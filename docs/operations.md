@@ -279,6 +279,33 @@ The native Rust relay uses a separate strict relay setting:
 metrics_listen = "127.0.0.1:6063"
 ```
 
+### Relay packet-data ceiling
+
+Both relay implementations accept the same optional aggregate limiter. It is
+one process-wide token bucket shared by QUIC and TCP fallback sessions; it
+applies only to authenticated packet frames, so health, controller snapshots,
+authentication, and direct-path rendezvous remain responsive when saturated.
+Exhaustion drops the newest packet without sleeping or creating another queue.
+
+```toml
+[relay]
+packet_rate_bits_per_second = 2000000
+packet_burst_bytes = 65536
+```
+
+Set both values or neither. The rate is payload framing bits per second, not
+wire usage. The burst must hold a complete 1285-byte framed packet and is
+bounded at 64 MiB. Metrics export forwarded, throttled, and total dropped
+packet/byte counters plus `laneway_relay_limiter_saturated`.
+
+For defense in depth, Linux operators may also apply a host `tc` ceiling to
+cover UDP/TCP/IP and encryption overhead. For a dedicated relay interface,
+for example, `tc qdisc replace dev eth0 root tbf rate 2200kbit burst 64kb
+latency 100ms` provides headroom over a 2 Mbit application limit. This command
+limits all egress on that interface; use a dedicated interface or an
+operator-reviewed classifier when the host carries unrelated traffic. Persist
+the rule in host network configuration and verify it after reboot.
+
 ```sh
 curl --fail --silent http://127.0.0.1:6063/metrics
 ```

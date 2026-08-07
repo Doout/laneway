@@ -10,7 +10,13 @@ import (
 // Forward validates and queues a single Laneway packet frame received from the
 // exact authenticated sender session. It performs no I/O and never blocks on a
 // full outbound queue. The frame is copied only after all validation succeeds.
-func (r *Registry) Forward(sender *Session, frame []byte) error {
+func (r *Registry) Forward(sender *Session, frame []byte) (err error) {
+	defer func() {
+		if err != nil {
+			r.metrics.droppedPackets.Add(1)
+			r.metrics.droppedBytes.Add(uint64(len(frame)))
+		}
+	}()
 	header, payload, err := protocol.DecodePacket(frame)
 	if err != nil {
 		r.metrics.droppedMalformed.Add(1)
@@ -67,6 +73,11 @@ func (r *Registry) Forward(sender *Session, frame []byte) error {
 	if !recipient.prefixes.contains(destination) {
 		r.metrics.droppedDestination.Add(1)
 		return ErrDestinationUnauthorized
+	}
+	if !r.limiter.allow(sender, len(frame), len(snapshot.bySession) > 1) {
+		r.metrics.throttledPackets.Add(1)
+		r.metrics.throttledBytes.Add(uint64(len(frame)))
+		return ErrRateLimited
 	}
 
 	out := r.frames.Acquire(len(frame))

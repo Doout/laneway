@@ -16,6 +16,11 @@ pub struct Metrics {
     pub(crate) candidate_pairs: AtomicU64,
     pub(crate) forwarded_packets: AtomicU64,
     pub(crate) forwarded_bytes: AtomicU64,
+    pub(crate) throttled_packets: AtomicU64,
+    pub(crate) throttled_bytes: AtomicU64,
+    pub(crate) dropped_packets: AtomicU64,
+    pub(crate) dropped_bytes: AtomicU64,
+    pub(crate) limiter_saturated_until_millis: AtomicU64,
     pub(crate) dropped_malformed: AtomicU64,
     pub(crate) dropped_unknown_handle: AtomicU64,
     pub(crate) dropped_source: AtomicU64,
@@ -65,6 +70,16 @@ pub struct MetricsSnapshot {
     pub forwarded_packets: u64,
     /// Framed packet bytes accepted for forwarding.
     pub forwarded_bytes: u64,
+    /// Packet frames rejected by the aggregate data limiter.
+    pub throttled_packets: u64,
+    /// Framed bytes rejected by the aggregate data limiter.
+    pub throttled_bytes: u64,
+    /// One when the limiter rejected a packet within the previous second.
+    pub limiter_saturated: u64,
+    /// Total packet frames dropped before recipient enqueue.
+    pub dropped_packets: u64,
+    /// Total framed bytes dropped before recipient enqueue.
+    pub dropped_bytes: u64,
     /// Structurally invalid packet frames.
     pub dropped_malformed: u64,
     /// Unknown or stale route handles.
@@ -127,6 +142,13 @@ impl Metrics {
             candidate_pairs: load(&self.candidate_pairs),
             forwarded_packets: load(&self.forwarded_packets),
             forwarded_bytes: load(&self.forwarded_bytes),
+            throttled_packets: load(&self.throttled_packets),
+            throttled_bytes: load(&self.throttled_bytes),
+            limiter_saturated: u64::from(
+                load(&self.limiter_saturated_until_millis) > now_unix_seconds.saturating_mul(1_000),
+            ),
+            dropped_packets: load(&self.dropped_packets),
+            dropped_bytes: load(&self.dropped_bytes),
             dropped_malformed: load(&self.dropped_malformed),
             dropped_unknown_handle: load(&self.dropped_unknown_handle),
             dropped_source: load(&self.dropped_source),

@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{Arc, Mutex, MutexGuard, atomic::Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -25,6 +25,14 @@ use crate::{
 };
 
 const MAX_PACKET_PAYLOAD: usize = 1280;
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Debug)]
 pub(crate) struct Session {
@@ -84,6 +92,88 @@ pub(crate) struct Registry {
     candidate_republish_floor: Duration,
     metrics: Arc<Metrics>,
     controller: Arc<ControllerState>,
+    limiter: Option<Mutex<PacketLimiter>>,
+}
+
+struct PacketLimiter {
+    rate_bits_per_second: u64,
+    capacity_bits: u64,
+    tokens_bits: u64,
+    refill_remainder: u64,
+    last_refill: Instant,
+    last_sender: Option<AuthenticatedIdentity>,
+    consecutive_bits: u64,
+    last_sender_change: Instant,
+    fairness_window: Duration,
+}
+
+impl PacketLimiter {
+    fn new(rate_bits_per_second: u64, burst_bytes: usize) -> Option<Self> {
+        if rate_bits_per_second == 0 || burst_bytes == 0 {
+            return None;
+        }
+        let capacity_bits = burst_bytes as u64 * 8;
+        let half_burst_nanos =
+            u128::from(capacity_bits / 2) * 1_000_000_000 / u128::from(rate_bits_per_second);
+        let fairness_window = Duration::from_nanos(half_burst_nanos.max(1) as u64);
+        let now = Instant::now();
+        Some(Self {
+            rate_bits_per_second,
+            capacity_bits,
+            tokens_bits: capacity_bits,
+            refill_remainder: 0,
+            last_refill: now,
+            last_sender: None,
+            consecutive_bits: 0,
+            last_sender_change: now,
+            fairness_window,
+        })
+    }
+
+    fn allow(
+        &mut self,
+        sender: AuthenticatedIdentity,
+        bytes: usize,
+        multiple_sessions: bool,
+    ) -> bool {
+        let now = Instant::now();
+        self.refill(now);
+        let needed = bytes as u64 * 8;
+        if self.last_sender != Some(sender) {
+            self.last_sender = Some(sender);
+            self.consecutive_bits = 0;
+            self.last_sender_change = now;
+        } else if multiple_sessions
+            && self.consecutive_bits.saturating_add(needed) > self.capacity_bits / 2
+            && now.duration_since(self.last_sender_change) < self.fairness_window
+        {
+            return false;
+        }
+        if needed > self.tokens_bits {
+            return false;
+        }
+        self.tokens_bits -= needed;
+        self.consecutive_bits = self.consecutive_bits.saturating_add(needed);
+        true
+    }
+
+    fn refill(&mut self, now: Instant) {
+        let elapsed = now.duration_since(self.last_refill);
+        let numerator = elapsed
+            .as_nanos()
+            .saturating_mul(u128::from(self.rate_bits_per_second))
+            .saturating_add(u128::from(self.refill_remainder));
+        let added = numerator / 1_000_000_000;
+        self.refill_remainder = (numerator % 1_000_000_000) as u64;
+        self.tokens_bits = self.capacity_bits.min(
+            self.tokens_bits
+                .saturating_add(added.min(u128::from(u64::MAX)) as u64),
+        );
+        if self.tokens_bits == self.capacity_bits {
+            self.refill_remainder = 0;
+        }
+        self.last_refill = now;
+    }
 }
 
 pub(crate) struct BenchmarkForwarder {
@@ -163,6 +253,7 @@ impl BenchmarkForwarder {
             Arc::clone(&metrics),
             ControllerState::static_snapshot(HashMap::new()),
             Duration::from_millis(100),
+            (0, 0),
         );
         registry.forwarding.store(Arc::new(ForwardingSnapshot {
             sessions: HashMap::from([(
@@ -223,6 +314,7 @@ impl Registry {
             metrics,
             ControllerState::static_snapshot(HashMap::new()),
             Duration::from_millis(100),
+            (0, 0),
         )
     }
 
@@ -233,6 +325,7 @@ impl Registry {
         metrics: Arc<Metrics>,
         controller: Arc<ControllerState>,
         candidate_republish_floor: Duration,
+        packet_limiter: (u64, usize),
     ) -> Self {
         Self {
             state: Mutex::new(State::default()),
@@ -243,6 +336,7 @@ impl Registry {
             candidate_republish_floor,
             metrics,
             controller,
+            limiter: PacketLimiter::new(packet_limiter.0, packet_limiter.1).map(Mutex::new),
         }
     }
 
@@ -509,6 +603,18 @@ impl Registry {
         frame: impl Into<PacketBuffer>,
     ) -> Result<()> {
         let frame = frame.into();
+        let length = frame.as_ref().len() as u64;
+        let result = self.forward_inner(session, frame);
+        if result.is_err() {
+            self.metrics.dropped_packets.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .dropped_bytes
+                .fetch_add(length, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn forward_inner(&self, session: &Arc<Session>, frame: PacketBuffer) -> Result<()> {
         let (header, packet) = match decode_packet(frame.as_ref()) {
             Ok(value) => value,
             Err(error) => {
@@ -592,6 +698,26 @@ impl Registry {
             }
             (Arc::clone(&target.recipient), target.return_handle)
         };
+
+        if let Some(limiter) = &self.limiter {
+            let multiple_sessions = self.forwarding.load().sessions.len() > 1;
+            if !limiter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .allow(session.identity, frame.as_ref().len(), multiple_sessions)
+            {
+                self.metrics
+                    .throttled_packets
+                    .fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .throttled_bytes
+                    .fetch_add(frame.as_ref().len() as u64, Ordering::Relaxed);
+                self.metrics
+                    .limiter_saturated_until_millis
+                    .store(unix_millis().saturating_add(1_000), Ordering::Relaxed);
+                bail!("relay aggregate packet-data limit exhausted");
+            }
+        }
 
         // QUIC and TCP readers both hand over uniquely owned storage. Retag
         // the five-byte route header in place and transfer that allocation to
@@ -872,6 +998,29 @@ mod tests {
         packet[12..16].copy_from_slice(&source);
         packet[16..20].copy_from_slice(&destination);
         packet
+    }
+
+    #[test]
+    fn packet_limiter_is_global_and_reserves_fairness_for_another_sender() {
+        let mut limiter = PacketLimiter::new(8_000_000, 2_000).unwrap();
+        assert!(limiter.allow(identity(1), 1_000, true));
+        assert!(!limiter.allow(identity(1), 1, true));
+        assert!(limiter.allow(identity(2), 1_000, true));
+        limiter.tokens_bits = 0;
+        limiter.last_refill = Instant::now();
+        assert!(!limiter.allow(identity(3), 1_000, false));
+    }
+
+    #[test]
+    fn packet_limiter_preserves_fractional_refills() {
+        let mut limiter = PacketLimiter::new(8, 1_285).unwrap();
+        let start = Instant::now();
+        limiter.tokens_bits = 0;
+        limiter.last_refill = start;
+        for tenth in 1..=10 {
+            limiter.refill(start + Duration::from_millis(tenth * 100));
+        }
+        assert_eq!(limiter.tokens_bits, 8);
     }
 
     fn ipv6(source: [u8; 16], destination: [u8; 16]) -> Vec<u8> {

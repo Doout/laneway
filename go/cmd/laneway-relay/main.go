@@ -121,12 +121,14 @@ func run(path, diagnostics string) error {
 	serviceConfig := relayservice.Config{
 		Authorizer: authorizer, PacketPolicy: packetPolicy, Revocations: revokedCertificates,
 		Registry: relay.Config{
-			MaxSessions:           4096,
-			MaxHandlesPerSession:  4096,
-			OutboundQueueCapacity: cfg.Relay.QueueDepth,
-			MaxPacketPayload:      relayMaxPacketPayload,
-			DuplicatePolicy:       relay.ReplaceDuplicate,
-			QueuePolicy:           relay.DropNewest,
+			MaxSessions:             4096,
+			MaxHandlesPerSession:    4096,
+			OutboundQueueCapacity:   cfg.Relay.QueueDepth,
+			MaxPacketPayload:        relayMaxPacketPayload,
+			DuplicatePolicy:         relay.ReplaceDuplicate,
+			QueuePolicy:             relay.DropNewest,
+			PacketRateBitsPerSecond: cfg.Relay.PacketRateBitsPerSecond,
+			PacketBurstBytes:        cfg.Relay.PacketBurstBytes,
 		},
 		Transport: &transport.Config{
 			HandshakeIdleTimeout: cfg.Relay.HandshakeTimeout.Duration(),
@@ -194,11 +196,12 @@ func run(path, diagnostics string) error {
 			"policy_drops_total":      serviceMetrics.PolicyDrops,
 			"forwarded_packets_total": metrics.ForwardedPackets,
 			"forwarded_bytes_total":   metrics.ForwardedBytes,
+			"throttled_packets_total": metrics.ThrottledPackets,
+			"throttled_bytes_total":   metrics.ThrottledBytes,
+			"limiter_saturated":       metrics.LimiterSaturated,
 			"queue_full_drops_total":  metrics.DroppedQueueFull,
-			"dropped_packets_total": metrics.DroppedMalformed + metrics.DroppedUnknownHandle +
-				metrics.DroppedNoReturnHandle + metrics.DroppedSource + metrics.DroppedDestination +
-				metrics.DroppedTooLarge + metrics.DroppedCapability + metrics.DroppedQueueFull + metrics.DroppedClosed +
-				metrics.DroppedDisconnect + serviceMetrics.PolicyDrops,
+			"dropped_packets_total":   metrics.DroppedPackets + serviceMetrics.DroppedPackets,
+			"dropped_bytes_total":     metrics.DroppedBytes + serviceMetrics.DroppedBytes,
 		}
 		if controllerState != nil {
 			renewal, renewAfter, notAfter := controllerState.CertificateHealth()

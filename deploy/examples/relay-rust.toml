@@ -10,6 +10,10 @@ ca = "/etc/laneway/ca.crt"
 [relay]
 listen = ":4433"
 queue_depth = 256
+# Optional aggregate packet-data ceiling shared by QUIC and TCP fallback.
+# Both values must be set together. Exhaustion drops the newest packet.
+packet_rate_bits_per_second = 2000000
+packet_burst_bytes = 65536
 max_sessions = 4096
 max_routes = 4096
 handshake_timeout = "10s"

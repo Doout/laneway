@@ -137,6 +137,10 @@ impl Server {
             Arc::clone(&metrics),
             Arc::clone(&authorizations),
             config.relay.candidate_republish_floor,
+            (
+                config.relay.packet_rate_bits_per_second,
+                config.relay.packet_burst_bytes,
+            ),
         );
         Ok(Self {
             endpoint,
