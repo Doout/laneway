@@ -295,6 +295,37 @@ fn render(snapshot: MetricsSnapshot) -> String {
     );
     counter(
         &mut output,
+        "throttled_packets",
+        "Packet frames rejected by the aggregate data limiter.",
+        snapshot.throttled_packets,
+    );
+    counter(
+        &mut output,
+        "throttled_bytes",
+        "Framed bytes rejected by the aggregate data limiter.",
+        snapshot.throttled_bytes,
+    );
+    metric(
+        &mut output,
+        "laneway_relay_limiter_saturated",
+        "gauge",
+        "One after a recent aggregate data limiter rejection.",
+        snapshot.limiter_saturated,
+    );
+    counter(
+        &mut output,
+        "dropped_packets",
+        "Total packet frames dropped before recipient enqueue.",
+        snapshot.dropped_packets,
+    );
+    counter(
+        &mut output,
+        "dropped_bytes",
+        "Total framed packet bytes dropped before recipient enqueue.",
+        snapshot.dropped_bytes,
+    );
+    counter(
+        &mut output,
         "dropped_malformed",
         "Structurally invalid packet drops.",
         snapshot.dropped_malformed,

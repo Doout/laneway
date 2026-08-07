@@ -37,6 +37,7 @@ var (
 	ErrPacketTooLarge          = errors.New("packet exceeds session payload limit")
 	ErrCapabilityNotNegotiated = errors.New("packet family capability was not negotiated")
 	ErrQueueFull               = errors.New("relay outbound queue is full")
+	ErrRateLimited             = errors.New("relay aggregate packet-data limit exhausted")
 )
 
 // DuplicatePolicy defines what Register does when the authenticated
@@ -64,6 +65,11 @@ type Config struct {
 	MaxPacketPayload      int
 	DuplicatePolicy       DuplicatePolicy
 	QueuePolicy           QueuePolicy
+	// PacketRateBitsPerSecond and PacketBurstBytes configure one aggregate
+	// non-blocking bucket shared by every QUIC and TCP packet session. Both zero
+	// disables limiting; otherwise both must be positive.
+	PacketRateBitsPerSecond uint64
+	PacketBurstBytes        int
 }
 
 type SessionConfig struct {
@@ -190,6 +196,7 @@ type Registry struct {
 	closed     bool
 	metrics    counters
 	frames     *packetbuffer.Pool
+	limiter    *packetLimiter
 	forwarding atomic.Pointer[registryForwarding]
 }
 
@@ -198,12 +205,16 @@ func NewRegistry(config Config) (*Registry, error) {
 		config.OutboundQueueCapacity <= 0 || config.MaxPacketPayload <= 0 ||
 		config.MaxPacketPayload > protocol.MaxPacketPayload ||
 		(config.DuplicatePolicy != RejectDuplicate && config.DuplicatePolicy != ReplaceDuplicate) ||
-		config.QueuePolicy != DropNewest {
+		config.QueuePolicy != DropNewest ||
+		((config.PacketRateBitsPerSecond == 0) != (config.PacketBurstBytes == 0)) ||
+		config.PacketRateBitsPerSecond > 1_000_000_000_000 || config.PacketBurstBytes > 64<<20 ||
+		(config.PacketBurstBytes != 0 && config.PacketBurstBytes < protocol.PacketHeaderSize+config.MaxPacketPayload) {
 		return nil, ErrInvalidConfig
 	}
 	registry := &Registry{
 		config: config, sessions: make(map[sessionKey]*Session),
-		frames: packetbuffer.NewPool(protocol.PacketHeaderSize + config.MaxPacketPayload),
+		frames:  packetbuffer.NewPool(protocol.PacketHeaderSize + config.MaxPacketPayload),
+		limiter: newPacketLimiter(config.PacketRateBitsPerSecond, config.PacketBurstBytes),
 	}
 	registry.forwarding.Store(&registryForwarding{bySession: map[*Session]*forwardingTable{}})
 	return registry, nil
@@ -422,8 +433,10 @@ func (r *Registry) detachLocked(session *Session) {
 			r.metrics.bindingsReleased.Add(1)
 		}
 	}
-	discarded := session.outbound.close()
+	discarded, discardedBytes := session.outbound.close()
 	r.metrics.droppedDisconnect.Add(uint64(discarded))
+	r.metrics.droppedPackets.Add(uint64(discarded))
+	r.metrics.droppedBytes.Add(discardedBytes)
 }
 
 func (r *Registry) publishForwardingLocked() {
@@ -564,16 +577,18 @@ func (q *packetQueue) popLocked() *packetbuffer.Buffer {
 	return frame
 }
 
-func (q *packetQueue) close() int {
+func (q *packetQueue) close() (int, uint64) {
 	q.mu.Lock()
 	if q.closed {
 		q.mu.Unlock()
-		return 0
+		return 0, 0
 	}
 	q.closed = true
 	discarded := q.size
+	var discardedBytes uint64
 	for i, frame := range q.frames {
 		if frame != nil {
+			discardedBytes += uint64(len(frame.Bytes()))
 			frame.Release()
 			q.frames[i] = nil
 		}
@@ -581,7 +596,7 @@ func (q *packetQueue) close() int {
 	q.size = 0
 	close(q.done)
 	q.mu.Unlock()
-	return discarded
+	return discarded, discardedBytes
 }
 
 type counters struct {
@@ -603,6 +618,10 @@ type counters struct {
 	droppedQueueFull     atomic.Uint64
 	droppedClosed        atomic.Uint64
 	droppedDisconnect    atomic.Uint64
+	throttledPackets     atomic.Uint64
+	throttledBytes       atomic.Uint64
+	droppedPackets       atomic.Uint64
+	droppedBytes         atomic.Uint64
 }
 
 // Metrics is a point-in-time, concurrency-safe snapshot. Counter fields are
@@ -630,6 +649,11 @@ type Metrics struct {
 	DroppedQueueFull      uint64
 	DroppedClosed         uint64
 	DroppedDisconnect     uint64
+	ThrottledPackets      uint64
+	ThrottledBytes        uint64
+	LimiterSaturated      uint64
+	DroppedPackets        uint64
+	DroppedBytes          uint64
 }
 
 func (r *Registry) Metrics() Metrics {
@@ -644,6 +668,11 @@ func (r *Registry) Metrics() Metrics {
 		DroppedCapability: r.metrics.droppedCapability.Load(),
 		DroppedQueueFull:  r.metrics.droppedQueueFull.Load(), DroppedClosed: r.metrics.droppedClosed.Load(),
 		DroppedDisconnect: r.metrics.droppedDisconnect.Load(),
+		ThrottledPackets:  r.metrics.throttledPackets.Load(), ThrottledBytes: r.metrics.throttledBytes.Load(),
+		DroppedPackets: r.metrics.droppedPackets.Load(), DroppedBytes: r.metrics.droppedBytes.Load(),
+	}
+	if r.limiter.saturated() {
+		m.LimiterSaturated = 1
 	}
 	r.mu.RLock()
 	m.Sessions = uint64(len(r.sessions))

@@ -10,6 +10,8 @@ ca = "/etc/laneway/ca.crt"
 [relay]
 listen = ":4433"
 queue_depth = 256
+packet_rate_bits_per_second = 2000000
+packet_burst_bytes = 65536
 handshake_timeout = "10s"
 idle_timeout = "45s"
 # The Rust relay's candidate_republish_floor defaults to 5s. Leave it at the

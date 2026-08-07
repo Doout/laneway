@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"laneway.dev/laneway/internal/netvalidate"
+	"laneway.dev/laneway/internal/protocol"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -75,10 +76,12 @@ type Node struct {
 }
 
 type Relay struct {
-	Listen           string   `toml:"listen"`
-	QueueDepth       int      `toml:"queue_depth"`
-	HandshakeTimeout Duration `toml:"handshake_timeout"`
-	IdleTimeout      Duration `toml:"idle_timeout"`
+	Listen                  string   `toml:"listen"`
+	QueueDepth              int      `toml:"queue_depth"`
+	PacketRateBitsPerSecond uint64   `toml:"packet_rate_bits_per_second"`
+	PacketBurstBytes        int      `toml:"packet_burst_bytes"`
+	HandshakeTimeout        Duration `toml:"handshake_timeout"`
+	IdleTimeout             Duration `toml:"idle_timeout"`
 }
 
 // TCPFallback configures the fallback-only TLS/TCP relay carrier. Address is
@@ -231,6 +234,11 @@ func (c Config) Validate() error {
 	}
 	if c.Relay.QueueDepth < 1 || c.Relay.QueueDepth > 65536 {
 		return errors.New("relay.queue_depth must be between 1 and 65536")
+	}
+	if (c.Relay.PacketRateBitsPerSecond == 0) != (c.Relay.PacketBurstBytes == 0) ||
+		c.Relay.PacketRateBitsPerSecond > 1_000_000_000_000 || c.Relay.PacketBurstBytes < 0 || c.Relay.PacketBurstBytes > 64<<20 ||
+		(c.Relay.PacketRateBitsPerSecond != 0 && c.Relay.PacketBurstBytes < protocol.PacketHeaderSize+1280) {
+		return errors.New("relay packet limiter requires rate and burst together, rate <= 1Tbps, and burst from 1285 bytes through 64MiB")
 	}
 	if c.Relay.HandshakeTimeout <= 0 || c.Relay.IdleTimeout <= 0 {
 		return errors.New("relay timeout values must be positive")

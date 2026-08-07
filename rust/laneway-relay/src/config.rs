@@ -96,6 +96,12 @@ pub struct RelayConfig {
     /// Per-session outbound packet queue depth.
     #[serde(default = "default_queue_depth")]
     pub queue_depth: usize,
+    /// Aggregate packet-data rate shared by QUIC and TCP fallback, in bits/s.
+    #[serde(default)]
+    pub packet_rate_bits_per_second: u64,
+    /// Maximum token-bucket burst in framed packet bytes.
+    #[serde(default)]
+    pub packet_burst_bytes: usize,
     /// Maximum authenticated concurrent sessions.
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
@@ -311,6 +317,13 @@ impl Config {
             "relay.queue_depth must be between 1 and 65536"
         );
         ensure!(
+            (self.relay.packet_rate_bits_per_second == 0) == (self.relay.packet_burst_bytes == 0)
+                && self.relay.packet_rate_bits_per_second <= 1_000_000_000_000
+                && self.relay.packet_burst_bytes <= 64 << 20
+                && (self.relay.packet_burst_bytes == 0 || self.relay.packet_burst_bytes >= 1_285),
+            "relay packet limiter requires rate and burst together, rate <= 1Tbps, and burst from 1285 bytes through 64MiB"
+        );
+        ensure!(
             (1..=65_536).contains(&self.relay.max_sessions),
             "relay.max_sessions must be between 1 and 65536"
         );
@@ -466,6 +479,36 @@ prefixes = ["100.96.0.1/24"]
 "#;
         let config: Config = toml::from_str(source).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_incomplete_or_undersized_packet_limiter() {
+        let template = |settings: &str| {
+            format!(
+                r#"
+mode = "relay"
+[tls]
+certificate = "relay.crt"
+private_key = "relay.key"
+ca = "ca.crt"
+[relay]
+listen = "127.0.0.1:4433"
+{settings}
+[[peers]]
+network_id = "000102030405060708090a0b0c0d0e0f"
+node_id = "101112131415161718191a1b1c1d1e1f"
+prefixes = ["100.96.0.1/32"]
+"#
+            )
+        };
+        for settings in [
+            "packet_rate_bits_per_second = 1000",
+            "packet_burst_bytes = 1285",
+            "packet_rate_bits_per_second = 1000\npacket_burst_bytes = 1284",
+        ] {
+            let config: Config = toml::from_str(&template(settings)).unwrap();
+            assert!(config.validate().is_err(), "accepted {settings}");
+        }
     }
 
     #[test]

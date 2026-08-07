@@ -98,6 +98,8 @@ type serviceCounters struct {
 	malformedInput        atomic.Uint64
 	authorizationFailures atomic.Uint64
 	policyDrops           atomic.Uint64
+	droppedPackets        atomic.Uint64
+	droppedBytes          atomic.Uint64
 }
 
 // Metrics combines the carrier/control counters owned by Server with the
@@ -110,6 +112,8 @@ type Metrics struct {
 	MalformedInput        uint64
 	AuthorizationFailures uint64
 	PolicyDrops           uint64
+	DroppedPackets        uint64
+	DroppedBytes          uint64
 }
 
 type wireSession struct {
@@ -216,6 +220,8 @@ func (s *Server) Metrics() Metrics {
 		MalformedInput:        s.metrics.malformedInput.Load(),
 		AuthorizationFailures: s.metrics.authorizationFailures.Load(),
 		PolicyDrops:           s.metrics.policyDrops.Load(),
+		DroppedPackets:        s.metrics.droppedPackets.Load(),
+		DroppedBytes:          s.metrics.droppedBytes.Load(),
 	}
 }
 
@@ -784,6 +790,8 @@ func (s *Server) receivePackets(ctx context.Context, wire *wireSession) error {
 			header, packet, decodeErr := protocol.DecodePacket(frame)
 			if decodeErr != nil {
 				s.metrics.malformedInput.Add(1)
+				s.metrics.droppedPackets.Add(1)
+				s.metrics.droppedBytes.Add(uint64(len(frame)))
 				owner.Release()
 				continue
 			}
@@ -791,6 +799,8 @@ func (s *Server) receivePackets(ctx context.Context, wire *wireSession) error {
 			if !ok || !s.config.PacketPolicy.Allow(wire.identity, peer.identity, packet) {
 				s.metrics.authorizationFailures.Add(1)
 				s.metrics.policyDrops.Add(1)
+				s.metrics.droppedPackets.Add(1)
+				s.metrics.droppedBytes.Add(uint64(len(frame)))
 				owner.Release()
 				continue
 			}
