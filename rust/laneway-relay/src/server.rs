@@ -24,7 +24,7 @@ use crate::{
     controller::{Client as ControllerClient, State as ControllerState},
     diagnostics,
     packet_pool::PacketPool,
-    registry::{Registry, Session, SessionChannels},
+    registry::{Registry, Session, SessionCapabilities, SessionChannels},
     tcp, tls,
 };
 
@@ -41,7 +41,8 @@ const RELAY_CAPABILITIES: u64 = Capability::LanewayRelayV1 as u64
     | Capability::LanewayDirectPeerV1 as u64
     | Capability::LanewaySubnetRouterV1 as u64
     | Capability::LanewayExitNodeV1 as u64
-    | Capability::LanewayIpv6V1 as u64;
+    | Capability::LanewayIpv6V1 as u64
+    | Capability::LanewayE2ePacketV1 as u64;
 const PROTOCOL_ERROR: u32 = 0x100;
 
 struct Inner {
@@ -393,7 +394,10 @@ async fn serve_tcp_connection(
         certificate_serial,
         authorization,
         handshake.requested_max_routes,
-        handshake.allow_ipv6,
+        SessionCapabilities {
+            allow_ipv6: handshake.allow_ipv6,
+            allow_e2e: handshake.allow_e2e,
+        },
         None,
     )?;
     let session = Arc::clone(&channels.session);
@@ -477,6 +481,7 @@ async fn perform_tcp_handshake(
     Ok(HandshakeResult {
         requested_max_routes: register.requested_max_routes,
         allow_ipv6: negotiated_capabilities & Capability::LanewayIpv6V1 as u64 != 0,
+        allow_e2e: negotiated_capabilities & Capability::LanewayE2ePacketV1 as u64 != 0,
         direct_capable: false,
         relay_reader,
     })
@@ -576,7 +581,10 @@ async fn serve_connection(inner: Arc<Inner>, connection: Connection) -> Result<(
         certificate_serial,
         authorization,
         handshake.requested_max_routes,
-        handshake.allow_ipv6,
+        SessionCapabilities {
+            allow_ipv6: handshake.allow_ipv6,
+            allow_e2e: handshake.allow_e2e,
+        },
         handshake
             .direct_capable
             .then(|| connection.remote_address()),
@@ -598,6 +606,7 @@ async fn serve_connection(inner: Arc<Inner>, connection: Connection) -> Result<(
 struct HandshakeResult {
     requested_max_routes: u32,
     allow_ipv6: bool,
+    allow_e2e: bool,
     direct_capable: bool,
     relay_reader: RelayReader,
 }
@@ -661,6 +670,7 @@ async fn perform_handshake(
     Ok(HandshakeResult {
         requested_max_routes: register.requested_max_routes,
         allow_ipv6: negotiated_capabilities & Capability::LanewayIpv6V1 as u64 != 0,
+        allow_e2e: negotiated_capabilities & Capability::LanewayE2ePacketV1 as u64 != 0,
         direct_capable: negotiated_capabilities & Capability::LanewayDirectPeerV1 as u64 != 0,
         relay_reader,
     })

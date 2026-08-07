@@ -16,7 +16,12 @@ const (
 
 type PacketFlags uint8
 
-const MaxPacketFlags PacketFlags = 0
+const (
+	// PacketFlagE2EEncrypted marks an opaque WireGuard UDP datagram. It is
+	// valid only when both authenticated endpoints negotiated e2e-packet-v1.
+	PacketFlagE2EEncrypted PacketFlags = 1 << iota
+	MaxPacketFlags                     = PacketFlagE2EEncrypted
+)
 
 var (
 	ErrShortPacket        = errors.New("laneway packet is shorter than its header")
@@ -25,6 +30,7 @@ var (
 	ErrInvalidRouteHandle = errors.New("invalid Laneway route handle")
 	ErrPacketTooLarge     = errors.New("Laneway packet payload is too large")
 	ErrInvalidIPPacket    = errors.New("invalid IP packet in Laneway frame")
+	ErrInvalidWireGuard   = errors.New("invalid WireGuard packet in Laneway frame")
 )
 
 // PacketHeader is the fixed five-byte dataplane header. Version and Flags each
@@ -39,7 +45,7 @@ func (h PacketHeader) validate() error {
 	if h.Version != PacketVersion1 {
 		return fmt.Errorf("%w: %d", ErrUnsupportedVersion, h.Version)
 	}
-	if h.Flags != 0 {
+	if h.Flags != 0 && h.Flags != PacketFlagE2EEncrypted {
 		return fmt.Errorf("%w: %#x", ErrInvalidPacketFlags, h.Flags)
 	}
 	if h.RouteHandle == 0 {
@@ -78,13 +84,28 @@ func DecodePacketHeader(src []byte) (PacketHeader, error) {
 // EncodePacket appends a framed packet to dst. Callers may reuse dst to avoid
 // allocating on the dataplane fast path.
 func EncodePacket(dst []byte, h PacketHeader, payload []byte) ([]byte, error) {
+	if h.Flags != 0 {
+		return nil, fmt.Errorf("%w: %#x", ErrInvalidPacketFlags, h.Flags)
+	}
+	return encodeFrame(dst, h, payload, ValidateIPPayload)
+}
+
+// EncodeWireGuardPacket appends a relay frame containing an already-encrypted
+// WireGuard UDP datagram. The relay route handle is authenticated by the
+// carrier session; no overlay plaintext is exposed to the relay.
+func EncodeWireGuardPacket(dst []byte, routeHandle uint32, payload []byte) ([]byte, error) {
+	h := PacketHeader{Version: PacketVersion1, Flags: PacketFlagE2EEncrypted, RouteHandle: routeHandle}
+	return encodeFrame(dst, h, payload, ValidateWireGuardPayload)
+}
+
+func encodeFrame(dst []byte, h PacketHeader, payload []byte, validate func([]byte) error) ([]byte, error) {
 	if err := h.validate(); err != nil {
 		return nil, err
 	}
 	if len(payload) > MaxPacketPayload {
 		return nil, ErrPacketTooLarge
 	}
-	if err := ValidateIPPayload(payload); err != nil {
+	if err := validate(payload); err != nil {
 		return nil, err
 	}
 	start := len(dst)
@@ -98,6 +119,20 @@ func EncodePacket(dst []byte, h PacketHeader, payload []byte) ([]byte, error) {
 
 // DecodePacket returns a view into src for the payload; it does not allocate.
 func DecodePacket(src []byte) (PacketHeader, []byte, error) {
+	h, payload, err := DecodeFrame(src)
+	if err != nil {
+		return PacketHeader{}, nil, err
+	}
+	if h.Flags != 0 {
+		return PacketHeader{}, nil, fmt.Errorf("%w: %#x", ErrInvalidPacketFlags, h.Flags)
+	}
+	return h, payload, nil
+}
+
+// DecodeFrame validates either a plaintext stable-v1 IP frame or a negotiated
+// opaque WireGuard frame. Callers must additionally enforce the negotiated
+// capability before accepting PacketFlagE2EEncrypted.
+func DecodeFrame(src []byte) (PacketHeader, []byte, error) {
 	if len(src) <= PacketHeaderSize {
 		return PacketHeader{}, nil, ErrShortPacket
 	}
@@ -109,10 +144,49 @@ func DecodePacket(src []byte) (PacketHeader, []byte, error) {
 		return PacketHeader{}, nil, ErrPacketTooLarge
 	}
 	payload := src[PacketHeaderSize:]
-	if err := ValidateIPPayload(payload); err != nil {
-		return PacketHeader{}, nil, err
+	switch h.Flags {
+	case 0:
+		if err := ValidateIPPayload(payload); err != nil {
+			return PacketHeader{}, nil, err
+		}
+	case PacketFlagE2EEncrypted:
+		if err := ValidateWireGuardPayload(payload); err != nil {
+			return PacketHeader{}, nil, err
+		}
+	default:
+		return PacketHeader{}, nil, fmt.Errorf("%w: %#x", ErrInvalidPacketFlags, h.Flags)
 	}
 	return h, payload, nil
+}
+
+// ValidateWireGuardPayload recognizes the four stable WireGuard UDP message
+// layouts. It deliberately validates only public framing: authenticity and
+// replay protection remain end-to-end properties of the WireGuard peers.
+func ValidateWireGuardPayload(payload []byte) error {
+	if len(payload) < 4 || payload[1] != 0 || payload[2] != 0 || payload[3] != 0 {
+		return ErrInvalidWireGuard
+	}
+	switch binary.LittleEndian.Uint32(payload[:4]) {
+	case 1: // handshake initiation
+		if len(payload) != 148 {
+			return ErrInvalidWireGuard
+		}
+	case 2: // handshake response
+		if len(payload) != 92 {
+			return ErrInvalidWireGuard
+		}
+	case 3: // cookie reply
+		if len(payload) != 64 {
+			return ErrInvalidWireGuard
+		}
+	case 4: // transport data: 16-byte header + ciphertext/tag, padded to 16
+		if len(payload) < 32 || len(payload)%16 != 0 {
+			return ErrInvalidWireGuard
+		}
+	default:
+		return ErrInvalidWireGuard
+	}
+	return nil
 }
 
 // ValidateIPPayload verifies the structural lengths required before a relay

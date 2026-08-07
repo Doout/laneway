@@ -29,8 +29,10 @@ big-endian control-frame length prefix. Both language suites decode the frame
 through their bounded production framer before validating the route semantics.
 
 For relay packet v1, the high nibble of the first byte is the version and the low
-nibble contains flags. Version 1 with no flags is therefore `0x10`; it is followed
-by the four-byte route handle and the complete raw IP packet.
+nibble contains flags. Version 1 with no flags is therefore `0x10`; it is
+followed by the four-byte route handle and the complete raw IP packet. Version 1
+with flag bit 0 is `0x11` and carries one structurally validated, opaque
+WireGuard UDP message. Shared vectors cover both forms.
 
 Certificate identity cases include both declarative URI/claim decisions and
 actual DER leaf certificates consumed by the production Go and Rust X.509/SAN

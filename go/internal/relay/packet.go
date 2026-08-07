@@ -17,19 +17,11 @@ func (r *Registry) Forward(sender *Session, frame []byte) (err error) {
 			r.metrics.droppedBytes.Add(uint64(len(frame)))
 		}
 	}()
-	header, payload, err := protocol.DecodePacket(frame)
+	header, payload, err := protocol.DecodeFrame(frame)
 	if err != nil {
 		r.metrics.droppedMalformed.Add(1)
 		return err
 	}
-	source, destination, ok := packetAddresses(payload)
-	if !ok {
-		// DecodePacket currently catches this, but retain a fail-closed boundary
-		// if its structural validation evolves.
-		r.metrics.droppedMalformed.Add(1)
-		return protocol.ErrInvalidIPPacket
-	}
-
 	if sender == nil || sender.registry != r {
 		r.metrics.droppedClosed.Add(1)
 		return ErrUnknownSession
@@ -62,17 +54,29 @@ func (r *Registry) Forward(sender *Session, frame []byte) (err error) {
 		r.metrics.droppedTooLarge.Add(1)
 		return ErrPacketTooLarge
 	}
-	if source.Is6() && (!sender.allowIPv6 || !recipient.allowIPv6) {
-		r.metrics.droppedCapability.Add(1)
-		return ErrCapabilityNotNegotiated
-	}
-	if !sender.prefixes.contains(source) {
-		r.metrics.droppedSource.Add(1)
-		return ErrSourceUnauthorized
-	}
-	if !recipient.prefixes.contains(destination) {
-		r.metrics.droppedDestination.Add(1)
-		return ErrDestinationUnauthorized
+	if header.Flags == protocol.PacketFlagE2EEncrypted {
+		if !sender.allowE2E || !recipient.allowE2E {
+			r.metrics.droppedCapability.Add(1)
+			return ErrCapabilityNotNegotiated
+		}
+	} else {
+		source, destination, ok := packetAddresses(payload)
+		if !ok {
+			r.metrics.droppedMalformed.Add(1)
+			return protocol.ErrInvalidIPPacket
+		}
+		if source.Is6() && (!sender.allowIPv6 || !recipient.allowIPv6) {
+			r.metrics.droppedCapability.Add(1)
+			return ErrCapabilityNotNegotiated
+		}
+		if !sender.prefixes.contains(source) {
+			r.metrics.droppedSource.Add(1)
+			return ErrSourceUnauthorized
+		}
+		if !recipient.prefixes.contains(destination) {
+			r.metrics.droppedDestination.Add(1)
+			return ErrDestinationUnauthorized
+		}
 	}
 	if !r.limiter.allow(sender, len(frame), len(snapshot.bySession) > 1) {
 		r.metrics.throttledPackets.Add(1)
@@ -84,7 +88,7 @@ func (r *Registry) Forward(sender *Session, frame []byte) (err error) {
 	forwardedBytes := len(frame)
 	copy(out.Bytes(), frame)
 	if err := protocol.EncodePacketHeader(out.Bytes(), protocol.PacketHeader{
-		Version: protocol.PacketVersion1, RouteHandle: route.returnHandle,
+		Version: protocol.PacketVersion1, Flags: header.Flags, RouteHandle: route.returnHandle,
 	}); err != nil {
 		out.Release()
 		r.metrics.droppedMalformed.Add(1)

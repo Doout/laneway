@@ -28,7 +28,12 @@ routes, and policy, but it is not trusted with endpoint private keys and MUST
 NOT receive them. Administrators are trusted to protect CA material and approve
 routes correctly.
 
-Nodes trust their local OS, daemon, configuration, certificate, and private key. A relay is trusted to enforce session isolation and forwarding policy. Transport cryptography protects packets from on-path observers; the relay terminates node transport connections and therefore can observe relayed packet plaintext and metadata. End-to-end packet encryption, represented by `LANEWAY_E2E_PACKET_V1`, is not provided by stable v1 and MUST NOT be advertised.
+Nodes trust their local OS, daemon, configuration, certificate, and private key.
+A relay is trusted to enforce session isolation and forwarding policy.
+Transport cryptography protects packets from on-path observers. Legacy raw-IP
+relay carriers expose plaintext to the relay. Hybrid WireGuard carriers may
+advertise `LANEWAY_E2E_PACKET_V1` only when they implement the opaque framing,
+identity binding, and endpoint enforcement defined by stable v1.
 
 The public network, NAT devices, DNS, unauthenticated peers, node names, hostnames, claimed overlay addresses, and identity fields inside protocol messages are untrusted.
 
@@ -100,7 +105,14 @@ Implementations MUST check certificate validity and revocation information made 
 
 ### 4.8 Relay compromise
 
-TLS protects each node-to-relay hop, not packet content from the relay. A compromised relay can observe, drop, delay, replay at the application level within live connections, or misroute traffic subject to endpoint validation. Endpoints MUST therefore retain source and destination validation even when the relay is authenticated. Applications needing confidentiality from the relay MUST use their own end-to-end security until `LANEWAY_E2E_PACKET_V1` is specified and negotiated.
+TLS protects each node-to-relay hop, not packet content from the relay. A
+compromised relay can observe, drop, delay, replay at the application level
+within live connections, or misroute traffic subject to endpoint validation.
+Endpoints MUST therefore retain source and destination validation even when the
+relay is authenticated. Applications needing confidentiality from the relay
+MUST use their own end-to-end security unless the hybrid WireGuard carrier has
+negotiated `LANEWAY_E2E_PACKET_V1`; legacy raw-IP carriers retain the plaintext
+limitation.
 
 ### 4.9 Route recursion and traffic leaks
 
@@ -181,7 +193,8 @@ Release validation MUST cover:
 - invalid chain, expired certificate, wrong CA, malformed URI SAN, and identity mismatch;
 - cross-network handle use and stale handle use;
 - malformed and oversized control frames;
-- every reserved packet-header flag and unsupported packet version;
+- every reserved packet-header bit, unnegotiated encrypted flag, malformed
+  WireGuard public message, and unsupported packet version;
 - invalid IPv4 lengths/checksums where validated, spoofed sources, and wrong destinations;
 - incompatible major versions and capability downgrade behavior;
 - queue exhaustion without unbounded memory growth; and

@@ -21,6 +21,8 @@ pub mod v1 {
 pub const ID_LEN: usize = 16;
 /// Exact size of the Laneway v1 packet header.
 pub const PACKET_HEADER_LEN: usize = 5;
+/// Packet flag for an opaque, end-to-end encrypted WireGuard UDP datagram.
+pub const PACKET_FLAG_E2E_ENCRYPTED: u8 = 1;
 /// Maximum v1 raw IP payload supported by the language-neutral format.
 pub const MAX_PACKET_PAYLOAD: usize = 65_575;
 /// Default maximum length-prefixed Protobuf payload.
@@ -64,6 +66,9 @@ pub enum Error {
     /// The raw IPv4 or IPv6 structure was malformed.
     #[error("invalid IP packet in Laneway frame")]
     InvalidIpPacket,
+    /// The opaque payload is not one exact stable WireGuard UDP message.
+    #[error("invalid WireGuard packet in Laneway frame")]
+    InvalidWireGuardPacket,
     /// A stable-v1 TCP fallback record had invalid framing or type.
     #[error("invalid Laneway TCP fallback record")]
     InvalidTcpRecord,
@@ -242,14 +247,20 @@ impl PacketHeader {
         if self.version != 1 {
             return Err(Error::UnsupportedVersion);
         }
-        if self.flags != 0 {
+        if self.flags != 0 && self.flags != PACKET_FLAG_E2E_ENCRYPTED {
             return Err(Error::InvalidPacketFlags);
         }
         if self.route_handle == 0 {
             return Err(Error::InvalidRouteHandle);
         }
         let handle = self.route_handle.to_be_bytes();
-        Ok([0x10, handle[0], handle[1], handle[2], handle[3]])
+        Ok([
+            0x10 | self.flags,
+            handle[0],
+            handle[1],
+            handle[2],
+            handle[3],
+        ])
     }
 
     /// Decodes and strictly validates a five-byte packet header.
@@ -269,6 +280,15 @@ impl PacketHeader {
 
 /// Decodes one complete framed IPv4 or IPv6 packet without allocating.
 pub fn decode_packet(frame: &[u8]) -> Result<(PacketHeader, &[u8]), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.flags != 0 {
+        return Err(Error::InvalidPacketFlags);
+    }
+    Ok((header, payload))
+}
+
+/// Decodes either a plaintext IP frame or an opaque WireGuard frame.
+pub fn decode_frame(frame: &[u8]) -> Result<(PacketHeader, &[u8]), Error> {
     if frame.len() <= PACKET_HEADER_LEN {
         return Err(Error::ShortPacket);
     }
@@ -277,7 +297,11 @@ pub fn decode_packet(frame: &[u8]) -> Result<(PacketHeader, &[u8]), Error> {
     if payload.len() > MAX_PACKET_PAYLOAD {
         return Err(Error::PacketTooLarge);
     }
-    validate_ip_packet(payload)?;
+    match header.flags {
+        0 => validate_ip_packet(payload)?,
+        PACKET_FLAG_E2E_ENCRYPTED => validate_wireguard_packet(payload)?,
+        _ => return Err(Error::InvalidPacketFlags),
+    }
     Ok((header, payload))
 }
 
@@ -287,6 +311,9 @@ pub fn encode_packet(
     payload: &[u8],
     output: &mut Vec<u8>,
 ) -> Result<(), Error> {
+    if header.flags != 0 {
+        return Err(Error::InvalidPacketFlags);
+    }
     let encoded_header = header.encode()?;
     if payload.len() > MAX_PACKET_PAYLOAD {
         return Err(Error::PacketTooLarge);
@@ -294,6 +321,46 @@ pub fn encode_packet(
     validate_ip_packet(payload)?;
     output.extend_from_slice(&encoded_header);
     output.extend_from_slice(payload);
+    Ok(())
+}
+
+/// Encodes one opaque WireGuard UDP datagram for relay carriage.
+pub fn encode_wireguard_packet(
+    route_handle: u32,
+    payload: &[u8],
+    output: &mut Vec<u8>,
+) -> Result<(), Error> {
+    let header = PacketHeader {
+        version: 1,
+        flags: PACKET_FLAG_E2E_ENCRYPTED,
+        route_handle,
+    }
+    .encode()?;
+    if payload.len() > MAX_PACKET_PAYLOAD {
+        return Err(Error::PacketTooLarge);
+    }
+    validate_wireguard_packet(payload)?;
+    output.extend_from_slice(&header);
+    output.extend_from_slice(payload);
+    Ok(())
+}
+
+/// Validates the public shape of one stable WireGuard UDP message.
+pub fn validate_wireguard_packet(packet: &[u8]) -> Result<(), Error> {
+    if packet.len() < 4 || packet[1..4] != [0, 0, 0] {
+        return Err(Error::InvalidWireGuardPacket);
+    }
+    let message_type = u32::from_le_bytes(packet[..4].try_into().expect("fixed slice"));
+    let valid = match message_type {
+        1 => packet.len() == 148,
+        2 => packet.len() == 92,
+        3 => packet.len() == 64,
+        4 => packet.len() >= 32 && packet.len().is_multiple_of(16),
+        _ => false,
+    };
+    if !valid {
+        return Err(Error::InvalidWireGuardPacket);
+    }
     Ok(())
 }
 

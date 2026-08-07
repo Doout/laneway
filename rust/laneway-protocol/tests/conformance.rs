@@ -3,8 +3,9 @@ use std::{collections::HashSet, fs, net::IpAddr, path::Path, path::PathBuf, str:
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ipnet::IpNet;
 use laneway_protocol::{
-    Error, Id, PacketHeader, ProtocolVersion, Role, decode_packet, encode_packet,
-    identity_from_certificate_der, negotiate_protocol, parse_spiffe_uri, read_control_frame, v1,
+    Error, Id, PACKET_FLAG_E2E_ENCRYPTED, PacketHeader, ProtocolVersion, Role, decode_frame,
+    decode_packet, encode_packet, identity_from_certificate_der, negotiate_protocol,
+    parse_spiffe_uri, read_control_frame, v1,
 };
 use prost::Message;
 use serde::Deserialize;
@@ -124,6 +125,17 @@ fn packet_golden_vector() {
     assert_eq!(payload.len(), wire.len() - 5);
 }
 
+#[test]
+fn opaque_wireguard_packet_golden_vector() {
+    let wire = read_hex("packets/relay-wireguard-initiation.hex");
+    let (header, payload) = decode_frame(&wire).expect("decode opaque WireGuard packet");
+    assert_eq!(header.flags, PACKET_FLAG_E2E_ENCRYPTED);
+    assert_eq!(header.route_handle, 0x0102_0304);
+    assert_eq!(payload.len(), 148);
+    assert_eq!(payload[0], 1);
+    assert_eq!(decode_packet(&wire), Err(Error::InvalidPacketFlags));
+}
+
 #[derive(Deserialize)]
 struct PacketRejectCases {
     cases: Vec<PacketRejectCase>,
@@ -162,6 +174,7 @@ fn packet_error_label(error: &Error) -> &'static str {
         Error::InvalidRouteHandle => "invalid_route_handle",
         Error::PacketTooLarge => "packet_too_large",
         Error::InvalidIpPacket => "invalid_ip_packet",
+        Error::InvalidWireGuardPacket => "invalid_wireguard_packet",
         other => panic!("unexpected packet error {other:?}"),
     }
 }

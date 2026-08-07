@@ -81,6 +81,20 @@ func TestStableIPv6PacketVector(t *testing.T) {
 	}
 }
 
+func TestStableOpaqueWireGuardPacketVector(t *testing.T) {
+	wire := readHexFixture(t, "packets/relay-wireguard-initiation.hex")
+	header, packet, err := protocol.DecodeFrame(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header.Flags != protocol.PacketFlagE2EEncrypted || header.RouteHandle != 0x01020304 || len(packet) != 148 || packet[0] != 1 {
+		t.Fatalf("header=%#v packet_length=%d packet_type=%d", header, len(packet), packet[0])
+	}
+	if _, _, err := protocol.DecodePacket(wire); !errors.Is(err, protocol.ErrInvalidPacketFlags) {
+		t.Fatalf("plaintext decoder error = %v", err)
+	}
+}
+
 func TestStableDirectProbeVector(t *testing.T) {
 	local, _ := identity.ParseNodeID("202122232425262728292a2b2c2d2e2f")
 	peer, _ := identity.ParseNodeID("101112131415161718191a1b1c1d1e1f")

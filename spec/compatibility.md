@@ -69,7 +69,12 @@ Timestamps, when introduced, MUST define epoch, units, range, and clock-skew beh
 
 ## 7. Binary packet rules
 
-Raw IP packets MUST NOT be encoded in Protobuf. Packet-header integers use network byte order. Reserved v1 flag bits MUST be zero on send and cause v1 rejection when nonzero. A new flag may be introduced only after its semantics and capability/version interaction are specified.
+Raw IP and opaque WireGuard packets MUST NOT be encoded in Protobuf.
+Packet-header integers use network byte order. Flag bit 0 is valid only for the
+specified, negotiated `LANEWAY_E2E_PACKET_V1` semantics; reserved v1 flag bits
+1..3 MUST be zero on send and cause v1 rejection when nonzero. A new flag may be
+introduced only after its semantics and capability/version interaction are
+specified.
 
 A receiver MUST validate the complete frame rather than relying on struct casts, native alignment, endianness, or pointer width. Implementations SHOULD parse from byte slices with explicit bounds checks.
 

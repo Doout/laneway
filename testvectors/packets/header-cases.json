@@ -3,10 +3,11 @@
     {"name": "minimum_handle", "version": 1, "flags": 0, "route_handle": 1, "expected_hex": "1000000001"},
     {"name": "maximum_handle", "version": 1, "flags": 0, "route_handle": 4294967295, "expected_hex": "10ffffffff"},
     {"name": "zero_handle", "version": 1, "flags": 0, "route_handle": 0, "expected_error": "invalid_route_handle"},
-    {"name": "reserved_flag_one", "version": 1, "flags": 1, "route_handle": 1, "expected_error": "invalid_packet_flags"},
+    {"name": "e2e_encrypted", "version": 1, "flags": 1, "route_handle": 1, "expected_hex": "1100000001"},
+    {"name": "reserved_flag_two", "version": 1, "flags": 2, "route_handle": 1, "expected_error": "invalid_packet_flags"},
     {"name": "reserved_flag_max", "version": 1, "flags": 15, "route_handle": 1, "expected_error": "invalid_packet_flags"},
     {"name": "unsupported_version_precedes_flags", "version": 2, "flags": 1, "route_handle": 1, "expected_error": "unsupported_version"},
-    {"name": "reserved_flags_precede_zero_handle", "version": 1, "flags": 1, "route_handle": 0, "expected_error": "invalid_packet_flags"},
+    {"name": "reserved_flags_precede_zero_handle", "version": 1, "flags": 2, "route_handle": 0, "expected_error": "invalid_packet_flags"},
     {"name": "version_zero", "version": 0, "flags": 0, "route_handle": 1, "expected_error": "unsupported_version"},
     {"name": "version_two", "version": 2, "flags": 0, "route_handle": 1, "expected_error": "unsupported_version"}
   ]

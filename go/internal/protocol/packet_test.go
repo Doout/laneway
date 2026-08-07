@@ -53,11 +53,45 @@ func TestPacketErrors(t *testing.T) {
 			}
 		})
 	}
-	if _, err := EncodePacket(nil, PacketHeader{Version: 1, Flags: 1, RouteHandle: 1}, make([]byte, 20)); !errors.Is(err, ErrInvalidPacketFlags) {
+	if _, err := EncodePacket(nil, PacketHeader{Version: 1, Flags: PacketFlagE2EEncrypted, RouteHandle: 1}, make([]byte, 20)); !errors.Is(err, ErrInvalidPacketFlags) {
 		t.Fatalf("flags: %v", err)
+	}
+	if _, _, err := DecodeFrame(append([]byte{0x12, 0, 0, 0, 1}, make([]byte, 20)...)); !errors.Is(err, ErrInvalidPacketFlags) {
+		t.Fatalf("reserved flags: %v", err)
 	}
 	if _, err := EncodePacket(nil, PacketHeader{Version: 1, RouteHandle: 1}, make([]byte, MaxPacketPayload+1)); !errors.Is(err, ErrPacketTooLarge) {
 		t.Fatalf("oversize: %v", err)
+	}
+}
+
+func TestWireGuardPacketRoundTripAndStrictShapes(t *testing.T) {
+	payload := make([]byte, 148)
+	payload[0] = 1
+	frame, err := EncodeWireGuardPacket(nil, 0x01020304, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, got, err := DecodeFrame(frame)
+	if err != nil || header.Flags != PacketFlagE2EEncrypted || header.RouteHandle != 0x01020304 || !bytes.Equal(got, payload) {
+		t.Fatalf("decoded header=%+v payload=%x error=%v", header, got, err)
+	}
+	if _, _, err := DecodePacket(frame); !errors.Is(err, ErrInvalidPacketFlags) {
+		t.Fatalf("plaintext decoder accepted encrypted payload: %v", err)
+	}
+	for _, invalid := range [][]byte{
+		{}, {1, 0, 0, 0}, append([]byte{1, 0, 0, 0}, make([]byte, 143)...),
+		append([]byte{4, 0, 0, 0}, make([]byte, 29)...), {5, 0, 0, 0}, {1, 1, 0, 0},
+	} {
+		if err := ValidateWireGuardPayload(invalid); !errors.Is(err, ErrInvalidWireGuard) {
+			t.Fatalf("invalid WireGuard shape length=%d accepted: %v", len(invalid), err)
+		}
+	}
+	for messageType, size := range map[byte]int{1: 148, 2: 92, 3: 64, 4: 32} {
+		valid := make([]byte, size)
+		valid[0] = messageType
+		if err := ValidateWireGuardPayload(valid); err != nil {
+			t.Fatalf("type %d size %d rejected: %v", messageType, size, err)
+		}
 	}
 }
 

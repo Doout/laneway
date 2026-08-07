@@ -1,9 +1,10 @@
 use std::{io::Cursor, str::FromStr};
 
 use laneway_protocol::{
-    Error, Id, PacketHeader, TcpRecordKind, decode_packet, decode_tcp_record,
-    decode_tcp_record_prefix, encode_tcp_record_prefix, negotiate_capabilities, parse_spiffe_uri,
-    read_control_frame, write_control_frame,
+    Error, Id, PACKET_FLAG_E2E_ENCRYPTED, PacketHeader, TcpRecordKind, decode_frame, decode_packet,
+    decode_tcp_record, decode_tcp_record_prefix, encode_tcp_record_prefix, encode_wireguard_packet,
+    negotiate_capabilities, parse_spiffe_uri, read_control_frame, validate_wireguard_packet,
+    write_control_frame,
 };
 
 #[test]
@@ -82,7 +83,7 @@ fn packet_decoder_rejects_reserved_bits_zero_handles_and_length_mismatch() {
     assert_eq!(
         PacketHeader {
             version: 1,
-            flags: 1,
+            flags: 2,
             route_handle: 1
         }
         .encode(),
@@ -102,6 +103,37 @@ fn packet_decoder_rejects_reserved_bits_zero_handles_and_length_mismatch() {
         0x10, 0, 0, 0, 1, 0x45, 0, 0, 21, 0, 0, 0, 0, 64, 1, 0, 0, 10, 0, 0, 1, 10, 0, 0, 2,
     ];
     assert_eq!(decode_packet(&bad_ipv4), Err(Error::InvalidIpPacket));
+}
+
+#[test]
+fn opaque_wireguard_frames_are_strict_and_plaintext_decoder_rejects_them() {
+    let mut initiation = vec![0_u8; 148];
+    initiation[0] = 1;
+    let mut frame = Vec::new();
+    encode_wireguard_packet(42, &initiation, &mut frame).unwrap();
+    let (header, payload) = decode_frame(&frame).unwrap();
+    assert_eq!(header.flags, PACKET_FLAG_E2E_ENCRYPTED);
+    assert_eq!(header.route_handle, 42);
+    assert_eq!(payload, initiation);
+    assert_eq!(decode_packet(&frame), Err(Error::InvalidPacketFlags));
+
+    for (message_type, size) in [(1, 148), (2, 92), (3, 64), (4, 32)] {
+        let mut packet = vec![0_u8; size];
+        packet[0] = message_type;
+        validate_wireguard_packet(&packet).unwrap();
+    }
+    for invalid in [
+        vec![],
+        vec![1, 0, 0, 0],
+        vec![1; 148],
+        vec![4, 0, 0, 0, 0],
+        vec![5, 0, 0, 0],
+    ] {
+        assert_eq!(
+            validate_wireguard_packet(&invalid),
+            Err(Error::InvalidWireGuardPacket)
+        );
+    }
 }
 
 #[test]

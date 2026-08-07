@@ -169,7 +169,8 @@ func New(config Config) (*Server, error) {
 			protocol.CapabilityDirectPeerV1 |
 			protocol.CapabilityIPv6V1 |
 			protocol.CapabilitySubnetRouterV1 |
-			protocol.CapabilityExitNodeV1
+			protocol.CapabilityExitNodeV1 |
+			protocol.CapabilityE2EPacketV1
 	}
 	if config.ControlWriteTimeout == 0 {
 		config.ControlWriteTimeout = defaultControlWriteTimeout
@@ -452,6 +453,7 @@ func (s *Server) serveConn(ctx context.Context, conn packetConnection) {
 		Identity: peer, AuthorizedPrefixes: authorization.AuthorizedPrefixes,
 		MaxPacketPayload: int(s.config.MaxPacketPayload),
 		AllowIPv6:        helloResult.Negotiated.Capabilities.Has(protocol.CapabilityIPv6V1),
+		AllowE2E:         helloResult.Negotiated.Capabilities.Has(protocol.CapabilityE2EPacketV1),
 	})
 	if err != nil {
 		s.sessionMu.Unlock()
@@ -787,7 +789,7 @@ func (s *Server) receivePackets(ctx context.Context, wire *wireSession) error {
 			return err
 		}
 		if s.config.PacketPolicy != nil {
-			header, packet, decodeErr := protocol.DecodePacket(frame)
+			header, packet, decodeErr := protocol.DecodeFrame(frame)
 			if decodeErr != nil {
 				s.metrics.malformedInput.Add(1)
 				s.metrics.droppedPackets.Add(1)
@@ -796,7 +798,17 @@ func (s *Server) receivePackets(ctx context.Context, wire *wireSession) error {
 				continue
 			}
 			peer, ok := s.peerForHandle(wire, header.RouteHandle)
-			if !ok || !s.config.PacketPolicy.Allow(wire.identity, peer.identity, packet) {
+			// Opaque E2E frames cannot be evaluated as plaintext. Exact peer
+			// authorization is instead enforced by the live bilateral binding and
+			// by both sessions negotiating the E2E capability; endpoint policy
+			// applies after WireGuard decrypts the packet.
+			allowed := ok
+			if header.Flags == 0 {
+				allowed = allowed && s.config.PacketPolicy.Allow(wire.identity, peer.identity, packet)
+			} else if header.Flags == protocol.PacketFlagE2EEncrypted {
+				allowed = allowed && wire.capabilities.Has(protocol.CapabilityE2EPacketV1) && peer.capabilities.Has(protocol.CapabilityE2EPacketV1)
+			}
+			if !allowed {
 				s.metrics.authorizationFailures.Add(1)
 				s.metrics.policyDrops.Add(1)
 				s.metrics.droppedPackets.Add(1)

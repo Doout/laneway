@@ -110,11 +110,16 @@ The `uint64` capability field uses bit positions below. Bit `n` has value `1 << 
 | 4 | `LANEWAY_EXIT_NODE_V1` | Controller-authorized, explicitly selected default routes |
 | 5 | `LANEWAY_TCP_FALLBACK_V1` | Fallback records over TLS/TCP |
 | 6 | `LANEWAY_IPV6_V1` | IPv6 packet and route support |
-| 7 | `LANEWAY_E2E_PACKET_V1` | Reserved; end-to-end packet protection from relay |
+| 7 | `LANEWAY_E2E_PACKET_V1` | Opaque WireGuard packet framing protected from relay plaintext inspection |
 
 Bits 8 through 63 are unassigned in this revision and MUST be sent as zero. Receivers MUST ignore unknown capability bits when computing an intersection and MUST NOT echo them unless they independently implement the assigned capability.
 
-QUIC relay packet exchange requires bits 0 and 1. TCP relay exchange requires bits 0 and 5. IPv4-only implementations MUST clear bit 6. Implementations that set bit 2 MUST follow [direct-path-v1.md](direct-path-v1.md). Bit 7 remains reserved and MUST stay clear until end-to-end packet protection is specified and implemented.
+QUIC relay packet exchange requires bits 0 and 1. TCP relay exchange requires
+bits 0 and 5. IPv4-only implementations MUST clear bit 6. Implementations that
+set bit 2 MUST follow [direct-path-v1.md](direct-path-v1.md). Implementations
+that set bit 7 MUST implement the opaque framing, identity binding, and endpoint
+policy requirements in [packet-format-v1.md](packet-format-v1.md); support for
+legacy raw-IP relay packets alone is insufficient.
 
 ## 5. Configuration epochs
 
