@@ -110,9 +110,26 @@ func TestRelayEndpointCarriesOpaquePacketsInBothDirections(t *testing.T) {
 	if source != peerEndpoint || !bytes.Equal(buffer[:n], packet) {
 		t.Fatalf("inbound source=%s payload_equal=%t", source, bytes.Equal(buffer[:n], packet))
 	}
-	metrics := endpoint.Metrics()
+	metrics := waitRelayEndpointMetrics(t, endpoint, func(metrics RelayEndpointMetrics) bool {
+		return metrics.PacketsSent == 1 && metrics.PacketsReceived == 1
+	})
 	if metrics.PacketsSent != 1 || metrics.PacketsReceived != 1 || metrics.PacketsDropped != 0 {
 		t.Fatalf("metrics = %+v", metrics)
+	}
+}
+
+func waitRelayEndpointMetrics(t *testing.T, endpoint *RelayEndpoint, ready func(RelayEndpointMetrics) bool) RelayEndpointMetrics {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		metrics := endpoint.Metrics()
+		if ready(metrics) {
+			return metrics
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for relay endpoint metrics: %+v", metrics)
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
