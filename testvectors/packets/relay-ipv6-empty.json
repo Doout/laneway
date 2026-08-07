@@ -1,0 +1,15 @@
+{
+  "header": {
+    "version": 1,
+    "flags": 0,
+    "route_handle": 168496141,
+    "route_handle_hex": "0a0b0c0d"
+  },
+  "packet": {
+    "ip_version": 6,
+    "source": "2001:db8::1",
+    "destination": "2001:db8::2",
+    "next_header": 59,
+    "payload_length": 0
+  }
+}

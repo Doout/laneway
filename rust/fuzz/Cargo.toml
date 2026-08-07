@@ -1,0 +1,65 @@
+[package]
+name = "laneway-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+laneway-protocol = { path = "../laneway-protocol" }
+prost = "0.14.4"
+
+[[bin]]
+name = "packet"
+path = "fuzz_targets/packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control"
+path = "fuzz_targets/control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_record"
+path = "fuzz_targets/tcp_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "direct_probe"
+path = "fuzz_targets/direct_probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spiffe"
+path = "fuzz_targets/spiffe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "certificate_der"
+path = "fuzz_targets/certificate_der.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "policy_routing"
+path = "fuzz_targets/policy_routing.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

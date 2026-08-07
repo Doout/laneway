@@ -1,0 +1,56 @@
+mode = "node"
+state_dir = "/var/lib/laneway"
+socket_path = "/run/laneway/lanewayd.sock"
+
+[tls]
+certificate = "/etc/laneway/node.crt"
+private_key = "/etc/laneway/node.key"
+ca = "/etc/laneway/ca.crt"
+server_name = "relay.example.com"
+
+[node]
+name = "example-node"
+relay_address = "relay.example.com:4433"
+relay_network_id = "000102030405060708090a0b0c0d0e0f"
+relay_service_id = "303132333435363738393a3b3c3d3e3f"
+overlay_addresses = ["100.96.0.1/32"]
+reconnect_min = "1s"
+reconnect_max = "30s"
+
+[direct]
+# Reuses this UDP socket for the relay session, rendezvous probes, and peer QUIC.
+enabled = true
+listen = "0.0.0.0:0"
+candidate_ttl = "2m"
+probe_interval = "200ms"
+probe_timeout = "3s"
+rendezvous_interval = "30s"
+max_candidates = 8
+# Keep special-use address classes disabled outside isolated test environments.
+allow_loopback = false
+allow_link_local = false
+
+[tcp_fallback]
+# Used only after the QUIC relay path fails.
+address = "relay.example.com:443"
+handshake_timeout = "10s"
+write_timeout = "10s"
+idle_timeout = "45s"
+keepalive_period = "15s"
+quic_probe_interval = "30s"
+queue_depth = 128
+
+[routing]
+# Required when advertise is non-empty or this node is an exit node.
+output_interface = "eth0"
+advertise = []
+nat = true
+
+# For controller-authoritative addresses and routes, use node-controller.toml;
+# static overlay_addresses/peers cannot be mixed with a controller endpoint.
+
+[[peers]]
+network_id = "000102030405060708090a0b0c0d0e0f"
+node_id = "202122232425262728292a2b2c2d2e2f"
+name = "homelab-gateway"
+prefixes = ["100.96.0.2/32"]

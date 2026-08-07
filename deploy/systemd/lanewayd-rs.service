@@ -1,0 +1,49 @@
+[Unit]
+Description=Laneway native Rust node dataplane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lanewayd-rs --config /etc/laneway/node-rust.toml
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+User=laneway
+Group=laneway
+RuntimeDirectory=laneway
+StateDirectory=laneway
+UMask=0077
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+# The native node transactionally owns forwarding sysctls when subnet/exit
+# features are enabled and restores their exact prior values on shutdown.
+ProtectKernelTunables=no
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectProc=invisible
+# Subnet/exit roles transactionally read and write /proc/sys forwarding state;
+# ProcSubset=pid would hide those kernel tunables even though
+# ProtectKernelTunables is intentionally disabled above.
+ProcSubset=all
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+# AF_UNIX permits resolvectl to reach systemd-resolved's local D-Bus socket
+# when exit-client DNS ownership is configured.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

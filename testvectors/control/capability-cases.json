@@ -1,0 +1,62 @@
+{
+  "known_mask": 255,
+  "cases": [
+    {
+      "name": "relay_quic_intersection",
+      "local_version": {"major": 1, "minor": 3},
+      "remote_version": {"major": 1, "minor": 1},
+      "local": 39,
+      "remote": 3,
+      "required": 3,
+      "expected": 3,
+      "expected_version": {"major": 1, "minor": 1}
+    },
+    {
+      "name": "missing_required_datagram",
+      "local_version": {"major": 1, "minor": 0},
+      "remote_version": {"major": 1, "minor": 0},
+      "local": 3,
+      "remote": 1,
+      "required": 3,
+      "expected_error": "incompatible_capabilities"
+    },
+    {
+      "name": "unknown_local_bit",
+      "local_version": {"major": 1, "minor": 0},
+      "remote_version": {"major": 1, "minor": 4},
+      "local": 259,
+      "remote": 3,
+      "required": 3,
+      "expected": 3,
+      "expected_version": {"major": 1, "minor": 0}
+    },
+    {
+      "name": "tcp_fallback_carrier",
+      "local_version": {"major": 1, "minor": 2},
+      "remote_version": {"major": 1, "minor": 2},
+      "local": 35,
+      "remote": 33,
+      "required": 33,
+      "expected": 33,
+      "expected_version": {"major": 1, "minor": 2}
+    },
+    {
+      "name": "local_major_zero",
+      "local_version": {"major": 0, "minor": 0},
+      "remote_version": {"major": 1, "minor": 0},
+      "local": 3,
+      "remote": 3,
+      "required": 3,
+      "expected_error": "incompatible_version"
+    },
+    {
+      "name": "remote_future_major",
+      "local_version": {"major": 1, "minor": 0},
+      "remote_version": {"major": 2, "minor": 0},
+      "local": 3,
+      "remote": 3,
+      "required": 3,
+      "expected_error": "incompatible_version"
+    }
+  ]
+}

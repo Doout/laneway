@@ -1,0 +1,413 @@
+name: Full benchmark matrix
+
+on:
+  schedule:
+    - cron: "41 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-full-matrix:
+    name: Go authenticated path matrix (${{ matrix.arch }} native)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            classification: Native linux/amd64 GitHub-hosted runner.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            classification: Native linux/arm64 GitHub-hosted runner; not QEMU emulation.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - name: Build benchmark
+        working-directory: go
+        run: go build -o ../laneway-bench ./cmd/laneway-bench
+      - name: Run LAN and WAN matrix without induced loss
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+          BENCH_CLASSIFICATION: ${{ matrix.classification }}
+        run: |
+          {
+            echo "architecture=${BENCH_ARCH}"
+            echo "classification=${BENCH_CLASSIFICATION}"
+            ./laneway-bench matrix -duration 1s -pps 0 -queue 4096 \
+              -flows 1,10,100 -sizes small,mtu -profiles lan,wan \
+              -loss 0 -seed 1
+          } | tee "benchmark-full-${BENCH_ARCH}-no-loss.txt"
+      - name: Run deterministic random and burst-loss matrix
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+          BENCH_CLASSIFICATION: ${{ matrix.classification }}
+        run: |
+          {
+            echo "architecture=${BENCH_ARCH}"
+            echo "classification=${BENCH_CLASSIFICATION}"
+            ./laneway-bench matrix -duration 1s -pps 10000 -queue 4096 \
+              -flows 1,10,100 -sizes small,mtu -profiles lan,wan \
+              -loss 1 -burst-loss 3 -seed 20260807
+          } | tee "benchmark-full-${BENCH_ARCH}-loss.txt"
+      - name: Summarize benchmark rows
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+          BENCH_CLASSIFICATION: ${{ matrix.classification }}
+        run: |
+          {
+            echo "### Full benchmark matrix (${BENCH_ARCH} native)"
+            echo
+            echo "${BENCH_CLASSIFICATION}"
+            echo
+            echo 'Native UDP, authenticated QUIC stream/direct/relay, TLS/TCP fallback, subnet, and exit packet pumps.'
+            echo
+            echo '```text'
+            grep '^summary ' "benchmark-full-${BENCH_ARCH}-no-loss.txt"
+            grep '^summary ' "benchmark-full-${BENCH_ARCH}-loss.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Archive full benchmark matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-full-linux-${{ matrix.arch }}-native
+          path: benchmark-full-${{ matrix.arch }}-*.txt
+          if-no-files-found: error
+
+  rust-full-matrix:
+    name: Native Go/Rust relay comparison (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            classification: Native linux/amd64 GitHub-hosted runner.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            classification: Native linux/arm64 GitHub-hosted runner; not QEMU emulation.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build benchmark driver, external relay, and production-adapter benchmark
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark-bin
+          (cd go && go build -trimpath -o ../benchmark-bin/laneway-bench ./cmd/laneway-bench)
+          cargo build --manifest-path rust/Cargo.toml --locked --release \
+            -p laneway-relay -p laneway-bench
+      - name: Run apples-to-apples Go and Rust relay matrix
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+          BENCH_CLASSIFICATION: ${{ matrix.classification }}
+        run: |
+          set -euo pipefail
+          case "${BENCH_ARCH}:$(uname -m)" in
+            amd64:x86_64|arm64:aarch64) ;;
+            *) echo "runner architecture does not match native classification" >&2; exit 1 ;;
+          esac
+          driver="$(pwd)/benchmark-bin/laneway-bench"
+          relay="$(pwd)/rust/target/release/laneway-relay"
+          scenarios="relay-quic,relay-tcp,rust-relay-quic,rust-relay-tcp"
+          no_loss="benchmark-relay-comparison-${BENCH_ARCH}-no-loss.txt"
+          loss="benchmark-relay-comparison-${BENCH_ARCH}-loss.txt"
+          "${driver}" matrix \
+            -scenarios "${scenarios}" \
+            -rust-relay-binary "${relay}" \
+            -duration 1s -pps 10000 -queue 4096 \
+            -flows 1,10,100 -sizes small,mtu -profiles lan,wan \
+            -loss 0 -seed 1 | tee "${no_loss}"
+          "${driver}" matrix \
+            -scenarios "${scenarios}" \
+            -rust-relay-binary "${relay}" \
+            -duration 1s -pps 10000 -queue 4096 \
+            -flows 1,10,100 -sizes small,mtu -profiles lan,wan \
+            -loss 1 -burst-loss 3 -seed 20260807 | tee "${loss}"
+          test "$(grep -c '^matrix_row=' "${no_loss}")" -eq 48
+          test "$(grep -c '^summary ' "${no_loss}")" -eq 48
+          test "$(grep -c '^matrix_row=' "${loss}")" -eq 48
+          test "$(grep -c '^summary ' "${loss}")" -eq 48
+      - name: Write and validate machine-readable relay comparison
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+          BENCH_CLASSIFICATION: ${{ matrix.classification }}
+        run: |
+          set -euo pipefail
+          comparison="benchmark-relay-comparison-linux-${BENCH_ARCH}-native.jsonl"
+          : > "${comparison}"
+          for trial in no-loss loss; do
+            grep '^summary ' "benchmark-relay-comparison-${BENCH_ARCH}-${trial}.txt" | \
+              jq -Rc \
+                --arg architecture "${BENCH_ARCH}" \
+                --arg classification "${BENCH_CLASSIFICATION}" \
+                --arg trial "${trial}" '
+                  ltrimstr("summary ")
+                  | split(" ")
+                  | map(capture("^(?<key>[^=]+)=(?<value>.*)$"))
+                  | from_entries
+                  | .schema = "laneway-relay-comparison-row-v2"
+                  | .architecture = $architecture
+                  | .classification = $classification
+                  | .trial = $trial
+                  | .configured_duration_seconds = 1
+                  | .configured_pps = 10000
+                  | .configured_queue_capacity = 4096
+                  | .configured_loss_percent = (if $trial == "loss" then 1 else 0 end)
+                  | .configured_burst_loss = (if $trial == "loss" then 3 else 0 end)
+                  | .configured_seed = (if $trial == "loss" then 20260807 else 1 end)
+                  | .implementation = (
+                      if (.scenario | startswith("rust-"))
+                      then "external-rust-relay"
+                      else "in-process-go-relay"
+                      end
+                    )
+                  | .allocation_scope = (
+                      if (.scenario | startswith("rust-"))
+                      then "go-driver-and-nodes in allocs; external-rust-relay in relay_allocs"
+                      else "go-driver-nodes-and-in-process-relay"
+                      end
+                    )
+                  | (.flows, .size, .generated, .sent, .packets, .bytes,
+                     .drops, .bad, .rss_bytes, .allocs, .gc_count,
+                     .relay_rss_bytes, .relay_allocs, .relay_allocated_bytes,
+                     .queue_capacity, .queue_depth,
+                     .queue_peak) |= tonumber
+                  | (.avg_pps, .avg_Gbps, .avg_MiBps, .loss_pct, .cpu_pct,
+                     .relay_cpu_pct) |= tonumber
+                  | .total_cpu_pct = (.cpu_pct + .relay_cpu_pct)
+                  | .total_rss_bytes = (.rss_bytes + .relay_rss_bytes)
+                  | .total_allocs = (.allocs + .relay_allocs)
+                ' >> "${comparison}"
+          done
+          jq -e -s '
+            length == 96 and
+            ([group_by([.trial, .scenario, .flows, .size, .profile])[] | length] | all(. == 1)) and
+            all(
+              .schema == "laneway-relay-comparison-row-v2" and
+              (.trial == "no-loss" or .trial == "loss") and
+              (.configured_duration_seconds == 1) and
+              (.configured_pps == 10000) and
+              (.configured_queue_capacity == 4096) and
+              (if .trial == "loss"
+               then (.configured_loss_percent == 1 and .configured_burst_loss == 3 and .configured_seed == 20260807)
+               else (.configured_loss_percent == 0 and .configured_burst_loss == 0 and .configured_seed == 1)
+               end) and
+              (.scenario == "relay-quic" or .scenario == "relay-tcp" or
+               .scenario == "rust-relay-quic" or .scenario == "rust-relay-tcp") and
+              (.flows == 1 or .flows == 10 or .flows == 100) and
+              (.size == 64 or .size == 1200) and
+              (.profile == "lan" or .profile == "wan") and
+              (.generated > 0) and (.sent > 0) and (.packets > 0) and
+              (.bytes > 0) and (.bad == 0) and
+              (.rss_bytes > 0) and (.allocs >= 0) and
+              (.relay_cpu_pct >= 0) and
+              (.relay_allocs >= 0) and (.relay_allocated_bytes >= 0) and
+              (.queue_capacity == 4096) and (.queue_depth == 0) and
+              (.queue_peak >= 0) and (.queue_peak <= .queue_capacity) and
+              (.total_cpu_pct >= .cpu_pct) and
+              (.total_rss_bytes >= .rss_bytes) and
+              (if (.scenario | endswith("-quic"))
+               then .transport == "quic-datagram"
+               else .transport == "tls1.3-tcp"
+               end) and
+              (if .implementation == "external-rust-relay"
+               then (.scope == "authenticated-external-rust-relay" and
+                     .queue_peak_scope == "relay-counter" and
+                     .allocation_scope == "go-driver-and-nodes in allocs; external-rust-relay in relay_allocs" and
+                     .relay_rss_bytes > 0 and .relay_allocs > 0 and
+                     .relay_allocated_bytes > 0 and .queue_peak > 0)
+               else (.scope == "authenticated-relay" and
+                     .queue_peak_scope == "sampled-1ms" and
+                     .allocation_scope == "go-driver-nodes-and-in-process-relay" and
+                     .relay_rss_bytes == 0 and .relay_allocs == 0 and
+                     .relay_allocated_bytes == 0)
+               end)
+            )
+          ' "${comparison}" >/dev/null
+      - name: Run production adapter and relay-forward matrix
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "${BENCH_ARCH}:$(uname -m)" in
+            amd64:x86_64|arm64:aarch64) ;;
+            *) echo "runner architecture does not match native classification" >&2; exit 1 ;;
+          esac
+          output="benchmark-rust-linux-${BENCH_ARCH}-native.jsonl"
+          : > "${output}"
+          for mode in node relay; do
+            for flows in 1 10 100; do
+              for packet_size in 64 1400; do
+                rust/target/release/laneway-bench \
+                  --mode "${mode}" \
+                  --flows "${flows}" \
+                  --packet-size "${packet_size}" \
+                  --duration-secs 1 \
+                  --json | tee -a "${output}"
+              done
+            done
+          done
+          for flows in 1 10 100; do
+            for packet_size in 64 1200; do
+              rust/target/release/laneway-bench \
+                --mode relay-forward \
+                --flows "${flows}" \
+                --packet-size "${packet_size}" \
+                --duration-secs 1 \
+                --json | tee -a "${output}"
+            done
+          done
+          test "$(wc -l < "${output}")" -eq 18
+          jq -e -s '
+            length == 18 and
+            ([group_by([.mode, .flows, .packet_size])[] | length] | all(. == 1)) and
+            all(
+              (.mode == "node" or .mode == "relay" or .mode == "relay-forward") and
+              (.flows == 1 or .flows == 10 or .flows == 100) and
+              (if .mode == "relay-forward"
+               then (.packet_size == 64 or .packet_size == 1200)
+               else (.packet_size == 64 or .packet_size == 1400)
+               end) and
+              (.duration_seconds > 0) and
+              (.packets > 0) and (.bytes > 0) and (.pps > 0) and (.gbps > 0) and
+              (.bytes == (.packets * .packet_size)) and
+              (.p50_us >= 0) and (.p95_us >= .p50_us) and (.p99_us >= .p95_us) and
+              (.drops >= 0) and (.loss_percent >= 0) and (.loss_percent <= 100) and
+              (.cpu_percent >= 0) and (.rss_bytes > 0) and
+              (.allocations >= 0) and (.allocations_per_packet >= 0) and
+              (.queue_depth_max >= 0) and
+              (if .mode == "relay-forward" then .allocations_per_packet < 1.1 else true end)
+            )
+          ' "${output}" >/dev/null
+      - name: Write reproducibility manifest
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+          BENCH_CLASSIFICATION: ${{ matrix.classification }}
+          BENCH_RUNNER: ${{ matrix.runner }}
+          BENCH_RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          output="benchmark-rust-linux-${BENCH_ARCH}-native.jsonl"
+          comparison="benchmark-relay-comparison-linux-${BENCH_ARCH}-native.jsonl"
+          manifest="benchmark-rust-linux-${BENCH_ARCH}-native-manifest.json"
+          jq -n \
+            --arg schema "laneway-native-benchmark-manifest-v3" \
+            --arg architecture "${BENCH_ARCH}" \
+            --arg classification "${BENCH_CLASSIFICATION}" \
+            --arg runner "${BENCH_RUNNER}" \
+            --arg rust_target "${BENCH_RUST_TARGET}" \
+            --arg host_architecture "$(uname -m)" \
+            --arg kernel "$(uname -sr)" \
+            --arg git_sha "${GITHUB_SHA}" \
+            --arg rustc "$(rustc --version --verbose)" \
+            --arg cargo "$(cargo --version)" \
+            --arg go "$(go version)" \
+            --arg driver_sha256 "$(sha256sum benchmark-bin/laneway-bench | awk '{print $1}')" \
+            --arg relay_sha256 "$(sha256sum rust/target/release/laneway-relay | awk '{print $1}')" \
+            --arg adapter_sha256 "$(sha256sum "${output}" | awk '{print $1}')" \
+            --arg comparison_sha256 "$(sha256sum "${comparison}" | awk '{print $1}')" \
+            --argjson adapter_rows "$(wc -l < "${output}")" \
+            --argjson comparison_rows "$(wc -l < "${comparison}")" \
+            '{
+              schema: $schema,
+              architecture: $architecture,
+              classification: $classification,
+              runner: $runner,
+              rust_target: $rust_target,
+              host_architecture: $host_architecture,
+              kernel: $kernel,
+              git_sha: $git_sha,
+              rustc: $rustc,
+              cargo: $cargo,
+              go: $go,
+              binaries: {
+                go_benchmark_driver_sha256: $driver_sha256,
+                rust_relay_sha256: $relay_sha256
+              },
+              relay_comparison: {
+                schema: "laneway-relay-comparison-row-v2",
+                sha256: $comparison_sha256,
+                rows: $comparison_rows,
+                scenarios: ["relay-quic", "relay-tcp", "rust-relay-quic", "rust-relay-tcp"],
+                flows: [1, 10, 100],
+                packet_sizes: [64, 1200],
+                profiles: ["lan", "wan"],
+                trials: [
+                  {name: "no-loss", pps: 10000, loss_percent: 0, burst_loss: 0, seed: 1},
+                  {name: "loss", pps: 10000, loss_percent: 1, burst_loss: 3, seed: 20260807}
+                ],
+                duration_seconds_per_row: 1,
+                allocation_scope: {
+                  go_relay_rows: "Go process: benchmark driver, nodes, and in-process relay",
+                  rust_relay_rows: "Go allocs: benchmark driver and nodes; relay_allocs/relay_allocated_bytes: live external Rust relay",
+                  rust_live_relay_allocator: "counted by the production relay system-allocator wrapper over the measurement interval, excluding diagnostics self-observation",
+                  rust_adapter_allocations: "reported only by the separate production-adapter matrix"
+                },
+                aggregate_resource_fields: {
+                  total_cpu_pct: "Go benchmark-process CPU plus separately sampled external-relay CPU",
+                  total_rss_bytes: "Go benchmark-process RSS plus separately sampled external-relay RSS",
+                  queue_peak_scope: "sampled-1ms for in-process Go relay rows; exact fresh-process relay-counter for external Rust rows"
+                }
+              },
+              rust_production_adapter: {
+                schema: "laneway-rust-benchmark-jsonl-v1",
+                sha256: $adapter_sha256,
+                rows: $adapter_rows,
+                modes: ["node", "relay", "relay-forward"],
+                flows: [1, 10, 100],
+                packet_sizes: {node_and_relay: [64, 1400], relay_forward: [64, 1200]},
+                duration_seconds_per_row: 1
+              }
+            }' > "${manifest}"
+          jq -e '
+            .schema == "laneway-native-benchmark-manifest-v3" and
+            .relay_comparison.rows == 96 and
+            .rust_production_adapter.rows == 18 and
+            .relay_comparison.allocation_scope.rust_live_relay_allocator ==
+              "counted by the production relay system-allocator wrapper over the measurement interval, excluding diagnostics self-observation"
+          ' "${manifest}" >/dev/null
+      - name: Summarize Rust benchmark rows
+        env:
+          BENCH_ARCH: ${{ matrix.arch }}
+          BENCH_CLASSIFICATION: ${{ matrix.classification }}
+        run: |
+          {
+            echo "### Native Go/Rust relay comparison (${BENCH_ARCH})"
+            echo
+            echo "${BENCH_CLASSIFICATION}"
+            echo
+            echo 'Authenticated Go and external Rust QUIC/TCP relays: 96 validated comparison rows.'
+            echo 'Rust relay CPU/RSS and live allocator calls/requested bytes are measured separately from the Go driver.'
+            echo
+            jq -r 'select(.trial == "no-loss" and .flows == 10 and .size == 1200 and .profile == "wan") | "- \(.scenario): \(.avg_Gbps) Gbps, p95=\(.latency_p95), total CPU=\(.total_cpu_pct)%, total RSS=\(.total_rss_bytes) bytes"' \
+              "benchmark-relay-comparison-linux-${BENCH_ARCH}-native.jsonl"
+            echo
+            echo 'Production routing/framing adapters and live relay forwarding fast path: 18 JSONL rows.'
+            jq -r '"- \(.mode), flows=\(.flows), bytes=\(.packet_size): \(.gbps) Gbps, p95=\(.p95_us) us, loss=\(.loss_percent)%"' \
+              "benchmark-rust-linux-${BENCH_ARCH}-native.jsonl"
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Archive Rust benchmark matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-rust-linux-${{ matrix.arch }}-native
+          path: |
+            benchmark-relay-comparison-${{ matrix.arch }}-no-loss.txt
+            benchmark-relay-comparison-${{ matrix.arch }}-loss.txt
+            benchmark-relay-comparison-linux-${{ matrix.arch }}-native.jsonl
+            benchmark-rust-linux-${{ matrix.arch }}-native.jsonl
+            benchmark-rust-linux-${{ matrix.arch }}-native-manifest.json
+          if-no-files-found: error

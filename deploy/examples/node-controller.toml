@@ -1,0 +1,43 @@
+mode = "node"
+state_dir = "/var/lib/laneway"
+socket_path = "/run/laneway/lanewayd.sock"
+
+[tls]
+certificate = "/etc/laneway/node.crt"
+private_key = "/etc/laneway/node.key"
+ca = "/etc/laneway/ca.crt"
+server_name = "relay.example.com"
+
+[node]
+name = "controller-node"
+relay_address = "relay.example.com:4433"
+relay_network_id = "000102030405060708090a0b0c0d0e0f"
+relay_service_id = "303132333435363738393a3b3c3d3e3f"
+# No overlay address or static peers: lanewayd fetches and validates the
+# controller assignment before it creates lane0.
+reconnect_min = "1s"
+reconnect_max = "30s"
+
+[controller]
+endpoint = "https://controller.example.com:8443"
+quic_endpoint = "controller.example.com:8443"
+server_name = "controller.example.com"
+network_id = "000102030405060708090a0b0c0d0e0f"
+service_id = "404142434445464748494a4b4c4d4e4f"
+poll_interval = "30s"
+
+[tcp_fallback]
+address = "relay.example.com:443"
+quic_probe_interval = "30s"
+
+[routing]
+# Needed only if this node later receives approval for its own subnet route.
+output_interface = "eth0"
+nat = true
+
+[exit]
+# Split tunnel remains active until `laneway exit use NAME_OR_NODE_ID`.
+enabled = false
+failure_mode = "closed"
+dns_servers = ["1.1.1.1"]
+local_lan_bypasses = ["192.168.0.0/16"]

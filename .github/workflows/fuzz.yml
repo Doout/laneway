@@ -1,0 +1,86 @@
+name: Timed fuzzing
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./internal/identity
+            target: FuzzParseID
+          - package: ./internal/identity
+            target: FuzzParseSPIFFE
+          - package: ./internal/protocol
+            target: FuzzControlFrame
+          - package: ./internal/protocol
+            target: FuzzPacketRoundTrip
+          - package: ./internal/protocol
+            target: FuzzDecodePacket
+          - package: ./internal/routing
+            target: FuzzSnapshotLookup
+          - package: ./internal/agent
+            target: FuzzControlCodecRead
+          - package: ./internal/agent
+            target: FuzzValidateHello
+          - package: ./internal/agent
+            target: FuzzValidateWelcome
+          - package: ./internal/controllerservice
+            target: FuzzStrictManagementJSON
+          - package: ./internal/controllerservice
+            target: FuzzTrafficSelectorProtoJSON
+          - package: ./internal/directpath
+            target: FuzzParseProbePacket
+          - package: ./internal/relayservice
+            target: FuzzRelayCodecRead
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - name: Fuzz ${{ matrix.target }} for 30 seconds
+        working-directory: go
+        run: >-
+          go test '${{ matrix.package }}' -run '^$'
+          -fuzz '^${{ matrix.target }}$' -fuzztime 30s
+
+  rust-fuzz:
+    name: rust/${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - packet
+          - control
+          - tcp_record
+          - direct_probe
+          - spiffe
+          - certificate_der
+          - policy_routing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Fuzz ${{ matrix.target }} for 30 seconds
+        working-directory: rust/fuzz
+        run: cargo +nightly fuzz run '${{ matrix.target }}' -- -max_total_time=30 -timeout=5

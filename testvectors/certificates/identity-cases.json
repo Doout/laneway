@@ -1,0 +1,45 @@
+{
+  "network_id_hex": "000102030405060708090a0b0c0d0e0f",
+  "authenticated_node_id_hex": "101112131415161718191a1b1c1d1e1f",
+  "cases": [
+    {
+      "name": "one_matching_uri_san",
+      "uri_sans": [
+        "spiffe://laneway/network/000102030405060708090a0b0c0d0e0f/node/101112131415161718191a1b1c1d1e1f"
+      ],
+      "message_node_id_hex": "101112131415161718191a1b1c1d1e1f",
+      "expected": "accept"
+    },
+    {
+      "name": "message_identity_mismatch",
+      "uri_sans": [
+        "spiffe://laneway/network/000102030405060708090a0b0c0d0e0f/node/101112131415161718191a1b1c1d1e1f"
+      ],
+      "message_node_id_hex": "ffffffffffffffffffffffffffffffff",
+      "expected": "reject_node_mismatch"
+    },
+    {
+      "name": "wrong_network",
+      "uri_sans": [
+        "spiffe://laneway/network/ffffffffffffffffffffffffffffffff/node/101112131415161718191a1b1c1d1e1f"
+      ],
+      "message_node_id_hex": "101112131415161718191a1b1c1d1e1f",
+      "expected": "reject_network_mismatch"
+    },
+    {
+      "name": "hostname_is_not_identity",
+      "dns_sans": ["node.example.test"],
+      "uri_sans": [],
+      "message_node_id_hex": "101112131415161718191a1b1c1d1e1f",
+      "expected": "reject_missing_identity"
+    },
+    {
+      "name": "noncanonical_ids",
+      "uri_sans": [
+        "spiffe://laneway/network/00010203-0405-0607-0809-0a0b0c0d0e0f/node/101112131415161718191a1b1c1d1e1f"
+      ],
+      "message_node_id_hex": "101112131415161718191a1b1c1d1e1f",
+      "expected": "reject_malformed_identity"
+    }
+  ]
+}

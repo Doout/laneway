@@ -1,0 +1,240 @@
+package main
+
+import (
+	"context"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"laneway.dev/laneway/internal/buildinfo"
+	"laneway.dev/laneway/internal/config"
+	"laneway.dev/laneway/internal/controller"
+	"laneway.dev/laneway/internal/controllerservice"
+	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/observability"
+	"laneway.dev/laneway/internal/pki"
+)
+
+const maxAdminTokenFile = 4096
+
+func main() {
+	fs := flag.NewFlagSet("laneway-controller", flag.ExitOnError)
+	configPath := fs.String("config", "/etc/laneway/controller.toml", "configuration file")
+	diagnostics := fs.String("diagnostics", "", "loopback metrics/pprof address (for example 127.0.0.1:6060)")
+	version := fs.Bool("version", false, "print the Laneway build version")
+	_ = fs.Parse(os.Args[1:])
+	if *version {
+		fmt.Println(buildinfo.Version)
+		return
+	}
+	if err := run(*configPath, *diagnostics); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintln(os.Stderr, "laneway-controller:", err)
+		os.Exit(1)
+	}
+}
+
+func run(path, diagnostics string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if cfg.Mode != config.ModeController {
+		return fmt.Errorf("configuration mode is %q, want %q", cfg.Mode, config.ModeController)
+	}
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return fmt.Errorf("create controller state directory: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.Controller.DatabaseFile), 0o700); err != nil {
+		return fmt.Errorf("create database directory: %w", err)
+	}
+	caPEM, err := os.ReadFile(cfg.TLS.CAFile)
+	if err != nil {
+		return fmt.Errorf("read CA certificate: %w", err)
+	}
+	issuerPath := cfg.Controller.IssuerCertificateFile
+	if issuerPath == "" {
+		issuerPath = cfg.TLS.CAFile
+	}
+	issuerPEM, err := os.ReadFile(issuerPath)
+	if err != nil {
+		return fmt.Errorf("read issuer certificate bundle: %w", err)
+	}
+	caKeyPEM, err := os.ReadFile(cfg.Controller.CAPrivateKeyFile)
+	if err != nil {
+		return fmt.Errorf("read CA private key: %w", err)
+	}
+	ca, caKey, issuerChain, err := pki.ParseAuthorityBundle(issuerPEM, caKeyPEM)
+	if err != nil {
+		return err
+	}
+	tlsConfig, err := controllerTLSConfig(cfg.TLS, caPEM)
+	if err != nil {
+		return err
+	}
+	adminAuthorizer, err := bearerAuthorizerFromFile(cfg.Controller.AdminTokenFile)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	store, err := controller.Open(ctx, cfg.Controller.DatabaseFile)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	service, err := controllerservice.New(controllerservice.Options{
+		Store: store, CACertificate: ca, CAKey: caKey, IssuerChain: issuerChain,
+		LeafValidity: cfg.Controller.LeafValidity.Duration(), AdminAuthorizer: adminAuthorizer,
+	})
+	if err != nil {
+		return err
+	}
+	server := service.NewHTTPServer(cfg.Controller.Listen, tlsConfig)
+	quicServer, err := service.ListenQUIC(cfg.Controller.QUICListen, tlsConfig)
+	if err != nil {
+		return err
+	}
+	defer quicServer.Close()
+	listener, err := net.Listen("tcp", cfg.Controller.Listen)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	defer listener.Close()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ServeTLS(listener, "", "") }()
+	quicServeErr := make(chan error, 1)
+	go func() { quicServeErr <- quicServer.Serve(ctx) }()
+	diagnosticsDone, err := observability.Start(ctx, observability.Config{Listen: diagnostics, Snapshot: func() map[string]uint64 {
+		metrics := service.Metrics()
+		return map[string]uint64{
+			"controller_up":                1,
+			"controller_requests_total":    metrics.Requests,
+			"successful_responses_total":   metrics.SuccessfulResponses,
+			"malformed_input_total":        metrics.MalformedInput,
+			"authorization_failures_total": metrics.AuthorizationFailures,
+			"internal_failures_total":      metrics.InternalFailures,
+		}
+	}})
+	if err != nil {
+		_ = server.Close()
+		_ = quicServer.Close()
+		<-serveErr
+		return err
+	}
+	fmt.Printf("laneway-controller HTTPS=%s QUIC=%s database=%s\n", listener.Addr(), quicServer.Addr(), cfg.Controller.DatabaseFile)
+	select {
+	case err := <-serveErr:
+		_ = quicServer.Close()
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case err := <-quicServeErr:
+		_ = server.Close()
+		<-serveErr
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		_ = quicServer.Close()
+		err := <-serveErr
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return ctx.Err()
+	case diagnosticsErr := <-diagnosticsDone:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		_ = quicServer.Close()
+		serveError := <-serveErr
+		if diagnosticsErr != nil {
+			return diagnosticsErr
+		}
+		if serveError != nil && !errors.Is(serveError, http.ErrServerClosed) {
+			return serveError
+		}
+		return nil
+	}
+}
+
+func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, error) {
+	certificate, err := tls.LoadX509KeyPair(cfg.CertificateFile, cfg.PrivateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load controller certificate and key: %w", err)
+	}
+	if len(certificate.Certificate) == 0 {
+		return nil, errors.New("controller certificate chain is empty")
+	}
+	certificate.Leaf, err = x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse controller certificate: %w", err)
+	}
+	authenticated, err := identity.AuthenticatedIdentityFromCertificate(certificate.Leaf)
+	if err != nil {
+		return nil, err
+	}
+	if err := authenticated.RequireRole(identity.IdentityRoleController); err != nil {
+		return nil, err
+	}
+	clientCAs := x509.NewCertPool()
+	if !clientCAs.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("CA file contains no valid certificates")
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{certificate}, ClientCAs: clientCAs,
+		MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
+	}, nil
+}
+
+func bearerAuthorizerFromFile(path string) (controllerservice.AdminAuthorizer, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open admin token: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat admin token: %w", err)
+	}
+	if info.Size() > maxAdminTokenFile {
+		return nil, errors.New("admin token file is too large")
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maxAdminTokenFile+1))
+	if err != nil {
+		return nil, fmt.Errorf("read admin token: %w", err)
+	}
+	token := strings.TrimSpace(string(contents))
+	if len(token) < 32 {
+		return nil, errors.New("admin token must contain at least 32 characters")
+	}
+	want := []byte("Bearer " + token)
+	return func(r *http.Request) error {
+		got := []byte(r.Header.Get("Authorization"))
+		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+			return controllerservice.ErrUnauthenticated
+		}
+		return nil
+	}, nil
+}

@@ -1,0 +1,30 @@
+{
+  "routes": [
+    {"id": "v4-default", "prefix": "0.0.0.0/0", "metric": 100, "next_hop": "00000000000000000000000000000001", "handle": 1},
+    {"id": "v4-subnet-slow", "prefix": "10.20.0.0/16", "metric": 50, "next_hop": "00000000000000000000000000000002", "handle": 2},
+    {"id": "v4-subnet-fast", "prefix": "10.20.0.0/16", "metric": 10, "next_hop": "00000000000000000000000000000003", "handle": 3},
+    {"id": "v4-host", "prefix": "10.20.30.40/32", "metric": 100, "next_hop": "00000000000000000000000000000004", "handle": 4},
+    {"id": "v6-subnet", "prefix": "2001:db8::/32", "metric": 20, "next_hop": "00000000000000000000000000000005", "handle": 5},
+    {"id": "v6-specific", "prefix": "2001:db8:1234::/48", "metric": 90, "next_hop": "00000000000000000000000000000006", "handle": 6}
+  ],
+  "lookups": [
+    {"name": "v4_default", "destination": "203.0.113.9", "expected_route_id": "v4-default"},
+    {"name": "v4_metric_tie_break", "destination": "10.20.9.9", "expected_route_id": "v4-subnet-fast"},
+    {"name": "v4_longest_prefix", "destination": "10.20.30.40", "expected_route_id": "v4-host"},
+    {"name": "v6_lpm", "destination": "2001:db8:1234::99", "expected_route_id": "v6-specific"},
+    {"name": "v6_broader", "destination": "2001:db8:ffff::1", "expected_route_id": "v6-subnet"},
+    {"name": "v6_no_match", "destination": "2001:db9::1", "expected": "no_match"}
+  ],
+  "source_authorization": [
+    {"name": "authorized_v4_owner", "source": "10.20.30.40", "peer": "00000000000000000000000000000004", "expected": true},
+    {"name": "wrong_v4_owner", "source": "10.20.30.40", "peer": "00000000000000000000000000000003", "expected": false},
+    {"name": "authorized_v6_owner", "source": "2001:db8:1234::99", "peer": "00000000000000000000000000000006", "expected": true},
+    {"name": "unrouted_source", "source": "2001:db9::1", "peer": "00000000000000000000000000000006", "expected": false}
+  ],
+  "invalid_sets": [
+    {"name": "noncanonical_v4", "expected_error": "invalid_prefix", "routes": [{"prefix": "192.168.1.1/24", "metric": 1, "next_hop": "00000000000000000000000000000001", "handle": 1}]},
+    {"name": "noncanonical_v6", "expected_error": "invalid_prefix", "routes": [{"prefix": "2001:db8::1/64", "metric": 1, "next_hop": "00000000000000000000000000000001", "handle": 1}]},
+    {"name": "ipv4_mapped_ipv6", "expected_error": "invalid_prefix", "routes": [{"prefix": "::ffff:192.0.2.1/128", "metric": 1, "next_hop": "00000000000000000000000000000001", "handle": 1}]},
+    {"name": "ambiguous_equal_prefix_metric", "expected_error": "ambiguous_route", "routes": [{"prefix": "10.0.0.0/8", "metric": 7, "next_hop": "00000000000000000000000000000001", "handle": 1}, {"prefix": "10.0.0.0/8", "metric": 7, "next_hop": "00000000000000000000000000000002", "handle": 2}]}
+  ]
+}

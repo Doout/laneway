@@ -1,0 +1,61 @@
+name: Architecture benchmark smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  architecture-smoke:
+    name: ${{ matrix.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            label: linux/amd64 native smoke
+            runner: ""
+            classification: Native functional smoke on a shared CI runner; metrics are informational only.
+          - goarch: arm64
+            label: linux/arm64 emulated smoke
+            runner: qemu-aarch64
+            classification: QEMU user-mode functional smoke; metrics are not native and must not be compared.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - name: Install ARM64 user-mode emulator
+        if: matrix.goarch == 'arm64'
+        run: sudo apt-get update && sudo apt-get install -y qemu-user
+      - name: Run all benchmark scenarios (${{ matrix.classification }})
+        env:
+          BENCHMARK_SMOKE_GOARCH: ${{ matrix.goarch }}
+          BENCHMARK_SMOKE_RUNNER: ${{ matrix.runner }}
+          SMOKE_CLASSIFICATION: ${{ matrix.classification }}
+          SMOKE_OUTPUT: benchmark-smoke-${{ matrix.goarch }}.txt
+        run: |
+          echo "classification: ${SMOKE_CLASSIFICATION}" | tee "${SMOKE_OUTPUT}"
+          make benchmark-arch-smoke | tee -a "${SMOKE_OUTPUT}"
+          {
+            echo "### ${{ matrix.label }}"
+            echo
+            echo "${SMOKE_CLASSIFICATION}"
+            echo
+            echo '```text'
+            grep '^summary ' "${SMOKE_OUTPUT}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Archive smoke output
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-smoke-${{ matrix.goarch }}
+          path: benchmark-smoke-${{ matrix.goarch }}.txt
+          if-no-files-found: error

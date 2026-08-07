@@ -1,0 +1,4 @@
+laneway-id = "spiffe://laneway/network/" id128 "/node/" id128
+id128      = 32lc-hexdig
+lc-hexdig  = DIGIT / %x61-66
+; Lowercase hexadecimal is the only canonical representation.

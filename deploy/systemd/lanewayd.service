@@ -1,0 +1,46 @@
+[Unit]
+Description=Laneway node networking daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/lanewayd -config /etc/laneway/laneway.toml
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+User=laneway
+Group=laneway
+RuntimeDirectory=laneway
+StateDirectory=laneway
+UMask=0077
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+DevicePolicy=closed
+ProtectKernelTunables=no
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectProc=invisible
+# Subnet/exit roles transactionally read and write /proc/sys forwarding state;
+# ProcSubset=pid would hide those kernel tunables even though
+# ProtectKernelTunables is intentionally disabled above.
+ProcSubset=all
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+ReadWritePaths=/run/laneway /var/lib/laneway
+DeviceAllow=/dev/net/tun rw
+
+[Install]
+WantedBy=multi-user.target

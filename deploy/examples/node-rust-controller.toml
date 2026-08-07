@@ -1,0 +1,81 @@
+mode = "node"
+socket_path = "/run/laneway/lanewayd.sock"
+exit_intent_path = "/var/lib/laneway/exit-intent-v1.json"
+
+[identity]
+# The controller certificate, node certificate, relay registration, and every
+# received snapshot must all carry this exact network ID.
+network_id = "000102030405060708090a0b0c0d0e0f"
+node_id = "101112131415161718191a1b1c1d1e1f"
+
+[tls]
+certificate = "/etc/laneway/node.crt"
+private_key = "/etc/laneway/node.key"
+ca = "/etc/laneway/ca.crt"
+
+[controller]
+# HTTPS is enrollment/management compatibility; authenticated runtime control
+# uses the required QUIC endpoint. server_name pins both TLS handshakes and the
+# peer must additionally present the pinned controller SPIFFE identity.
+endpoint = "https://controller.example.com:8443"
+quic_endpoint = "controller.example.com:8443"
+server_name = "controller.example.com"
+service_id = "404142434445464748494a4b4c4d4e4f"
+poll_interval = "30s"
+timeout = "10s"
+
+[tun]
+name = "lane0"
+mtu = 1280
+configure = true
+# Controller mode intentionally has no static addresses. The Rust node obtains
+# its initial overlay assignment before lane0 is created and reconciles later
+# address and route snapshots as one native transaction.
+
+[relay]
+address = "203.0.113.10:4433"
+server_name = "relay.example.com"
+service_id = "303132333435363738393a3b3c3d3e3f"
+queue_depth = 256
+max_routes = 4096
+handshake_timeout = "10s"
+idle_timeout = "45s"
+keepalive = "15s"
+reconnect_min = "250ms"
+reconnect_max = "15s"
+quic_recovery_interval = "5s"
+
+[tcp_fallback]
+address = "203.0.113.10:443"
+handshake_timeout = "10s"
+write_timeout = "10s"
+idle_timeout = "45s"
+keepalive_period = "15s"
+queue_depth = 128
+
+[direct]
+# Controller peers form the live direct-path allowlist. Removed or revoked
+# peer certificate paths are closed when a newer snapshot is committed.
+listen = "0.0.0.0:4434"
+probe_interval = "200ms"
+probe_timeout = "3s"
+probe_attempts = 3
+candidate_refresh_interval = "30s"
+
+# Optional, loopback-only Prometheus endpoint. It serves GET /metrics only.
+# [diagnostics]
+# listen = "127.0.0.1:6062"
+
+# Authorize explicit runtime exit selection without choosing one at startup.
+# `laneway exit use NODE_ID --socket /run/laneway/lanewayd.sock` accepts only
+# an exit gateway present in the current leased controller snapshot. The
+# daemon applies policy routing and DNS transactionally and persists intent.
+[forwarding.exit_client]
+authorized = true
+failure_mode = "closed"
+local_lan_bypass = ["192.168.0.0/16"]
+dns_servers = ["1.1.1.1", "2606:4700:4700::1111"]
+
+# Do not add [[routes]], [[direct_peers]], or tun.addresses in controller mode.
+# Capabilities, overlay addresses, peers, routes, revocations, and the
+# default-deny ACL policy all come from one leased controller snapshot.

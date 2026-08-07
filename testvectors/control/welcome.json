@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "sequence": 1,
+  "welcome": {
+    "session_id_hex": "303132333435363738393a3b3c3d3e3f",
+    "configuration_epoch": 7,
+    "overlay_addresses": ["100.96.0.1"],
+    "capabilities": 3,
+    "capability_names": [
+      "LANEWAY_RELAY_V1",
+      "LANEWAY_QUIC_DATAGRAM_V1"
+    ],
+    "max_control_payload": 1048576,
+    "max_packet_payload": 1200
+  }
+}

@@ -1,0 +1,256 @@
+{
+  "manifest_version": 1,
+  "protocol": "laneway/v1",
+  "digest_algorithm": "sha256",
+  "hex_decoding": "remove ASCII whitespace, then decode hexadecimal octets",
+  "fixtures": [
+    {
+      "path": "control/hello.payload.hex",
+      "kind": "protobuf:laneway.v1.Hello",
+      "encoding": "hex",
+      "decoded_byte_length": 58,
+      "sha256": "16e6558d8b1c601df2fd7eb9e125b6a1d53caab06d5bd07903b7f71b13cec64f",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/hello.envelope.hex",
+      "kind": "protobuf:laneway.v1.ControlEnvelope",
+      "encoding": "hex",
+      "decoded_byte_length": 64,
+      "sha256": "0aa3a46e9619c50ef2dd14d99598b9f438cfa93033c94a1e6d8f01cf5e6ca130",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/hello.frame.hex",
+      "kind": "control-frame:u32be+laneway.v1.ControlEnvelope",
+      "encoding": "hex",
+      "decoded_byte_length": 68,
+      "sha256": "062fada8cd9a788072f112ed492d552d5b506d3bf49ce17d555661965b9a1690",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/hello.json",
+      "kind": "source-description:laneway.v1.ControlEnvelope",
+      "encoding": "json-utf8",
+      "stored_byte_length": 393,
+      "sha256": "180786ad8f92d0680361a9293c3f59fce80040aeba4c923f045a7e32dcda48a1",
+      "expected": "matches_control_hello_vectors"
+    },
+    {
+      "path": "packets/relay-ipv4-icmp.hex",
+      "kind": "relay-packet-v1",
+      "encoding": "hex",
+      "decoded_byte_length": 40,
+      "sha256": "d28d86c404348076f70cc835869b569f8fcc0f1a90bb4c502073c432e705c7ed",
+      "expected": "decode_success"
+    },
+    {
+      "path": "packets/relay-ipv4-icmp.json",
+      "kind": "source-description:relay-packet-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 296,
+      "sha256": "46a3294643b9bdc025dd5382b265055c40f9318f81e48f14034ff5175bd0fbcb",
+      "expected": "matches_relay_ipv4_icmp"
+    },
+    {
+      "path": "packets/reject-cases.json",
+      "kind": "table:relay-packet-v1-negative",
+      "encoding": "json-utf8",
+      "stored_byte_length": 2156,
+      "sha256": "8a748f0cdd523f42cef8fa17172c831e3de51fe2acd010204055edb5c15d99c3",
+      "expected": "per_case"
+    },
+    {
+      "path": "packets/boundary-cases.json",
+      "kind": "table:relay-packet-v1-boundaries",
+      "encoding": "json-utf8",
+      "stored_byte_length": 670,
+      "sha256": "6ebb4a2325c5c48a69ac1dd51eae4247a6ea87b6afa48fde795eeedae4917961",
+      "expected": "per_case"
+    },
+    {
+      "path": "packets/header-cases.json",
+      "kind": "table:relay-packet-v1-header",
+      "encoding": "json-utf8",
+      "stored_byte_length": 1112,
+      "sha256": "92a22934dbe5d9c945bab50f31d9ec2abfc0262d63ba6ee254f870d7292238d9",
+      "expected": "per_case"
+    },
+    {
+      "path": "routing/overlay-route-snapshot.hex",
+      "kind": "protobuf:laneway.v1.RouteSnapshot",
+      "encoding": "hex",
+      "decoded_byte_length": 72,
+      "sha256": "8a10b5884ee61a98d59e28ab2ec55a93e02aadd4c7828ef37f44d39e7624712f",
+      "expected": "decode_success"
+    },
+    {
+      "path": "routing/overlay-route-controller.frame.hex",
+      "kind": "control-frame:u32be+laneway.v1.ControllerEnvelope",
+      "encoding": "hex",
+      "decoded_byte_length": 92,
+      "sha256": "78d4284d0dd2996e36dd55aba6b821b75eef0987a3322e603f174e44bf8fbed2",
+      "expected": "decode_node_configuration_and_match_overlay_route_snapshot"
+    },
+    {
+      "path": "routing/overlay-route-snapshot.json",
+      "kind": "source-description:laneway.v1.RouteSnapshot",
+      "encoding": "json-utf8",
+      "stored_byte_length": 363,
+      "sha256": "4cf4b09031b8c053fad21783e0910fcf691874ef925b2d986b1d36b14eba5b09",
+      "expected": "matches_overlay_route_snapshot"
+    },
+    {
+      "path": "routing/selection-cases.json",
+      "kind": "table:route-selection-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 575,
+      "sha256": "081b0779cbacb52dbdbf6aadf7bc6897b2d7b1a1d1ed848dbfe4507319605bf2",
+      "expected": "per_case"
+    },
+    {
+      "path": "routing/semantic-cases.json",
+      "kind": "table:route-semantics-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 2794,
+      "sha256": "89970ef543fd68537a9bef0306e24a5cf9c0737409ff0d52be5cea0c33e78629",
+      "expected": "per_case"
+    },
+    {
+      "path": "certificates/identity-cases.json",
+      "kind": "table:x509-uri-san-identity-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 1530,
+      "sha256": "3010bd76e9e6c86372eb43bb3779c0a031c1b0f1654d2618e84ae9f27e3a78b7",
+      "expected": "per_case"
+    },
+    {
+      "path": "certificates/der-cases.json",
+      "kind": "table:x509-der-identity-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 3985,
+      "sha256": "e8b8d14a54874874c928109bacf93d3ce32a8321d83101ae878f9e2ec5fd5bf5",
+      "expected": "per_case"
+    },
+    {
+      "path": "certificates/spiffe-uri-abnf.txt",
+      "kind": "grammar:x509-uri-san-identity-v1",
+      "encoding": "utf8",
+      "stored_byte_length": 178,
+      "sha256": "a75fa0acaee5f3a300c7377331592c63dae3f46e8a8e396c3fd683d7a0fb22c3",
+      "expected": "reference"
+    },
+    {
+      "path": "control/welcome.payload.hex",
+      "kind": "protobuf:laneway.v1.Welcome",
+      "encoding": "hex",
+      "decoded_byte_length": 35,
+      "sha256": "1606b0ea814b21a24d8281703c7d9cfd5c1d4d07f24422a3c7b69e782035933f",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/welcome.envelope.hex",
+      "kind": "protobuf:laneway.v1.ControlEnvelope",
+      "encoding": "hex",
+      "decoded_byte_length": 41,
+      "sha256": "0af73b82bde8dc776faeec2b5585194206d679dd057310d5a0576e98f8676d28",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/welcome.frame.hex",
+      "kind": "control-frame:u32be+laneway.v1.ControlEnvelope",
+      "encoding": "hex",
+      "decoded_byte_length": 45,
+      "sha256": "17dcc8fcb2b77cba3fbcdef6ec7c84356b64b7353eb3c44d41a2d53b090ea956",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/welcome.json",
+      "kind": "source-description:laneway.v1.ControlEnvelope",
+      "encoding": "json-utf8",
+      "stored_byte_length": 374,
+      "sha256": "bf8f0e6c843a875a108d4473584f6b017e9b08dc35a752e8b70fc87085ace969",
+      "expected": "matches_control_welcome_vectors"
+    },
+    {
+      "path": "control/permission-denied.envelope.hex",
+      "kind": "protobuf:laneway.v1.ControlEnvelope",
+      "encoding": "hex",
+      "decoded_byte_length": 16,
+      "sha256": "a2d96004b76b0ad14a09042aca28355ca2c6986f5bd79df1bef835510bd6e15b",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/permission-denied.frame.hex",
+      "kind": "control-frame:u32be+laneway.v1.ControlEnvelope",
+      "encoding": "hex",
+      "decoded_byte_length": 20,
+      "sha256": "63fa4d5e15420e9eda17e8a6036c08f03d0e3014fd31c5c04d27663a21238c70",
+      "expected": "decode_success"
+    },
+    {
+      "path": "control/permission-denied.json",
+      "kind": "source-description:laneway.v1.ControlEnvelope",
+      "encoding": "json-utf8",
+      "stored_byte_length": 152,
+      "sha256": "7248852907eab7db5adf481115087ec4b0acd33e4af2848d66b18cc9ca34b12b",
+      "expected": "matches_permission_denied_vectors"
+    },
+    {
+      "path": "control/capability-cases.json",
+      "kind": "table:capability-negotiation-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 1658,
+      "sha256": "10112db9662f6096d1bded2ddd2538e19772e95f4986b7e65d2e0cfbac81eb6a",
+      "expected": "per_case"
+    },
+    {
+      "path": "packets/relay-ipv6-empty.hex",
+      "kind": "relay-packet-v1",
+      "encoding": "hex",
+      "decoded_byte_length": 45,
+      "sha256": "bd33b60cd98d8c67f60018d4c9feaaff852538091c21e9fd91111751f603d810",
+      "expected": "decode_success"
+    },
+    {
+      "path": "packets/relay-ipv6-empty.json",
+      "kind": "source-description:relay-packet-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 272,
+      "sha256": "0fbc4141f1c27c7ca04aa472dd974eac504dd9d54178045b5af40256762731e0",
+      "expected": "matches_relay_ipv6_empty"
+    },
+    {
+      "path": "direct/probe-request.hex",
+      "kind": "direct-probe-v1",
+      "encoding": "hex",
+      "decoded_byte_length": 54,
+      "sha256": "980022e361e285828bc07d8ed44b6c0530d9b0d88688ec934b30e8df96d79fc5",
+      "expected": "decode_success"
+    },
+    {
+      "path": "direct/probe-request.json",
+      "kind": "source-description:direct-probe-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 214,
+      "sha256": "b14b8fec283273a5e9cc4a5a494244c5296edadd5f107f5d0fb36bb3b41c1184",
+      "expected": "matches_direct_probe_request"
+    },
+    {
+      "path": "tcp/packet-record.hex",
+      "kind": "tcp-fallback-record-v1",
+      "encoding": "hex",
+      "decoded_byte_length": 30,
+      "sha256": "2152d3082153040d6cabc70f77aa5e7ded7132a8d01b700103c3f59dc5c660d0",
+      "expected": "decode_success"
+    },
+    {
+      "path": "tcp/packet-record.json",
+      "kind": "source-description:tcp-fallback-record-v1",
+      "encoding": "json-utf8",
+      "stored_byte_length": 193,
+      "sha256": "acf27ab1e311f929f64fd54437bff82b7b124980e42a2e2ae9312e7b731f9ce0",
+      "expected": "matches_tcp_packet_record"
+    }
+  ]
+}

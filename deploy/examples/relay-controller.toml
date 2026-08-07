@@ -1,0 +1,28 @@
+mode = "relay"
+state_dir = "/var/lib/laneway-relay"
+socket_path = "/run/laneway/relay.sock"
+
+[tls]
+certificate = "/etc/laneway/relay.crt"
+private_key = "/etc/laneway/relay.key"
+ca = "/etc/laneway/ca.crt"
+
+[relay]
+listen = ":4433"
+queue_depth = 256
+handshake_timeout = "10s"
+idle_timeout = "45s"
+# The Rust relay's candidate_republish_floor defaults to 5s. Leave it at the
+# default here so this controller-backed example remains valid for both the
+# strict Go and Rust relay configuration schemas.
+
+[controller]
+endpoint = "https://controller.example.com:8443"
+quic_endpoint = "controller.example.com:8443"
+network_id = "000102030405060708090a0b0c0d0e0f"
+service_id = "404142434445464748494a4b4c4d4e4f"
+server_name = "controller.example.com"
+poll_interval = "30s"
+
+[tcp_fallback]
+listen = ":443"

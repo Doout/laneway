@@ -1,0 +1,152 @@
+syntax = "proto3";
+
+package laneway.v1;
+
+option go_package = "laneway.dev/laneway/api/laneway/v1;lanewayv1";
+
+import "laneway/v1/control.proto";
+import "laneway/v1/policy.proto";
+import "laneway/v1/routes.proto";
+
+message EnrollmentRequest {
+  string enrollment_token = 1;
+  // DER PKCS#10 CSR. The private key is never transmitted.
+  bytes pkcs10_csr_der = 2;
+  string requested_name = 3;
+}
+
+message CertificateChain {
+  // DER leaf first, followed by intermediates. The trust anchor is distributed
+  // out of band and should not normally be included.
+  repeated bytes certificates_der = 1;
+  uint64 not_after_unix_seconds = 2;
+}
+
+message EnrollmentResponse {
+  bytes network_id = 1;
+  bytes node_id = 2;
+  CertificateChain certificate_chain = 3;
+  // Controller-assigned canonical overlay addresses for initial lane0 setup.
+  repeated bytes overlay_addresses = 4;
+}
+
+message RenewalRequest {
+  bytes pkcs10_csr_der = 1;
+}
+
+message RenewalResponse {
+  CertificateChain certificate_chain = 1;
+}
+
+message NodeConfiguration {
+  uint64 configuration_epoch = 1;
+  repeated bytes overlay_addresses = 2;
+  RouteSnapshot routes = 3;
+  PolicySnapshot policy = 4;
+  uint64 enabled_capabilities = 5;
+  // Authorization is fail-closed after this UTC Unix-second deadline unless
+  // the controller renews it, including through a not-modified response.
+  uint64 valid_until_unix_seconds = 6;
+  // Canonical unsigned big-endian serials of currently valid revoked
+  // certificates in this network.
+  repeated bytes revoked_certificate_serials = 7;
+  // Authenticated node identities with human-readable controller names. Names
+  // are selectors for operator UX only; dataplane authorization remains bound
+  // to the certificate-carried node_id.
+  repeated NodePeer peers = 8;
+  // Enabled relay services discovered from the authoritative controller.
+  repeated RelayEndpoint relays = 9;
+  // Controller policy for the authenticated, relay-assisted candidate
+  // exchange. Ephemeral endpoint candidates themselves remain on the relay
+  // control channel so they are never persisted by the controller.
+  CandidateExchangePolicy candidate_exchange = 10;
+  // Explicitly authorized exit gateways derived from approved exit routes.
+  ExitNodePolicy exit_policy = 11;
+  // Health of the certificate used to authenticate this request.
+  CertificateHealth certificate_health = 12;
+}
+
+message NodePeer {
+  bytes node_id = 1;
+  string name = 2;
+  repeated bytes overlay_addresses = 3;
+}
+
+message RelayEndpoint {
+  bytes service_id = 1;
+  string name = 2;
+  string endpoint = 3;
+}
+
+message CandidateExchangePolicy {
+  bool enabled = 1;
+  uint32 max_candidates = 2;
+  uint32 candidate_ttl_seconds = 3;
+}
+
+message ExitNodePolicy {
+  repeated bytes authorized_node_ids = 1;
+}
+
+message CertificateHealth {
+  bytes presented_serial = 1;
+  uint64 not_after_unix_seconds = 2;
+  uint64 renew_after_unix_seconds = 3;
+  bool revoked = 4;
+}
+
+message ConfigurationRequest {
+  uint64 known_configuration_epoch = 1;
+}
+
+message RelayConfigurationRequest {
+  uint64 known_configuration_epoch = 1;
+}
+
+message RelayPeerAuthorization {
+  bytes node_id = 1;
+  repeated bytes overlay_addresses = 2;
+  repeated IpPrefix authorized_prefixes = 3;
+}
+
+message RelayConfiguration {
+  bytes network_id = 1;
+  uint64 configuration_epoch = 2;
+  repeated RelayPeerAuthorization peers = 3;
+  PolicySnapshot policy = 4;
+  uint64 valid_until_unix_seconds = 5;
+  repeated bytes revoked_certificate_serials = 6;
+  CertificateHealth certificate_health = 7;
+}
+
+// A successful conditional request whose immutable configuration epoch did
+// not change. The fresh deadline extends the fail-closed snapshot lease.
+message ConfigurationLease {
+  uint64 configuration_epoch = 1;
+  uint64 valid_until_unix_seconds = 2;
+}
+
+message CertificateRevocation {
+  bytes certificate_serial = 1;
+  bytes node_id = 2;
+  uint64 revoked_unix_seconds = 3;
+  string reason = 4;
+}
+
+message ControllerEnvelope {
+  uint32 schema_version = 1;
+  uint64 request_id = 2;
+  oneof body {
+    EnrollmentRequest enrollment_request = 10;
+    EnrollmentResponse enrollment_response = 11;
+    RenewalRequest renewal_request = 12;
+    RenewalResponse renewal_response = 13;
+    ConfigurationRequest configuration_request = 14;
+    NodeConfiguration node_configuration = 15;
+    CertificateRevocation certificate_revocation = 16;
+    ProtocolError error = 17;
+    RelayConfigurationRequest relay_configuration_request = 18;
+    RelayConfiguration relay_configuration = 19;
+    ConfigurationLease configuration_lease = 20;
+  }
+}

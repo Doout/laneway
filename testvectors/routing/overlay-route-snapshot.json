@@ -1,0 +1,14 @@
+{
+  "network_id_hex": "000102030405060708090a0b0c0d0e0f",
+  "configuration_epoch": 7,
+  "routes": [
+    {
+      "destination": "100.96.0.2/32",
+      "address_hex": "64600002",
+      "via_node_id_hex": "101112131415161718191a1b1c1d1e1f",
+      "kind": "ROUTE_KIND_OVERLAY",
+      "metric": 10,
+      "route_id_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+    }
+  ]
+}

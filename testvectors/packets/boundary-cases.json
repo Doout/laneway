@@ -1,0 +1,11 @@
+{
+  "route_handle": 4294967295,
+  "cases": [
+    {"name": "minimum_ipv4", "family": "ipv4", "payload_length": 20, "expected": "accept"},
+    {"name": "maximum_ipv4", "family": "ipv4", "payload_length": 65535, "expected": "accept"},
+    {"name": "ipv4_length_not_representable", "family": "ipv4", "payload_length": 65536, "expected_error": "invalid_ip_packet"},
+    {"name": "minimum_ipv6", "family": "ipv6", "payload_length": 40, "expected": "accept"},
+    {"name": "maximum_ipv6", "family": "ipv6", "payload_length": 65575, "expected": "accept"},
+    {"name": "stable_v1_oversize", "family": "ipv6", "payload_length": 65576, "expected_error": "packet_too_large"}
+  ]
+}

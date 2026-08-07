@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package laneway.v1;
+
+option go_package = "laneway.dev/laneway/api/laneway/v1;lanewayv1";
+
+import "laneway/v1/control.proto";
+
+message IpPrefix {
+  // Network-order IPv4 (4 bytes) or IPv6 (16 bytes). Host bits must be zero.
+  bytes address = 1;
+  uint32 prefix_length = 2;
+}
+
+enum RouteKind {
+  ROUTE_KIND_UNSPECIFIED = 0;
+  ROUTE_KIND_OVERLAY = 1;
+  ROUTE_KIND_SUBNET = 2;
+  ROUTE_KIND_EXIT = 3;
+}
+
+message Route {
+  IpPrefix destination = 1;
+  bytes via_node_id = 2;
+  RouteKind kind = 3;
+  uint32 metric = 4;
+  // Stable controller-assigned identifier; exactly 16 bytes.
+  bytes route_id = 5;
+  // NAT or routed forwarding semantics for subnet and exit routes. Overlay
+  // routes leave this unspecified.
+  RouteAdvertisementMode mode = 6;
+}
+
+message RouteSnapshot {
+  bytes network_id = 1;
+  uint64 configuration_epoch = 2;
+  repeated Route routes = 3;
+}
+
+message RouteDelta {
+  bytes network_id = 1;
+  uint64 from_epoch = 2;
+  uint64 to_epoch = 3;
+  repeated Route upsert = 4;
+  repeated bytes remove_route_id = 5;
+}
+
+enum RouteAdvertisementMode {
+  ROUTE_ADVERTISEMENT_MODE_UNSPECIFIED = 0;
+  ROUTE_ADVERTISEMENT_MODE_NAT = 1;
+  ROUTE_ADVERTISEMENT_MODE_ROUTED = 2;
+}
+
+message RouteAdvertisement {
+  NodeRef advertiser = 1;
+  bytes advertisement_id = 2;
+  repeated IpPrefix prefixes = 3;
+  RouteAdvertisementMode mode = 4;
+  uint64 valid_until_unix_seconds = 5;
+}
+
+message RouteWithdrawal {
+  NodeRef advertiser = 1;
+  bytes advertisement_id = 2;
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "sequence": 1,
+  "hello": {
+    "network_id_hex": "000102030405060708090a0b0c0d0e0f",
+    "node_id_hex": "101112131415161718191a1b1c1d1e1f",
+    "boot_id_hex": "202122232425262728292a2b2c2d2e2f",
+    "protocol_major": 1,
+    "protocol_minor": 0,
+    "capabilities": 3,
+    "capability_names": [
+      "LANEWAY_RELAY_V1",
+      "LANEWAY_QUIC_DATAGRAM_V1"
+    ]
+  }
+}

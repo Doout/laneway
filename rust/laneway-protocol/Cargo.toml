@@ -1,0 +1,24 @@
+[package]
+name = "laneway-protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Language-neutral Laneway v1 protocol primitives"
+
+[dependencies]
+hex.workspace = true
+ipnet.workspace = true
+prost.workspace = true
+thiserror.workspace = true
+x509-parser.workspace = true
+
+[build-dependencies]
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.2.0"
+
+[dev-dependencies]
+base64.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true

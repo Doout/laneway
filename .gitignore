@@ -1,0 +1,21 @@
+# Go build and coverage output
+bin/
+dist/
+coverage.out
+*.test
+rust/target/
+
+# Ad-hoc executable output from local cross-builds
+go/netprobe
+go/netprobe.exe
+
+# Local Laneway state and credentials
+.laneway/
+*.key
+*.pem
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*~

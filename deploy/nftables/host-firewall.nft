@@ -1,0 +1,33 @@
+#!/usr/sbin/nft -f
+# EXAMPLE ONLY. Replace the documentation addresses before loading this file,
+# and merge these rules into the host's existing firewall policy.
+
+define management_v4 = { 192.0.2.10 }
+define management_v6 = { 2001:db8::10 }
+
+table inet laneway_host {
+  chain input {
+    type filter hook input priority filter; policy drop;
+
+    iifname "lo" accept
+    ct state established,related accept
+    ct state invalid drop
+    ip protocol icmp accept
+    ip6 nexthdr ipv6-icmp accept
+
+    # Preserve an operator access path before enabling a default-drop policy.
+    ip saddr $management_v4 tcp dport 22 accept
+    ip6 saddr $management_v6 tcp dport 22 accept
+
+    # Public relay: preferred QUIC and restricted-network TCP fallback.
+    udp dport 4433 accept
+    tcp dport 443 accept
+
+    # Controller HTTPS administration/enrollment and reliable QUIC control.
+    # Prefer private management/node source CIDRs for both transports.
+    ip saddr $management_v4 tcp dport 8443 accept
+    ip saddr $management_v4 udp dport 8443 accept
+    ip6 saddr $management_v6 tcp dport 8443 accept
+    ip6 saddr $management_v6 udp dport 8443 accept
+  }
+}

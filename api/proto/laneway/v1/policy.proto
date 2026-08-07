@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package laneway.v1;
+
+option go_package = "laneway.dev/laneway/api/laneway/v1;lanewayv1";
+
+import "laneway/v1/routes.proto";
+
+enum PolicyAction {
+  POLICY_ACTION_UNSPECIFIED = 0;
+  POLICY_ACTION_ACCEPT = 1;
+  POLICY_ACTION_DENY = 2;
+}
+
+enum IpProtocol {
+  IP_PROTOCOL_UNSPECIFIED = 0;
+  IP_PROTOCOL_ICMP = 1;
+  IP_PROTOCOL_TCP = 6;
+  IP_PROTOCOL_UDP = 17;
+  IP_PROTOCOL_ICMPV6 = 58;
+  // ANY is deliberately nonzero so an omitted field cannot broaden policy.
+  IP_PROTOCOL_ANY = 256;
+}
+
+message PortRange {
+  uint32 first = 1;
+  uint32 last = 2;
+}
+
+message TrafficSelector {
+  repeated bytes source_node_ids = 1;
+  repeated IpPrefix source_prefixes = 2;
+  repeated bytes destination_node_ids = 3;
+  repeated IpPrefix destination_prefixes = 4;
+  IpProtocol ip_protocol = 5;
+  repeated PortRange destination_ports = 6;
+}
+
+message PolicyRule {
+  bytes rule_id = 1;
+  uint32 priority = 2;
+  PolicyAction action = 3;
+  TrafficSelector selector = 4;
+  string description = 5;
+}
+
+message PolicySnapshot {
+  bytes network_id = 1;
+  uint64 configuration_epoch = 2;
+  // Rules are evaluated by ascending priority, then lexicographic rule_id.
+  repeated PolicyRule rules = 3;
+  PolicyAction default_action = 4;
+}

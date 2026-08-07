@@ -1,0 +1,69 @@
+{
+  "cases": [
+    {
+      "name": "empty",
+      "wire_hex": "",
+      "expected_error": "packet_too_short"
+    },
+    {
+      "name": "header_only",
+      "wire_hex": "1001020304",
+      "expected_error": "packet_too_short"
+    },
+    {
+      "name": "unsupported_version",
+      "wire_hex": "20010203044500001400000000400100006460000164600002",
+      "expected_error": "unsupported_version"
+    },
+    {
+      "name": "reserved_route_handle",
+      "wire_hex": "10000000004500001400000000400100006460000164600002",
+      "expected_error": "invalid_route_handle"
+    },
+    {
+      "name": "reserved_flags",
+      "wire_hex": "11010203044500001400000000400100006460000164600002",
+      "expected_error": "invalid_packet_flags"
+    },
+    {
+      "name": "ipv4_short_header",
+      "wire_hex": "100102030445000000000000000000000000000000000000",
+      "expected_error": "packet_too_short"
+    },
+    {
+      "name": "ipv4_ihl_below_minimum",
+      "wire_hex": "10010203044400001400000000400100006460000164600002",
+      "expected_error": "invalid_ip_packet"
+    },
+    {
+      "name": "ipv4_ihl_exceeds_packet",
+      "wire_hex": "10010203044600001400000000400100006460000164600002",
+      "expected_error": "invalid_ip_packet"
+    },
+    {
+      "name": "ipv4_total_below_header",
+      "wire_hex": "10010203044500001000000000400100006460000164600002",
+      "expected_error": "invalid_ip_packet"
+    },
+    {
+      "name": "ipv4_total_exceeds_packet",
+      "wire_hex": "10010203044500001500000000400100006460000164600002",
+      "expected_error": "invalid_ip_packet"
+    },
+    {
+      "name": "ipv6_short_header",
+      "wire_hex": "10010203046000000000000000000000000000000000000000000000000000000000000000000000",
+      "expected_error": "packet_too_short"
+    },
+    {
+      "name": "ipv6_payload_length_mismatch",
+      "wire_hex": "100102030460000000000100000000000000000000000000000000000000000000000000000000000000000000",
+      "expected_error": "invalid_ip_packet"
+    },
+    {
+      "name": "unknown_ip_version",
+      "wire_hex": "10010203047000000000000000000000000000000000000000",
+      "expected_error": "invalid_ip_packet"
+    }
+  ]
+}

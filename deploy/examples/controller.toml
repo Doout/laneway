@@ -1,0 +1,21 @@
+mode = "controller"
+state_dir = "/var/lib/laneway-controller"
+socket_path = "/run/laneway/controller.sock"
+
+[tls]
+certificate = "/etc/laneway/controller.crt"
+private_key = "/etc/laneway/controller.key"
+ca = "/etc/laneway/ca.crt"
+
+[controller]
+listen = ":8443"
+# UDP QUIC and TCP HTTPS intentionally share the same numeric port.
+quic_listen = ":8443"
+database = "/var/lib/laneway-controller/controller.db"
+ca_private_key = "/etc/laneway/ca.key"
+# For an offline-root deployment, set this to an issuer-first bundle containing
+# the online intermediate followed by its parent chain, and point
+# ca_private_key at the intermediate key. tls.ca remains the root trust bundle.
+# issuer_certificate = "/etc/laneway/intermediate.crt"
+admin_token_file = "/etc/laneway/admin.token"
+leaf_validity = "720h"

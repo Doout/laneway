@@ -1,0 +1,10 @@
+{
+  "record_length": 26,
+  "record_type": 2,
+  "record_type_name": "packet",
+  "packet_frame": {
+    "route_handle": 16909060,
+    "source": "100.96.0.1",
+    "destination": "100.96.0.2"
+  }
+}

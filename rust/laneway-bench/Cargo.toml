@@ -1,0 +1,16 @@
+[package]
+name = "laneway-bench"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+crossbeam-queue.workspace = true
+ipnet.workspace = true
+laneway-protocol = { path = "../laneway-protocol" }
+laneway-relay = { path = "../laneway-relay" }
+lanewayd-rs = { path = "../lanewayd" }
+serde_json.workspace = true
