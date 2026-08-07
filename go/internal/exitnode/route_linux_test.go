@@ -294,3 +294,26 @@ func TestLinuxRoutesAdoptCrashResidueAfterTUNRemovedItsRoutes(t *testing.T) {
 		t.Fatalf("unmarked empty-table adoption error = %v", err)
 	}
 }
+
+func TestLinuxRoutesAdoptAndCleanStaleDynamicHostBypass(t *testing.T) {
+	r := newFakeIPRunner()
+	first, _ := NewRouteManager(RouteManagerConfig{InterfaceName: "lane0", Runner: r})
+	plan := routePlanFor(validClientPlan())
+	if err := first.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	delete(r.routes, "0.0.0.0/1")
+	delete(r.routes, "128.0.0.0/1")
+	r.routes["203.0.113.44/32"] = "203.0.113.44/32 dev eth0 proto 251\n"
+
+	restarted, _ := NewRouteManager(RouteManagerConfig{InterfaceName: "lane0", Runner: r})
+	if err := restarted.Apply(context.Background(), plan); err != nil {
+		t.Fatalf("adopt dynamic host-route residue: %v", err)
+	}
+	if err := restarted.Restore(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.routes) != 0 || len(r.rules) != 0 {
+		t.Fatalf("stale dynamic bypass survived restore: routes=%v rules=%v", r.routes, r.rules)
+	}
+}
