@@ -25,6 +25,7 @@ import (
 	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/localapi"
+	"laneway.dev/laneway/internal/nethelper"
 	"laneway.dev/laneway/internal/nodeapp"
 	"laneway.dev/laneway/internal/pki"
 )
@@ -68,6 +69,8 @@ func run(args []string) error {
 		return runRenew(args[1:])
 	case "node":
 		return runNode(args[1:])
+	case "_network-helper":
+		return runNetworkHelper(args[1:])
 	case "controller":
 		return runController(args[1:])
 	case "route":
@@ -80,6 +83,18 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runNetworkHelper(args []string) error {
+	fs := flag.NewFlagSet("_network-helper", flag.ContinueOnError)
+	fd := fs.Int("control-fd", -1, "inherited control socket descriptor")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *fd < 0 {
+		return errors.New("invalid privileged helper invocation")
+	}
+	return nethelper.ServeInheritedFD(context.Background(), *fd, nethelper.ProductionConfig())
 }
 
 func usage() {
