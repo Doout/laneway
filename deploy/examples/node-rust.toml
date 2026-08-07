@@ -40,7 +40,7 @@ queue_depth = 128
 
 [direct]
 # Relay QUIC, rendezvous probes, and direct QUIC reuse this UDP socket.
-listen = "0.0.0.0:4434"
+listen = "0.0.0.0:0"
 probe_interval = "200ms"
 probe_timeout = "3s"
 probe_attempts = 3

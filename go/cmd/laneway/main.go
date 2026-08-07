@@ -586,9 +586,9 @@ func runLocal(command string, args []string) error {
 		}
 		for _, peer := range peers {
 			if peer.Name != "" {
-				fmt.Printf("%s\t%s\t%s\n", peer.Name, peer.NodeID, strings.Join(peer.Prefixes, ","))
+				fmt.Printf("%s\t%s\t%s\t%s\n", peer.Name, peer.NodeID, peer.Path, strings.Join(peer.Prefixes, ","))
 			} else {
-				fmt.Printf("%s\t%s\n", peer.NodeID, strings.Join(peer.Prefixes, ","))
+				fmt.Printf("%s\t%s\t%s\n", peer.NodeID, peer.Path, strings.Join(peer.Prefixes, ","))
 			}
 		}
 	case "routes":

@@ -213,6 +213,19 @@ func Decode(r io.Reader) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode configuration: %w", err)
 	}
+	// Node configurations opt into the managed direct-path default unless the
+	// operator explicitly sets direct.enabled=false. Other actor modes retain
+	// a disabled direct section because they do not own a node dataplane.
+	var document map[string]any
+	if err := toml.Unmarshal(data, &document); err != nil {
+		return Config{}, fmt.Errorf("decode configuration shape: %w", err)
+	}
+	direct, _ := document["direct"].(map[string]any)
+	if cfg.Mode == ModeNode {
+		if _, specified := direct["enabled"]; !specified {
+			cfg.Direct.Enabled = true
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}

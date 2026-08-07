@@ -56,7 +56,7 @@ queue_depth = 128
 [direct]
 # Controller peers form the live direct-path allowlist. Removed or revoked
 # peer certificate paths are closed when a newer snapshot is committed.
-listen = "0.0.0.0:4434"
+listen = "0.0.0.0:0"
 probe_interval = "200ms"
 probe_timeout = "3s"
 probe_attempts = 3

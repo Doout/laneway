@@ -30,6 +30,12 @@ poll_interval = "30s"
 address = "relay.example.com:443"
 quic_probe_interval = "30s"
 
+[direct]
+# Managed nodes prefer authenticated direct QUIC by default. Port zero keeps
+# the host port ephemeral while sharing it with relay QUIC and probes.
+enabled = true
+listen = "0.0.0.0:0"
+
 [routing]
 # Needed only if this node later receives approval for its own subnet route.
 output_interface = "eth0"

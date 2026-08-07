@@ -14,7 +14,7 @@ func TestServerClientLifecycle(t *testing.T) {
 	var selected ExitSelection
 	server := Server{SocketPath: path, Snapshot: func() (Status, []Peer, []Route) {
 		return Status{Running: true, NodeID: "node", MTU: 1200, ProductVersion: "1.0.0", ControlVersion: "1.0", PacketVersion: 1, Capabilities: "relay-v1", SelectedPath: "relay-quic", Controller: ControllerStatus{CandidateExchangeEnabled: true, CertificateRenewalNeeded: true, CertificateNotAfterUnixSeconds: 12345}},
-			[]Peer{{NodeID: "peer", Name: "homelab-gateway", Prefixes: []string{"100.96.0.2/32"}}},
+			[]Peer{{NodeID: "peer", Name: "homelab-gateway", Prefixes: []string{"100.96.0.2/32"}, Path: "direct"}},
 			[]Route{{Prefix: "100.96.0.2/32", ViaNode: "peer", Kind: "peer"}}
 	}, SetExit: func(_ context.Context, selection ExitSelection) error {
 		selected = selection
@@ -39,7 +39,7 @@ func TestServerClientLifecycle(t *testing.T) {
 		t.Fatalf("status = %#v, %v", status, err)
 	}
 	peers, err := client.Peers(context.Background())
-	if err != nil || len(peers) != 1 || peers[0].NodeID != "peer" || peers[0].Name != "homelab-gateway" {
+	if err != nil || len(peers) != 1 || peers[0].NodeID != "peer" || peers[0].Name != "homelab-gateway" || peers[0].Path != "direct" {
 		t.Fatalf("peers = %#v, %v", peers, err)
 	}
 	routes, err := client.Routes(context.Background())

@@ -50,7 +50,12 @@ healthy, the Rust node keeps one packet pump active and performs bounded QUIC
 recovery handshakes at `relay.quic_recovery_interval`; promotion occurs only
 after exact relay identity validation and registration.
 
-The node example enables authenticated direct paths. Both relay implementations
+Managed Go node configurations enable authenticated direct paths unless
+`direct.enabled = false` is set explicitly; the Rust node always enables its
+direct manager. Host Node/User examples bind an ephemeral UDP port, while the
+isolated Docker Exit Node publishes a fixed port. `laneway peers` reports each
+peer as `direct`, `relay-quic`, `tcp-fallback`, or `disconnected`.
+Both relay implementations
 derive each candidate from the source address of the node's QUIC session,
 coordinate a short-lived UDP probe exchange, and remain available as fallback.
 Nodes reuse one UDP socket for the relay, probes, and peer QUIC, so host firewalls must

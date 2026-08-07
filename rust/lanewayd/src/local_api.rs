@@ -76,6 +76,7 @@ pub(crate) struct Peer {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) name: String,
     pub(crate) prefixes: Vec<String>,
+    pub(crate) path: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -443,7 +444,12 @@ mod tests {
                 exit: ExitStatus::default(),
                 controller: ControllerStatus::default(),
             },
-            peers: vec![],
+            peers: vec![Peer {
+                node_id: "22".repeat(16),
+                name: "peer".into(),
+                prefixes: vec!["100.96.0.2/32".into()],
+                path: "direct".into(),
+            }],
             routes: vec![],
         }
     }
@@ -491,6 +497,8 @@ mod tests {
         assert!(response.contains("\"certificate_presented_serial\":\"\""));
         assert!(response.contains("\"certificate_renew_after_unix_seconds\":0"));
         assert!(response.contains("\"certificate_not_after_unix_seconds\":0"));
+        let response = request(&path, "GET /v1/peers HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
+        assert!(response.contains("\"path\":\"direct\""));
         let body = r#"{"enabled":true,"selected_node_id":"202122232425262728292a2b2c2d2e2f"}"#;
         let response = request(
             &path,
