@@ -185,7 +185,7 @@ echo "==> building the real controller service fixture, product binaries, and Ru
 (
   cd "${repo_root}/go"
   go build -o "${work_dir}/laneway" ./cmd/laneway
-  go build -o "${work_dir}/lanewayd" ./cmd/lanewayd
+  go build -o "${work_dir}/lanewayd" ./cmd/laneway
   go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
   go build -o "${work_dir}/netprobe" ./integration/netprobe
   go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller

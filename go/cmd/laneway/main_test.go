@@ -63,6 +63,20 @@ func TestJoinTokenFileMustBeProtectedAndExclusive(t *testing.T) {
 	}
 }
 
+func TestNodeRunCommandSurface(t *testing.T) {
+	for _, arguments := range [][]string{{"node"}, {"node", "start"}} {
+		if err := run(arguments); err == nil || !strings.Contains(err.Error(), "laneway node run") {
+			t.Fatalf("run(%v) error = %v", arguments, err)
+		}
+	}
+	if err := run([]string{"node", "run", "-version"}); err != nil {
+		t.Fatalf("node run version: %v", err)
+	}
+	if err := run([]string{"node", "run", "unexpected"}); err == nil || !strings.Contains(err.Error(), "unexpected node run argument") {
+		t.Fatalf("unexpected node argument error = %v", err)
+	}
+}
+
 func TestPKICommands(t *testing.T) {
 	dir := t.TempDir()
 	if err := run([]string{"pki", "init", "--out-dir", dir, "--validity", "48h"}); err != nil {

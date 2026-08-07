@@ -16,7 +16,7 @@ Laneway has four logical components:
 
 - `laneway-controller` is the authority for networks, identities, certificates, overlay addresses, policy, and approved routes. It MUST NOT carry user packets.
 - `laneway-relay` accepts outbound authenticated connections, provides rendezvous, allocates session-local route handles, and forwards packets when no direct path is used.
-- `lanewayd` is the node agent. It authenticates, maintains paths, applies routes, and exchanges packets with the operating system through `lane0`.
+- `laneway node run` is the Go node agent (`lanewayd` remains a compatibility alias). It authenticates, maintains paths, applies routes, and exchanges packets with the operating system through `lane0`.
 - `laneway` is the user-facing CLI. It manages the local daemon; it is not a wire-protocol peer.
 
 Every participating endpoint uses the same reusable node dataplane. Roles are

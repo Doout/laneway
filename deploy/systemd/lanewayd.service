@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/lanewayd -config /etc/laneway/laneway.toml
+ExecStart=/usr/local/bin/laneway node run -config /etc/laneway/laneway.toml
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s

@@ -59,9 +59,10 @@ install -d -m 0755 "$bindir" "$sbindir" "$sharedir/examples" \
 	"$sharedir/docs" "$sharedir/nftables" "$sharedir/spec" \
 	"$sharedir/deploy" "$sharedir/integration" "$unitdir"
 install -m 0755 "$script_dir/bin/laneway" "$bindir/laneway"
-for command in lanewayd laneway-relay laneway-controller; do
+for command in laneway-relay laneway-controller; do
   install -m 0755 "$script_dir/sbin/$command" "$sbindir/$command"
 done
+ln -sfn ../bin/laneway "$sbindir/lanewayd"
 install -m 0755 "$script_dir/sbin/laneway-setup-node" "$sbindir/laneway-setup-node"
 install -m 0644 "$script_dir"/examples/*.toml "$sharedir/examples/"
 install -m 0644 "$script_dir"/docs/*.md "$sharedir/docs/"
