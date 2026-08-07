@@ -221,18 +221,21 @@ func normalizeEndpoint(value string) (string, error) {
 	return strings.TrimSuffix(parsed.String(), "/"), nil
 }
 
+// Enroll is the stable-v1 legacy enrollment path. It intentionally creates an
+// unbound native-QUIC identity; hybrid-capable clients must use a network-bound
+// method and provide their locally generated WireGuard public key.
 func (c *Client) Enroll(ctx context.Context, token, name string, csrDER []byte) (*lanewayv1.EnrollmentResponse, error) {
-	return c.enroll(ctx, token, name, csrDER, identity.NetworkID{})
+	return c.enroll(ctx, token, name, csrDER, nil, identity.NetworkID{})
 }
 
-func (c *Client) EnrollForNetwork(ctx context.Context, token, name string, csrDER []byte, expectedNetwork identity.NetworkID) (*lanewayv1.EnrollmentResponse, error) {
+func (c *Client) EnrollForNetwork(ctx context.Context, token, name string, csrDER, wireGuardPublicKey []byte, expectedNetwork identity.NetworkID) (*lanewayv1.EnrollmentResponse, error) {
 	if expectedNetwork.IsZero() {
 		return nil, errors.New("controller client: expected enrollment network is required")
 	}
-	return c.enroll(ctx, token, name, csrDER, expectedNetwork)
+	return c.enroll(ctx, token, name, csrDER, wireGuardPublicKey, expectedNetwork)
 }
 
-func (c *Client) EnrollForNetworkAndClass(ctx context.Context, token, name string, csrDER []byte, expectedNetwork identity.NetworkID, expectedClass lanewayv1.EnrollmentClass) (*lanewayv1.EnrollmentResponse, error) {
+func (c *Client) EnrollForNetworkAndClass(ctx context.Context, token, name string, csrDER, wireGuardPublicKey []byte, expectedNetwork identity.NetworkID, expectedClass lanewayv1.EnrollmentClass) (*lanewayv1.EnrollmentResponse, error) {
 	if expectedNetwork.IsZero() || (expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE &&
 		expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER &&
 		expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER) {
@@ -241,6 +244,7 @@ func (c *Client) EnrollForNetworkAndClass(ctx context.Context, token, name strin
 	request := &lanewayv1.EnrollmentRequest{
 		EnrollmentToken: token, RequestedName: name, Pkcs10CsrDer: csrDER,
 		ExpectedNetworkId: append([]byte(nil), expectedNetwork[:]...), ExpectedEnrollmentClass: expectedClass,
+		WireguardPublicKey: append([]byte(nil), wireGuardPublicKey...),
 	}
 	response := new(lanewayv1.EnrollmentResponse)
 	if err := c.post(ctx, "/v1/enroll", request, response); err != nil {
@@ -249,10 +253,11 @@ func (c *Client) EnrollForNetworkAndClass(ctx context.Context, token, name strin
 	return response, nil
 }
 
-func (c *Client) enroll(ctx context.Context, token, name string, csrDER []byte, expectedNetwork identity.NetworkID) (*lanewayv1.EnrollmentResponse, error) {
-	request := &lanewayv1.EnrollmentRequest{EnrollmentToken: token, RequestedName: name, Pkcs10CsrDer: csrDER}
+func (c *Client) enroll(ctx context.Context, token, name string, csrDER, wireGuardPublicKey []byte, expectedNetwork identity.NetworkID) (*lanewayv1.EnrollmentResponse, error) {
+	request := &lanewayv1.EnrollmentRequest{EnrollmentToken: token, RequestedName: name, Pkcs10CsrDer: csrDER, WireguardPublicKey: append([]byte(nil), wireGuardPublicKey...)}
 	if !expectedNetwork.IsZero() {
 		request.ExpectedNetworkId = append([]byte(nil), expectedNetwork[:]...)
+		request.ExpectedEnrollmentClass = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE
 	}
 	response := new(lanewayv1.EnrollmentResponse)
 	if err := c.post(ctx, "/v1/enroll", request, response); err != nil {
@@ -261,12 +266,12 @@ func (c *Client) enroll(ctx context.Context, token, name string, csrDER []byte, 
 	return response, nil
 }
 
-func (c *Client) Renew(ctx context.Context, csrDER []byte) (*lanewayv1.RenewalResponse, error) {
+func (c *Client) Renew(ctx context.Context, csrDER, wireGuardPublicKey []byte) (*lanewayv1.RenewalResponse, error) {
 	if c.quic != nil {
-		return c.quic.renew(ctx, csrDER)
+		return c.quic.renew(ctx, csrDER, wireGuardPublicKey)
 	}
 	response := new(lanewayv1.RenewalResponse)
-	if err := c.post(ctx, "/v1/renew", &lanewayv1.RenewalRequest{Pkcs10CsrDer: csrDER}, response); err != nil {
+	if err := c.post(ctx, "/v1/renew", &lanewayv1.RenewalRequest{Pkcs10CsrDer: csrDER, WireguardPublicKey: append([]byte(nil), wireGuardPublicKey...)}, response); err != nil {
 		return nil, err
 	}
 	return response, nil

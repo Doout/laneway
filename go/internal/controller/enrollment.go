@@ -109,7 +109,7 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 // assigns its IPv4 and optional IPv6 overlay addresses. Any failure rolls back
 // all changes.
 func (s *Store) EnrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64) (Node, error) {
-	enrollment, err := s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, "", nil)
+	enrollment, err := s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, "", WireGuardPublicKey{}, nil)
 	return enrollment.Node, err
 }
 
@@ -120,7 +120,7 @@ func (s *Store) EnrollNodeWithCertificate(ctx context.Context, secret, name stri
 	if issuer == nil {
 		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
 	}
-	return s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, "", issuer)
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, "", WireGuardPublicKey{}, issuer)
 }
 
 // EnrollNodeWithCertificateForNetwork additionally binds enrollment to the
@@ -133,7 +133,7 @@ func (s *Store) EnrollNodeWithCertificateForNetwork(ctx context.Context, secret,
 	if issuer == nil {
 		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
 	}
-	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, "", issuer)
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, "", WireGuardPublicKey{}, issuer)
 }
 
 // EnrollNodeWithCertificateForNetworkAndClass additionally binds the client's
@@ -146,10 +146,21 @@ func (s *Store) EnrollNodeWithCertificateForNetworkAndClass(ctx context.Context,
 	if issuer == nil {
 		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
 	}
-	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, expectedClass, issuer)
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, expectedClass, WireGuardPublicKey{}, issuer)
 }
 
-func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, expectedClass EnrollmentClass, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
+// EnrollNodeBound atomically binds a validated WireGuard key, the authenticated
+// bootstrap NetworkID/class, overlay addresses, and certificate before consuming
+// the invite. This is the protocol enrollment entry point; the older helpers
+// remain only for migration and store-level administration.
+func (s *Store) EnrollNodeBound(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, expectedClass EnrollmentClass, wireGuardPublicKey WireGuardPublicKey, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
+	if expectedNetwork.IsZero() || !expectedClass.Valid() || wireGuardPublicKey.IsZero() || issuer == nil {
+		return Enrollment{}, fmt.Errorf("%w: authenticated network, class, WireGuard key, and issuer are required", ErrInvalid)
+	}
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, expectedClass, wireGuardPublicKey, issuer)
+}
+
+func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, expectedClass EnrollmentClass, wireGuardPublicKey WireGuardPublicKey, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
 	if enabledCapabilities > math.MaxInt64 {
 		return Enrollment{}, fmt.Errorf("%w: capability mask exceeds SQLite integer range", ErrInvalid)
 	}
@@ -242,10 +253,10 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		leaseUnix = unix(*leaseExpiresAt)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes
-        (id,network_id,name,enabled_capabilities,created_at,enrollment_class,lease_expires_at) VALUES(?,?,?,?,?,?,?)`,
-		idBytes(nodeID), idBytes(networkID), name, int64(enabledCapabilities), unix(now), string(enrollmentClass), leaseUnix); err != nil {
+        (id,network_id,name,enabled_capabilities,created_at,enrollment_class,lease_expires_at,wireguard_public_key) VALUES(?,?,?,?,?,?,?,?)`,
+		idBytes(nodeID), idBytes(networkID), name, int64(enabledCapabilities), unix(now), string(enrollmentClass), leaseUnix, nullableWireGuardKey(wireGuardPublicKey)); err != nil {
 		if isConstraint(err) {
-			return Enrollment{}, fmt.Errorf("%w: node name already exists", ErrConflict)
+			return Enrollment{}, fmt.Errorf("%w: node name or WireGuard public key already exists", ErrConflict)
 		}
 		return Enrollment{}, fmt.Errorf("insert enrolled node: %w", err)
 	}
@@ -287,7 +298,7 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		return Enrollment{}, err
 	}
 	node := Node{ID: nodeID, NetworkID: networkID, Name: name, EnabledCapabilities: enabledCapabilities, IPv4Address: address, IPv6Address: address6, CreatedAt: now,
-		EnrollmentClass: enrollmentClass, LeaseExpiresAt: leaseExpiresAt}
+		EnrollmentClass: enrollmentClass, LeaseExpiresAt: leaseExpiresAt, WireGuardPublicKey: wireGuardPublicKey}
 	var certificate Certificate
 	if issuer != nil {
 		material, err := issuer(ctx, node)

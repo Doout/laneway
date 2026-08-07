@@ -31,15 +31,17 @@ import (
 	"laneway.dev/laneway/internal/nodeapp"
 	"laneway.dev/laneway/internal/pki"
 	"laneway.dev/laneway/internal/platform"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 type connectEnrollment struct {
-	identity       identity.NodeIdentity
-	certificatePEM []byte
-	privateKeyPEM  []byte
-	overlays       []netip.Prefix
-	class          lanewayv1.EnrollmentClass
-	leaseExpiresAt time.Time
+	identity            identity.NodeIdentity
+	certificatePEM      []byte
+	privateKeyPEM       []byte
+	overlays            []netip.Prefix
+	class               lanewayv1.EnrollmentClass
+	leaseExpiresAt      time.Time
+	wireGuardPrivateKey wireguard.PrivateKey
 }
 
 type runtimeCredentialFiles struct {
@@ -184,6 +186,10 @@ func runConnect(args []string) error {
 	if err != nil {
 		return err
 	}
+	wireGuardKeyPath, err := credentials.add(runtimeDir, "wireguard-key", enrollment.wireGuardPrivateKey.Bytes())
+	if err != nil {
+		return err
+	}
 	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
 	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
 	configurationClient, err := controllerclient.New(controllerclient.Options{
@@ -209,7 +215,7 @@ func runConnect(args []string) error {
 	if _, err := filter(initial); err != nil {
 		return err
 	}
-	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, selectedExit, *failureMode, dns, localLAN)
+	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, *failureMode, dns, localLAN)
 	if err != nil {
 		return err
 	}
@@ -282,6 +288,10 @@ func enrollForConnect(ctx context.Context, metadata bootstrap.Metadata, code str
 	if err != nil {
 		return connectEnrollment{}, err
 	}
+	wireGuardPrivateKey, wireGuardPublicKey, err := wireguard.GenerateKey()
+	if err != nil {
+		return connectEnrollment{}, err
+	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "laneway-temporary-user"}}, private)
 	if err != nil {
 		return connectEnrollment{}, err
@@ -293,7 +303,7 @@ func enrollForConnect(ctx context.Context, metadata bootstrap.Metadata, code str
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	response, err := client.EnrollForNetworkAndClass(ctx, code, "", csrDER, expectedNetwork, expectedClass)
+	response, err := client.EnrollForNetworkAndClass(ctx, code, "", csrDER, wireGuardPublicKey.Bytes(), expectedNetwork, expectedClass)
 	if err != nil {
 		return connectEnrollment{}, err
 	}
@@ -311,6 +321,9 @@ func enrollForConnect(ctx context.Context, metadata bootstrap.Metadata, code str
 	}
 	if authenticated.NetworkID != expectedNetwork || !bytes.Equal(authenticated.NetworkID[:], response.GetNetworkId()) || !bytes.Equal(authenticated.NodeID[:], response.GetNodeId()) {
 		return connectEnrollment{}, errors.New("issued certificate identity does not match authenticated bootstrap and enrollment response")
+	}
+	if !wireGuardPublicKey.Equal(response.GetWireguardPublicKey()) {
+		return connectEnrollment{}, errors.New("controller returned a different WireGuard public key than the locally generated key")
 	}
 	wantPublic, _ := x509.MarshalPKIXPublicKey(public)
 	gotPublic, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
@@ -349,10 +362,10 @@ func enrollForConnect(ctx context.Context, metadata bootstrap.Metadata, code str
 	} else if response.GetLeaseExpiresAtUnixSeconds() != 0 {
 		return connectEnrollment{}, errors.New("remembered enrollment response unexpectedly contains an ephemeral lease")
 	}
-	return connectEnrollment{identity: authenticated, certificatePEM: certificatePEM, privateKeyPEM: privatePEM, overlays: overlays, class: expectedClass, leaseExpiresAt: lease}, nil
+	return connectEnrollment{identity: authenticated, certificatePEM: certificatePEM, privateKeyPEM: privatePEM, overlays: overlays, class: expectedClass, leaseExpiresAt: lease, wireGuardPrivateKey: wireGuardPrivateKey}, nil
 }
 
-func connectConfig(runtimeDir string, metadata bootstrap.Metadata, name, caPath, certPath, keyPath string, selectedExit identity.NodeID,
+func connectConfig(runtimeDir string, metadata bootstrap.Metadata, name, caPath, certPath, keyPath, wireGuardKeyPath string, selectedExit identity.NodeID,
 	failureMode string, dns []netip.Addr, localLAN []netip.Prefix,
 ) (config.Config, error) {
 	if len(metadata.Relays) == 0 {
@@ -363,6 +376,7 @@ func connectConfig(runtimeDir string, metadata bootstrap.Metadata, name, caPath,
 	cfg.StateDir = filepath.Join(runtimeDir, "state")
 	cfg.SocketPath = filepath.Join(runtimeDir, "laneway.sock")
 	cfg.TLS = config.TLS{CertificateFile: certPath, PrivateKeyFile: keyPath, CAFile: caPath}
+	cfg.WireGuard = config.WireGuard{PrivateKeyFile: wireGuardKeyPath, InterfaceName: "lane0", MTU: 1280}
 	cfg.Node.Name = name
 	cfg.Node.RelayAddress = metadata.Relays[0].Endpoint
 	cfg.Node.RelayNetworkID = metadata.NetworkID

@@ -3,6 +3,7 @@ package controllerservice
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -225,9 +226,15 @@ func issueToken(t *testing.T, f fixture, expiry time.Time) string {
 }
 
 func enroll(t *testing.T, f fixture, token string, csr []byte, name string) (*lanewayv1.EnrollmentResponse, *httptest.ResponseRecorder) {
+	return enrollClass(t, f, token, csr, name, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE)
+}
+
+func enrollClass(t *testing.T, f fixture, token string, csr []byte, name string, class lanewayv1.EnrollmentClass) (*lanewayv1.EnrollmentResponse, *httptest.ResponseRecorder) {
 	t.Helper()
 	result := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", &lanewayv1.EnrollmentRequest{
 		EnrollmentToken: token, Pkcs10CsrDer: csr, RequestedName: name,
+		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...), ExpectedEnrollmentClass: class,
+		WireguardPublicKey: testWireGuardPublicKey(t),
 	})
 	if result.Code != http.StatusCreated {
 		return nil, result
@@ -237,6 +244,15 @@ func enroll(t *testing.T, f fixture, token string, csr []byte, name string) (*la
 		t.Fatal(err)
 	}
 	return response, result
+}
+
+func testWireGuardPublicKey(t *testing.T) []byte {
+	t.Helper()
+	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return privateKey.PublicKey().Bytes()
 }
 
 func parseLeaf(t *testing.T, chain *lanewayv1.CertificateChain) *x509.Certificate {
@@ -270,6 +286,9 @@ func TestEnrollmentUsesCSRKeyButOverridesIdentityAndRejectsReplay(t *testing.T) 
 	if len(response.GetOverlayAddresses()) != 1 {
 		t.Fatalf("enrollment omitted controller overlay assignment: %+v", response)
 	}
+	if len(response.GetWireguardPublicKey()) != controller.WireGuardKeySize {
+		t.Fatalf("enrollment omitted controller-bound WireGuard key: %+v", response)
+	}
 	if len(leaf.DNSNames) != 0 || len(leaf.URIs) != 1 || leaf.Subject.CommonName == "untrusted identity" {
 		t.Fatalf("untrusted CSR identity fields copied: subject=%q DNS=%v URIs=%v", leaf.Subject.CommonName, leaf.DNSNames, leaf.URIs)
 	}
@@ -280,6 +299,47 @@ func TestEnrollmentUsesCSRKeyButOverridesIdentityAndRejectsReplay(t *testing.T) 
 	replayProblem := new(lanewayv1.ProtocolError)
 	if err := proto.Unmarshal(replay.Body.Bytes(), replayProblem); err != nil || !strings.Contains(replayProblem.GetDetail(), "already been used") {
 		t.Fatalf("replay problem=%+v err=%v", replayProblem, err)
+	}
+}
+
+func TestLegacyEnrollmentWithoutWireGuardKeyRemainsUnbound(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	token := issueToken(t, f, time.Now().Add(time.Hour))
+	legacy := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", &lanewayv1.EnrollmentRequest{
+		EnrollmentToken: token, Pkcs10CsrDer: csrDER(t, ""), RequestedName: "key-required",
+		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...), ExpectedEnrollmentClass: lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE,
+	})
+	if legacy.Code != http.StatusCreated {
+		t.Fatalf("legacy enrollment status=%d body=%x", legacy.Code, legacy.Body.Bytes())
+	}
+	response := new(lanewayv1.EnrollmentResponse)
+	if err := proto.Unmarshal(legacy.Body.Bytes(), response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.GetWireguardPublicKey()) != 0 {
+		t.Fatalf("legacy enrollment acquired an implicit key: %x", response.GetWireguardPublicKey())
+	}
+	var nodeID identity.NodeID
+	copy(nodeID[:], response.GetNodeId())
+	node, err := f.store.Node(context.Background(), nodeID)
+	if err != nil || !node.WireGuardPublicKey.IsZero() {
+		t.Fatalf("legacy node = %+v error=%v", node, err)
+	}
+}
+
+func TestInvalidWireGuardKeyDoesNotConsumeInvite(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	token := issueToken(t, f, time.Now().Add(time.Hour))
+	invalid := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", &lanewayv1.EnrollmentRequest{
+		EnrollmentToken: token, Pkcs10CsrDer: csrDER(t, ""), RequestedName: "invalid-key",
+		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...), ExpectedEnrollmentClass: lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE,
+		WireguardPublicKey: make([]byte, controller.WireGuardKeySize),
+	})
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid key status=%d body=%x", invalid.Code, invalid.Body.Bytes())
+	}
+	if _, retry := enroll(t, f, token, csrDER(t, ""), "invalid-key"); retry.Code != http.StatusCreated {
+		t.Fatalf("invalid key consumed invite: status=%d body=%x", retry.Code, retry.Body.Bytes())
 	}
 }
 
@@ -295,7 +355,8 @@ func TestEnrollmentExpectedNetworkMismatchIsClearAndDoesNotConsumeCode(t *testin
 	}
 	request := &lanewayv1.EnrollmentRequest{
 		EnrollmentToken: token.Secret, Pkcs10CsrDer: csrDER(t, ""), RequestedName: "wrong-network",
-		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...),
+		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...), ExpectedEnrollmentClass: lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE,
+		WireguardPublicKey: testWireGuardPublicKey(t),
 	}
 	mismatch := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
 	if mismatch.Code != http.StatusForbidden {
@@ -323,7 +384,8 @@ func TestEnrollmentInviteNameIsBoundAndMayBeOmittedByClient(t *testing.T) {
 	}
 	request := &lanewayv1.EnrollmentRequest{
 		EnrollmentToken: token.Secret, Pkcs10CsrDer: csrDER(t, ""), RequestedName: "attacker-name",
-		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...),
+		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...), ExpectedEnrollmentClass: lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER,
+		WireguardPublicKey: testWireGuardPublicKey(t),
 	}
 	mismatch := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
 	if mismatch.Code != http.StatusForbidden {
@@ -351,6 +413,7 @@ func TestEnrollmentExpectedClassMismatchIsClearAndDoesNotConsumeCode(t *testing.
 	request := &lanewayv1.EnrollmentRequest{
 		EnrollmentToken: token.Secret, Pkcs10CsrDer: csrDER(t, ""), ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...),
 		ExpectedEnrollmentClass: lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER,
+		WireguardPublicKey:      testWireGuardPublicKey(t),
 	}
 	mismatch := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
 	if mismatch.Code != http.StatusForbidden {
@@ -376,7 +439,7 @@ func TestEphemeralEnrollmentCertificateAndResponseAreLeaseBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	csrBytes := csrDER(t, "")
-	response, result := enroll(t, f, token.Secret, csrBytes, "ephemeral-user")
+	response, result := enrollClass(t, f, token.Secret, csrBytes, "ephemeral-user", lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER)
 	if result.Code != http.StatusCreated {
 		t.Fatalf("enroll status=%d body=%x", result.Code, result.Body.Bytes())
 	}
@@ -515,8 +578,14 @@ func TestRenewalPreservesAuthenticatedIdentity(t *testing.T) {
 	}
 	copy(authenticated.NetworkID[:], response.NetworkId)
 	copy(authenticated.NodeID[:], response.NodeId)
+	before, err := f.store.Network(context.Background(), f.network.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementWireGuardKey := testWireGuardPublicKey(t)
 	renewal := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/renew", &lanewayv1.RenewalRequest{
-		Pkcs10CsrDer: csrDER(t, "spiffe://laneway/network/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/node/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+		Pkcs10CsrDer:       csrDER(t, "spiffe://laneway/network/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/node/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+		WireguardPublicKey: replacementWireGuardKey,
 	})
 	if renewal.Code != http.StatusOK {
 		t.Fatalf("renew status=%d body=%x", renewal.Code, renewal.Body.Bytes())
@@ -531,6 +600,24 @@ func TestRenewalPreservesAuthenticatedIdentity(t *testing.T) {
 	}
 	if got != authenticated {
 		t.Fatalf("renewed identity=%+v want %+v", got, authenticated)
+	}
+	if !bytes.Equal(responseRenewal.GetWireguardPublicKey(), replacementWireGuardKey) {
+		t.Fatal("renewal response did not echo the new authoritative WireGuard key")
+	}
+	after, err := f.store.Network(context.Background(), f.network.ID)
+	if err != nil || after.ConfigurationEpoch != before.ConfigurationEpoch+1 {
+		t.Fatalf("WireGuard rotation epoch=%d want=%d error=%v", after.ConfigurationEpoch, before.ConfigurationEpoch+1, err)
+	}
+	configurationResult := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", &lanewayv1.ConfigurationRequest{})
+	if configurationResult.Code != http.StatusOK {
+		t.Fatalf("configuration status=%d body=%x", configurationResult.Code, configurationResult.Body.Bytes())
+	}
+	configuration := new(lanewayv1.NodeConfiguration)
+	if err := proto.Unmarshal(configurationResult.Body.Bytes(), configuration); err != nil {
+		t.Fatal(err)
+	}
+	if len(configuration.GetPeers()) != 1 || !bytes.Equal(configuration.GetPeers()[0].GetWireguardPublicKey(), replacementWireGuardKey) {
+		t.Fatalf("configuration peer key = %+v", configuration.GetPeers())
 	}
 }
 
@@ -573,7 +660,7 @@ func TestEnrollmentAndRenewalReturnIntermediateChainForRootTrust(t *testing.T) {
 	copy(authenticated.NetworkID[:], enrollment.GetNetworkId())
 	copy(authenticated.NodeID[:], enrollment.GetNodeId())
 
-	renewalResult := protobufRequest(t, service.Handler(), http.MethodPost, "/v1/renew", &lanewayv1.RenewalRequest{Pkcs10CsrDer: csrDER(t, "")})
+	renewalResult := protobufRequest(t, service.Handler(), http.MethodPost, "/v1/renew", &lanewayv1.RenewalRequest{Pkcs10CsrDer: csrDER(t, ""), WireguardPublicKey: enrollment.GetWireguardPublicKey()})
 	if renewalResult.Code != http.StatusOK {
 		t.Fatalf("renew status=%d body=%x", renewalResult.Code, renewalResult.Body.Bytes())
 	}
@@ -689,7 +776,7 @@ func TestEveryNodeSnapshotIsCappedByEarliestEphemeralLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ephemeral, result := enroll(t, f, token.Secret, csrDER(t, ""), "short-user")
+	ephemeral, result := enrollClass(t, f, token.Secret, csrDER(t, ""), "short-user", lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER)
 	if result.Code != http.StatusCreated {
 		t.Fatalf("ephemeral enrollment status=%d body=%x", result.Code, result.Body.Bytes())
 	}

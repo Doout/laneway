@@ -11,6 +11,16 @@ by TLS 1.3; the private key never leaves the joining node. Every operation
 after issuance—configuration snapshots, conditional lease renewal, and node
 certificate renewal—uses mTLS QUIC when `controller.quic_endpoint` is set.
 
+Hybrid-capable enrollment also carries the raw public half of a locally generated
+X25519 WireGuard identity. When that field is present, the request MUST include the WebPKI-authenticated expected
+NetworkID and enrollment class; the controller validates and globally binds
+the key before consuming the token. Responses echo the authoritative key.
+Authenticated renewal MUST include the current or replacement public key, and
+the controller commits certificate issuance, key rotation, audit, and epoch
+advance atomically. Field absence preserves a legacy unbound native-QUIC node
+and never authorizes a hybrid carrier. Details and migration rules are normative in
+`wireguard-hybrid-v1.md`.
+
 Enrollment tokens are authority for exactly one controller-selected class:
 `DURABLE_NODE`, `EPHEMERAL_USER`, or `REMEMBERED_USER`. The request cannot
 upgrade that class. An ephemeral token also fixes a 5-minute through 24-hour
@@ -58,7 +68,7 @@ long-lived, serialized controller connections.
 
 `NodeConfiguration` is the atomic authoritative snapshot for discovery,
 routes, ACL policy, relay-assisted candidate-exchange policy, approved exit
-gateways, revocation state, and the presented certificate's renewal/expiry
+gateways, each NodeID's WireGuard public key, revocation state, and the presented certificate's renewal/expiry
 health. Ephemeral peer endpoint candidates remain on the authenticated relay
 rendezvous channel and are intentionally not persisted by the controller.
 `RelayConfiguration` contains packet authorization, ACL policy, revocation,

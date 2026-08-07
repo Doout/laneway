@@ -21,6 +21,7 @@ import (
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 func TestControllerCommandValidation(t *testing.T) {
@@ -151,7 +152,7 @@ func TestRenewUsesCSRAndWritesDistinctCredentialPair(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		payload, _ := proto.Marshal(&lanewayv1.RenewalResponse{CertificateChain: &lanewayv1.CertificateChain{CertificatesDer: [][]byte{der, caMaterial.CertificateDER}}})
+		payload, _ := proto.Marshal(&lanewayv1.RenewalResponse{CertificateChain: &lanewayv1.CertificateChain{CertificatesDer: [][]byte{der, caMaterial.CertificateDER}}, WireguardPublicKey: request.GetWireguardPublicKey()})
 		w.Header().Set("Content-Type", "application/x-protobuf")
 		_, _ = w.Write(payload)
 	}))
@@ -165,6 +166,7 @@ func TestRenewUsesCSRAndWritesDistinctCredentialPair(t *testing.T) {
 	keyPath := filepath.Join(dir, "node.key")
 	outCert := filepath.Join(dir, "node.next.crt")
 	outKey := filepath.Join(dir, "node.next.key")
+	outWireGuardKey := filepath.Join(dir, "wireguard.next.key")
 	currentKey, _ := pki.PrivateKeyPEM(nodeMaterial.PrivateKey)
 	if err := os.WriteFile(caPath, pki.CertificatePEM(caMaterial.CertificateDER), 0o644); err != nil {
 		t.Fatal(err)
@@ -177,7 +179,7 @@ func TestRenewUsesCSRAndWritesDistinctCredentialPair(t *testing.T) {
 	}
 	oldCert, _ := os.ReadFile(certPath)
 	oldKey, _ := os.ReadFile(keyPath)
-	if err := runRenew([]string{"--controller", server.URL, "--allow-legacy-controller-https", "--server-name", "controller.test", "--controller-network-id", networkID.String(), "--controller-service-id", serviceID.String(), "--ca", caPath, "--cert", certPath, "--key", keyPath, "--out-cert", outCert, "--out-key", outKey}); err != nil {
+	if err := runRenew([]string{"--controller", server.URL, "--allow-legacy-controller-https", "--server-name", "controller.test", "--controller-network-id", networkID.String(), "--controller-service-id", serviceID.String(), "--ca", caPath, "--cert", certPath, "--key", keyPath, "--out-cert", outCert, "--out-key", outKey, "--out-wireguard-key", outWireGuardKey}); err != nil {
 		t.Fatal(err)
 	}
 	if current, _ := os.ReadFile(certPath); string(current) != string(oldCert) {
@@ -192,8 +194,11 @@ func TestRenewUsesCSRAndWritesDistinctCredentialPair(t *testing.T) {
 	if info, err := os.Stat(outKey); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("new key permissions: %v, %v", info, err)
 	}
+	if raw, err := os.ReadFile(outWireGuardKey); err != nil || len(raw) != wireguard.KeySize {
+		t.Fatalf("new WireGuard key: length=%d error=%v", len(raw), err)
+	}
 	wrongServiceID, _ := identity.NewID()
-	if err := runRenew([]string{"--controller", server.URL, "--allow-legacy-controller-https", "--server-name", "controller.test", "--controller-network-id", networkID.String(), "--controller-service-id", wrongServiceID.String(), "--ca", caPath, "--cert", certPath, "--key", keyPath, "--out-cert", outCert + ".wrong", "--out-key", outKey + ".wrong"}); err == nil {
+	if err := runRenew([]string{"--controller", server.URL, "--allow-legacy-controller-https", "--server-name", "controller.test", "--controller-network-id", networkID.String(), "--controller-service-id", wrongServiceID.String(), "--ca", caPath, "--cert", certPath, "--key", keyPath, "--out-cert", outCert + ".wrong", "--out-key", outKey + ".wrong", "--out-wireguard-key", outWireGuardKey + ".wrong"}); err == nil {
 		t.Fatal("renewal accepted an unexpected controller service identity")
 	}
 	if err := runRenew([]string{"--controller", server.URL, "--ca", caPath, "--cert", certPath, "--key", keyPath, "--out-cert", certPath, "--out-key", outKey + ".other"}); err == nil {

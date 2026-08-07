@@ -86,8 +86,11 @@ type EnrollmentRequest struct {
 	// Optional client-side class expectation authenticated by the bootstrap
 	// flow. A mismatch is rejected before the single-use token is consumed.
 	ExpectedEnrollmentClass EnrollmentClass `protobuf:"varint,5,opt,name=expected_enrollment_class,json=expectedEnrollmentClass,proto3,enum=laneway.v1.EnrollmentClass" json:"expected_enrollment_class,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// Raw 32-byte X25519 public key generated locally for the WireGuard
+	// dataplane. The corresponding private key never leaves the client.
+	WireguardPublicKey []byte `protobuf:"bytes,6,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *EnrollmentRequest) Reset() {
@@ -155,6 +158,13 @@ func (x *EnrollmentRequest) GetExpectedEnrollmentClass() EnrollmentClass {
 	return EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED
 }
 
+func (x *EnrollmentRequest) GetWireguardPublicKey() []byte {
+	if x != nil {
+		return x.WireguardPublicKey
+	}
+	return nil
+}
+
 type CertificateChain struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// DER leaf first, followed by intermediates. The trust anchor is distributed
@@ -220,8 +230,11 @@ type EnrollmentResponse struct {
 	// Nonzero only for a fully ephemeral identity. Authentication and every
 	// authorization derived from it fail closed at this UTC deadline.
 	LeaseExpiresAtUnixSeconds uint64 `protobuf:"varint,6,opt,name=lease_expires_at_unix_seconds,json=leaseExpiresAtUnixSeconds,proto3" json:"lease_expires_at_unix_seconds,omitempty"`
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
+	// The controller-authoritative key bound to network_id and node_id. Clients
+	// must compare this with the locally generated public key before use.
+	WireguardPublicKey []byte `protobuf:"bytes,7,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *EnrollmentResponse) Reset() {
@@ -296,11 +309,21 @@ func (x *EnrollmentResponse) GetLeaseExpiresAtUnixSeconds() uint64 {
 	return 0
 }
 
+func (x *EnrollmentResponse) GetWireguardPublicKey() []byte {
+	if x != nil {
+		return x.WireguardPublicKey
+	}
+	return nil
+}
+
 type RenewalRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Pkcs10CsrDer  []byte                 `protobuf:"bytes,1,opt,name=pkcs10_csr_der,json=pkcs10CsrDer,proto3" json:"pkcs10_csr_der,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Pkcs10CsrDer []byte                 `protobuf:"bytes,1,opt,name=pkcs10_csr_der,json=pkcs10CsrDer,proto3" json:"pkcs10_csr_der,omitempty"`
+	// The current or replacement locally generated WireGuard public key. A key
+	// change is committed atomically with the replacement certificate.
+	WireguardPublicKey []byte `protobuf:"bytes,2,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RenewalRequest) Reset() {
@@ -340,11 +363,19 @@ func (x *RenewalRequest) GetPkcs10CsrDer() []byte {
 	return nil
 }
 
+func (x *RenewalRequest) GetWireguardPublicKey() []byte {
+	if x != nil {
+		return x.WireguardPublicKey
+	}
+	return nil
+}
+
 type RenewalResponse struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	CertificateChain *CertificateChain      `protobuf:"bytes,1,opt,name=certificate_chain,json=certificateChain,proto3" json:"certificate_chain,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	CertificateChain   *CertificateChain      `protobuf:"bytes,1,opt,name=certificate_chain,json=certificateChain,proto3" json:"certificate_chain,omitempty"`
+	WireguardPublicKey []byte                 `protobuf:"bytes,2,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RenewalResponse) Reset() {
@@ -380,6 +411,13 @@ func (*RenewalResponse) Descriptor() ([]byte, []int) {
 func (x *RenewalResponse) GetCertificateChain() *CertificateChain {
 	if x != nil {
 		return x.CertificateChain
+	}
+	return nil
+}
+
+func (x *RenewalResponse) GetWireguardPublicKey() []byte {
+	if x != nil {
+		return x.WireguardPublicKey
 	}
 	return nil
 }
@@ -550,8 +588,10 @@ type NodePeer struct {
 	NodeId           []byte                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Name             string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
 	OverlayAddresses [][]byte               `protobuf:"bytes,3,rep,name=overlay_addresses,json=overlayAddresses,proto3" json:"overlay_addresses,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Controller-authenticated WireGuard key for this exact NetworkID/NodeID.
+	WireguardPublicKey []byte `protobuf:"bytes,4,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *NodePeer) Reset() {
@@ -601,6 +641,13 @@ func (x *NodePeer) GetName() string {
 func (x *NodePeer) GetOverlayAddresses() [][]byte {
 	if x != nil {
 		return x.OverlayAddresses
+	}
+	return nil
+}
+
+func (x *NodePeer) GetWireguardPublicKey() []byte {
+	if x != nil {
+		return x.WireguardPublicKey
 	}
 	return nil
 }
@@ -1446,16 +1493,17 @@ var File_laneway_v1_controller_proto protoreflect.FileDescriptor
 const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\n" +
 	"\x1blaneway/v1/controller.proto\x12\n" +
-	"laneway.v1\x1a\x18laneway/v1/control.proto\x1a\x17laneway/v1/policy.proto\x1a\x17laneway/v1/routes.proto\"\x94\x02\n" +
+	"laneway.v1\x1a\x18laneway/v1/control.proto\x1a\x17laneway/v1/policy.proto\x1a\x17laneway/v1/routes.proto\"\xc6\x02\n" +
 	"\x11EnrollmentRequest\x12)\n" +
 	"\x10enrollment_token\x18\x01 \x01(\tR\x0fenrollmentToken\x12$\n" +
 	"\x0epkcs10_csr_der\x18\x02 \x01(\fR\fpkcs10CsrDer\x12%\n" +
 	"\x0erequested_name\x18\x03 \x01(\tR\rrequestedName\x12.\n" +
 	"\x13expected_network_id\x18\x04 \x01(\fR\x11expectedNetworkId\x12W\n" +
-	"\x19expected_enrollment_class\x18\x05 \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x17expectedEnrollmentClass\"r\n" +
+	"\x19expected_enrollment_class\x18\x05 \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x17expectedEnrollmentClass\x120\n" +
+	"\x14wireguard_public_key\x18\x06 \x01(\fR\x12wireguardPublicKey\"r\n" +
 	"\x10CertificateChain\x12)\n" +
 	"\x10certificates_der\x18\x01 \x03(\fR\x0fcertificatesDer\x123\n" +
-	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\xce\x02\n" +
+	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\x80\x03\n" +
 	"\x12EnrollmentResponse\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\fR\tnetworkId\x12\x17\n" +
@@ -1463,11 +1511,14 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x11certificate_chain\x18\x03 \x01(\v2\x1c.laneway.v1.CertificateChainR\x10certificateChain\x12+\n" +
 	"\x11overlay_addresses\x18\x04 \x03(\fR\x10overlayAddresses\x12F\n" +
 	"\x10enrollment_class\x18\x05 \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x0fenrollmentClass\x12@\n" +
-	"\x1dlease_expires_at_unix_seconds\x18\x06 \x01(\x04R\x19leaseExpiresAtUnixSeconds\"6\n" +
+	"\x1dlease_expires_at_unix_seconds\x18\x06 \x01(\x04R\x19leaseExpiresAtUnixSeconds\x120\n" +
+	"\x14wireguard_public_key\x18\a \x01(\fR\x12wireguardPublicKey\"h\n" +
 	"\x0eRenewalRequest\x12$\n" +
-	"\x0epkcs10_csr_der\x18\x01 \x01(\fR\fpkcs10CsrDer\"\\\n" +
+	"\x0epkcs10_csr_der\x18\x01 \x01(\fR\fpkcs10CsrDer\x120\n" +
+	"\x14wireguard_public_key\x18\x02 \x01(\fR\x12wireguardPublicKey\"\x8e\x01\n" +
 	"\x0fRenewalResponse\x12I\n" +
-	"\x11certificate_chain\x18\x01 \x01(\v2\x1c.laneway.v1.CertificateChainR\x10certificateChain\"\xdd\x06\n" +
+	"\x11certificate_chain\x18\x01 \x01(\v2\x1c.laneway.v1.CertificateChainR\x10certificateChain\x120\n" +
+	"\x14wireguard_public_key\x18\x02 \x01(\fR\x12wireguardPublicKey\"\xdd\x06\n" +
 	"\x11NodeConfiguration\x12/\n" +
 	"\x13configuration_epoch\x18\x01 \x01(\x04R\x12configurationEpoch\x12+\n" +
 	"\x11overlay_addresses\x18\x02 \x03(\fR\x10overlayAddresses\x121\n" +
@@ -1484,11 +1535,12 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"exitPolicy\x12L\n" +
 	"\x12certificate_health\x18\f \x01(\v2\x1d.laneway.v1.CertificateHealthR\x11certificateHealth\x12F\n" +
 	"\x10enrollment_class\x18\r \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x0fenrollmentClass\x12Q\n" +
-	"&identity_lease_expires_at_unix_seconds\x18\x0e \x01(\x04R!identityLeaseExpiresAtUnixSeconds\"d\n" +
+	"&identity_lease_expires_at_unix_seconds\x18\x0e \x01(\x04R!identityLeaseExpiresAtUnixSeconds\"\x96\x01\n" +
 	"\bNodePeer\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12+\n" +
-	"\x11overlay_addresses\x18\x03 \x03(\fR\x10overlayAddresses\"^\n" +
+	"\x11overlay_addresses\x18\x03 \x03(\fR\x10overlayAddresses\x120\n" +
+	"\x14wireguard_public_key\x18\x04 \x01(\fR\x12wireguardPublicKey\"^\n" +
 	"\rRelayEndpoint\x12\x1d\n" +
 	"\n" +
 	"service_id\x18\x01 \x01(\fR\tserviceId\x12\x12\n" +

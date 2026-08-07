@@ -1200,11 +1200,13 @@ mod tests {
                     node_id: local.as_bytes().to_vec(),
                     name: "local".to_owned(),
                     overlay_addresses: vec![vec![100, 96, 0, 1]],
+                    wireguard_public_key: vec![1; 32],
                 },
                 NodePeer {
                     node_id: peer.as_bytes().to_vec(),
                     name: "peer".to_owned(),
                     overlay_addresses: vec![vec![100, 96, 0, 2]],
+                    wireguard_public_key: vec![2; 32],
                 },
             ],
             relays: vec![RelayEndpoint {

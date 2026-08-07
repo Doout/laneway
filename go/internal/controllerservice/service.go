@@ -314,6 +314,14 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed(err.Error()), true)
 		return
 	}
+	var wireGuardPublicKey controller.WireGuardPublicKey
+	if len(req.GetWireguardPublicKey()) != 0 {
+		wireGuardPublicKey, err = controller.ParseWireGuardPublicKey(req.GetWireguardPublicKey())
+		if err != nil {
+			s.writeError(w, malformed("invalid wireguard_public_key"), true)
+			return
+		}
+	}
 	var expectedNetwork identity.NetworkID
 	if len(req.GetExpectedNetworkId()) != 0 {
 		if len(req.GetExpectedNetworkId()) != identity.IDSize {
@@ -335,6 +343,10 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed("expected_enrollment_class requires expected_network_id"), true)
 		return
 	}
+	if !wireGuardPublicKey.IsZero() && (expectedClass == "" || expectedNetwork.IsZero()) {
+		s.writeError(w, malformed("wireguard_public_key requires authenticated expected_network_id and expected_enrollment_class"), true)
+		return
+	}
 	// CSR validation happens before opening the enrollment transaction. Signing
 	// and certificate persistence then participate in the same transaction as
 	// token consumption, node creation, and overlay allocation.
@@ -351,7 +363,9 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		}, nil
 	}
 	var enrollment controller.Enrollment
-	if expectedNetwork.IsZero() {
+	if !wireGuardPublicKey.IsZero() {
+		enrollment, err = s.store.EnrollNodeBound(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, expectedNetwork, expectedClass, wireGuardPublicKey, issuer)
+	} else if expectedNetwork.IsZero() {
 		enrollment, err = s.store.EnrollNodeWithCertificate(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, issuer)
 	} else if expectedClass != "" {
 		enrollment, err = s.store.EnrollNodeWithCertificateForNetworkAndClass(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, expectedNetwork, expectedClass, issuer)
@@ -366,6 +380,7 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 	resp := &lanewayv1.EnrollmentResponse{
 		NetworkId: append([]byte(nil), node.NetworkID[:]...), NodeId: append([]byte(nil), node.ID[:]...),
 		CertificateChain: s.certificateChain(cert), OverlayAddresses: nodeOverlayAddresses(node), EnrollmentClass: enrollmentClassProto(node.EnrollmentClass),
+		WireguardPublicKey: node.WireGuardPublicKey.Bytes(),
 	}
 	if node.LeaseExpiresAt != nil {
 		resp.LeaseExpiresAtUnixSeconds = uint64(node.LeaseExpiresAt.Unix())
@@ -389,6 +404,14 @@ func (s *Service) renew(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed(err.Error()), true)
 		return
 	}
+	var wireGuardPublicKey controller.WireGuardPublicKey
+	if len(req.GetWireguardPublicKey()) != 0 {
+		wireGuardPublicKey, err = controller.ParseWireGuardPublicKey(req.GetWireguardPublicKey())
+		if err != nil {
+			s.writeError(w, malformed("invalid wireguard_public_key"), true)
+			return
+		}
+	}
 	if _, err := s.store.ExpireEphemeral(r.Context(), controller.MaxExpireBatch); err != nil {
 		s.writeError(w, err, true)
 		return
@@ -398,12 +421,20 @@ func (s *Service) renew(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, ErrPermissionDenied, true)
 		return
 	}
-	cert, err := s.issueAndPersist(r.Context(), node, csr)
+	var cert *x509.Certificate
+	renewal, err := s.store.RenewNodeBound(r.Context(), caller.NetworkID, caller.NodeID, wireGuardPublicKey, func(_ context.Context, boundNode controller.Node) (controller.CertificateMaterial, error) {
+		issued, issueErr := s.issueCertificate(boundNode, csr)
+		if issueErr != nil {
+			return controller.CertificateMaterial{}, issueErr
+		}
+		cert = issued
+		return controller.CertificateMaterial{Serial: issued.SerialNumber.Bytes(), DER: issued.Raw, NotBefore: issued.NotBefore, NotAfter: issued.NotAfter}, nil
+	})
 	if err != nil {
 		s.writeError(w, err, true)
 		return
 	}
-	s.writeProto(w, http.StatusOK, &lanewayv1.RenewalResponse{CertificateChain: s.certificateChain(cert)})
+	s.writeProto(w, http.StatusOK, &lanewayv1.RenewalResponse{CertificateChain: s.certificateChain(cert), WireguardPublicKey: renewal.Node.WireGuardPublicKey.Bytes()})
 }
 
 func parseCSR(der []byte) (*x509.CertificateRequest, error) {
@@ -421,17 +452,6 @@ func parseCSR(der []byte) (*x509.CertificateRequest, error) {
 		return nil, errors.New("PKCS#10 CSR has no public key")
 	}
 	return csr, nil
-}
-
-func (s *Service) issueAndPersist(ctx context.Context, node controller.Node, csr *x509.CertificateRequest) (*x509.Certificate, error) {
-	cert, err := s.issueCertificate(node, csr)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.store.AddCertificate(ctx, node.NetworkID, node.ID, cert.SerialNumber.Bytes(), cert.Raw, cert.NotBefore, cert.NotAfter); err != nil {
-		return nil, fmt.Errorf("persist issued certificate: %w", err)
-	}
-	return cert, nil
 }
 
 func (s *Service) issueCertificate(node controller.Node, csr *x509.CertificateRequest) (*x509.Certificate, error) {
@@ -704,7 +724,7 @@ func buildConfiguration(network controller.Network, node controller.Node, nodes 
 	for _, peer := range nodes {
 		peers = append(peers, &lanewayv1.NodePeer{
 			NodeId: append([]byte(nil), peer.ID[:]...), Name: peer.Name,
-			OverlayAddresses: nodeOverlayAddresses(peer),
+			OverlayAddresses: nodeOverlayAddresses(peer), WireguardPublicKey: peer.WireGuardPublicKey.Bytes(),
 		})
 	}
 	exitNodes := make([][]byte, 0)

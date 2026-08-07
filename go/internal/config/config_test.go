@@ -110,6 +110,27 @@ func TestDecodeDirectConnectivityCanBeExplicitlyDisabled(t *testing.T) {
 	}
 }
 
+func TestDecodeWireGuardIdentityBoundary(t *testing.T) {
+	cfg, err := Decode(strings.NewReader(validNode + `
+[wireguard]
+enabled = true
+private_key = "/etc/laneway/wireguard.key"
+interface = "lane0"
+listen_port = 51820
+mtu = 1280
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WireGuard.Enabled || cfg.WireGuard.PrivateKeyFile != "/etc/laneway/wireguard.key" || cfg.WireGuard.InterfaceName != "lane0" || cfg.WireGuard.ListenPort != 51820 || cfg.WireGuard.MTU != 1280 {
+		t.Fatalf("WireGuard config = %#v", cfg.WireGuard)
+	}
+	cfg.WireGuard.MTU = 1279
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unsafe WireGuard MTU accepted")
+	}
+}
+
 func TestDecodeRejectsUnknownAndOversize(t *testing.T) {
 	if _, err := Decode(strings.NewReader(validNode + "\nunknown = true\n")); err == nil {
 		t.Fatal("unknown field accepted")

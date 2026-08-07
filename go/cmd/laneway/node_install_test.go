@@ -40,7 +40,8 @@ func TestManagedNodeConfigurationUsesAuthenticatedDiscoveryAndDirectDefault(t *t
 	}
 	if cfg.Node.Name != "managed-node" || cfg.Node.RelayAddress != "relay.example:4433" || cfg.Node.RelayServiceID != serviceID.String() ||
 		cfg.Controller.NetworkID != metadata.NetworkID || cfg.Controller.ServiceID != metadata.Controller.ServiceID ||
-		cfg.Controller.QUICEndpoint != metadata.Controller.QUICEndpoint || !cfg.Direct.Enabled || cfg.Direct.Listen != "0.0.0.0:0" {
+		cfg.Controller.QUICEndpoint != metadata.Controller.QUICEndpoint || !cfg.Direct.Enabled || cfg.Direct.Listen != "0.0.0.0:0" ||
+		cfg.WireGuard.Enabled || cfg.WireGuard.PrivateKeyFile != "/etc/laneway/wireguard.key" {
 		t.Fatalf("generated managed config = %#v", cfg)
 	}
 	contents, err = renderManagedNodeConfig(metadata, "managed-node", managedNodeRelay{serviceID: serviceID, endpoint: "relay.example:4433"}, false)

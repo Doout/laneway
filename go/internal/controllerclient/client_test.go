@@ -118,14 +118,14 @@ func TestEnrollAndConfiguration(t *testing.T) {
 		t.Fatalf("Enroll = %#v, %v", response, err)
 	}
 	networkID, _ := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")
-	if _, err := client.EnrollForNetwork(context.Background(), "secret", "network-bound", []byte{1}, networkID); err != nil {
+	if _, err := client.EnrollForNetwork(context.Background(), "secret", "network-bound", []byte{1}, make([]byte, 32), networkID); err != nil {
 		t.Fatalf("EnrollForNetwork = %v", err)
 	}
-	if _, err := client.EnrollForNetworkAndClass(context.Background(), "secret", "class-bound", []byte{1}, networkID,
+	if _, err := client.EnrollForNetworkAndClass(context.Background(), "secret", "class-bound", []byte{1}, make([]byte, 32), networkID,
 		lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER); err != nil {
 		t.Fatalf("EnrollForNetworkAndClass = %v", err)
 	}
-	if _, err := client.EnrollForNetworkAndClass(context.Background(), "secret", "durable-bound", []byte{1}, networkID,
+	if _, err := client.EnrollForNetworkAndClass(context.Background(), "secret", "durable-bound", []byte{1}, make([]byte, 32), networkID,
 		lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE); err != nil {
 		t.Fatalf("durable EnrollForNetworkAndClass = %v", err)
 	}

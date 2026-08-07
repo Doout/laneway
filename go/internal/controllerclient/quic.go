@@ -51,8 +51,8 @@ func newQUICControllerClient(address, dialAddress string, tlsConfig *tls.Config,
 	return &quicControllerClient{address: address, tls: config, timeout: timeout}, nil
 }
 
-func (c *quicControllerClient) renew(ctx context.Context, csr []byte) (*lanewayv1.RenewalResponse, error) {
-	request := &lanewayv1.ControllerEnvelope{Body: &lanewayv1.ControllerEnvelope_RenewalRequest{RenewalRequest: &lanewayv1.RenewalRequest{Pkcs10CsrDer: csr}}}
+func (c *quicControllerClient) renew(ctx context.Context, csr, wireGuardPublicKey []byte) (*lanewayv1.RenewalResponse, error) {
+	request := &lanewayv1.ControllerEnvelope{Body: &lanewayv1.ControllerEnvelope_RenewalRequest{RenewalRequest: &lanewayv1.RenewalRequest{Pkcs10CsrDer: csr, WireguardPublicKey: append([]byte(nil), wireGuardPublicKey...)}}}
 	response, err := c.request(ctx, request)
 	if err != nil {
 		return nil, err

@@ -59,6 +59,7 @@ type Config struct {
 	Exit        Exit             `toml:"exit"`
 	TCPFallback TCPFallback      `toml:"tcp_fallback"`
 	Direct      Direct           `toml:"direct"`
+	WireGuard   WireGuard        `toml:"wireguard"`
 	Peers       []AuthorizedPeer `toml:"peers"`
 }
 
@@ -115,6 +116,16 @@ type Direct struct {
 	MaxCandidates      int      `toml:"max_candidates"`
 	AllowLoopback      bool     `toml:"allow_loopback"`
 	AllowLinkLocal     bool     `toml:"allow_link_local"`
+}
+
+// WireGuard identifies the stable end-to-end encrypted overlay device. The
+// private key file contains exactly 32 raw bytes and must remain host-local.
+type WireGuard struct {
+	Enabled        bool   `toml:"enabled"`
+	PrivateKeyFile string `toml:"private_key"`
+	InterfaceName  string `toml:"interface"`
+	ListenPort     uint16 `toml:"listen_port"`
+	MTU            int    `toml:"mtu"`
 }
 
 type Controller struct {
@@ -208,6 +219,7 @@ func Defaults() Config {
 			Listen: ":0", CandidateTTL: Duration(2 * time.Minute), ProbeInterval: Duration(200 * time.Millisecond),
 			ProbeTimeout: Duration(3 * time.Second), RendezvousInterval: Duration(30 * time.Second), MaxCandidates: 8,
 		},
+		WireGuard: WireGuard{InterfaceName: "lane0", MTU: 1280},
 		Controller: Controller{
 			Listen: "127.0.0.1:8080", LeafValidity: Duration(30 * 24 * time.Hour), PollInterval: Duration(30 * time.Second),
 		},
@@ -326,9 +338,12 @@ func (c Config) Validate() error {
 		if c.Direct.Enabled && c.Direct.Listen == "" {
 			return errors.New("direct.listen is required when direct connectivity is enabled")
 		}
+		if c.WireGuard.Enabled && (c.WireGuard.PrivateKeyFile == "" || c.WireGuard.InterfaceName == "" || c.WireGuard.MTU < 1280 || c.WireGuard.MTU > 9000) {
+			return errors.New("wireguard.private_key, interface, and MTU in [1280,9000] are required when WireGuard is enabled")
+		}
 	case ModeRelay:
-		if c.Direct.Enabled {
-			return errors.New("direct connectivity is only valid in node mode")
+		if c.Direct.Enabled || c.WireGuard.Enabled {
+			return errors.New("direct connectivity and WireGuard are only valid in node mode")
 		}
 		if c.Relay.Listen == "" {
 			return errors.New("relay.listen is required in relay mode")
@@ -347,8 +362,8 @@ func (c Config) Validate() error {
 			return errors.New("tcp_fallback.address is only valid in node mode")
 		}
 	case ModeController:
-		if c.Direct.Enabled {
-			return errors.New("direct connectivity is only valid in node mode")
+		if c.Direct.Enabled || c.WireGuard.Enabled {
+			return errors.New("direct connectivity and WireGuard are only valid in node mode")
 		}
 		if c.Controller.Listen == "" || c.Controller.QUICListen == "" || c.Controller.DatabaseFile == "" || c.Controller.CAPrivateKeyFile == "" || c.Controller.AdminTokenFile == "" {
 			return errors.New("controller.listen, controller.quic_listen, controller.database, controller.ca_private_key, and controller.admin_token_file are required in controller mode")

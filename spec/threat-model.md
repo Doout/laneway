@@ -207,6 +207,24 @@ packet pump to stop, preventing duplicate TUN readers. The relay remains able
 to observe plaintext IP packets; TCP fallback does not imply end-to-end packet
 encryption.
 
-## 8. Residual and future risks
+## 8. Hybrid WireGuard carrier boundary
 
-Rendezvous tokens reveal a short-lived reachability secret to the relay, while direct QUIC still authenticates both certificate identities before carrying packets. Enrollment and renewal remain dependent on controller and CA integrity. End-to-end packet encryption from the relay is not implemented; the reserved capability does not constitute a security design and MUST remain clear. Traffic analysis, compromised endpoints, and compromised issuing authorities remain outside the containment promise described above.
+WireGuard private keys are generated and retained only on the enrolled host.
+The controller binds the corresponding public key to NetworkID, NodeID,
+overlay ownership, policy epoch, and expiry; relays receive only public
+authorization data and already-encrypted WireGuard datagrams. Compromise of a
+hybrid relay can drop, delay, replay, or observe encrypted packet sizes and
+timing, but must not expose overlay plaintext or permit a key from another
+network. The legacy native-QUIC/TCP dataplane retains the plaintext-relay
+limitation described above until operators complete hybrid migration.
+
+Hybrid enrollment rejects low-order or duplicate public keys before invite
+consumption. A missing key retains stable-v1 legacy enrollment but produces no
+hybrid authorization. Authenticated renewal rotates the key and certificate in a
+single transaction, and snapshot leases bound how long an old authorization can
+survive loss of controller reachability. Pre-schema-v6 nodes have no key and
+are deliberately unusable on the hybrid dataplane until they renew.
+
+## 9. Residual and future risks
+
+Rendezvous tokens reveal a short-lived reachability secret to the relay, while direct QUIC still authenticates both certificate identities before carrying packets. Enrollment and renewal remain dependent on controller and CA integrity. End-to-end packet encryption from the relay applies only to the hybrid WireGuard carriers; selecting the legacy native-QUIC dataplane retains relay plaintext exposure. Traffic analysis, compromised endpoints, and compromised issuing authorities remain outside the containment promise described above.
