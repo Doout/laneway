@@ -233,9 +233,10 @@ func (c *Client) EnrollForNetwork(ctx context.Context, token, name string, csrDE
 }
 
 func (c *Client) EnrollForNetworkAndClass(ctx context.Context, token, name string, csrDER []byte, expectedNetwork identity.NetworkID, expectedClass lanewayv1.EnrollmentClass) (*lanewayv1.EnrollmentResponse, error) {
-	if expectedNetwork.IsZero() || (expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER &&
+	if expectedNetwork.IsZero() || (expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE &&
+		expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER &&
 		expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER) {
-		return nil, errors.New("controller client: expected enrollment network and user class are required")
+		return nil, errors.New("controller client: expected enrollment network and class are required")
 	}
 	request := &lanewayv1.EnrollmentRequest{
 		EnrollmentToken: token, RequestedName: name, Pkcs10CsrDer: csrDER,

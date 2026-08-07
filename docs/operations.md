@@ -182,6 +182,53 @@ laneway controller relay update --relay-id RELAY_RECORD_ID \
   --name primary --endpoint relay-new.example:4433 --enabled=true
 ```
 
+### Managed persistent Nodes
+
+After the release package creates the locked service account and installs the
+hardened unit, a durable Node invite is the only secret input required:
+
+```sh
+install -m 0600 enrollment-code.txt ./laneway.code
+sudo laneway node install lane.example.com --token-file ./laneway.code
+sudo laneway status
+```
+
+The command verifies the root-owned package files and service account before it
+reads the invite. Public-Web-PKI bootstrap supplies the private CA, controller
+identity, and endpoints; the first mTLS controller snapshot supplies the relay
+identity and endpoint. The generated controller-authoritative configuration has
+no static overlays or peers and enables the shared-socket direct path on an
+ephemeral UDP port. `--no-direct` is the explicit opt-out.
+
+The installation writes `0640 root:laneway` credentials/configuration and a
+`0600 root:root` ownership manifest. An exact re-run validates those files and
+starts the existing identity without reusing the consumed invite. A fresh
+start must remain active across bounded systemd probes; otherwise the service
+is stopped and disabled and the newly installed credentials are removed. The
+invite was consumed by that point, so retry with a newly issued invite.
+
+Package upgrades replace the binary and unit but preserve `/etc/laneway` and
+`/var/lib/laneway`. Confirm `systemctl is-enabled lanewayd`, restart the unit,
+and check `laneway status` after an upgrade. Reboot behavior follows the same
+enabled unit. Rotate a managed credential with `sudo laneway node renew`; it
+stages a locally generated key, stops the service for pair promotion, verifies
+the restarted service remains active, and restores the previous pair if the
+new credential cannot start. To uninstall command-owned Node state after a
+graceful stop:
+
+```sh
+sudo laneway node uninstall
+# Or retain /var/lib/laneway while removing credentials and configuration:
+sudo laneway node uninstall --keep-state
+```
+
+Uninstall refuses to operate without the root-owned managed manifest and never
+removes the shared binary, unit, service account, controller, or relay files.
+For an existing manual Node, stop the unit, back up and move the four files
+`ca.crt`, `node.crt`, `node.key`, and `laneway.toml` out of `/etc/laneway`, then
+run the managed install with a fresh durable invite. The installer deliberately
+refuses to overwrite unmanaged files.
+
 For one compromised node credential, prefer certificate-specific revocation
 so another credential for the same node remains usable:
 
@@ -208,8 +255,8 @@ sudo -u laneway laneway renew --controller https://controller:8443 \
   --controller-quic controller:8443 \
   --controller-network-id NETWORK_ID --controller-service-id CONTROLLER_ID \
   --ca /etc/laneway/ca.crt --cert /etc/laneway/node.crt \
-  --key /etc/laneway/node.key --out-cert /etc/laneway/node.next.crt \
-  --out-key /etc/laneway/node.next.key
+  --key /etc/laneway/node.key --out-cert /var/lib/laneway/node.next.crt \
+  --out-key /var/lib/laneway/node.next.key
 ```
 
 Verify the staged certificate's network/node URI and public-key match, then

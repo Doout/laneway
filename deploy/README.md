@@ -12,6 +12,10 @@ by the service account.
 The node service requires `/dev/net/tun` and `CAP_NET_ADMIN`. Relay and
 controller services deliberately run without network-administration
 capabilities. Production certificate and key files are never included here.
+After installing the package, the supported managed Node path is
+`sudo laneway node install DOMAIN`. It authenticates public bootstrap metadata,
+requires a durable Node invite, derives controller and relay identity pins, and
+enables direct paths without copying identifiers into a shell command.
 Node units leave the non-process `/proc` APIs visible (`ProcSubset=all`) because
 subnet and exit roles must transactionally read, update, and restore their
 owned forwarding sysctls; `ProtectProc=invisible` still restricts visibility
@@ -86,10 +90,12 @@ It deliberately contains neither `node.overlay_addresses` nor `[[peers]]`:
 The node runtime fetches a complete leased snapshot before opening `lane0`, validates
 the assigned address against its certificate identity and self-owned host
 route, and fails startup closed when that bootstrap is unavailable.
-Replace its controller identity pins and `node.relay_network_id` and
-`node.relay_service_id` with the exact identities encoded in the controller
-and relay certificates. CA, role, and optional DNS-name verification remain
-enabled in addition to these immutable pins.
+For a managed install, those controller and relay pins are generated from the
+authenticated discovery and controller snapshots. Existing hand-written
+installations may continue using this example; migrate by backing up the four
+files in `/etc/laneway`, stopping `lanewayd`, moving those files out of the way,
+and running `laneway node install DOMAIN` with a fresh durable invite. Do not
+mix manual files with the managed ownership manifest.
 
 `nftables/` contains an operator-reviewed host firewall example and guidance
 for the runtime-owned subnet table. The full deployment, diagnostics,
