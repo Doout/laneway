@@ -35,6 +35,7 @@ trap cleanup EXIT INT TERM
   cd "${repo_root}/go"
   go test -c -o "${work_dir}/linux.test" ./integration/linux
   go test -c -o "${work_dir}/relay.test" ./integration/relay
+  go test -c -o "${work_dir}/nethelper.test" ./internal/nethelper
   go build -o "${work_dir}/laneway" ./cmd/laneway
   go build -o "${work_dir}/lanewayd" ./cmd/laneway
   go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
@@ -49,6 +50,11 @@ echo "==> kernel TUN, overlay routes, subnet forwarding, exit rollback, and cras
 ip netns exec "${namespace}" env \
   LANEWAY_PRIVILEGED_INTEGRATION=1 \
   "${work_dir}/linux.test" -test.v
+
+echo "==> least-privileged foreground networking helper and requester-death cleanup"
+ip netns exec "${namespace}" env \
+  LANEWAY_PRIVILEGED_TEST=1 \
+  "${work_dir}/nethelper.test" -test.v -test.run '^TestPrivilegedHelper'
 
 echo "==> authenticated TCP fallback with all UDP output blocked"
 ip netns exec "${namespace}" nft add table inet laneway_udp_block

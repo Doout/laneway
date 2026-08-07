@@ -115,7 +115,7 @@ Laneway MUST NOT delete or overwrite it.
 | relay container | dedicated non-root | none; `no-new-privileges` | bounded runtime tmpfs only | configuration, trust bundle, TLS identity |
 | administrative CLI | invoking operator | none by default | explicit backup/output path | configuration and trust material as required |
 | foreground User process | invoking user | none | user-owned bounded session state | downloaded trust/bootstrap metadata |
-| User network helper | root or `CAP_NET_ADMIN`, separately invoked | allowlisted TUN/route/rule and optional DNS operations only; `no_new_privs` after setup | root-owned bounded ownership journal | structured authenticated request; no enrollment token or private key |
+| User network helper | separately invoked as root, then bounded to `CAP_NET_ADMIN` | inherited peer-authenticated socket; allowlisted TUN/route operations now, rule/bypass/DNS operations only as their foreground modes require; `no_new_privs` after setup | in-process ownership transaction bound to requester socket EOF | versioned structured request; no enrollment token or private key |
 | Node host service | locked service identity | `CAP_NET_ADMIN` and `/dev/net/tun` | Node state/runtime directories | configuration, trust bundle, Node TLS identity |
 | Exit Node container | dedicated non-root where supported | `NET_ADMIN` and `/dev/net/tun`; never `privileged` by default | bounded state/runtime volumes | configuration, trust bundle, Exit TLS identity |
 

@@ -221,6 +221,42 @@ func OpenTUN(ctx context.Context, config TUNConfig) (TUNDevice, error) {
 	return openTUN(ctx, config, linuxTUNBackend{ip: config.IPCommand, runner: config.Runner})
 }
 
+// DuplicateTUNFile returns a close-on-exec duplicate of a Linux TUN file
+// descriptor. It is intentionally narrow: callers can transfer packet I/O to
+// an unprivileged process without exposing the privileged configuration API.
+func DuplicateTUNFile(device TUNDevice) (*os.File, error) {
+	tun, ok := device.(*linuxTUN)
+	if !ok {
+		return nil, fmt.Errorf("platform: TUN device cannot be transferred")
+	}
+	fd, err := unix.FcntlInt(tun.file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("platform: duplicate TUN descriptor: %w", err)
+	}
+	return os.NewFile(uintptr(fd), tun.name), nil
+}
+
+// AdoptTUNFile wraps an already attached and configured TUN descriptor. The
+// receiver owns file. Closing it never mutates addresses or routes; those are
+// owned and restored by the privileged process that transferred the file.
+func AdoptTUNFile(file *os.File, config TUNConfig) (TUNDevice, error) {
+	if file == nil {
+		return nil, fmt.Errorf("%w: missing transferred descriptor", ErrInvalidTUN)
+	}
+	normalized, err := normalizeTUNConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.SetNonblock(int(file.Fd()), true); err != nil {
+		return nil, fmt.Errorf("platform: configure transferred TUN descriptor: %w", err)
+	}
+	return &linuxTUN{
+		file: file, name: normalized.Name, mtu: normalized.MTU,
+		addresses: append([]netip.Prefix(nil), normalized.Addresses...),
+		backend:   linuxTUNBackend{}, done: make(chan struct{}),
+	}, nil
+}
+
 func openTUN(ctx context.Context, config TUNConfig, backend tunBackend) (TUNDevice, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

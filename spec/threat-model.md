@@ -117,6 +117,22 @@ MUST NOT execute caller-supplied commands, and MUST NOT receive enrollment token
 or endpoint private keys. Parent death MUST trigger bounded cleanup or leave an
 exactly recoverable root-owned journal.
 
+The Linux helper boundary uses a private `SOCK_SEQPACKET` socket inherited from
+the requester rather than a listening endpoint. Kernel `SO_PEERCRED` binds that
+channel to the process that created it, and the helper accepts versioned JSON
+operations with unknown fields rejected. Setup transfers only a duplicate TUN
+file descriptor with `SCM_RIGHTS`; controller credentials, enrollment tokens,
+and private keys never cross the boundary. A non-root launcher will elevate only
+a resolved binary whose file and every parent directory are root-owned and not
+group- or world-writable, preventing executable replacement before `sudo`.
+After setup, the helper drops its
+capability bounding, permitted, effective, inheritable, and ambient sets to
+`CAP_NET_ADMIN` and enables `no_new_privs`. Socket EOF is the requester-death
+journal: the helper transactionally restores only routes it owns and closes the
+last privileged TUN reference. Privileged namespace tests cover clean shutdown,
+requester `SIGKILL`, exact capability state, and rejection of non-allowlisted
+operations.
+
 Controller and relay containers MUST run as non-root, drop all capabilities, use
 a read-only root filesystem, and set `no-new-privileges`. The default Exit Node
 MUST NOT use host networking, `privileged: true`, the Docker socket, or host
