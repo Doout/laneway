@@ -53,11 +53,27 @@
       "expected": "matches_relay_ipv4_icmp"
     },
     {
+      "path": "packets/relay-wireguard-initiation.hex",
+      "kind": "relay-packet-v1:opaque-wireguard",
+      "encoding": "hex",
+      "decoded_byte_length": 153,
+      "sha256": "9719a84f624b692939c432ee302a12257903fb2526e9636bb459208a5239d662",
+      "expected": "decode_e2e_wireguard_success"
+    },
+    {
+      "path": "packets/relay-wireguard-initiation.json",
+      "kind": "source-description:relay-packet-v1:opaque-wireguard",
+      "encoding": "json-utf8",
+      "stored_byte_length": 247,
+      "sha256": "5f7bc8b61377e23b3bbbfc1f1e823d9cb1b4dc0a0decf0058055ad906a9b309c",
+      "expected": "matches_relay_wireguard_initiation"
+    },
+    {
       "path": "packets/reject-cases.json",
       "kind": "table:relay-packet-v1-negative",
       "encoding": "json-utf8",
       "stored_byte_length": 2156,
-      "sha256": "8a748f0cdd523f42cef8fa17172c831e3de51fe2acd010204055edb5c15d99c3",
+      "sha256": "234214f295108610d4136038c38744a07e21805b2e6d68b84e9f7c4e4d6f8867",
       "expected": "per_case"
     },
     {
@@ -72,8 +88,8 @@
       "path": "packets/header-cases.json",
       "kind": "table:relay-packet-v1-header",
       "encoding": "json-utf8",
-      "stored_byte_length": 1112,
-      "sha256": "92a22934dbe5d9c945bab50f31d9ec2abfc0262d63ba6ee254f870d7292238d9",
+      "stored_byte_length": 1218,
+      "sha256": "cd80196b9723040a8fc01f590f524f668ca71584cc75f5de1f10f11164f5fada",
       "expected": "per_case"
     },
     {

@@ -56,11 +56,23 @@ func register(t testing.TB, r *Registry, network, node byte, prefixes ...string)
 		Identity:           identity.NodeIdentity{NetworkID: networkID(network), NodeID: nodeID(node)},
 		AuthorizedPrefixes: parsed,
 		AllowIPv6:          true,
+		AllowE2E:           true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
+}
+
+func wireGuardFrame(t testing.TB, handle uint32) []byte {
+	t.Helper()
+	payload := make([]byte, 148)
+	payload[0] = 1
+	frame, err := protocol.EncodeWireGuardPacket(nil, handle, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frame
 }
 
 func ipv4Frame(t testing.TB, handle uint32, source, destination string, extra int) []byte {
@@ -264,6 +276,46 @@ func TestForwardRejectsIPv6UnlessBothSessionsNegotiatedIt(t *testing.T) {
 	}
 	if got := r.Metrics().DroppedCapability; got != 1 {
 		t.Fatalf("capability drops = %d, want 1", got)
+	}
+}
+
+func TestForwardOpaqueWireGuardPreservesCiphertextAndRequiresCapability(t *testing.T) {
+	r := testRegistry(t, nil)
+	a := register(t, r, 1, 1, "10.0.0.1/32")
+	b := register(t, r, 1, 2, "10.0.0.2/32")
+	pair, err := r.BindPeers(a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := wireGuardFrame(t, pair.First.Handle)
+	if err := r.Forward(a, input); err != nil {
+		t.Fatal(err)
+	}
+	out, err := b.Dequeue(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, payload, err := protocol.DecodeFrame(out)
+	if err != nil || header.Flags != protocol.PacketFlagE2EEncrypted || header.RouteHandle != pair.Second.Handle {
+		t.Fatalf("forwarded header=%+v error=%v", header, err)
+	}
+	if string(payload) != string(input[protocol.PacketHeaderSize:]) {
+		t.Fatal("relay changed opaque WireGuard ciphertext")
+	}
+
+	withoutCapability, err := r.Register(SessionConfig{
+		Identity:           identity.NodeIdentity{NetworkID: networkID(1), NodeID: nodeID(3)},
+		AuthorizedPrefixes: []netip.Prefix{netip.MustParsePrefix("10.0.0.3/32")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPair, err := r.BindPeers(a, withoutCapability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Forward(a, wireGuardFrame(t, secondPair.First.Handle)); !errors.Is(err, ErrCapabilityNotNegotiated) {
+		t.Fatalf("capability error = %v", err)
 	}
 }
 

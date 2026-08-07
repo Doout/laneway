@@ -81,6 +81,10 @@ type SessionConfig struct {
 	// AllowIPv6 must be true only when both transport endpoints negotiated
 	// LANEWAY_IPV6_V1. IPv4 remains available for every v1 relay session.
 	AllowIPv6 bool
+	// AllowE2E must be true only when this transport endpoint negotiated
+	// LANEWAY_E2E_PACKET_V1. It permits opaque, structurally valid WireGuard
+	// datagrams; bilateral route handles still bind the exact recipient.
+	AllowE2E bool
 }
 
 type sessionKey struct {
@@ -97,6 +101,7 @@ type Session struct {
 	prefixes   prefixSet
 	maxPayload int
 	allowIPv6  bool
+	allowE2E   bool
 
 	// Binding state is mutated only on the control path under Registry.mu.
 	// Forward never consults these maps: every mutation publishes a complete,
@@ -245,6 +250,7 @@ func (r *Registry) Register(config SessionConfig) (*Session, error) {
 		prefixes:   prefixes,
 		maxPayload: maxPayload,
 		allowIPv6:  config.AllowIPv6,
+		allowE2E:   config.AllowE2E,
 		byHandle:   make(map[uint32]*Session),
 		byPeer:     make(map[*Session]uint32),
 		nextHandle: 1,

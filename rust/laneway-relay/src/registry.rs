@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use laneway_protocol::{
-    AuthenticatedIdentity, PacketHeader, decode_packet,
+    AuthenticatedIdentity, PACKET_FLAG_E2E_ENCRYPTED, PacketHeader, decode_frame,
     v1::{
         EndpointCandidate, EndpointTransport, RouteHandleBinding, RouteHandleRelease,
         relay_envelope,
@@ -40,6 +40,7 @@ pub(crate) struct Session {
     certificate_serial: Vec<u8>,
     authorization: Authorization,
     allow_ipv6: bool,
+    allow_e2e: bool,
     direct_endpoint: Option<SocketAddr>,
     max_routes: u32,
     outbound: mpsc::Sender<Bytes>,
@@ -52,6 +53,12 @@ pub(crate) struct SessionChannels {
     pub(crate) outbound: mpsc::Receiver<Bytes>,
     pub(crate) control: mpsc::Receiver<relay_envelope::Body>,
     pub(crate) canceled: watch::Receiver<bool>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct SessionCapabilities {
+    pub(crate) allow_ipv6: bool,
+    pub(crate) allow_e2e: bool,
 }
 
 struct Entry {
@@ -228,6 +235,7 @@ impl BenchmarkForwarder {
             certificate_serial: Vec::new(),
             authorization: sender_authorization,
             allow_ipv6: true,
+            allow_e2e: true,
             direct_endpoint: None,
             max_routes: flows as u32,
             outbound: sender_outbound,
@@ -239,6 +247,7 @@ impl BenchmarkForwarder {
             certificate_serial: Vec::new(),
             authorization: recipient_authorization,
             allow_ipv6: true,
+            allow_e2e: true,
             direct_endpoint: None,
             max_routes: flows as u32,
             outbound: recipient_outbound,
@@ -353,7 +362,10 @@ impl Registry {
             Vec::new(),
             authorization,
             requested_max_routes,
-            allow_ipv6,
+            SessionCapabilities {
+                allow_ipv6,
+                allow_e2e: true,
+            },
             None,
         )
     }
@@ -364,7 +376,7 @@ impl Registry {
         certificate_serial: Vec<u8>,
         authorization: Authorization,
         requested_max_routes: u32,
-        allow_ipv6: bool,
+        capabilities: SessionCapabilities,
         direct_endpoint: Option<SocketAddr>,
     ) -> Result<SessionChannels> {
         ensure!(
@@ -378,7 +390,8 @@ impl Registry {
             identity,
             certificate_serial,
             authorization,
-            allow_ipv6,
+            allow_ipv6: capabilities.allow_ipv6,
+            allow_e2e: capabilities.allow_e2e,
             direct_endpoint,
             max_routes: requested_max_routes,
             outbound: outbound_tx,
@@ -615,7 +628,7 @@ impl Registry {
     }
 
     fn forward_inner(&self, session: &Arc<Session>, frame: PacketBuffer) -> Result<()> {
-        let (header, packet) = match decode_packet(frame.as_ref()) {
+        let (header, packet) = match decode_frame(frame.as_ref()) {
             Ok(value) => value,
             Err(error) => {
                 self.metrics
@@ -624,7 +637,6 @@ impl Registry {
                 return Err(error.into());
             }
         };
-        let (source, destination) = packet_addresses(packet)?;
         let (recipient, return_handle) = {
             let forwarding = self.forwarding.load();
             let sender = match forwarding
@@ -653,46 +665,66 @@ impl Registry {
                     .fetch_add(1, Ordering::Relaxed);
                 bail!("packet exceeds negotiated payload limit");
             }
-            if source.is_ipv6() && (!session.allow_ipv6 || !target.recipient.allow_ipv6) {
-                self.metrics
-                    .dropped_capability
-                    .fetch_add(1, Ordering::Relaxed);
-                bail!("IPv6 packet capability was not negotiated");
-            }
-            if let Err(rejection) = self.controller.authorize_packet(PacketAuthorization {
-                source: PacketPeer {
-                    identity: &session.identity,
-                    certificate_serial: &session.certificate_serial,
-                    fallback: &session.authorization,
-                    address: source,
-                },
-                destination: PacketPeer {
-                    identity: &target.recipient.identity,
-                    certificate_serial: &target.recipient.certificate_serial,
-                    fallback: &target.recipient.authorization,
-                    address: destination,
-                },
-                packet,
-            }) {
-                match rejection {
-                    PacketRejection::Credential => {
-                        bail!("sender or recipient authorization is expired or revoked")
-                    }
-                    PacketRejection::Source => {
-                        self.metrics.dropped_source.fetch_add(1, Ordering::Relaxed);
-                        bail!("packet source is not authorized")
-                    }
-                    PacketRejection::Destination => {
-                        self.metrics
-                            .dropped_destination
-                            .fetch_add(1, Ordering::Relaxed);
-                        bail!("packet destination is not authorized")
-                    }
-                    PacketRejection::Policy => {
-                        self.metrics
-                            .dropped_capability
-                            .fetch_add(1, Ordering::Relaxed);
-                        bail!("packet denied by controller policy")
+            if header.flags == PACKET_FLAG_E2E_ENCRYPTED {
+                if !session.allow_e2e
+                    || !target.recipient.allow_e2e
+                    || !self.controller.credential_authorized_with_fallback(
+                        &session.identity,
+                        &session.certificate_serial,
+                    )
+                    || !self.controller.credential_authorized_with_fallback(
+                        &target.recipient.identity,
+                        &target.recipient.certificate_serial,
+                    )
+                {
+                    self.metrics
+                        .dropped_capability
+                        .fetch_add(1, Ordering::Relaxed);
+                    bail!("E2E packet capability or credential authorization is unavailable");
+                }
+            } else {
+                let (source, destination) = packet_addresses(packet)?;
+                if source.is_ipv6() && (!session.allow_ipv6 || !target.recipient.allow_ipv6) {
+                    self.metrics
+                        .dropped_capability
+                        .fetch_add(1, Ordering::Relaxed);
+                    bail!("IPv6 packet capability was not negotiated");
+                }
+                if let Err(rejection) = self.controller.authorize_packet(PacketAuthorization {
+                    source: PacketPeer {
+                        identity: &session.identity,
+                        certificate_serial: &session.certificate_serial,
+                        fallback: &session.authorization,
+                        address: source,
+                    },
+                    destination: PacketPeer {
+                        identity: &target.recipient.identity,
+                        certificate_serial: &target.recipient.certificate_serial,
+                        fallback: &target.recipient.authorization,
+                        address: destination,
+                    },
+                    packet,
+                }) {
+                    match rejection {
+                        PacketRejection::Credential => {
+                            bail!("sender or recipient authorization is expired or revoked")
+                        }
+                        PacketRejection::Source => {
+                            self.metrics.dropped_source.fetch_add(1, Ordering::Relaxed);
+                            bail!("packet source is not authorized")
+                        }
+                        PacketRejection::Destination => {
+                            self.metrics
+                                .dropped_destination
+                                .fetch_add(1, Ordering::Relaxed);
+                            bail!("packet destination is not authorized")
+                        }
+                        PacketRejection::Policy => {
+                            self.metrics
+                                .dropped_capability
+                                .fetch_add(1, Ordering::Relaxed);
+                            bail!("packet denied by controller policy")
+                        }
                     }
                 }
             }
@@ -724,7 +756,7 @@ impl Registry {
         // the recipient writer instead of copying every warmed packet.
         let prefix = PacketHeader {
             version: 1,
-            flags: 0,
+            flags: header.flags,
             route_handle: return_handle,
         }
         .encode()?;
@@ -973,7 +1005,7 @@ pub(crate) fn packet_addresses(packet: &[u8]) -> Result<(IpAddr, IpAddr)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use laneway_protocol::{Id, Role, encode_packet};
+    use laneway_protocol::{Id, Role, decode_frame, encode_packet, encode_wireguard_packet};
     use std::{sync::mpsc as std_mpsc, time::Duration};
 
     fn identity(node: u8) -> AuthenticatedIdentity {
@@ -1114,6 +1146,61 @@ mod tests {
         assert_eq!(metrics.snapshot().forwarded_packets, 1);
         assert_eq!(metrics.snapshot().sessions, 1);
         assert_eq!(metrics.snapshot().bindings_released, 2);
+    }
+
+    #[tokio::test]
+    async fn opaque_wireguard_forwarding_preserves_ciphertext_and_requires_capability() {
+        let metrics = Arc::new(Metrics::default());
+        let registry = Registry::new(2, 4, 4, Arc::clone(&metrics));
+        let mut first = registry
+            .register(identity(2), authorization("100.96.0.1/32"), 4, true)
+            .unwrap();
+        let mut second = registry
+            .register(identity(3), authorization("100.96.0.2/32"), 4, true)
+            .unwrap();
+        let first_handle = next_binding(&mut first).await;
+        let second_handle = next_binding(&mut second).await;
+        let mut wireguard = vec![0_u8; 148];
+        wireguard[0] = 1;
+        wireguard[4..8].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        let mut frame = Vec::new();
+        encode_wireguard_packet(first_handle, &wireguard, &mut frame).unwrap();
+        registry
+            .forward(&first.session, Bytes::from(frame))
+            .unwrap();
+        let forwarded = second.outbound.recv().await.unwrap();
+        let (header, payload) = decode_frame(&forwarded).unwrap();
+        assert_eq!(header.flags, PACKET_FLAG_E2E_ENCRYPTED);
+        assert_eq!(header.route_handle, second_handle);
+        assert_eq!(payload, wireguard);
+
+        let denied = Registry::new(2, 4, 4, Arc::new(Metrics::default()));
+        let mut denied_sender = denied
+            .register_credential(
+                identity(4),
+                Vec::new(),
+                authorization("100.96.0.4/32"),
+                4,
+                SessionCapabilities {
+                    allow_ipv6: true,
+                    allow_e2e: false,
+                },
+                None,
+            )
+            .unwrap();
+        let mut denied_recipient = denied
+            .register(identity(5), authorization("100.96.0.5/32"), 4, true)
+            .unwrap();
+        let denied_handle = next_binding(&mut denied_sender).await;
+        let _ = next_binding(&mut denied_recipient).await;
+        let mut denied_frame = Vec::new();
+        encode_wireguard_packet(denied_handle, &wireguard, &mut denied_frame).unwrap();
+        assert!(
+            denied
+                .forward(&denied_sender.session, Bytes::from(denied_frame))
+                .is_err()
+        );
+        assert!(denied_recipient.outbound.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1339,7 +1426,10 @@ mod tests {
                 Vec::new(),
                 authorization("100.96.0.1/32"),
                 4,
-                true,
+                SessionCapabilities {
+                    allow_ipv6: true,
+                    allow_e2e: true,
+                },
                 Some(first_endpoint),
             )
             .unwrap();
@@ -1349,7 +1439,10 @@ mod tests {
                 Vec::new(),
                 authorization("100.96.0.2/32"),
                 4,
-                true,
+                SessionCapabilities {
+                    allow_ipv6: true,
+                    allow_e2e: true,
+                },
                 Some(second_endpoint),
             )
             .unwrap();
@@ -1461,7 +1554,10 @@ mod tests {
                 Vec::new(),
                 authorization("100.96.0.2/32"),
                 4,
-                true,
+                SessionCapabilities {
+                    allow_ipv6: true,
+                    allow_e2e: true,
+                },
                 Some(replacement_endpoint),
             )
             .unwrap();
