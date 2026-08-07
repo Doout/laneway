@@ -222,7 +222,7 @@ The Go daemons have an opt-in loopback-only diagnostics listener:
 ```sh
 laneway-relay -config /etc/laneway/relay.toml -diagnostics 127.0.0.1:6060
 laneway-controller -config /etc/laneway/controller.toml -diagnostics 127.0.0.1:6061
-lanewayd -config /etc/laneway/laneway.toml -diagnostics 127.0.0.1:6062
+laneway node run -config /etc/laneway/laneway.toml -diagnostics 127.0.0.1:6062
 curl --fail --silent http://127.0.0.1:6060/metrics
 curl --fail --output /tmp/laneway-relay.heap \
   http://127.0.0.1:6060/debug/pprof/heap
@@ -492,8 +492,23 @@ readable by container UID/GID `65532` (or by the runtime's mapped equivalent);
 the host-systemd `root:laneway 0640` ownership convention does not
 automatically grant access to this separate container identity.
 
-The scratch image is not a node image: `lanewayd` needs `/dev/net/tun`,
-`CAP_NET_ADMIN`, and host tools such as `ip`, `nft`, `sysctl`, and optionally
-`resolvectl`. Rootless containers cannot provide that host-network contract.
-Run nodes with the hardened systemd unit, or build a dedicated node image and
-explicitly accept its device, capability, host-network, and cleanup model.
+The general scratch image is not a node image. Use the dedicated isolated Exit
+Node image and Compose profile when containerizing that role; it reduces the
+long-running `laneway node run` process to UID 65532 plus `NET_ADMIN`, exposes
+only `/dev/net/tun`, and keeps routes and nftables state in the container
+network namespace. Rootless containers cannot provide that kernel contract.
+Ordinary host nodes use the hardened systemd unit.
+
+## Unified node command and compatibility
+
+The supported Go node entrypoint is:
+
+```sh
+laneway node run -config /etc/laneway/laneway.toml
+```
+
+Release packages install `/usr/local/sbin/lanewayd` as a compatibility symlink
+to the same versioned `/usr/local/bin/laneway` artifact. Invoking that symlink
+with legacy `-config`, `-diagnostics`, or `-version` arguments remains
+supported. New service definitions and automation should use `laneway node
+run`; no separate daemon binary needs to be upgraded or version-matched.

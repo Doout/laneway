@@ -25,11 +25,16 @@ import (
 	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/localapi"
+	"laneway.dev/laneway/internal/nodeapp"
 	"laneway.dev/laneway/internal/pki"
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	args := os.Args[1:]
+	if filepath.Base(os.Args[0]) == "lanewayd" {
+		args = append([]string{"node", "run"}, args...)
+	}
+	if err := run(args); err != nil {
 		fmt.Fprintln(os.Stderr, "laneway:", err)
 		os.Exit(1)
 	}
@@ -61,6 +66,8 @@ func run(args []string) error {
 		return runJoin(args[1:])
 	case "renew":
 		return runRenew(args[1:])
+	case "node":
+		return runNode(args[1:])
 	case "controller":
 		return runController(args[1:])
 	case "route":
@@ -86,6 +93,7 @@ commands:
   routes            list installed overlay routes
   join TOKEN        enroll with a controller (or use --token-file PATH)
   renew             renew this node's controller-issued certificate
+  node run          run the persistent host Node service
   controller        manage controller networks, relays, routes, ACLs, and audit events
   route advertise   advertise or withdraw this node's subnet/exit routes
   exit enable       advertise this configured gateway as an exit node
@@ -98,6 +106,13 @@ commands:
   pki node          issue a node certificate
   pki relay         issue a relay service certificate
   pki controller    issue a controller service certificate`)
+}
+
+func runNode(args []string) error {
+	if len(args) == 0 || args[0] != "run" {
+		return errors.New("usage: laneway node run [-config path] [-diagnostics 127.0.0.1:PORT]")
+	}
+	return nodeapp.Run(args[1:])
 }
 
 func runExit(args []string) error {

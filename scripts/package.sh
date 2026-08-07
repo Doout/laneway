@@ -39,10 +39,11 @@ ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=$version"
   cd "$project_dir/go"
   CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
     go build -trimpath -ldflags "$ldflags" -o "$package_dir/bin/laneway" ./cmd/laneway
-  for command in lanewayd laneway-relay laneway-controller; do
+  for command in laneway-relay laneway-controller; do
     CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
       go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/$command" "./cmd/$command"
   done
+	ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
 )
 
 cp "$project_dir/deploy/examples/controller.toml" \

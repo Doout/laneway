@@ -35,8 +35,11 @@ less install.sh
 sudo sh install.sh
 ```
 
-It installs four Go binaries, hardened systemd units, examples, and operational
-documentation. It creates the locked `laneway` service account but never
+It installs one versioned `laneway` binary for enrollment, node operation, and
+administration, plus dedicated relay/controller service binaries. A
+`lanewayd` compatibility symlink dispatches to `laneway node run`. The package
+also includes hardened systemd units, examples, and operational documentation.
+It creates the locked `laneway` service account but never
 overwrites configuration or starts a service.
 
 To build the same package from source (Go 1.26+):
@@ -97,7 +100,8 @@ make package VERSION=1.0.0 PACKAGE_GOARCH=arm64
 
 Pushing a stable `vMAJOR.MINOR.PATCH` tag runs the release workflow, builds both architectures,
 generates `checksums.txt`, and publishes a GitHub release. Release binaries
-support `laneway version` and daemon `-version` flags.
+support `laneway version`; `laneway node run -version` and the legacy
+`lanewayd -version` alias report the identical embedded version.
 
 ## Documentation
 

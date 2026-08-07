@@ -36,7 +36,7 @@ trap cleanup EXIT INT TERM
   go test -c -o "${work_dir}/linux.test" ./integration/linux
   go test -c -o "${work_dir}/relay.test" ./integration/relay
   go build -o "${work_dir}/laneway" ./cmd/laneway
-  go build -o "${work_dir}/lanewayd" ./cmd/lanewayd
+  go build -o "${work_dir}/lanewayd" ./cmd/laneway
   go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
   go build -o "${work_dir}/laneway-controller" ./cmd/laneway-controller
   go build -o "${work_dir}/netprobe" ./integration/netprobe

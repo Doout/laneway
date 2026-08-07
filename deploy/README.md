@@ -80,9 +80,10 @@ controller-managed authorization are intentionally mutually exclusive.
 Replace `controller.network_id` and `controller.service_id` with the exact
 identity encoded in the controller certificate.
 
-`node-controller.toml` is the matching controller-authoritative node example.
+`node-controller.toml` is the matching controller-authoritative node example,
+started with `laneway node run -config /etc/laneway/laneway.toml`.
 It deliberately contains neither `node.overlay_addresses` nor `[[peers]]`:
-`lanewayd` fetches a complete leased snapshot before opening `lane0`, validates
+The node runtime fetches a complete leased snapshot before opening `lane0`, validates
 the assigned address against its certificate identity and self-owned host
 route, and fails startup closed when that bootstrap is unavailable.
 Replace its controller identity pins and `node.relay_network_id` and

@@ -1,4 +1,4 @@
-package main
+package nodeapp
 
 import (
 	"context"
