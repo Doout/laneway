@@ -55,30 +55,24 @@ The native Rust implementations remain available as
 
 ## Quick start: join a managed network
 
-Get an enrollment token and the network, controller, and relay identity values
-from your Laneway administrator. Save the one-time token in a protected file.
-One helper then enrolls the node, installs its
-credentials with service-safe permissions, writes and validates the controller
-configuration, and optionally starts it:
+Get the public Laneway domain and a durable Node invite from your administrator.
+Save the one-time code in a protected file. One command authenticates discovery,
+binds enrollment to the discovered network and durable-node class, discovers
+the authorized relay, writes the strict configuration and credentials, and
+enables the hardened systemd service. Direct P2P is enabled by default.
 
 ```bash
-install -m 0600 enrollment-token.txt ./laneway.token
-sudo laneway-setup-node \
-  --token-file ./laneway.token --name laptop --ca ./ca.crt \
-  --controller https://controller.example.com:8443 \
-  --controller-quic controller.example.com:8443 \
-  --controller-network-id NETWORK_ID \
-  --controller-service-id CONTROLLER_ID \
-  --controller-server-name controller.example.com \
-  --relay relay.example.com:4433 \
-  --relay-tcp relay.example.com:443 \
-  --relay-service-id RELAY_ID \
-  --relay-server-name relay.example.com \
-  --start
+install -m 0600 enrollment-code.txt ./laneway.code
+sudo laneway node install lane.example.com --token-file ./laneway.code
 
 sudo laneway up
 sudo laneway status
 ```
+
+Use `--no-direct` only for a deliberate operator opt-out and `--no-start` when
+activation is managed separately. Re-running the same command is idempotent and
+does not consume another invite. Remove only command-owned Node credentials and
+state with `sudo laneway node uninstall` (or preserve state with `--keep-state`).
 
 `laneway up` is a readiness check; systemd starts and supervises the daemon.
 The local management socket is intentionally restricted, so packaged service

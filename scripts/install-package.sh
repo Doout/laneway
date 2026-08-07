@@ -82,5 +82,5 @@ fi
 
 echo "Laneway $(cat "$script_dir/VERSION") installed."
 echo "Examples: $prefix/share/laneway/examples"
-echo "Next: configure the role for this host, then enable its service."
-echo "Managed node helper: laneway-setup-node --help"
+echo "Next for a managed Node: sudo laneway node install DOMAIN"
+echo "Compatibility alias: laneway-setup-node DOMAIN"

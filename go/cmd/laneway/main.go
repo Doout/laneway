@@ -119,7 +119,10 @@ commands:
   invite            issue a short-lived single-use join code on a controller
   bootstrap         inspect metadata or download a verified release artifact
   renew             renew this node's controller-issued certificate
+  node install      enroll and install a managed persistent host Node
+  node renew        safely rotate a managed Node credential
   node run          run the persistent host Node service
+  node uninstall    gracefully remove command-owned Node state
   controller        manage controller networks, relays, routes, ACLs, and audit events
   route advertise   advertise or withdraw this node's subnet/exit routes
   exit enable       advertise this configured gateway as an exit node
@@ -135,10 +138,21 @@ commands:
 }
 
 func runNode(args []string) error {
-	if len(args) == 0 || args[0] != "run" {
-		return errors.New("usage: laneway node run [-config path] [-diagnostics 127.0.0.1:PORT]")
+	if len(args) == 0 {
+		return errors.New("usage: laneway node <install|renew|run|uninstall> [options]; laneway node run [-config path] [-diagnostics 127.0.0.1:PORT]")
 	}
-	return nodeapp.Run(args[1:])
+	switch args[0] {
+	case "install":
+		return runNodeInstall(args[1:])
+	case "run":
+		return nodeapp.Run(args[1:])
+	case "renew":
+		return runManagedNodeRenew(args[1:])
+	case "uninstall":
+		return runNodeUninstall(args[1:])
+	default:
+		return fmt.Errorf("unknown node command %q; usage: laneway node run [-config path]", args[0])
+	}
 }
 
 func runExit(args []string) error {
