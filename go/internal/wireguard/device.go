@@ -2,6 +2,8 @@ package wireguard
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -15,6 +17,8 @@ const (
 	DefaultMTU           = 1280
 	MinMTU               = 1280
 	MaxMTU               = 9000
+	MinEphemeralPort     = 49152
+	MaxEphemeralPort     = 65535
 )
 
 var (
@@ -50,10 +54,20 @@ type DeviceConfig struct {
 type Device interface {
 	Name() string
 	MTU() int
+	ListenPort() uint16
 	Addresses() []netip.Prefix
 	ApplyPeers(context.Context, []Peer) error
 	Peers() []Peer
 	Close() error
+}
+
+func ephemeralListenPort() (uint16, error) {
+	var random [2]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return 0, fmt.Errorf("wireguard: generate ephemeral listen port: %w", err)
+	}
+	span := uint32(MaxEphemeralPort - MinEphemeralPort + 1)
+	return uint16(uint32(binary.BigEndian.Uint16(random[:]))%span + MinEphemeralPort), nil
 }
 
 func normalizeDeviceConfig(config DeviceConfig) (DeviceConfig, error) {
@@ -90,13 +104,20 @@ func normalizeDeviceConfig(config DeviceConfig) (DeviceConfig, error) {
 	if err != nil {
 		return DeviceConfig{}, err
 	}
-	for _, peer := range peers {
-		if peer.PublicKey == localPublicKey {
-			return DeviceConfig{}, fmt.Errorf("%w: local public key cannot be configured as a peer", ErrInvalidPeer)
-		}
+	if err := rejectLocalPeer(peers, localPublicKey); err != nil {
+		return DeviceConfig{}, err
 	}
 	config.Addresses, config.Peers = addresses, peers
 	return config, nil
+}
+
+func rejectLocalPeer(peers []Peer, localPublicKey PublicKey) error {
+	for _, peer := range peers {
+		if peer.PublicKey == localPublicKey {
+			return fmt.Errorf("%w: local public key cannot be configured as a peer", ErrInvalidPeer)
+		}
+	}
+	return nil
 }
 
 func normalizePeers(peers []Peer) ([]Peer, error) {

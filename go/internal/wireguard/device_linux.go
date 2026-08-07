@@ -33,16 +33,18 @@ type controlClient interface {
 }
 
 type linuxDevice struct {
-	name      string
-	mtu       int
-	addresses []netip.Prefix
-	runner    commandRunner
-	control   controlClient
-	peers     []Peer
-	mu        sync.Mutex
-	close     sync.Once
-	closeErr  error
-	closed    bool
+	name       string
+	mtu        int
+	listenPort uint16
+	publicKey  PublicKey
+	addresses  []netip.Prefix
+	runner     commandRunner
+	control    controlClient
+	peers      []Peer
+	mu         sync.Mutex
+	close      sync.Once
+	closeErr   error
+	closed     bool
 }
 
 var _ Device = (*linuxDevice)(nil)
@@ -87,10 +89,17 @@ func openLinuxDevice(ctx context.Context, config DeviceConfig, runner commandRun
 		}
 		return cause
 	}
-	listenPort := int(config.ListenPort)
+	listenPort := config.ListenPort
+	if listenPort == 0 {
+		listenPort, err = ephemeralListenPort()
+		if err != nil {
+			return nil, cleanup(err)
+		}
+	}
+	kernelListenPort := int(listenPort)
 	privateKey := wgtypes.Key(config.PrivateKey)
 	peerConfigs := peersToWG(config.Peers)
-	if err := control.ConfigureDevice(config.Name, wgtypes.Config{PrivateKey: &privateKey, ListenPort: &listenPort, ReplacePeers: true, Peers: peerConfigs}); err != nil {
+	if err := control.ConfigureDevice(config.Name, wgtypes.Config{PrivateKey: &privateKey, ListenPort: &kernelListenPort, ReplacePeers: true, Peers: peerConfigs}); err != nil {
 		return nil, cleanup(fmt.Errorf("wireguard: configure interface identity: %w", err))
 	}
 	if out, err := runner.Run(ctx, "ip", "link", "set", "dev", config.Name, "mtu", fmt.Sprint(config.MTU), "up"); err != nil {
@@ -106,11 +115,13 @@ func openLinuxDevice(ctx context.Context, config DeviceConfig, runner commandRun
 		}
 	}
 	owned = false
-	return &linuxDevice{name: config.Name, mtu: config.MTU, addresses: append([]netip.Prefix(nil), config.Addresses...), runner: runner, control: control, peers: clonePeers(config.Peers)}, nil
+	_, publicKey, _ := ParsePrivateKey(config.PrivateKey[:])
+	return &linuxDevice{name: config.Name, mtu: config.MTU, listenPort: listenPort, publicKey: publicKey, addresses: append([]netip.Prefix(nil), config.Addresses...), runner: runner, control: control, peers: clonePeers(config.Peers)}, nil
 }
 
-func (d *linuxDevice) Name() string { return d.name }
-func (d *linuxDevice) MTU() int     { return d.mtu }
+func (d *linuxDevice) Name() string       { return d.name }
+func (d *linuxDevice) MTU() int           { return d.mtu }
+func (d *linuxDevice) ListenPort() uint16 { return d.listenPort }
 func (d *linuxDevice) Addresses() []netip.Prefix {
 	return append([]netip.Prefix(nil), d.addresses...)
 }
@@ -127,6 +138,9 @@ func (d *linuxDevice) ApplyPeers(ctx context.Context, peers []Peer) error {
 	}
 	normalized, err := normalizePeers(peers)
 	if err != nil {
+		return err
+	}
+	if err := rejectLocalPeer(normalized, d.publicKey); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
