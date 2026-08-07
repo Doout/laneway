@@ -13,7 +13,9 @@ import (
 	"io"
 	"net/netip"
 	"sync"
+	"time"
 
+	"laneway.dev/laneway/internal/exitnode"
 	"laneway.dev/laneway/internal/platform"
 )
 
@@ -30,11 +32,13 @@ func decodeStrict(data []byte, target any) error {
 }
 
 const (
-	ProtocolVersion = 1
-	maxMessageSize  = 64 << 10
-	maxAddresses    = 8
-	maxRoutes       = 1024
-	maxBypasses     = 64
+	ProtocolVersion  = 1
+	maxMessageSize   = 64 << 10
+	maxAddresses     = 8
+	maxRoutes        = 1024
+	maxBypasses      = 64
+	maxDNSAddresses  = 8
+	roundTripTimeout = 10 * time.Second
 )
 
 type Setup struct {
@@ -54,12 +58,27 @@ type RoutePlan struct {
 	Bypasses []string `json:"bypasses,omitempty"`
 }
 
+// ExitRoutePlan is the narrow wire representation of the policy-routing
+// changes required by an explicitly selected exit node. Every prefix and
+// bypass is re-parsed and validated by the privileged process.
+type ExitRoutePlan struct {
+	TunnelPrefixes  []string `json:"tunnel_prefixes,omitempty"`
+	TransportBypass []string `json:"transport_bypasses,omitempty"`
+	LocalLANBypass  []string `json:"local_lan_bypasses,omitempty"`
+}
+
+type DNSPlan struct {
+	Servers []string `json:"servers,omitempty"`
+}
+
 type request struct {
-	Version int        `json:"version"`
-	ID      uint64     `json:"id"`
-	Op      string     `json:"op"`
-	Setup   *Setup     `json:"setup,omitempty"`
-	Routes  *RoutePlan `json:"routes,omitempty"`
+	Version int            `json:"version"`
+	ID      uint64         `json:"id"`
+	Op      string         `json:"op"`
+	Setup   *Setup         `json:"setup,omitempty"`
+	Routes  *RoutePlan     `json:"routes,omitempty"`
+	Exit    *ExitRoutePlan `json:"exit_routes,omitempty"`
+	DNS     *DNSPlan       `json:"dns,omitempty"`
 }
 
 type response struct {
@@ -118,6 +137,57 @@ func parseRoutePlan(value RoutePlan) (platform.RoutePlan, error) {
 	return plan, nil
 }
 
+func parseExitRoutePlan(value ExitRoutePlan) (exitnode.RoutePlan, error) {
+	if len(value.TunnelPrefixes) > 4 || len(value.TransportBypass) > maxBypasses || len(value.LocalLANBypass) > maxBypasses {
+		return exitnode.RoutePlan{}, errors.New("exit route plan exceeds helper limits")
+	}
+	plan := exitnode.RoutePlan{
+		TunnelPrefixes:  make([]netip.Prefix, 0, len(value.TunnelPrefixes)),
+		TransportBypass: make([]netip.Addr, 0, len(value.TransportBypass)),
+		LocalLANBypass:  make([]netip.Prefix, 0, len(value.LocalLANBypass)),
+	}
+	for _, raw := range value.TunnelPrefixes {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return exitnode.RoutePlan{}, fmt.Errorf("invalid exit tunnel prefix %q", raw)
+		}
+		plan.TunnelPrefixes = append(plan.TunnelPrefixes, prefix)
+	}
+	for _, raw := range value.TransportBypass {
+		address, err := netip.ParseAddr(raw)
+		if err != nil {
+			return exitnode.RoutePlan{}, fmt.Errorf("invalid exit transport bypass %q", raw)
+		}
+		plan.TransportBypass = append(plan.TransportBypass, address)
+	}
+	for _, raw := range value.LocalLANBypass {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return exitnode.RoutePlan{}, fmt.Errorf("invalid exit local-LAN bypass %q", raw)
+		}
+		plan.LocalLANBypass = append(plan.LocalLANBypass, prefix)
+	}
+	if err := exitnode.ValidateRoutePlan(plan); err != nil {
+		return exitnode.RoutePlan{}, err
+	}
+	return plan, nil
+}
+
+func parseDNSPlan(value DNSPlan) ([]netip.Addr, error) {
+	if len(value.Servers) == 0 || len(value.Servers) > maxDNSAddresses {
+		return nil, fmt.Errorf("DNS plan must contain from 1 through %d servers", maxDNSAddresses)
+	}
+	servers := make([]netip.Addr, 0, len(value.Servers))
+	for _, raw := range value.Servers {
+		address, err := netip.ParseAddr(raw)
+		if err != nil || address.Is4In6() || address.IsUnspecified() || address.IsMulticast() {
+			return nil, fmt.Errorf("invalid DNS server %q", raw)
+		}
+		servers = append(servers, address)
+	}
+	return servers, nil
+}
+
 // Session is the unprivileged side of a helper connection.
 type Session struct {
 	conn      packetConn
@@ -125,7 +195,8 @@ type Session struct {
 	mu        sync.Mutex
 	next      uint64
 	done      bool
-	wait      func() error
+	wait      <-chan error
+	kill      func() error
 	helperPID int
 }
 
@@ -133,9 +204,33 @@ type packetConn interface {
 	ReadPacket([]byte, []byte) (int, int, int, error)
 	WritePacket([]byte, []byte) error
 	Close() error
+	SetDeadline(time.Time) error
 }
 
 func (s *Session) ApplyRoutes(ctx context.Context, plan RoutePlan) error {
+	return s.request(ctx, request{Op: "apply-routes", Routes: &plan})
+}
+
+// ApplyExitRoutes reconciles the dedicated exit policy-routing table. It does
+// not permit arbitrary tables, priorities, protocols, devices, or commands;
+// those remain fixed by ProductionConfig in the privileged process.
+func (s *Session) ApplyExitRoutes(ctx context.Context, plan ExitRoutePlan) error {
+	return s.request(ctx, request{Op: "apply-exit-routes", Exit: &plan})
+}
+
+func (s *Session) RestoreExitRoutes(ctx context.Context) error {
+	return s.request(ctx, request{Op: "restore-exit-routes"})
+}
+
+func (s *Session) ApplyDNS(ctx context.Context, plan DNSPlan) error {
+	return s.request(ctx, request{Op: "apply-dns", DNS: &plan})
+}
+
+func (s *Session) RestoreDNS(ctx context.Context) error {
+	return s.request(ctx, request{Op: "restore-dns"})
+}
+
+func (s *Session) request(ctx context.Context, req request) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -145,7 +240,16 @@ func (s *Session) ApplyRoutes(ctx context.Context, plan RoutePlan) error {
 		return platform.ErrClosed
 	}
 	s.next++
-	return s.roundTrip(request{Version: ProtocolVersion, ID: s.next, Op: "apply-routes", Routes: &plan}, false)
+	req.Version, req.ID = ProtocolVersion, s.next
+	deadline := time.Now().Add(roundTripTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := s.conn.SetDeadline(deadline); err != nil {
+		return err
+	}
+	defer s.conn.SetDeadline(time.Time{})
+	return s.roundTrip(req, false)
 }
 
 func (s *Session) Close() error {
@@ -156,11 +260,22 @@ func (s *Session) Close() error {
 	}
 	s.done = true
 	s.next++
+	_ = s.conn.SetDeadline(time.Now().Add(roundTripTimeout))
 	requestErr := s.roundTrip(request{Version: ProtocolVersion, ID: s.next, Op: "close"}, false)
 	closeErr := errors.Join(requestErr, s.TUN.Close(), s.conn.Close())
 	if s.wait != nil {
-		if waitErr := s.wait(); waitErr != nil && requestErr == nil {
-			closeErr = errors.Join(closeErr, fmt.Errorf("network helper exited: %w", waitErr))
+		timer := time.NewTimer(roundTripTimeout)
+		select {
+		case waitErr := <-s.wait:
+			timer.Stop()
+			if waitErr != nil && requestErr == nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("network helper exited: %w", waitErr))
+			}
+		case <-timer.C:
+			if s.kill != nil {
+				closeErr = errors.Join(closeErr, s.kill())
+			}
+			closeErr = errors.Join(closeErr, errors.New("network helper cleanup timed out"))
 		}
 	}
 	return closeErr

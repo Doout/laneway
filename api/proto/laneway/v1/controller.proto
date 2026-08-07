@@ -24,6 +24,9 @@ message EnrollmentRequest {
   // controller compares it with the token's immutable network before token
   // consumption, preventing cross-network code confusion.
   bytes expected_network_id = 4;
+  // Optional client-side class expectation authenticated by the bootstrap
+  // flow. A mismatch is rejected before the single-use token is consumed.
+  EnrollmentClass expected_enrollment_class = 5;
 }
 
 message CertificateChain {

@@ -67,6 +67,8 @@ func run(args []string) error {
 		return runLocal(args[0], args[1:])
 	case "join":
 		return runJoin(args[1:])
+	case "connect":
+		return runConnect(args[1:])
 	case "invite":
 		return runInvite(args[1:])
 	case "bootstrap":
@@ -113,6 +115,7 @@ commands:
   peers             list configured peers
   routes            list installed overlay routes
   join TOKEN        enroll with a controller (or use --token-file PATH)
+  connect DOMAIN    run a temporary foreground User session
   invite            issue a short-lived single-use join code on a controller
   bootstrap         inspect metadata or download a verified release artifact
   renew             renew this node's controller-issued certificate

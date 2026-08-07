@@ -86,6 +86,13 @@ type RouteManager interface {
 	Close() error
 }
 
+// ValidateRoutePlan applies the same strict shape checks as the privileged
+// route backend without mutating host state. It is used on both sides of the
+// temporary-client helper boundary.
+func ValidateRoutePlan(plan RoutePlan) error {
+	return normalizeRoutePlan(&plan)
+}
+
 type DNSManager interface {
 	Apply(context.Context, []netip.Addr) error
 	Restore(context.Context) error
@@ -146,20 +153,30 @@ func (m *ClientManager) Apply(ctx context.Context, plan ClientPlan) error {
 	if err := m.routes.Apply(ctx, routePlan); err != nil {
 		return err
 	}
-	if err := m.dns.Apply(ctx, normalized.DNSServers); err != nil {
+	var dnsErr error
+	if len(normalized.DNSServers) == 0 {
+		dnsErr = m.dns.Restore(ctx)
+	} else {
+		dnsErr = m.dns.Apply(ctx, normalized.DNSServers)
+	}
+	if dnsErr != nil {
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), m.timeout)
 		defer cancel()
 		var rollbackErr error
 		if hadPrevious {
 			rollbackErr = errors.Join(rollbackErr, m.routes.Apply(rollbackCtx, routePlanFor(previous)))
-			rollbackErr = errors.Join(rollbackErr, m.dns.Apply(rollbackCtx, previous.DNSServers))
+			if len(previous.DNSServers) == 0 {
+				rollbackErr = errors.Join(rollbackErr, m.dns.Restore(rollbackCtx))
+			} else {
+				rollbackErr = errors.Join(rollbackErr, m.dns.Apply(rollbackCtx, previous.DNSServers))
+			}
 		} else {
 			rollbackErr = errors.Join(rollbackErr, m.routes.Restore(rollbackCtx), m.dns.Restore(rollbackCtx))
 		}
 		if rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("exitnode: activation rollback: %w", rollbackErr))
+			return errors.Join(dnsErr, fmt.Errorf("exitnode: activation rollback: %w", rollbackErr))
 		}
-		return err
+		return dnsErr
 	}
 	m.plan, m.active = cloneClientPlan(normalized), true
 	return nil
@@ -228,7 +245,7 @@ func normalizeClientPlan(plan ClientPlan) (ClientPlan, bool, error) {
 	if err != nil {
 		return ClientPlan{}, false, fmt.Errorf("%w: transport bypass: %v", ErrInvalid, err)
 	}
-	dns, err := normalizeAddresses(plan.DNSServers, false)
+	dns, err := normalizeAddresses(plan.DNSServers, true)
 	if err != nil {
 		return ClientPlan{}, false, fmt.Errorf("%w: DNS server: %v", ErrInvalid, err)
 	}

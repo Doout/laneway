@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"laneway.dev/laneway/internal/exitnode"
 	"laneway.dev/laneway/internal/platform"
 )
 
@@ -97,25 +98,29 @@ func socketPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
 	return wrap(fds[0]), wrap(fds[1])
 }
 
-func testService(t *testing.T) (*net.UnixConn, *testTUN, *testRoutes, <-chan error) {
+func testService(t *testing.T) (*net.UnixConn, *testTUN, *testRoutes, *exitnode.MemoryRouteManager, *exitnode.MemoryDNSManager, <-chan error) {
 	t.Helper()
 	clientConn, serviceConn := socketPair(t)
 	tun := &testTUN{}
 	routes := &testRoutes{}
+	exitRoutes := exitnode.NewMemoryRouteManager()
+	dns := exitnode.NewMemoryDNSManager()
 	done := make(chan error, 1)
 	go func() {
 		done <- Serve(context.Background(), serviceConn, ServiceConfig{
-			OpenTUN:   func(context.Context, platform.TUNConfig) (platform.TUNDevice, error) { return tun, nil },
-			NewRoutes: func(platform.RouteManagerConfig) (platform.RouteManager, error) { return routes, nil },
-			Duplicate: func(platform.TUNDevice) (*os.File, error) { return os.Open("/dev/null") },
-			Harden:    func() error { return nil },
+			OpenTUN:       func(context.Context, platform.TUNConfig) (platform.TUNDevice, error) { return tun, nil },
+			NewRoutes:     func(platform.RouteManagerConfig) (platform.RouteManager, error) { return routes, nil },
+			NewExitRoutes: func(exitnode.RouteManagerConfig) (exitnode.RouteManager, error) { return exitRoutes, nil },
+			NewDNS:        func(exitnode.DNSManagerConfig) (exitnode.DNSManager, error) { return dns, nil },
+			Duplicate:     func(platform.TUNDevice) (*os.File, error) { return os.Open("/dev/null") },
+			Harden:        func() error { return nil },
 		})
 	}()
-	return clientConn, tun, routes, done
+	return clientConn, tun, routes, exitRoutes, dns, done
 }
 
 func TestServeAllowsOnlyStructuredOperationsAndCleans(t *testing.T) {
-	clientConn, tun, routes, done := testService(t)
+	clientConn, tun, routes, exitRoutes, dns, done := testService(t)
 	defer clientConn.Close()
 	client := &unixPacketConn{conn: clientConn}
 	writeRequest(t, client, request{Version: ProtocolVersion, ID: 1, Op: "setup", Setup: &Setup{
@@ -136,7 +141,23 @@ func TestServeAllowsOnlyStructuredOperationsAndCleans(t *testing.T) {
 	if reply, _ := readResponse(t, client); !reply.OK {
 		t.Fatalf("apply routes failed: %+v", reply)
 	}
-	writeRequest(t, client, request{Version: ProtocolVersion, ID: 4, Op: "close"})
+	writeRequest(t, client, request{Version: ProtocolVersion, ID: 4, Op: "apply-exit-routes", Exit: &ExitRoutePlan{
+		TunnelPrefixes: []string{"0.0.0.0/1", "128.0.0.0/1"}, TransportBypass: []string{"192.0.2.1"},
+	}})
+	if reply, _ := readResponse(t, client); !reply.OK {
+		t.Fatalf("apply exit routes failed: %+v", reply)
+	}
+	writeRequest(t, client, request{Version: ProtocolVersion, ID: 5, Op: "apply-dns", DNS: &DNSPlan{Servers: []string{"192.0.2.53"}}})
+	if reply, _ := readResponse(t, client); !reply.OK {
+		t.Fatalf("apply DNS failed: %+v", reply)
+	}
+	if _, active := exitRoutes.Snapshot(); !active {
+		t.Fatal("exit route plan was not applied")
+	}
+	if _, active := dns.Snapshot(); !active {
+		t.Fatal("DNS plan was not applied")
+	}
+	writeRequest(t, client, request{Version: ProtocolVersion, ID: 6, Op: "close"})
 	if reply, _ := readResponse(t, client); !reply.OK {
 		t.Fatalf("close failed: %+v", reply)
 	}
@@ -149,7 +170,7 @@ func TestServeAllowsOnlyStructuredOperationsAndCleans(t *testing.T) {
 }
 
 func TestServeCleansWhenRequesterDies(t *testing.T) {
-	clientConn, tun, routes, done := testService(t)
+	clientConn, tun, routes, _, _, done := testService(t)
 	client := &unixPacketConn{conn: clientConn}
 	writeRequest(t, client, request{Version: ProtocolVersion, ID: 1, Op: "setup", Setup: &Setup{Name: "lane-test", MTU: 1200}})
 	_, files := readResponse(t, client)
@@ -185,6 +206,17 @@ func TestPrivilegedHelperLifecycle(t *testing.T) {
 	}, StartOptions{Executable: os.Args[0], Direct: true})
 	if err != nil {
 		t.Fatal(err)
+	}
+	parentGroup, err := unix.Getpgid(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperGroup, err := unix.Getpgid(session.helperPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if helperGroup == parentGroup {
+		t.Fatal("network helper shares the foreground client process group")
 	}
 	status, err := os.ReadFile("/proc/" + strconv.Itoa(session.helperPID) + "/status")
 	if err != nil {

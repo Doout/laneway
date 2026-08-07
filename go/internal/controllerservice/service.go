@@ -326,6 +326,15 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	expectedClass, err := enrollmentClassFromProto(req.GetExpectedEnrollmentClass())
+	if err != nil {
+		s.writeError(w, malformed(err.Error()), true)
+		return
+	}
+	if expectedClass != "" && expectedNetwork.IsZero() {
+		s.writeError(w, malformed("expected_enrollment_class requires expected_network_id"), true)
+		return
+	}
 	// CSR validation happens before opening the enrollment transaction. Signing
 	// and certificate persistence then participate in the same transaction as
 	// token consumption, node creation, and overlay allocation.
@@ -344,6 +353,8 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 	var enrollment controller.Enrollment
 	if expectedNetwork.IsZero() {
 		enrollment, err = s.store.EnrollNodeWithCertificate(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, issuer)
+	} else if expectedClass != "" {
+		enrollment, err = s.store.EnrollNodeWithCertificateForNetworkAndClass(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, expectedNetwork, expectedClass, issuer)
 	} else {
 		enrollment, err = s.store.EnrollNodeWithCertificateForNetwork(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, expectedNetwork, issuer)
 	}
@@ -472,6 +483,21 @@ func enrollmentClassProto(class controller.EnrollmentClass) lanewayv1.Enrollment
 		return lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER
 	default:
 		return lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED
+	}
+}
+
+func enrollmentClassFromProto(class lanewayv1.EnrollmentClass) (controller.EnrollmentClass, error) {
+	switch class {
+	case lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED:
+		return "", nil
+	case lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE:
+		return controller.EnrollmentClassDurable, nil
+	case lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER:
+		return controller.EnrollmentClassEphemeral, nil
+	case lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER:
+		return controller.EnrollmentClassRemembered, nil
+	default:
+		return "", errors.New("expected_enrollment_class is unknown")
 	}
 }
 
@@ -1003,6 +1029,8 @@ func (s *Service) writeError(w http.ResponseWriter, err error, protobuf bool) {
 		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code belongs to a different network", false
 	case errors.Is(err, controller.ErrTokenName):
 		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code is bound to a different device name", false
+	case errors.Is(err, controller.ErrTokenClass):
+		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code has a different enrollment class", false
 	case errors.Is(err, controller.ErrNotFound):
 		status, code, detail, retryable = http.StatusNotFound, lanewayv1.ErrorCode_ERROR_CODE_MALFORMED, "record not found", false
 	case errors.Is(err, controller.ErrTokenConsumed):

@@ -575,6 +575,27 @@ func TestNameBoundEnrollmentResolvesOmittedNameAndRejectsSubstitution(t *testing
 	}
 }
 
+func TestClassBoundEnrollmentRejectsMismatchBeforeTokenConsumption(t *testing.T) {
+	s, _ := openTestStore(t)
+	network := createTestNetwork(t, s, "100.118.0.0/24")
+	token, err := s.IssueEnrollmentTokenWithOptions(context.Background(), network.ID, "remembered-user", time.Now().Add(time.Hour), EnrollmentTokenOptions{
+		Class: EnrollmentClassRemembered, RequestedName: "remembered-user",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Second)
+	issuer := func(context.Context, Node) (CertificateMaterial, error) {
+		return CertificateMaterial{Serial: []byte{43}, DER: []byte{0x30, 0x00}, NotBefore: base, NotAfter: base.Add(time.Hour)}, nil
+	}
+	if _, err := s.EnrollNodeWithCertificateForNetworkAndClass(context.Background(), token.Secret, "", 0, network.ID, EnrollmentClassEphemeral, issuer); !errors.Is(err, ErrTokenClass) {
+		t.Fatalf("class mismatch error = %v", err)
+	}
+	if _, err := s.EnrollNodeWithCertificateForNetworkAndClass(context.Background(), token.Secret, "", 0, network.ID, EnrollmentClassRemembered, issuer); err != nil {
+		t.Fatalf("class mismatch consumed invite: %v", err)
+	}
+}
+
 func TestCreateNetworkWithAdministratorGeneratedID(t *testing.T) {
 	s, _ := openTestStore(t)
 	want, err := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")

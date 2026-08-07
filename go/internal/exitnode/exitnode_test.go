@@ -27,7 +27,6 @@ func TestClientRequiresExplicitSafeOptIn(t *testing.T) {
 		{"authorization", func(p *ClientPlan) { p.Authorized = false }, ErrUnauthorized},
 		{"failure mode", func(p *ClientPlan) { p.FailureMode = FailureModeUnspecified }, ErrInvalid},
 		{"transport bypass", func(p *ClientPlan) { p.TransportBypass = nil }, ErrInvalid},
-		{"DNS", func(p *ClientPlan) { p.DNSServers = nil }, ErrInvalid},
 		{"exit families", func(p *ClientPlan) { p.ExitPrefixes = nil }, ErrInvalid},
 		{"non-default exit", func(p *ClientPlan) { p.ExitPrefixes = []netip.Prefix{netip.MustParsePrefix("2001:db8::/64")} }, ErrInvalid},
 		{"default local bypass", func(p *ClientPlan) { p.LocalLANBypass = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")} }, ErrInvalid},
@@ -45,6 +44,25 @@ func TestClientRequiresExplicitSafeOptIn(t *testing.T) {
 	// Disabled is always a no-op, regardless of stale subordinate fields.
 	if _, effective, err := normalizeClientPlan(ClientPlan{}); err != nil || effective {
 		t.Fatalf("disabled plan: effective=%v err=%v", effective, err)
+	}
+}
+
+func TestClientMayPreserveNativeDNS(t *testing.T) {
+	routes, dns := NewMemoryRouteManager(), NewMemoryDNSManager()
+	manager, err := NewClientManager(routes, dns, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := validClientPlan()
+	plan.DNSServers = nil
+	if err := manager.Apply(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if _, active := routes.Snapshot(); !active {
+		t.Fatal("exit routes were not applied")
+	}
+	if servers, active := dns.Snapshot(); active || len(servers) != 0 {
+		t.Fatalf("native DNS was changed: servers=%v active=%v", servers, active)
 	}
 }
 

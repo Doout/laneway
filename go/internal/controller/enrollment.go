@@ -109,7 +109,7 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 // assigns its IPv4 and optional IPv6 overlay addresses. Any failure rolls back
 // all changes.
 func (s *Store) EnrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64) (Node, error) {
-	enrollment, err := s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, nil)
+	enrollment, err := s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, "", nil)
 	return enrollment.Node, err
 }
 
@@ -120,7 +120,7 @@ func (s *Store) EnrollNodeWithCertificate(ctx context.Context, secret, name stri
 	if issuer == nil {
 		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
 	}
-	return s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, issuer)
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, "", issuer)
 }
 
 // EnrollNodeWithCertificateForNetwork additionally binds enrollment to the
@@ -133,10 +133,23 @@ func (s *Store) EnrollNodeWithCertificateForNetwork(ctx context.Context, secret,
 	if issuer == nil {
 		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
 	}
-	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, issuer)
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, "", issuer)
 }
 
-func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
+// EnrollNodeWithCertificateForNetworkAndClass additionally binds the client's
+// expected enrollment class. The class is checked before token consumption so
+// an accidental remembered/ephemeral mismatch does not destroy the invite.
+func (s *Store) EnrollNodeWithCertificateForNetworkAndClass(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, expectedClass EnrollmentClass, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
+	if expectedNetwork.IsZero() || !expectedClass.Valid() {
+		return Enrollment{}, fmt.Errorf("%w: expected enrollment network and class are required", ErrInvalid)
+	}
+	if issuer == nil {
+		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
+	}
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, expectedClass, issuer)
+}
+
+func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, expectedClass EnrollmentClass, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
 	if enabledCapabilities > math.MaxInt64 {
 		return Enrollment{}, fmt.Errorf("%w: capability mask exceeds SQLite integer range", ErrInvalid)
 	}
@@ -200,6 +213,9 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	enrollmentClass := EnrollmentClass(class)
 	if !enrollmentClass.Valid() || (enrollmentClass == EnrollmentClassEphemeral) != sessionLifetime.Valid {
 		return Enrollment{}, errors.New("corrupt enrollment token class")
+	}
+	if expectedClass != "" && enrollmentClass != expectedClass {
+		return Enrollment{}, ErrTokenClass
 	}
 	var leaseExpiresAt *time.Time
 	if enrollmentClass == EnrollmentClassEphemeral {
