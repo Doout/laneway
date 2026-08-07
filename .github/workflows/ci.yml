@@ -52,6 +52,14 @@ jobs:
       - run: buf generate
       - run: git diff --exit-code -- go/api
 
+  compose:
+    name: Hardened Compose contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose security, storage, health, and port model
+        run: ./integration/compose-config.sh
+
   rust:
     name: Rust workspace and Go interoperability
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@ Laneway is a private IP overlay. It gives authenticated nodes stable overlay add
 
 The first implementation is Go, but no Laneway protocol element may depend on Go types, encodings, errors, memory layout, or runtime behavior.
 
-## 2. Components
+## 2. Components and product actors
 
 Laneway has four logical components:
 
@@ -19,7 +19,15 @@ Laneway has four logical components:
 - `lanewayd` is the node agent. It authenticates, maintains paths, applies routes, and exchanges packets with the operating system through `lane0`.
 - `laneway` is the user-facing CLI. It manages the local daemon; it is not a wire-protocol peer.
 
-Every participating endpoint runs the same `lanewayd`. Roles are policy attributes rather than different agent binaries. A node MAY hold any compatible combination of ordinary peer, subnet-router, exit-node, and relay-client roles.
+Every participating endpoint uses the same reusable node dataplane. Roles are
+controller-authorized policy attributes rather than trust granted by different
+agent binaries. A protocol node MAY hold any compatible combination of ordinary
+peer, subnet-router, exit-node, and relay-client roles.
+
+The product distinguishes a foreground temporary **User**, a persistent host
+**Node**, and an isolated container **Exit Node**. Their supported paths,
+privilege boundaries, namespace ownership, and cleanup requirements are
+normatively defined in [deployment-contract.md](deployment-contract.md).
 
 ## 3. Plane separation
 

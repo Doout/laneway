@@ -3,7 +3,9 @@
 `systemd/` contains hardened service units for nodes, relays, and the
 controller. `containers/Dockerfile` builds a selected command with
 `--build-arg BINARY=<command>`. Static and controller-backed examples live in
-`examples/`. The controller's `admin_token_file` must contain an independently
+`examples/`. `compose/` contains the hardened container-first
+controller/relay/admin stack; see [compose/README.md](compose/README.md). The
+controller's `admin_token_file` must contain an independently
 generated bearer secret of at least 32 characters and should be readable only
 by the service account.
 

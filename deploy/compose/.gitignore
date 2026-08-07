@@ -1,0 +1,8 @@
+.env
+generated/backups/
+generated/config/*.toml
+generated/pki/
+generated/secrets/
+
+# Keep reviewed templates in version control.
+!generated/config/*.example

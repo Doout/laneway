@@ -104,6 +104,7 @@ support `laneway version` and daemon `-version` flags.
 - [Deployment and host requirements](deploy/README.md)
 - [Operations and troubleshooting](docs/operations.md)
 - [Architecture](spec/architecture.md)
+- [Actor and deployment contract](spec/deployment-contract.md)
 - [Threat model](spec/threat-model.md)
 - [Protocol specifications](spec/)
 - [Benchmarks](docs/benchmarks.md)
