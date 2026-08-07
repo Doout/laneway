@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.9
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go/go.mod go/go.sum ./
+RUN go mod download
+COPY go/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/lanewayd ./cmd/lanewayd
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
+
+FROM alpine:3.23
+RUN apk add --no-cache ca-certificates iproute2 nftables tini \
+    && addgroup -g 65532 laneway \
+    && adduser -D -H -u 65532 -G laneway laneway \
+    && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway
+COPY --from=build /out/lanewayd /usr/local/bin/lanewayd
+COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+USER 65532:65532
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/lanewayd"]
+CMD ["-config", "/etc/laneway/exit-node.toml"]

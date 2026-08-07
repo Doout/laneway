@@ -18,11 +18,12 @@ LANEWAY_BIND_ADDRESS=127.0.0.1 \
 LANEWAY_CONTROLLER_PORT=18443 \
 LANEWAY_RELAY_QUIC_PORT=14433 \
 LANEWAY_RELAY_TCP_PORT=10443 \
+LANEWAY_EXIT_DIRECT_PORT=14434 \
 LANEWAY_CONTROLLER_SERVER_NAME=controller.example.test \
 docker compose --project-directory "$repo_dir/deploy/compose" \
-  --env-file /dev/null --profile tools -f "$compose_file" config --format json |
+  --env-file /dev/null --profile tools --profile exit-node -f "$compose_file" config --format json |
 jq -e '
-  (.services | keys | sort) == ["admin", "controller", "relay"] and
+  (.services | keys | sort) == ["admin", "controller", "exit-node", "relay"] and
   ([.services[] | .user == "65532:65532"] | all) and
   ([.services[] | .read_only == true] | all) and
   ([.services[] | .cap_drop == ["ALL"]] | all) and
@@ -34,6 +35,14 @@ jq -e '
   (.services.controller.ports | any(.host_ip == "127.0.0.1" and .target == 8443 and .published == "18443" and .protocol == "udp")) and
   (.services.relay.ports | any(.host_ip == "127.0.0.1" and .target == 4433 and .published == "14433" and .protocol == "udp")) and
   (.services.relay.ports | any(.host_ip == "127.0.0.1" and .target == 8443 and .published == "10443" and .protocol == "tcp")) and
+  (.services["exit-node"].ports | any(.host_ip == "127.0.0.1" and .target == 4434 and .published == "14434" and .protocol == "udp")) and
+  (.services["exit-node"].cap_add == ["NET_ADMIN"]) and
+  (.services["exit-node"].devices | any(.source == "/dev/net/tun" and .target == "/dev/net/tun" and .permissions == "rwm")) and
+  (.services["exit-node"].sysctls["net.ipv4.ip_forward"] == "1") and
+  (.services["exit-node"].sysctls["net.ipv6.conf.all.forwarding"] == "1") and
+  (.services["exit-node"].volumes | any(.type == "volume" and .target == "/var/lib/laneway")) and
+  ([.services["exit-node"].volumes[] | select(.type == "bind") | .read_only == true] | all) and
+  (.services["exit-node"].healthcheck.test == ["CMD", "/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]) and
   (.services.controller.volumes | any(.type == "volume" and .target == "/var/lib/laneway-controller")) and
   ([.services.controller.volumes[] | select(.type == "bind") | .read_only == true] | all) and
   ([.services.relay.volumes[] | select(.type == "bind") | .read_only == true] | all) and

@@ -20,3 +20,8 @@ services:
       dockerfile: deploy/containers/Dockerfile
       args:
         BINARY: laneway
+  exit-node:
+    image: laneway-exit-node:dev
+    build:
+      context: ../..
+      dockerfile: deploy/containers/Dockerfile.exit-node

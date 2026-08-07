@@ -85,6 +85,46 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
     networks: [control]
 
+  exit-node:
+    image: ghcr.io/doout/laneway-exit-node:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    profiles: [exit-node]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    depends_on:
+      controller:
+        condition: service_healthy
+      relay:
+        condition: service_healthy
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: "1"
+      net.ipv6.conf.all.forwarding: "1"
+    volumes:
+      - exit-node-state:/var/lib/laneway
+      - ./generated/config/exit-node.toml:/etc/laneway/exit-node.toml:ro
+      - ./generated/pki/ca.crt:/run/laneway-secrets/ca.crt:ro
+      - ./generated/pki/exit-node.crt:/run/laneway-secrets/exit-node.crt:ro
+      - ./generated/pki/exit-node.key:/run/laneway-secrets/exit-node.key:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
+      - /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532
+    ports:
+      - "${LANEWAY_BIND_ADDRESS:-0.0.0.0}:${LANEWAY_EXIT_DIRECT_PORT:-4434}:4434/udp"
+    networks: [control]
+    healthcheck:
+      test: [CMD, /usr/local/bin/laneway-healthcheck, -unix, /run/laneway/lanewayd.sock]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+
 networks:
   control:
     driver: bridge
@@ -92,3 +132,5 @@ networks:
 volumes:
   controller-state:
     name: laneway-controller-state
+  exit-node-state:
+    name: laneway-exit-node-state
