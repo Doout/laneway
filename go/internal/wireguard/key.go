@@ -42,6 +42,31 @@ func ParsePrivateKey(raw []byte) (PrivateKey, PublicKey, error) {
 	return privateKey, publicKey, nil
 }
 
+// ParsePublicKey rejects malformed and low-order X25519 points. Accepting a
+// low-order point would create a peer entry that can never authenticate a
+// WireGuard handshake and could conceal a bad controller snapshot.
+func ParsePublicKey(raw []byte) (PublicKey, error) {
+	var result PublicKey
+	if len(raw) != KeySize {
+		return result, fmt.Errorf("WireGuard public key must be exactly %d bytes", KeySize)
+	}
+	public, err := ecdh.X25519().NewPublicKey(raw)
+	if err != nil {
+		return result, errors.New("invalid WireGuard public key")
+	}
+	probeRaw := make([]byte, KeySize)
+	probeRaw[0] = 9
+	probe, err := ecdh.X25519().NewPrivateKey(probeRaw)
+	if err != nil {
+		return result, errors.New("initialize WireGuard public-key validator")
+	}
+	if _, err := probe.ECDH(public); err != nil {
+		return result, errors.New("low-order WireGuard public key")
+	}
+	copy(result[:], public.Bytes())
+	return result, nil
+}
+
 func (k PrivateKey) Bytes() []byte { return append([]byte(nil), k[:]...) }
 func (k PublicKey) Bytes() []byte  { return append([]byte(nil), k[:]...) }
 
