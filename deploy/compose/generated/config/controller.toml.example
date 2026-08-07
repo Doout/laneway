@@ -1,0 +1,17 @@
+mode = "controller"
+state_dir = "/var/lib/laneway-controller"
+socket_path = "/tmp/controller.sock"
+
+[tls]
+certificate = "/run/laneway-secrets/controller.crt"
+private_key = "/run/laneway-secrets/controller.key"
+ca = "/run/laneway-secrets/ca.crt"
+
+[controller]
+listen = ":8443"
+quic_listen = ":8443"
+database = "/var/lib/laneway-controller/controller.db"
+ca_private_key = "/run/laneway-secrets/intermediate.key"
+issuer_certificate = "/run/laneway-secrets/intermediate-chain.crt"
+admin_token_file = "/run/laneway-secrets/admin.token"
+leaf_validity = "720h"

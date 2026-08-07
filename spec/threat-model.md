@@ -21,11 +21,23 @@ Laneway does not attempt to make a compromised endpoint trustworthy, conceal tra
 
 ## 2. Trust boundaries and assumptions
 
-The root and issuing CA are trusted to issue correct identities. The controller is trusted to authorize nodes, addresses, routes, and policy, but it is not trusted with node private keys and MUST NOT receive them. Administrators are trusted to protect CA material and approve routes correctly.
+The offline root and online issuing CA are trusted to issue correct identities.
+The offline root private key MUST NOT be stored on a controller, relay, Exit
+Node, or control VPS. The controller is trusted to authorize nodes, addresses,
+routes, and policy, but it is not trusted with endpoint private keys and MUST
+NOT receive them. Administrators are trusted to protect CA material and approve
+routes correctly.
 
 Nodes trust their local OS, daemon, configuration, certificate, and private key. A relay is trusted to enforce session isolation and forwarding policy. Transport cryptography protects packets from on-path observers; the relay terminates node transport connections and therefore can observe relayed packet plaintext and metadata. End-to-end packet encryption, represented by `LANEWAY_E2E_PACKET_V1`, is not provided by stable v1 and MUST NOT be advertised.
 
 The public network, NAT devices, DNS, unauthenticated peers, node names, hostnames, claimed overlay addresses, and identity fields inside protocol messages are untrusted.
+
+Docker Engine and the host kernel are trusted to enforce namespace and device
+boundaries. Controller and relay containers are unprivileged. The default Exit
+Node has `NET_ADMIN` and `/dev/net/tun` only in its own network namespace; this
+does not protect it from a compromised container runtime or kernel. The exact
+deployment boundary is defined in
+[deployment-contract.md](deployment-contract.md).
 
 ## 3. Adversaries
 
@@ -38,6 +50,11 @@ The design considers:
 - a stale or revoked node attempting to reconnect;
 - a compromised relay attempting to inspect or disrupt relayed traffic; and
 - malformed input intended to trigger parser bugs or resource exhaustion.
+- a local unprivileged user attempting to abuse the temporary networking helper;
+- a compromised Exit Node attempting to alter host or sibling-container network
+  state; and
+- a compromised control-plane container attempting to read unrelated secrets or
+  gain host capabilities.
 
 Compromise of an issuing CA, controller authorization database, endpoint OS, or endpoint private key is outside the containment promise for identities governed by that component. Recovery from such compromise requires revocation and re-issuance.
 
@@ -89,6 +106,37 @@ TLS protects each node-to-relay hop, not packet content from the relay. A compro
 
 When exit routing is enabled, paths to the controller, relay, selected exit, and required local gateways MUST bypass `lane0`. Full tunnel MUST be opt-in. Implementations MUST define fail-open versus fail-closed behavior explicitly; they MUST NOT silently change modes after path failure.
 
+### 4.10 Local privilege boundaries
+
+The foreground User dataplane, enrollment, private-key handling, and controller
+communication MUST run without elevated privilege. Its privileged helper MUST
+accept only a structured allowlist of TUN, address, route, rule, endpoint-bypass,
+and optional DNS operations. Requests MUST be bound to one local session and
+requesting process. The helper MUST reject unsafe identifiers and foreign state,
+MUST NOT execute caller-supplied commands, and MUST NOT receive enrollment tokens
+or endpoint private keys. Parent death MUST trigger bounded cleanup or leave an
+exactly recoverable root-owned journal.
+
+Controller and relay containers MUST run as non-root, drop all capabilities, use
+a read-only root filesystem, and set `no-new-privileges`. The default Exit Node
+MUST NOT use host networking, `privileged: true`, the Docker socket, or host
+network-state mounts. It MAY receive only `NET_ADMIN` and `/dev/net/tun` inside
+its container namespace. All actors MUST validate ownership before cleanup and
+fail closed rather than remove foreign state.
+
+### 4.11 Bootstrap and supply chain
+
+Unauthenticated discovery data is not authority. Bootstrap metadata MUST be
+authenticated by public Web PKI or an equivalently pre-pinned mechanism before
+it can introduce the network CA, controller and relay identity pins, or artifact
+metadata. Enrollment codes MUST be short-lived, single-use, rate-limited, and
+bound to the intended network and enrollment class. They MUST NOT be placed in
+argv, URLs, logs, or shell history.
+
+Downloaded artifacts MUST be verified before execution and before any privilege
+boundary is crossed. Deployment inputs MUST use a semantic version or immutable
+digest, never a mutable `latest` tag.
+
 ## 5. Privacy
 
 Relays necessarily learn authenticated node identity, connection timing, observed public endpoints, packet sizes, and destinations needed for forwarding. Controllers learn membership, addresses, approved routes, and policy. Logs SHOULD minimize retention of public endpoints and MUST NOT log raw packet bodies or private keys. Stable NodeIDs are linkable within their network by design.
@@ -108,6 +156,12 @@ Release validation MUST cover:
 - subnet/exit authorization and host-state rollback;
 - UDP-blocked TCP fallback; and
 - shared golden vectors in the Go and Rust protocol implementations.
+- temporary-helper allowlist, requester binding, foreign-state rejection, clean
+  teardown, and crash reconciliation;
+- container capability, read-only-root, secret-mount, and namespace-isolation
+  assertions; and
+- tampered bootstrap metadata, artifact, enrollment replay, and wrong-network
+  rejection.
 
 ## 7. TLS/TCP fallback
 

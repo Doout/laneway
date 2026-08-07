@@ -1,0 +1,22 @@
+services:
+  controller:
+    image: laneway-controller:dev
+    build:
+      context: ../..
+      dockerfile: deploy/containers/Dockerfile
+      args:
+        BINARY: laneway-controller
+  relay:
+    image: laneway-relay:dev
+    build:
+      context: ../..
+      dockerfile: deploy/containers/Dockerfile
+      args:
+        BINARY: laneway-relay
+  admin:
+    image: laneway-admin:dev
+    build:
+      context: ../..
+      dockerfile: deploy/containers/Dockerfile
+      args:
+        BINARY: laneway

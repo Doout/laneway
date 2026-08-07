@@ -1,0 +1,25 @@
+mode = "relay"
+state_dir = "/var/lib/laneway-relay"
+socket_path = "/tmp/relay.sock"
+
+[tls]
+certificate = "/run/laneway-secrets/relay.crt"
+private_key = "/run/laneway-secrets/relay.key"
+ca = "/run/laneway-secrets/ca.crt"
+
+[relay]
+listen = ":4433"
+queue_depth = 256
+handshake_timeout = "10s"
+idle_timeout = "45s"
+
+[controller]
+endpoint = "https://controller:8443"
+quic_endpoint = "controller:8443"
+network_id = "REPLACE_NETWORK_ID"
+service_id = "REPLACE_CONTROLLER_SERVICE_ID"
+server_name = "REPLACE_PUBLIC_HOSTNAME"
+poll_interval = "30s"
+
+[tcp_fallback]
+listen = ":8443"

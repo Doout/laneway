@@ -1,0 +1,94 @@
+name: laneway
+
+x-security: &security
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  init: true
+  restart: unless-stopped
+  logging:
+    driver: local
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  controller:
+    <<: *security
+    image: ghcr.io/doout/laneway-controller:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    command: ["-config", "/etc/laneway/controller.toml"]
+    volumes:
+      - controller-state:/var/lib/laneway-controller
+      - ./generated/config/controller.toml:/etc/laneway/controller.toml:ro
+      - ./generated/pki/ca.crt:/run/laneway-secrets/ca.crt:ro
+      - ./generated/pki/intermediate-chain.crt:/run/laneway-secrets/intermediate-chain.crt:ro
+      - ./generated/pki/intermediate.key:/run/laneway-secrets/intermediate.key:ro
+      - ./generated/pki/controller.crt:/run/laneway-secrets/controller.crt:ro
+      - ./generated/pki/controller.key:/run/laneway-secrets/controller.key:ro
+      - ./generated/secrets/admin.token:/run/laneway-secrets/admin.token:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
+    ports:
+      - "${LANEWAY_BIND_ADDRESS:-0.0.0.0}:${LANEWAY_CONTROLLER_PORT:-8443}:8443/tcp"
+      - "${LANEWAY_BIND_ADDRESS:-0.0.0.0}:${LANEWAY_CONTROLLER_PORT:-8443}:8443/udp"
+    networks: [control]
+    healthcheck:
+      test: [CMD, /usr/local/bin/laneway-healthcheck, -tcp, "127.0.0.1:8443", -tls-ca, /run/laneway-secrets/ca.crt, -tls-server-name, "${LANEWAY_CONTROLLER_SERVER_NAME:?set LANEWAY_CONTROLLER_SERVER_NAME to the certificate DNS name}"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  relay:
+    <<: *security
+    image: ghcr.io/doout/laneway-relay:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    command: ["-config", "/etc/laneway/relay.toml"]
+    depends_on:
+      controller:
+        condition: service_healthy
+    volumes:
+      - ./generated/config/relay.toml:/etc/laneway/relay.toml:ro
+      - ./generated/pki/ca.crt:/run/laneway-secrets/ca.crt:ro
+      - ./generated/pki/relay.crt:/run/laneway-secrets/relay.crt:ro
+      - ./generated/pki/relay.key:/run/laneway-secrets/relay.key:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
+      - /var/lib/laneway-relay:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
+    ports:
+      - "${LANEWAY_BIND_ADDRESS:-0.0.0.0}:${LANEWAY_RELAY_QUIC_PORT:-4433}:4433/udp"
+      - "${LANEWAY_BIND_ADDRESS:-0.0.0.0}:${LANEWAY_RELAY_TCP_PORT:-443}:8443/tcp"
+    networks: [control]
+    healthcheck:
+      test: [CMD, /usr/local/bin/laneway-healthcheck, -tcp, "127.0.0.1:8443"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+  admin:
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    image: ghcr.io/doout/laneway-admin:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    profiles: [tools]
+    entrypoint: [/usr/local/bin/laneway]
+    volumes:
+      - ./generated/pki/ca.crt:/run/laneway-secrets/ca.crt:ro
+      - ./generated/secrets/admin.token:/run/laneway-secrets/admin.token:ro
+      - ./generated/backups:/backups
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
+    networks: [control]
+
+networks:
+  control:
+    driver: bridge
+
+volumes:
+  controller-state:
+    name: laneway-controller-state
