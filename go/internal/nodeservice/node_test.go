@@ -1,6 +1,7 @@
 package nodeservice
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -16,15 +17,33 @@ import (
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/agent"
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/packetbuffer"
 	"laneway.dev/laneway/internal/protocol"
 	"laneway.dev/laneway/internal/routing"
 	"laneway.dev/laneway/internal/transport"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 type fakePackets struct{}
 
 func (fakePackets) ReadPacket(context.Context, []byte) (int, error) { return 0, context.Canceled }
 func (fakePackets) WritePacket(context.Context, []byte) error       { return nil }
+
+type fakeWireGuardRelayHandler struct{}
+
+func (fakeWireGuardRelayHandler) RunRelay(ctx context.Context, _ *wireguard.RelayMux) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type inertEncryptedCarrier struct{ done chan struct{} }
+
+func (inertEncryptedCarrier) SendPacket(context.Context, []byte) error { return nil }
+func (inertEncryptedCarrier) ReceivePacket(ctx context.Context) ([]byte, *packetbuffer.Buffer, error) {
+	return nil, nil, ctx.Err()
+}
+func (c inertEncryptedCarrier) Done() <-chan struct{} { return c.done }
+func (inertEncryptedCarrier) Close() error            { return nil }
 
 type testRelayAuthority struct {
 	targets []RelayTarget
@@ -150,6 +169,83 @@ func TestNewRejectsInvalidConfig(t *testing.T) {
 	config.BootID = identity.ID{}
 	if _, err := New(config); err == nil {
 		t.Fatal("zero boot ID accepted")
+	}
+}
+
+func TestWireGuardRelayConfigurationIsExclusiveAndAdvertisesE2E(t *testing.T) {
+	config := testConfig(t)
+	config.WireGuardRelay = fakeWireGuardRelayHandler{}
+	if _, err := New(config); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("mixed plaintext/encrypted config error = %v", err)
+	}
+	config.Packets = nil
+	service, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities := service.AdvertisedCapabilities()
+	if !capabilities.Has(protocol.CapabilityE2EPacketV1) {
+		t.Fatalf("advertised capabilities = %s", capabilities)
+	}
+	service.metrics.carrier.Store(carrierQUIC)
+	if got := service.SelectedCarrier(); got != "wireguard-relay-quic" {
+		t.Fatalf("QUIC carrier = %q", got)
+	}
+	service.metrics.carrier.Store(carrierTCP)
+	if got := service.SelectedCarrier(); got != "wireguard-relay-tcp" {
+		t.Fatalf("TCP carrier = %q", got)
+	}
+	plain := testService(t)
+	if plain.AdvertisedCapabilities().Has(protocol.CapabilityE2EPacketV1) {
+		t.Fatal("plaintext service advertised encrypted packet support")
+	}
+}
+
+func TestWireGuardControlLoopPublishesAndReleasesSessionBindings(t *testing.T) {
+	service := testService(t)
+	params := agent.SessionParameters{EffectiveMaxControlPayload: protocol.DefaultMaxControlFrame}
+	peer := testNodeID(8)
+	newMux := func(t *testing.T) *wireguard.RelayMux {
+		t.Helper()
+		mux, err := wireguard.NewRelayMux(inertEncryptedCarrier{done: make(chan struct{})}, protocol.CapabilityE2EPacketV1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mux
+	}
+	remoteError := &lanewayv1.RelayEnvelope_Error{Error: &lanewayv1.ProtocolError{Code: lanewayv1.ErrorCode_ERROR_CODE_INTERNAL, Detail: "stop"}}
+
+	mux := newMux(t)
+	var stream bytes.Buffer
+	if err := writeMessage(&stream, params.ControlFramer(), &lanewayv1.RelayEnvelope{SchemaVersion: 1, Sequence: 1,
+		Body: &lanewayv1.RelayEnvelope_RouteHandleBinding{RouteHandleBinding: &lanewayv1.RouteHandleBinding{
+			PeerNodeId: peer[:], RouteHandle: 17, MaxPacketPayload: 1280,
+		}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMessage(&stream, params.ControlFramer(), &lanewayv1.RelayEnvelope{SchemaVersion: 1, Sequence: 2, Body: remoteError}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.controlLoopWireGuard(context.Background(), &stream, params, mux); err == nil {
+		t.Fatal("remote stop was accepted")
+	}
+	if peers := mux.Peers(); len(peers) != 1 || peers[0] != peer {
+		t.Fatalf("published peers = %v", peers)
+	}
+
+	stream.Reset()
+	if err := writeMessage(&stream, params.ControlFramer(), &lanewayv1.RelayEnvelope{SchemaVersion: 1, Sequence: 1,
+		Body: &lanewayv1.RelayEnvelope_RouteHandleRelease{RouteHandleRelease: &lanewayv1.RouteHandleRelease{RouteHandle: 17}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMessage(&stream, params.ControlFramer(), &lanewayv1.RelayEnvelope{SchemaVersion: 1, Sequence: 2, Body: remoteError}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.controlLoopWireGuard(context.Background(), &stream, params, mux); err == nil {
+		t.Fatal("remote stop was accepted")
+	}
+	if peers := mux.Peers(); len(peers) != 0 {
+		t.Fatalf("released peers = %v", peers)
 	}
 }
 

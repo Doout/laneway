@@ -28,6 +28,7 @@ import (
 	"laneway.dev/laneway/internal/routing"
 	"laneway.dev/laneway/internal/tcpfallback"
 	"laneway.dev/laneway/internal/transport"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 const DefaultMaxRoutes = 4096
@@ -66,6 +67,13 @@ type RelayAuthority interface {
 	RelayAuthorityChanges() <-chan struct{}
 }
 
+// WireGuardRelayHandler bridges the stable local WireGuard device/socket to
+// one authenticated relay session. RunRelay must stop when ctx is canceled and
+// must release every received datagram after delivering it locally.
+type WireGuardRelayHandler interface {
+	RunRelay(context.Context, *wireguard.RelayMux) error
+}
+
 type Config struct {
 	Identity           identity.NodeIdentity
 	BootID             identity.ID
@@ -80,7 +88,10 @@ type Config struct {
 	PacketPolicy       PacketPolicy
 	// DataPlane enables unified direct > relay QUIC > TCP selection. When set,
 	// this service owns relay control sessions but does not read or write TUN.
-	DataPlane          *dataplane.Engine
+	DataPlane *dataplane.Engine
+	// WireGuardRelay selects the opaque encrypted dataplane. It is mutually
+	// exclusive with the legacy plaintext PacketIO/DataPlane paths.
+	WireGuardRelay     WireGuardRelayHandler
 	CandidateSink      dataplane.CandidateSink
 	CandidateAuthority interface{ CandidateExchangeEnabled() bool }
 	LocalCandidate     *lanewayv1.EndpointCandidate
@@ -171,8 +182,14 @@ func (s *Service) SelectedCarrier() string {
 	}
 	switch s.metrics.carrier.Load() {
 	case carrierQUIC:
+		if s.config.WireGuardRelay != nil {
+			return "wireguard-relay-quic"
+		}
 		return "relay-quic"
 	case carrierTCP:
+		if s.config.WireGuardRelay != nil {
+			return "wireguard-relay-tcp"
+		}
 		return "tcp-fallback"
 	default:
 		return "disconnected"
@@ -191,12 +208,18 @@ func (s *Service) AdvertisedCapabilities() protocol.Capability {
 	if s.config.TCPFallbackAddress != "" {
 		capabilities |= protocol.CapabilityTCPFallbackV1
 	}
+	if s.config.WireGuardRelay != nil {
+		capabilities |= protocol.CapabilityE2EPacketV1
+	}
 	return capabilities
 }
 
 func New(config Config) (*Service, error) {
 	if err := config.Identity.Validate(); err != nil || config.BootID.IsZero() || config.RelayAddress == "" ||
-		config.TLSConfig == nil || config.Routes == nil || (config.Packets == nil && config.DataPlane == nil) {
+		config.TLSConfig == nil || config.Routes == nil || (config.Packets == nil && config.DataPlane == nil && config.WireGuardRelay == nil) {
+		return nil, ErrInvalidConfig
+	}
+	if config.WireGuardRelay != nil && (config.Packets != nil || config.DataPlane != nil) {
 		return nil, ErrInvalidConfig
 	}
 	if (config.CandidateSink == nil) != (config.LocalCandidate == nil) || (config.CandidateSink != nil && config.DataPlane == nil) {
@@ -315,6 +338,9 @@ func (s *Service) RunSession(ctx context.Context) error { return s.runSession(ct
 func (s *Service) runSession(ctx context.Context) error {
 	capabilities := agent.RequiredRelayCapabilities | protocol.CapabilityIPv6V1 |
 		protocol.CapabilitySubnetRouterV1 | protocol.CapabilityExitNodeV1
+	if s.config.WireGuardRelay != nil {
+		capabilities |= protocol.CapabilityE2EPacketV1
+	}
 	if s.config.CandidateSink != nil {
 		capabilities |= protocol.CapabilityDirectPeerV1
 	}
@@ -406,6 +432,9 @@ func (s *Service) dialQUIC(ctx context.Context) (*transport.Conn, error) {
 func (s *Service) runTCPWithQUICRecovery(ctx context.Context, tcp nodeConnection, quicCapabilities protocol.Capability) error {
 	tcpCapabilities := agent.RequiredTCPFallbackCapabilities | protocol.CapabilityIPv6V1 |
 		protocol.CapabilitySubnetRouterV1 | protocol.CapabilityExitNodeV1
+	if s.config.WireGuardRelay != nil {
+		tcpCapabilities |= protocol.CapabilityE2EPacketV1
+	}
 	tcpCtx, cancelTCP := context.WithCancel(ctx)
 	defer cancelTCP()
 	tcpDone := make(chan error, 1)
@@ -528,6 +557,9 @@ func (s *Service) runConnectedGated(ctx context.Context, conn nodeConnection, ca
 	s.metrics.connections.Add(1)
 	s.bindings.reset()
 	defer s.bindings.reset()
+	if s.config.WireGuardRelay != nil {
+		return s.runWireGuardConnected(ctx, conn, params)
+	}
 	if s.config.DataPlane != nil {
 		return s.runUnifiedConnected(ctx, conn, params, capabilities)
 	}
@@ -553,6 +585,69 @@ func (s *Service) runConnectedGated(ctx context.Context, conn nodeConnection, ca
 		<-errorsOut
 	}
 	return err
+}
+
+func (s *Service) runWireGuardConnected(ctx context.Context, conn nodeConnection, params agent.SessionParameters) error {
+	mux, err := wireguard.NewRelayMux(nodeRelayCarrier{conn}, params.Capabilities)
+	if err != nil {
+		return err
+	}
+	sessionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 2)
+	go func() { done <- s.controlLoopWireGuard(sessionCtx, conn.controlStream(), params, mux) }()
+	go func() { done <- s.config.WireGuardRelay.RunRelay(sessionCtx, mux) }()
+	select {
+	case err = <-done:
+	case <-sessionCtx.Done():
+		err = sessionCtx.Err()
+	case <-conn.done():
+		err = errors.New("relay connection closed")
+	}
+	cancel()
+	_ = conn.close()
+	<-done
+	return err
+}
+
+func (s *Service) controlLoopWireGuard(ctx context.Context, stream io.Reader, params agent.SessionParameters, mux *wireguard.RelayMux) error {
+	var sequence uint64 = 1
+	for {
+		envelope := new(lanewayv1.RelayEnvelope)
+		if err := readMessage(stream, params.ControlFramer(), envelope); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		}
+		if envelope.GetSchemaVersion() != 1 || envelope.GetSequence() != sequence {
+			return ErrControlSequence
+		}
+		sequence++
+		switch body := envelope.GetBody().(type) {
+		case *lanewayv1.RelayEnvelope_RouteHandleBinding:
+			binding := body.RouteHandleBinding
+			if binding.GetRouteHandle() == 0 || len(binding.GetPeerNodeId()) != identity.IDSize || binding.GetMaxPacketPayload() == 0 {
+				return ErrControlBody
+			}
+			var peer identity.NodeID
+			copy(peer[:], binding.GetPeerNodeId())
+			if peer.IsZero() {
+				return ErrControlBody
+			}
+			if err := mux.SetBinding(wireguard.RelayBinding{Peer: peer, Handle: binding.GetRouteHandle(), MaxPacketPayload: int(binding.GetMaxPacketPayload())}); err != nil {
+				return err
+			}
+		case *lanewayv1.RelayEnvelope_RouteHandleRelease:
+			if _, ok := mux.ReleaseHandle(body.RouteHandleRelease.GetRouteHandle()); !ok {
+				return ErrControlBody
+			}
+		case *lanewayv1.RelayEnvelope_Error:
+			return agent.RemoteError(body.Error)
+		default:
+			return ErrControlBody
+		}
+	}
 }
 
 func (s *Service) runUnifiedConnected(ctx context.Context, conn nodeConnection, params agent.SessionParameters, capabilities protocol.Capability) error {
