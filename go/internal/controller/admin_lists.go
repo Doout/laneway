@@ -70,7 +70,7 @@ func (s *Store) NetworkNodes(ctx context.Context, networkID identity.NetworkID, 
 	if err := validateListLimit(limit); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at
 		FROM nodes n LEFT JOIN overlay_addresses a ON a.id=(SELECT oa.id FROM overlay_addresses oa
 			WHERE oa.node_id=n.id AND oa.released_at IS NULL AND length(oa.address)=4 ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
 		LEFT JOIN overlay_addresses a6 ON a6.id=(SELECT oa.id FROM overlay_addresses oa
@@ -87,14 +87,20 @@ func (s *Store) NetworkNodes(ctx context.Context, networkID identity.NetworkID, 
 		var capabilities uint64
 		var created int64
 		var revoked sql.NullInt64
-		if err := rows.Scan(&idRaw, &name, &capabilities, &created, &revoked, &address4, &address6); err != nil {
+		var class string
+		var lease sql.NullInt64
+		if err := rows.Scan(&idRaw, &name, &capabilities, &created, &revoked, &address4, &address6, &class, &lease); err != nil {
 			return nil, fmt.Errorf("scan node inventory: %w", err)
 		}
 		id, err := scanID(idRaw)
 		if err != nil {
 			return nil, err
 		}
-		node := Node{ID: identity.NodeID(id), NetworkID: networkID, Name: name, EnabledCapabilities: capabilities, CreatedAt: fromUnix(created), RevokedAt: nullableTime(revoked)}
+		enrollmentClass := EnrollmentClass(class)
+		if !enrollmentClass.Valid() || (enrollmentClass == EnrollmentClassEphemeral) != lease.Valid {
+			return nil, errors.New("corrupt node enrollment class")
+		}
+		node := Node{ID: identity.NodeID(id), NetworkID: networkID, Name: name, EnabledCapabilities: capabilities, CreatedAt: fromUnix(created), RevokedAt: nullableTime(revoked), EnrollmentClass: enrollmentClass, LeaseExpiresAt: nullableTime(lease)}
 		if len(address4) != 0 {
 			node.IPv4Address, _ = netip.AddrFromSlice(address4)
 			if !node.IPv4Address.Is4() {

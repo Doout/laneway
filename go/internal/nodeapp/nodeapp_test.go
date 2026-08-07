@@ -294,6 +294,30 @@ func TestControllerOverlayAddressesRequiresAuthoritativeHostRouteAndLease(t *tes
 	}
 }
 
+func TestControllerOverlayAddressesEnforcesEphemeralIdentityLease(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	local := identity.NodeIdentity{NetworkID: identity.NetworkID(testID(1)), NodeID: identity.NodeID(testID(2))}
+	configuration := controllerTestConfiguration(local, identity.NodeID(testID(3)), uint64(now.Add(time.Minute).Unix()))
+	configuration.EnrollmentClass = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER
+	configuration.IdentityLeaseExpiresAtUnixSeconds = uint64(now.Add(2 * time.Minute).Unix())
+	if _, err := controllerOverlayAddresses(configuration, local, now); err != nil {
+		t.Fatal(err)
+	}
+	configuration.ValidUntilUnixSeconds = uint64(now.Add(3 * time.Minute).Unix())
+	if _, err := controllerOverlayAddresses(configuration, local, now); err == nil {
+		t.Fatal("snapshot extending beyond ephemeral lease accepted")
+	}
+	configuration.ValidUntilUnixSeconds = uint64(now.Add(time.Minute).Unix())
+	configuration.IdentityLeaseExpiresAtUnixSeconds = uint64(now.Unix())
+	if _, err := controllerOverlayAddresses(configuration, local, now); err == nil {
+		t.Fatal("expired ephemeral identity lease accepted")
+	}
+	configuration.EnrollmentClass = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE
+	if _, err := controllerOverlayAddresses(configuration, local, now); err == nil {
+		t.Fatal("durable identity with ephemeral lease accepted")
+	}
+}
+
 func TestControllerOverlayAddressesAcceptsDualStackAssignment(t *testing.T) {
 	local := identity.NodeIdentity{NetworkID: identity.NetworkID(testID(1)), NodeID: identity.NodeID(testID(2))}
 	configuration := controllerTestConfiguration(local, identity.NodeID(testID(3)), uint64(time.Now().Unix()+60))

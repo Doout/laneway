@@ -20,7 +20,22 @@ const (
 	MaxAuditDetailLength = 16 << 10
 	MaxRouteMetric       = 1_000_000
 	MaxTokenLifetime     = 30 * 24 * time.Hour
+	MinEphemeralLifetime = 5 * time.Minute
+	MaxEphemeralLifetime = 24 * time.Hour
+	MaxActiveEphemeral   = 4096
 )
+
+type EnrollmentClass string
+
+const (
+	EnrollmentClassDurable    EnrollmentClass = "durable"
+	EnrollmentClassEphemeral  EnrollmentClass = "ephemeral"
+	EnrollmentClassRemembered EnrollmentClass = "remembered"
+)
+
+func (c EnrollmentClass) Valid() bool {
+	return c == EnrollmentClassDurable || c == EnrollmentClassEphemeral || c == EnrollmentClassRemembered
+}
 
 var (
 	ErrNotFound        = errors.New("controller record not found")
@@ -52,19 +67,28 @@ type Node struct {
 	IPv6Address         netip.Addr
 	CreatedAt           time.Time
 	RevokedAt           *time.Time
+	EnrollmentClass     EnrollmentClass
+	LeaseExpiresAt      *time.Time
 }
 
 // EnrollmentToken contains the immutable token record and, only when returned
 // by IssueEnrollmentToken, its bearer Secret. The secret is never persisted.
 type EnrollmentToken struct {
-	ID         identity.ID
-	NetworkID  identity.NetworkID
-	Label      string
-	Secret     string
-	ExpiresAt  time.Time
-	CreatedAt  time.Time
-	ConsumedAt *time.Time
-	ConsumedBy *identity.NodeID
+	ID              identity.ID
+	NetworkID       identity.NetworkID
+	Label           string
+	Secret          string
+	ExpiresAt       time.Time
+	CreatedAt       time.Time
+	ConsumedAt      *time.Time
+	ConsumedBy      *identity.NodeID
+	EnrollmentClass EnrollmentClass
+	SessionLifetime time.Duration
+}
+
+type EnrollmentTokenOptions struct {
+	Class           EnrollmentClass
+	SessionLifetime time.Duration
 }
 
 type RouteKind string

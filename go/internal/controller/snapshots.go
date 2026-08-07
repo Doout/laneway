@@ -21,14 +21,15 @@ type RelayAuthorization struct {
 // in node snapshots. Node names are operator selectors only; every consumer
 // must continue to authenticate and authorize the corresponding NodeID.
 func (s *Store) ActiveNodes(ctx context.Context, networkID identity.NetworkID) ([]Node, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,a.address,a6.address
+	now := unix(s.now())
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at
 		FROM nodes n LEFT JOIN overlay_addresses a ON a.id=(
 			SELECT oa.id FROM overlay_addresses oa WHERE oa.node_id=n.id AND oa.released_at IS NULL AND length(oa.address)=4
 			ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
 		LEFT JOIN overlay_addresses a6 ON a6.id=(
 			SELECT oa.id FROM overlay_addresses oa WHERE oa.node_id=n.id AND oa.released_at IS NULL AND length(oa.address)=16
 			ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
-		WHERE n.network_id=? AND n.revoked_at IS NULL ORDER BY n.name,n.id`, idBytes(networkID))
+		WHERE n.network_id=? AND n.revoked_at IS NULL AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?) ORDER BY n.name,n.id`, idBytes(networkID), now)
 	if err != nil {
 		return nil, fmt.Errorf("read active nodes: %w", err)
 	}
@@ -38,14 +39,20 @@ func (s *Store) ActiveNodes(ctx context.Context, networkID identity.NetworkID) (
 		var idRaw, address4, address6 []byte
 		var name string
 		var capabilities, created int64
-		if err := rows.Scan(&idRaw, &name, &capabilities, &created, &address4, &address6); err != nil {
+		var class string
+		var lease sql.NullInt64
+		if err := rows.Scan(&idRaw, &name, &capabilities, &created, &address4, &address6, &class, &lease); err != nil {
 			return nil, fmt.Errorf("scan active node: %w", err)
 		}
 		id, err := scanID(idRaw)
 		if err != nil {
 			return nil, err
 		}
-		node := Node{ID: identity.NodeID(id), NetworkID: networkID, Name: name, EnabledCapabilities: uint64(capabilities), CreatedAt: fromUnix(created)}
+		enrollmentClass := EnrollmentClass(class)
+		if !enrollmentClass.Valid() || (enrollmentClass == EnrollmentClassEphemeral) != lease.Valid {
+			return nil, errors.New("corrupt active node enrollment class")
+		}
+		node := Node{ID: identity.NodeID(id), NetworkID: networkID, Name: name, EnabledCapabilities: uint64(capabilities), CreatedAt: fromUnix(created), EnrollmentClass: enrollmentClass, LeaseExpiresAt: nullableTime(lease)}
 		if len(address4) != 0 {
 			if node.IPv4Address, _ = netip.AddrFromSlice(address4); !node.IPv4Address.Is4() {
 				return nil, errors.New("corrupt node IPv4 overlay address")
@@ -70,8 +77,8 @@ func (s *Store) ActiveNodes(ctx context.Context, networkID identity.NetworkID) (
 func (s *Store) OverlayRoutes(ctx context.Context, networkID identity.NetworkID) ([]Route, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT a.id,a.node_id,a.address,a.prefix_length,a.created_at
 		FROM overlay_addresses a JOIN nodes n ON n.id=a.node_id
-		WHERE a.network_id=? AND a.released_at IS NULL AND n.revoked_at IS NULL
-		ORDER BY a.prefix_length DESC,a.address ASC,a.id ASC`, idBytes(networkID))
+		WHERE a.network_id=? AND a.released_at IS NULL AND n.revoked_at IS NULL AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?)
+		ORDER BY a.prefix_length DESC,a.address ASC,a.id ASC`, idBytes(networkID), unix(s.now()))
 	if err != nil {
 		return nil, fmt.Errorf("read overlay routes: %w", err)
 	}
@@ -117,7 +124,7 @@ func (s *Store) OverlayRoutes(ctx context.Context, networkID identity.NetworkID)
 func (s *Store) RelayAuthorizations(ctx context.Context, networkID identity.NetworkID) ([]RelayAuthorization, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT n.id,a.address FROM nodes n
 		JOIN overlay_addresses a ON a.node_id=n.id AND a.released_at IS NULL
-		WHERE n.network_id=? AND n.revoked_at IS NULL ORDER BY n.id,a.address`, idBytes(networkID))
+		WHERE n.network_id=? AND n.revoked_at IS NULL AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?) ORDER BY n.id,a.address`, idBytes(networkID), unix(s.now()))
 	if err != nil {
 		return nil, fmt.Errorf("read relay nodes: %w", err)
 	}
@@ -170,10 +177,12 @@ func (s *Store) RelayAuthorizations(ctx context.Context, networkID identity.Netw
 // ApprovedRoutes returns the currently usable routes for a network in the
 // controller's deterministic route-selection order.
 func (s *Store) ApprovedRoutes(ctx context.Context, networkID identity.NetworkID) ([]Route, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,node_id,prefix_address,prefix_length,kind,mode,metric,
-		valid_until,created_at,approved_at FROM routes
-		WHERE network_id=? AND state='approved' AND (valid_until IS NULL OR valid_until>?)
-		ORDER BY prefix_length DESC,metric ASC,id ASC`, idBytes(networkID), unix(s.now()))
+	now := unix(s.now())
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.node_id,r.prefix_address,r.prefix_length,r.kind,r.mode,r.metric,
+		r.valid_until,r.created_at,r.approved_at FROM routes r JOIN nodes n ON n.id=r.node_id
+		WHERE r.network_id=? AND r.state='approved' AND (r.valid_until IS NULL OR r.valid_until>?)
+		AND n.revoked_at IS NULL AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?)
+		ORDER BY r.prefix_length DESC,r.metric ASC,r.id ASC`, idBytes(networkID), now, now)
 	if err != nil {
 		return nil, fmt.Errorf("read approved routes: %w", err)
 	}

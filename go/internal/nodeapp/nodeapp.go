@@ -662,6 +662,9 @@ func controllerOverlayAddresses(configuration *lanewayv1.NodeConfiguration, loca
 	if _, err := configurationDeadline(configuration.GetValidUntilUnixSeconds(), now); err != nil {
 		return nil, err
 	}
+	if err := validateConfigurationIdentityLease(configuration, now); err != nil {
+		return nil, err
+	}
 	if len(configuration.GetOverlayAddresses()) == 0 {
 		return nil, errors.New("controller assigned no overlay address")
 	}
@@ -703,6 +706,28 @@ func controllerOverlayAddresses(configuration *lanewayv1.NodeConfiguration, loca
 		}
 	}
 	return addresses, nil
+}
+
+func validateConfigurationIdentityLease(configuration *lanewayv1.NodeConfiguration, now time.Time) error {
+	class := configuration.GetEnrollmentClass()
+	lease := configuration.GetIdentityLeaseExpiresAtUnixSeconds()
+	switch class {
+	case lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE,
+		lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER:
+		if lease != 0 {
+			return errors.New("non-ephemeral controller identity has an unexpected lease")
+		}
+	case lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER:
+		if lease == 0 || lease > uint64(1<<63-1) || !time.Unix(int64(lease), 0).After(now) {
+			return errors.New("ephemeral controller identity lease is missing or expired")
+		}
+		if configuration.GetValidUntilUnixSeconds() > lease {
+			return errors.New("controller snapshot exceeds the ephemeral identity lease")
+		}
+	default:
+		return errors.New("controller returned an unknown enrollment class")
+	}
+	return nil
 }
 
 func configurationDeadline(seconds uint64, now time.Time) (time.Time, error) {

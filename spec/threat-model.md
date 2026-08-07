@@ -140,6 +140,15 @@ network-state mounts. It MAY receive only `NET_ADMIN` and `/dev/net/tun` inside
 its container namespace. All actors MUST validate ownership before cleanup and
 fail closed rather than remove foreign state.
 
+Temporary identity class and lifetime are properties of the one-time token,
+not caller-selected enrollment fields. Ephemeral certificates and every node
+or relay snapshot that could authorize them are capped by the same controller
+lease. The earliest active ephemeral lease bounds the complete network
+snapshot, preventing established relay or direct paths from extending a user
+session. Expiry transactionally revokes credentials, releases addresses,
+withdraws owned routes, advances the epoch, and audits the event. Address reuse
+is allowed only after the former credential is expired or durably revoked.
+
 ### 4.11 Bootstrap and supply chain
 
 Unauthenticated discovery data is not authority. Bootstrap metadata MUST be

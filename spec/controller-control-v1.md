@@ -11,6 +11,20 @@ by TLS 1.3; the private key never leaves the joining node. Every operation
 after issuance—configuration snapshots, conditional lease renewal, and node
 certificate renewal—uses mTLS QUIC when `controller.quic_endpoint` is set.
 
+Enrollment tokens are authority for exactly one controller-selected class:
+`DURABLE_NODE`, `EPHEMERAL_USER`, or `REMEMBERED_USER`. The request cannot
+upgrade that class. An ephemeral token also fixes a 5-minute through 24-hour
+identity lifetime. Its certificate, configuration lease, overlay addresses,
+peer/route authorization, and renewal are all bounded by the same UTC deadline.
+Every node and relay snapshot is capped by the earliest active ephemeral lease
+in its network, so an established direct or relayed path fails closed at the
+deadline even if no cleanup request arrives at that instant. Expiry revokes the
+certificate, releases addresses, withdraws routes, advances the network epoch,
+and writes an audit event in one transaction. Expired records are retained for
+seven days for recovery, then pruned in bounded batches while audit events
+remain. A remembered user is a distinct durable identity class; reconnecting
+never converts an ephemeral identity into that class.
+
 The UDP QUIC listener may share a numeric port with the HTTPS TCP listener.
 Servers require TLS 1.3, a chain rooted in the configured network CA, exactly
 one Laneway URI SAN, a node or relay workload role, and the same NetworkID as

@@ -155,6 +155,18 @@ CREATE UNIQUE INDEX one_active_ipv6_per_node ON overlay_addresses(node_id)
 ALTER TABLE relays ADD COLUMN service_id BLOB CHECK(service_id IS NULL OR length(service_id) = 16);
 CREATE UNIQUE INDEX relays_network_service_identity ON relays(network_id, service_id)
     WHERE service_id IS NOT NULL;
+`, `
+ALTER TABLE nodes ADD COLUMN enrollment_class TEXT NOT NULL DEFAULT 'durable'
+    CHECK(enrollment_class IN ('durable','ephemeral','remembered'));
+ALTER TABLE nodes ADD COLUMN lease_expires_at INTEGER;
+CREATE INDEX nodes_ephemeral_expiry ON nodes(lease_expires_at)
+    WHERE enrollment_class='ephemeral' AND revoked_at IS NULL;
+
+ALTER TABLE enrollment_tokens ADD COLUMN enrollment_class TEXT NOT NULL DEFAULT 'durable'
+    CHECK(enrollment_class IN ('durable','ephemeral','remembered'));
+ALTER TABLE enrollment_tokens ADD COLUMN session_lifetime_seconds INTEGER;
+CREATE INDEX enrollment_tokens_class_expiry ON enrollment_tokens(enrollment_class,expires_at)
+    WHERE consumed_at IS NULL;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

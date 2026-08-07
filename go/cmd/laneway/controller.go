@@ -365,13 +365,15 @@ func runControllerNetwork(args []string) error {
 
 func runControllerEnrollmentToken(args []string) error {
 	if len(args) == 0 || args[0] != "issue" {
-		return errors.New("usage: laneway controller enrollment-token issue --network-id ID --label LABEL [--expires-in 1h] [connection options]")
+		return errors.New("usage: laneway controller enrollment-token issue --network-id ID --label LABEL [--class durable|ephemeral|remembered] [--session-lifetime 8h] [--expires-in 1h] [connection options]")
 	}
 	fs := flag.NewFlagSet("controller enrollment-token issue", flag.ContinueOnError)
 	remote := addRemoteFlags(fs, false, true)
 	networkText := fs.String("network-id", "", "network ID")
 	label := fs.String("label", "", "single-use token label")
 	expiresIn := fs.Duration("expires-in", time.Hour, "token lifetime")
+	class := fs.String("class", "durable", "enrollment class: durable, ephemeral, or remembered")
+	sessionLifetime := fs.Duration("session-lifetime", 0, "ephemeral identity lifetime (default 8h for --class ephemeral)")
 	if err := parseNoArgs(fs, args[1:]); err != nil {
 		return err
 	}
@@ -382,13 +384,22 @@ func runControllerEnrollmentToken(args []string) error {
 	if *label == "" || *expiresIn <= 0 {
 		return errors.New("enrollment-token issue requires --label and a positive --expires-in")
 	}
+	if *class != "durable" && *class != "ephemeral" && *class != "remembered" {
+		return errors.New("--class must be durable, ephemeral, or remembered")
+	}
+	if *class == "ephemeral" && *sessionLifetime == 0 {
+		*sessionLifetime = 8 * time.Hour
+	}
+	if (*class == "ephemeral" && *sessionLifetime <= 0) || (*class != "ephemeral" && *sessionLifetime != 0) {
+		return errors.New("--session-lifetime is required only for ephemeral enrollment")
+	}
 	client, err := remote.client()
 	if err != nil {
 		return err
 	}
 	ctx, cancel := commandContext()
 	defer cancel()
-	result, err := client.IssueEnrollmentToken(ctx, networkID, *label, time.Now().UTC().Add(*expiresIn))
+	result, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, *label, time.Now().UTC().Add(*expiresIn), controllerclient.EnrollmentTokenOptions{Class: *class, SessionLifetime: *sessionLifetime})
 	if err != nil {
 		return err
 	}
