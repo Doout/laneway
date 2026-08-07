@@ -70,6 +70,7 @@ type Service struct {
 	verifyPeerCertificate bool
 	now                   func() time.Time
 	snapshotValidity      time.Duration
+	enrollmentLimiter     *enrollmentRateLimiter
 	handler               http.Handler
 	metrics               serviceMetrics
 }
@@ -141,7 +142,8 @@ func New(opts Options) (*Service, error) {
 		store: opts.Store, ca: opts.CACertificate, caKey: opts.CAKey, issuerChain: issuerChain, validity: opts.LeafValidity,
 		maxBody: opts.MaxBodyBytes, authorizeAdm: opts.AdminAuthorizer,
 		authorizeNode: opts.NodeAuthorizer, verifyPeerCertificate: verifyPeerCertificate, now: opts.Now,
-		snapshotValidity: opts.SnapshotValidity,
+		snapshotValidity:  opts.SnapshotValidity,
+		enrollmentLimiter: newEnrollmentRateLimiter(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
@@ -254,6 +256,7 @@ type tokenRequest struct {
 	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
 	EnrollmentClass        string `json:"enrollment_class,omitempty"`
 	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
+	RequestedName          string `json:"requested_name,omitempty"`
 }
 
 type tokenResponse struct {
@@ -262,6 +265,7 @@ type tokenResponse struct {
 	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
 	EnrollmentClass        string `json:"enrollment_class"`
 	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
+	RequestedName          string `json:"requested_name,omitempty"`
 }
 
 func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
@@ -284,17 +288,22 @@ func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
 		class = controller.EnrollmentClassDurable
 	}
 	token, err := s.store.IssueEnrollmentTokenWithOptions(r.Context(), networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
-		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second,
+		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second, RequestedName: req.RequestedName,
 	})
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, tokenResponse{TokenID: token.ID.String(), EnrollmentToken: token.Secret, ExpiresAtUnix: token.ExpiresAt.Unix(),
-		EnrollmentClass: string(token.EnrollmentClass), SessionLifetimeSeconds: int64(token.SessionLifetime / time.Second)})
+		EnrollmentClass: string(token.EnrollmentClass), SessionLifetimeSeconds: int64(token.SessionLifetime / time.Second), RequestedName: token.RequestedName})
 }
 
 func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
+	if !s.enrollmentLimiter.allow(r.RemoteAddr, s.now()) {
+		w.Header().Set("Retry-After", "1")
+		s.writeProtocolError(w, http.StatusTooManyRequests, lanewayv1.ErrorCode_ERROR_CODE_RESOURCE_EXHAUSTED, "enrollment rate limit exceeded; retry later", true)
+		return
+	}
 	req := new(lanewayv1.EnrollmentRequest)
 	if err := s.decodeProto(w, r, req); err != nil {
 		s.writeError(w, err, true)
@@ -305,22 +314,39 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed(err.Error()), true)
 		return
 	}
+	var expectedNetwork identity.NetworkID
+	if len(req.GetExpectedNetworkId()) != 0 {
+		if len(req.GetExpectedNetworkId()) != identity.IDSize {
+			s.writeError(w, malformed("expected_network_id must be a NetworkID"), true)
+			return
+		}
+		copy(expectedNetwork[:], req.GetExpectedNetworkId())
+		if expectedNetwork.IsZero() {
+			s.writeError(w, malformed("expected_network_id must be nonzero"), true)
+			return
+		}
+	}
 	// CSR validation happens before opening the enrollment transaction. Signing
 	// and certificate persistence then participate in the same transaction as
 	// token consumption, node creation, and overlay allocation.
 	var cert *x509.Certificate
-	enrollment, err := s.store.EnrollNodeWithCertificate(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0,
-		func(_ context.Context, node controller.Node) (controller.CertificateMaterial, error) {
-			issued, issueErr := s.issueCertificate(node, csr)
-			if issueErr != nil {
-				return controller.CertificateMaterial{}, issueErr
-			}
-			cert = issued
-			return controller.CertificateMaterial{
-				Serial: issued.SerialNumber.Bytes(), DER: issued.Raw,
-				NotBefore: issued.NotBefore, NotAfter: issued.NotAfter,
-			}, nil
-		})
+	issuer := func(_ context.Context, node controller.Node) (controller.CertificateMaterial, error) {
+		issued, issueErr := s.issueCertificate(node, csr)
+		if issueErr != nil {
+			return controller.CertificateMaterial{}, issueErr
+		}
+		cert = issued
+		return controller.CertificateMaterial{
+			Serial: issued.SerialNumber.Bytes(), DER: issued.Raw,
+			NotBefore: issued.NotBefore, NotAfter: issued.NotAfter,
+		}, nil
+	}
+	var enrollment controller.Enrollment
+	if expectedNetwork.IsZero() {
+		enrollment, err = s.store.EnrollNodeWithCertificate(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, issuer)
+	} else {
+		enrollment, err = s.store.EnrollNodeWithCertificateForNetwork(r.Context(), req.GetEnrollmentToken(), req.GetRequestedName(), 0, expectedNetwork, issuer)
+	}
 	if err != nil {
 		s.writeError(w, err, true)
 		return
@@ -967,13 +993,21 @@ func (s *Service) writeError(w http.ResponseWriter, err error, protobuf bool) {
 	switch {
 	case errors.As(err, &requestErr):
 		status, code, detail, retryable = requestErr.status, requestErr.code, requestErr.detail, requestErr.retryable
-	case errors.Is(err, ErrUnauthenticated), errors.Is(err, controller.ErrTokenInvalid), errors.Is(err, controller.ErrTokenExpired):
+	case errors.Is(err, ErrUnauthenticated), errors.Is(err, controller.ErrTokenInvalid):
 		status, code, detail, retryable = http.StatusUnauthorized, lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "authentication failed", false
+	case errors.Is(err, controller.ErrTokenExpired):
+		status, code, detail, retryable = http.StatusUnauthorized, lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "enrollment code has expired", false
 	case errors.Is(err, ErrPermissionDenied):
 		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied", false
+	case errors.Is(err, controller.ErrTokenNetwork):
+		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code belongs to a different network", false
+	case errors.Is(err, controller.ErrTokenName):
+		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code is bound to a different device name", false
 	case errors.Is(err, controller.ErrNotFound):
 		status, code, detail, retryable = http.StatusNotFound, lanewayv1.ErrorCode_ERROR_CODE_MALFORMED, "record not found", false
-	case errors.Is(err, controller.ErrConflict), errors.Is(err, controller.ErrTokenConsumed), errors.Is(err, controller.ErrAlreadyApproved):
+	case errors.Is(err, controller.ErrTokenConsumed):
+		status, code, detail, retryable = http.StatusConflict, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code has already been used", false
+	case errors.Is(err, controller.ErrConflict), errors.Is(err, controller.ErrAlreadyApproved):
 		status, code, detail, retryable = http.StatusConflict, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "request conflicts with controller state", false
 	case errors.Is(err, controller.ErrInvalid):
 		status, code, detail, retryable = http.StatusBadRequest, lanewayv1.ErrorCode_ERROR_CODE_MALFORMED, "invalid request", false

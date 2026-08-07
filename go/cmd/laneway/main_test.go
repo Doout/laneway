@@ -186,6 +186,38 @@ func TestJoinParsesDocumentedTokenBeforeFlags(t *testing.T) {
 	}
 }
 
+func TestBootstrapJoinRefusesSecretsInArgvAndMetadataOverrides(t *testing.T) {
+	err := runJoin([]string{"literal-token", "--bootstrap", "lane.example.test", "--name", "laptop"})
+	if err == nil || !strings.Contains(err.Error(), "refuses a code in argv") {
+		t.Fatalf("bootstrap argv secret error = %v", err)
+	}
+	err = runJoin([]string{"--bootstrap", "lane.example.test", "--name", "laptop", "--controller", "https://attacker.example.test"})
+	if err == nil || !strings.Contains(err.Error(), "cannot override") {
+		t.Fatalf("bootstrap metadata override error = %v", err)
+	}
+	err = runInvite([]string{"--name", "laptop", "--ephemeral", "--remembered"})
+	if err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("conflicting invite class error = %v", err)
+	}
+	err = runInvite([]string{"--name", "laptop", "--expires-in", "2h"})
+	if err == nil || !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("unbounded invite expiry error = %v", err)
+	}
+}
+
+func TestControllerInvitePinsLocalDialWithoutChangingTLSIdentity(t *testing.T) {
+	for input, want := range map[string]string{
+		":8443":        "127.0.0.1:8443",
+		"0.0.0.0:8443": "127.0.0.1:8443",
+		"[::]:8443":    "127.0.0.1:8443",
+		"127.0.0.2:9":  "127.0.0.2:9",
+	} {
+		if got := controllerLoopbackDialAddress(input); got != want {
+			t.Errorf("controllerLoopbackDialAddress(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestResolveExitSelectorExactUniqueName(t *testing.T) {
 	first := "000102030405060708090a0b0c0d0e0f"
 	second := "101112131415161718191a1b1c1d1e1f"

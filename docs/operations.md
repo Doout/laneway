@@ -33,6 +33,70 @@ key access.
 Enrollment and administrator tokens must not be placed in shell history,
 process arguments, source control, or logs.
 
+### Public bootstrap and short invite codes
+
+A fresh user client must authenticate discovery before it accepts the private
+network CA. Enable the controller's optional `[bootstrap]` listener with a
+certificate issued by public Web PKI. This listener is separate from the
+controller HTTPS/QUIC listener: it serves only
+`/.well-known/laneway/bootstrap.json`, while the controller listener retains
+its Laneway service certificate and immutable NetworkID/ServiceID identity.
+Never reuse a self-signed or private-network certificate on the public
+bootstrap listener.
+
+Bootstrap configuration pins one network, the internal controller HTTPS and
+QUIC endpoints, its DNS name, both supported Linux release artifacts, their
+exact byte sizes, and lowercase SHA-256 digests. Enabled relay targets and
+ServiceIDs are read from controller state for each short-lived response. The
+controller refuses to start if static bootstrap data is malformed or if the
+configured NetworkID differs from its controller certificate. A response
+fails closed when there is no enabled relay.
+
+On the controller host, issue a ten-minute code without spelling controller,
+CA, relay, network, or service IDs:
+
+```sh
+lane invite --name laptop --ephemeral
+```
+
+`lane` is a packaged alias of the single `laneway` binary. Durable and
+remembered codes use `lane invite --name NAME` and `--remembered`
+respectively. The advanced `laneway controller enrollment-token issue`
+interface remains available for automation. Codes are random, stored only as
+a hash, network/class-bound, single-use, limited to one hour of validity, and
+the enrollment endpoint applies a bounded per-source token bucket.
+
+On a clean Linux AMD64 or ARM64 client:
+
+```sh
+laneway join lane.example.com
+```
+
+The client obtains metadata using TLS 1.3 and the host system's public roots,
+rejects redirects and non-DNS authorities, validates its architecture and the
+authenticated artifact record, then prompts on `/dev/tty` with terminal echo
+disabled. The product invite binds the requested device name, so the client
+does not repeat it and a substitution attempt leaves the code unused. For
+non-interactive provisioning, pass a mode-0600 `--token-file`;
+the bootstrap flow rejects codes in argv. It also refuses endpoint/pin
+overrides and sends the authenticated expected NetworkID so a wrong-network
+code is rejected before consumption. The older many-flag `join` form remains
+the explicit migration/debug path.
+
+Artifact downloaders must stream into an unprivileged temporary file, enforce
+the authenticated `size_bytes`, and call the same SHA-256 verification logic
+before extraction or privilege. Never pipe a download into a shell.
+
+```sh
+laneway bootstrap inspect lane.example.com
+laneway bootstrap download lane.example.com --out ./laneway_linux.tar.gz
+```
+
+`bootstrap download` follows at most five HTTPS-only redirects, writes a
+mode-0600 temporary file in the destination directory, verifies exact length
+and SHA-256, and publishes with a no-replace hard link. It neither overwrites,
+extracts, executes, nor elevates the artifact.
+
 ## Deployment checklist
 
 1. Build with the pinned Go toolchain and run `make test`, `make vet`, and

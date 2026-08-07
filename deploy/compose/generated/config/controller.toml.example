@@ -15,3 +15,7 @@ ca_private_key = "/run/laneway-secrets/intermediate.key"
 issuer_certificate = "/run/laneway-secrets/intermediate-chain.crt"
 admin_token_file = "/run/laneway-secrets/admin.token"
 leaf_validity = "720h"
+
+# See deploy/examples/controller.toml for the optional public-Web-PKI
+# [bootstrap] listener. Keep it disabled until real release sizes/checksums and
+# a publicly trusted certificate are mounted into the controller container.

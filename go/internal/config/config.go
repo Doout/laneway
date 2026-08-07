@@ -4,10 +4,13 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -51,6 +54,7 @@ type Config struct {
 	Node        Node             `toml:"node"`
 	Relay       Relay            `toml:"relay"`
 	Controller  Controller       `toml:"controller"`
+	Bootstrap   Bootstrap        `toml:"bootstrap"`
 	Routing     Routing          `toml:"routing"`
 	Exit        Exit             `toml:"exit"`
 	TCPFallback TCPFallback      `toml:"tcp_fallback"`
@@ -130,6 +134,28 @@ type Controller struct {
 	AdminTokenFile        string   `toml:"admin_token_file"`
 	LeafValidity          Duration `toml:"leaf_validity"`
 	PollInterval          Duration `toml:"poll_interval"`
+}
+
+// Bootstrap configures a dedicated public-Web-PKI HTTPS listener. It serves
+// non-secret discovery data only; the private controller API keeps its
+// Laneway-CA service certificate and identity pin.
+type Bootstrap struct {
+	Listen                 string              `toml:"listen"`
+	CertificateFile        string              `toml:"certificate"`
+	PrivateKeyFile         string              `toml:"private_key"`
+	NetworkID              string              `toml:"network_id"`
+	ControllerEndpoint     string              `toml:"controller_endpoint"`
+	ControllerQUICEndpoint string              `toml:"controller_quic_endpoint"`
+	ControllerServerName   string              `toml:"controller_server_name"`
+	Artifacts              []BootstrapArtifact `toml:"artifacts"`
+}
+
+type BootstrapArtifact struct {
+	OS        string `toml:"os"`
+	Arch      string `toml:"arch"`
+	URL       string `toml:"url"`
+	SHA256    string `toml:"sha256"`
+	SizeBytes int64  `toml:"size_bytes"`
 }
 
 type Routing struct {
@@ -333,6 +359,12 @@ func (c Config) Validate() error {
 		if c.TCPFallback.Address != "" || c.TCPFallback.Listen != "" {
 			return errors.New("tcp_fallback endpoints are not valid in controller mode")
 		}
+		if err := validateBootstrap(c.Bootstrap); err != nil {
+			return err
+		}
+	}
+	if c.Mode != ModeController && bootstrapConfigured(c.Bootstrap) {
+		return errors.New("bootstrap listener is valid only in controller mode")
 	}
 	if c.Controller.Endpoint != "" {
 		if _, err := identity.ParseNetworkID(c.Controller.NetworkID); err != nil {
@@ -407,6 +439,62 @@ func (c Config) Validate() error {
 			if err != nil || netvalidate.RoutablePrefix(parsed, false) != nil {
 				return fmt.Errorf("peers[%d] prefix %q is not a canonical routable non-default prefix", i, prefix)
 			}
+		}
+	}
+	return nil
+}
+
+func bootstrapConfigured(value Bootstrap) bool {
+	return value.Listen != "" || value.CertificateFile != "" || value.PrivateKeyFile != "" || value.NetworkID != "" ||
+		value.ControllerEndpoint != "" || value.ControllerQUICEndpoint != "" || value.ControllerServerName != "" || len(value.Artifacts) != 0
+}
+
+func validateBootstrap(value Bootstrap) error {
+	if !bootstrapConfigured(value) {
+		return nil
+	}
+	if value.Listen == "" || value.CertificateFile == "" || value.PrivateKeyFile == "" || value.NetworkID == "" ||
+		value.ControllerEndpoint == "" || value.ControllerQUICEndpoint == "" || value.ControllerServerName == "" {
+		return errors.New("bootstrap requires listen, certificate, private_key, network_id, controller_endpoint, controller_quic_endpoint, and controller_server_name")
+	}
+	if _, err := identity.ParseNetworkID(value.NetworkID); err != nil {
+		return fmt.Errorf("bootstrap.network_id: %w", err)
+	}
+	parsed, err := url.Parse(value.ControllerEndpoint)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return errors.New("bootstrap.controller_endpoint must be an HTTPS origin")
+	}
+	if _, err := netvalidate.CanonicalHostPort(value.ControllerQUICEndpoint); err != nil {
+		return errors.New("bootstrap.controller_quic_endpoint must be a canonical host:port")
+	}
+	if value.ControllerServerName != strings.ToLower(value.ControllerServerName) || strings.HasSuffix(value.ControllerServerName, ".") || len(value.ControllerServerName) > 253 {
+		return errors.New("bootstrap.controller_server_name must be a canonical lowercase DNS name")
+	}
+	platforms := make(map[string]struct{}, len(value.Artifacts))
+	for i, artifact := range value.Artifacts {
+		if artifact.OS != "linux" || (artifact.Arch != "amd64" && artifact.Arch != "arm64") {
+			return fmt.Errorf("bootstrap.artifacts[%d] must target linux/amd64 or linux/arm64", i)
+		}
+		artifactURL, err := url.Parse(artifact.URL)
+		if err != nil || artifactURL.Scheme != "https" || artifactURL.Host == "" || artifactURL.User != nil || artifactURL.Fragment != "" {
+			return fmt.Errorf("bootstrap.artifacts[%d].url must be HTTPS without credentials or fragment", i)
+		}
+		digest, err := hex.DecodeString(artifact.SHA256)
+		if err != nil || len(digest) != sha256.Size || artifact.SHA256 != strings.ToLower(artifact.SHA256) {
+			return fmt.Errorf("bootstrap.artifacts[%d].sha256 must be canonical lowercase SHA-256", i)
+		}
+		if artifact.SizeBytes <= 0 || artifact.SizeBytes > 512<<20 {
+			return fmt.Errorf("bootstrap.artifacts[%d].size_bytes is invalid", i)
+		}
+		key := artifact.OS + "/" + artifact.Arch
+		if _, exists := platforms[key]; exists {
+			return fmt.Errorf("bootstrap.artifacts[%d] duplicates platform %s", i, key)
+		}
+		platforms[key] = struct{}{}
+	}
+	for _, required := range []string{"linux/amd64", "linux/arm64"} {
+		if _, exists := platforms[required]; !exists {
+			return fmt.Errorf("bootstrap artifact metadata is missing %s", required)
 		}
 	}
 	return nil

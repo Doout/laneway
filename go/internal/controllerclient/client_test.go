@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/pki"
 )
 
 func TestNormalizeEndpoint(t *testing.T) {
@@ -29,6 +30,31 @@ func TestNormalizeEndpoint(t *testing.T) {
 	}
 	if got, err := normalizeEndpoint("https://controller.example/"); err != nil || got != "https://controller.example" {
 		t.Fatalf("normalize endpoint = %q, %v", got, err)
+	}
+}
+
+func TestClientAcceptsOnlyOneAuthenticatedCASource(t *testing.T) {
+	now := time.Now().UTC()
+	material, _, err := pki.NewAuthority("bootstrap CA", now.Add(-time.Hour), 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPEM := pki.CertificatePEM(material.CertificateDER)
+	networkID, _ := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")
+	serviceID, _ := identity.ParseID("101112131415161718191a1b1c1d1e1f")
+	options := Options{Endpoint: "https://controller.example.test:8443", CAPEM: caPEM, ExpectedNetworkID: networkID, ExpectedServiceID: serviceID}
+	if _, err := New(options); err != nil {
+		t.Fatal(err)
+	}
+	without := options
+	without.CAPEM = nil
+	if _, err := New(without); err == nil {
+		t.Fatal("missing CA source accepted")
+	}
+	both := options
+	both.CAFile = filepath.Join(t.TempDir(), "ca.crt")
+	if _, err := New(both); err == nil {
+		t.Fatal("ambiguous CA sources accepted")
 	}
 }
 
@@ -66,6 +92,9 @@ func TestEnrollAndConfiguration(t *testing.T) {
 			if err := proto.Unmarshal(body, request); err != nil || request.GetEnrollmentToken() != "secret" {
 				t.Errorf("bad enrollment request: %#v, %v", request, err)
 			}
+			if request.GetRequestedName() == "network-bound" && len(request.GetExpectedNetworkId()) != identity.IDSize {
+				t.Errorf("network-bound enrollment omitted expected NetworkID: %#v", request)
+			}
 			payload, _ := proto.Marshal(&lanewayv1.EnrollmentResponse{NetworkId: make([]byte, 16), NodeId: make([]byte, 16)})
 			_, _ = w.Write(payload)
 		case "/v1/configuration":
@@ -81,6 +110,10 @@ func TestEnrollAndConfiguration(t *testing.T) {
 	response, err := client.Enroll(context.Background(), "secret", "node", []byte{1})
 	if err != nil || len(response.GetNodeId()) != 16 {
 		t.Fatalf("Enroll = %#v, %v", response, err)
+	}
+	networkID, _ := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")
+	if _, err := client.EnrollForNetwork(context.Background(), "secret", "network-bound", []byte{1}, networkID); err != nil {
+		t.Fatalf("EnrollForNetwork = %v", err)
 	}
 	configuration, unchanged, err := client.Configuration(context.Background(), 4)
 	if err != nil || !unchanged || configuration.GetValidUntilUnixSeconds() != 2_000_000_000 {
@@ -204,11 +237,14 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 	if token, err := client.IssueEnrollmentToken(ctx, networkID, "label", time.Unix(100, 0)); err != nil || token.EnrollmentToken != "issued-secret" {
 		t.Fatalf("token=%+v err=%v", token, err)
 	}
-	if _, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, "temporary", time.Unix(200, 0), EnrollmentTokenOptions{Class: "ephemeral", SessionLifetime: 8 * time.Hour}); err != nil {
+	if _, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, "temporary", time.Unix(200, 0), EnrollmentTokenOptions{Class: "ephemeral", SessionLifetime: 8 * time.Hour, RequestedName: "laptop"}); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(lastTokenBody, []byte(`"enrollment_class":"ephemeral"`)) || !bytes.Contains(lastTokenBody, []byte(`"session_lifetime_seconds":28800`)) {
 		t.Fatalf("ephemeral token request=%s", lastTokenBody)
+	}
+	if !bytes.Contains(lastTokenBody, []byte(`"requested_name":"laptop"`)) {
+		t.Fatalf("name-bound token request=%s", lastTokenBody)
 	}
 	if _, err := client.AdvertiseRoute(ctx, netip.MustParsePrefix("192.0.2.0/24"), "subnet", "nat", 5, nil); err != nil {
 		t.Fatal(err)

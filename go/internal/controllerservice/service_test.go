@@ -277,6 +277,67 @@ func TestEnrollmentUsesCSRKeyButOverridesIdentityAndRejectsReplay(t *testing.T) 
 	if replay.Code != http.StatusConflict {
 		t.Fatalf("replay status=%d want %d", replay.Code, http.StatusConflict)
 	}
+	replayProblem := new(lanewayv1.ProtocolError)
+	if err := proto.Unmarshal(replay.Body.Bytes(), replayProblem); err != nil || !strings.Contains(replayProblem.GetDetail(), "already been used") {
+		t.Fatalf("replay problem=%+v err=%v", replayProblem, err)
+	}
+}
+
+func TestEnrollmentExpectedNetworkMismatchIsClearAndDoesNotConsumeCode(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	other, err := f.store.CreateNetwork(context.Background(), "other", netip.MustParsePrefix("10.45.0.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := f.store.IssueEnrollmentToken(context.Background(), other.ID, "wrong-network", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &lanewayv1.EnrollmentRequest{
+		EnrollmentToken: token.Secret, Pkcs10CsrDer: csrDER(t, ""), RequestedName: "wrong-network",
+		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...),
+	}
+	mismatch := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
+	if mismatch.Code != http.StatusForbidden {
+		t.Fatalf("mismatch status=%d body=%x", mismatch.Code, mismatch.Body.Bytes())
+	}
+	problem := new(lanewayv1.ProtocolError)
+	if err := proto.Unmarshal(mismatch.Body.Bytes(), problem); err != nil || !strings.Contains(problem.GetDetail(), "different network") {
+		t.Fatalf("mismatch problem=%+v err=%v", problem, err)
+	}
+	request.RequestedName = "right-network"
+	request.ExpectedNetworkId = append(request.ExpectedNetworkId[:0], other.ID[:]...)
+	retry := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("mismatch consumed code: status=%d body=%x", retry.Code, retry.Body.Bytes())
+	}
+}
+
+func TestEnrollmentInviteNameIsBoundAndMayBeOmittedByClient(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	token, err := f.store.IssueEnrollmentTokenWithOptions(context.Background(), f.network.ID, "bound-laptop", time.Now().Add(time.Hour), controller.EnrollmentTokenOptions{
+		Class: controller.EnrollmentClassEphemeral, SessionLifetime: controller.MinEphemeralLifetime, RequestedName: "bound-laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &lanewayv1.EnrollmentRequest{
+		EnrollmentToken: token.Secret, Pkcs10CsrDer: csrDER(t, ""), RequestedName: "attacker-name",
+		ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...),
+	}
+	mismatch := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
+	if mismatch.Code != http.StatusForbidden {
+		t.Fatalf("name mismatch status=%d body=%x", mismatch.Code, mismatch.Body.Bytes())
+	}
+	problem := new(lanewayv1.ProtocolError)
+	if err := proto.Unmarshal(mismatch.Body.Bytes(), problem); err != nil || !strings.Contains(problem.GetDetail(), "device name") {
+		t.Fatalf("name mismatch problem=%+v err=%v", problem, err)
+	}
+	request.RequestedName = ""
+	retry := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("name mismatch consumed invite: status=%d body=%x", retry.Code, retry.Body.Bytes())
+	}
 }
 
 func TestEphemeralEnrollmentCertificateAndResponseAreLeaseBound(t *testing.T) {
@@ -389,6 +450,10 @@ func TestExpiredTokenAndMalformedCSRDoesNotConsumeToken(t *testing.T) {
 	_, expired := enroll(t, f, expiredToken, csrDER(t, ""), "expired")
 	if expired.Code != http.StatusUnauthorized {
 		t.Fatalf("expired status=%d", expired.Code)
+	}
+	expiredProblem := new(lanewayv1.ProtocolError)
+	if err := proto.Unmarshal(expired.Body.Bytes(), expiredProblem); err != nil || !strings.Contains(expiredProblem.GetDetail(), "expired") {
+		t.Fatalf("expired problem=%+v err=%v", expiredProblem, err)
 	}
 
 	validToken := issueToken(t, f, time.Now().Add(time.Hour))

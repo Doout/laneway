@@ -145,6 +145,59 @@ leaf_validity = "720h"
 	}
 }
 
+func TestDecodeControllerPublicBootstrap(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	source := `
+mode = "controller"
+state_dir = "/var/lib/laneway-controller"
+socket_path = "/run/laneway/controller.sock"
+[tls]
+certificate = "/etc/laneway/controller.crt"
+private_key = "/etc/laneway/controller.key"
+ca = "/etc/laneway/ca.crt"
+[controller]
+listen = ":8443"
+quic_listen = ":8443"
+database = "/var/lib/laneway-controller/controller.db"
+ca_private_key = "/etc/laneway/ca.key"
+admin_token_file = "/etc/laneway/admin.token"
+leaf_validity = "720h"
+[bootstrap]
+listen = ":443"
+certificate = "/etc/letsencrypt/live/lane/fullchain.pem"
+private_key = "/etc/letsencrypt/live/lane/privkey.pem"
+network_id = "000102030405060708090a0b0c0d0e0f"
+controller_endpoint = "https://controller.example.test:8443"
+controller_quic_endpoint = "controller.example.test:8443"
+controller_server_name = "controller.example.test"
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "amd64"
+url = "https://downloads.example.test/laneway-amd64.tar.gz"
+sha256 = "` + digest + `"
+size_bytes = 123
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "arm64"
+url = "https://downloads.example.test/laneway-arm64.tar.gz"
+sha256 = "` + digest + `"
+size_bytes = 124
+`
+	cfg, err := Decode(strings.NewReader(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Bootstrap.Listen != ":443" || len(cfg.Bootstrap.Artifacts) != 2 {
+		t.Fatalf("bootstrap config = %+v", cfg.Bootstrap)
+	}
+	if _, err := Decode(strings.NewReader(strings.Replace(source, "arch = \"arm64\"", "arch = \"amd64\"", 1))); err == nil {
+		t.Fatal("duplicate/missing architecture metadata accepted")
+	}
+	if _, err := Decode(strings.NewReader(strings.Replace(source, "https://downloads.example.test/laneway-amd64.tar.gz", "http://downloads.example.test/laneway-amd64.tar.gz", 1))); err == nil {
+		t.Fatal("insecure artifact URL accepted")
+	}
+}
+
 func TestDecodeControllerBackedRelay(t *testing.T) {
 	cfg, err := Decode(strings.NewReader(`
 mode = "relay"

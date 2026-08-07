@@ -158,6 +158,14 @@ metadata. Enrollment codes MUST be short-lived, single-use, rate-limited, and
 bound to the intended network and enrollment class. They MUST NOT be placed in
 argv, URLs, logs, or shell history.
 
+The public listener exposes no secret or mutation endpoint. Clients reject
+redirects, IP authorities, unbounded, stale, or unknown metadata, endpoint
+overrides, invalid identity pins, and artifact size or digest mismatches.
+Enrollment codes are read from a non-echoed controlling terminal (or a
+protected file); requests carry the WebPKI-authenticated expected NetworkID
+and are throttled by bounded transport-source state before parsing or token
+lookup. A network mismatch is checked before the code can be consumed.
+
 Downloaded artifacts MUST be verified before execution and before any privilege
 boundary is crossed. Deployment inputs MUST use a semantic version or immutable
 digest, never a mutable `latest` tag.

@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/buildinfo"
 	"laneway.dev/laneway/internal/config"
 	"laneway.dev/laneway/internal/controller"
@@ -102,6 +103,61 @@ func run(path, diagnostics string) error {
 	if err != nil {
 		return err
 	}
+	var bootstrapServer *http.Server
+	var bootstrapListener net.Listener
+	var bootstrapServeErr <-chan error
+	if cfg.Bootstrap.Listen != "" {
+		networkID, parseErr := identity.ParseNetworkID(cfg.Bootstrap.NetworkID)
+		if parseErr != nil {
+			return parseErr
+		}
+		if _, lookupErr := store.Network(ctx, networkID); lookupErr != nil {
+			return fmt.Errorf("bootstrap network: %w", lookupErr)
+		}
+		controllerIdentity, identityErr := identity.AuthenticatedIdentityFromCertificate(tlsConfig.Certificates[0].Leaf)
+		if identityErr != nil {
+			return identityErr
+		}
+		if controllerIdentity.NetworkID != networkID {
+			return errors.New("bootstrap network does not match the controller certificate network identity")
+		}
+		artifacts := make([]bootstrap.Artifact, 0, len(cfg.Bootstrap.Artifacts))
+		for _, artifact := range cfg.Bootstrap.Artifacts {
+			artifacts = append(artifacts, bootstrap.Artifact{
+				OS: artifact.OS, Arch: artifact.Arch, URL: artifact.URL,
+				SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes,
+			})
+		}
+		bootstrapMetadata, bootstrapErr := bootstrap.NewServer(bootstrap.ServerOptions{
+			Relays: store, NetworkID: networkID,
+			ControllerEndpoint:   cfg.Bootstrap.ControllerEndpoint,
+			ControllerQUIC:       cfg.Bootstrap.ControllerQUICEndpoint,
+			ControllerServerName: cfg.Bootstrap.ControllerServerName,
+			ControllerServiceID:  controllerIdentity.SubjectID,
+			CAPEM:                string(caPEM), Artifacts: artifacts,
+		})
+		if bootstrapErr != nil {
+			return bootstrapErr
+		}
+		publicCertificate, certificateErr := tls.LoadX509KeyPair(cfg.Bootstrap.CertificateFile, cfg.Bootstrap.PrivateKeyFile)
+		if certificateErr != nil {
+			return fmt.Errorf("load bootstrap Web PKI certificate and key: %w", certificateErr)
+		}
+		bootstrapServer = &http.Server{
+			Addr: cfg.Bootstrap.Listen, Handler: bootstrapMetadata.Handler(),
+			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{publicCertificate}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
+			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+			WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
+		}
+		bootstrapListener, err = net.Listen("tcp", cfg.Bootstrap.Listen)
+		if err != nil {
+			return fmt.Errorf("listen for public bootstrap metadata: %w", err)
+		}
+		defer bootstrapListener.Close()
+		bootstrapErrors := make(chan error, 1)
+		bootstrapServeErr = bootstrapErrors
+		go func() { bootstrapErrors <- bootstrapServer.ServeTLS(bootstrapListener, "", "") }()
+	}
 	server := service.NewHTTPServer(cfg.Controller.Listen, tlsConfig)
 	quicServer, err := service.ListenQUIC(cfg.Controller.QUICListen, tlsConfig)
 	if err != nil {
@@ -134,18 +190,36 @@ func run(path, diagnostics string) error {
 		<-serveErr
 		return err
 	}
-	fmt.Printf("laneway-controller HTTPS=%s QUIC=%s database=%s\n", listener.Addr(), quicServer.Addr(), cfg.Controller.DatabaseFile)
+	bootstrapAddress := "disabled"
+	if bootstrapListener != nil {
+		bootstrapAddress = bootstrapListener.Addr().String()
+	}
+	fmt.Printf("laneway-controller HTTPS=%s QUIC=%s bootstrap=%s database=%s\n", listener.Addr(), quicServer.Addr(), bootstrapAddress, cfg.Controller.DatabaseFile)
 	select {
 	case err := <-serveErr:
 		_ = quicServer.Close()
+		if bootstrapServer != nil {
+			_ = bootstrapServer.Close()
+		}
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
 	case err := <-quicServeErr:
 		_ = server.Close()
+		if bootstrapServer != nil {
+			_ = bootstrapServer.Close()
+		}
 		<-serveErr
 		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	case err := <-bootstrapServeErr:
+		_ = server.Close()
+		_ = quicServer.Close()
+		<-serveErr
+		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return err
@@ -154,6 +228,11 @@ func run(path, diagnostics string) error {
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			return err
+		}
+		if bootstrapServer != nil {
+			if err := bootstrapServer.Shutdown(shutdownCtx); err != nil {
+				return err
+			}
 		}
 		_ = quicServer.Close()
 		err := <-serveErr
@@ -166,6 +245,11 @@ func run(path, diagnostics string) error {
 		defer cancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			return err
+		}
+		if bootstrapServer != nil {
+			if err := bootstrapServer.Shutdown(shutdownCtx); err != nil {
+				return err
+			}
 		}
 		_ = quicServer.Close()
 		serveError := <-serveErr

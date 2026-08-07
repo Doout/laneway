@@ -534,6 +534,47 @@ func TestAtomicEnrollmentRollsBackIssuerFailureAndAllowsRetry(t *testing.T) {
 	}
 }
 
+func TestNetworkBoundEnrollmentRejectsMismatchBeforeTokenConsumption(t *testing.T) {
+	s, _ := openTestStore(t)
+	intended := createTestNetwork(t, s, "100.115.0.0/24")
+	other, err := s.CreateNetwork(context.Background(), "other-network", netip.MustParsePrefix("100.116.0.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := issueToken(t, s, intended.ID, "network-bound")
+	base := time.Now().UTC().Truncate(time.Second)
+	issuer := func(context.Context, Node) (CertificateMaterial, error) {
+		return CertificateMaterial{Serial: []byte{42}, DER: []byte{0x30, 0x00}, NotBefore: base, NotAfter: base.Add(time.Hour)}, nil
+	}
+	if _, err := s.EnrollNodeWithCertificateForNetwork(context.Background(), token.Secret, "wrong-network", 0, other.ID, issuer); !errors.Is(err, ErrTokenNetwork) {
+		t.Fatalf("network mismatch error = %v", err)
+	}
+	if _, err := s.EnrollNodeWithCertificateForNetwork(context.Background(), token.Secret, "right-network", 0, intended.ID, issuer); err != nil {
+		t.Fatalf("mismatched request consumed token: %v", err)
+	}
+}
+
+func TestNameBoundEnrollmentResolvesOmittedNameAndRejectsSubstitution(t *testing.T) {
+	s, _ := openTestStore(t)
+	network := createTestNetwork(t, s, "100.117.0.0/24")
+	token, err := s.IssueEnrollmentTokenWithOptions(context.Background(), network.ID, "invited-laptop", time.Now().Add(time.Hour), EnrollmentTokenOptions{
+		Class: EnrollmentClassEphemeral, SessionLifetime: MinEphemeralLifetime, RequestedName: "invited-laptop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnrollNode(context.Background(), token.Secret, "substituted-name", 0); !errors.Is(err, ErrTokenName) {
+		t.Fatalf("name substitution error = %v", err)
+	}
+	node, err := s.EnrollNode(context.Background(), token.Secret, "", 0)
+	if err != nil {
+		t.Fatalf("name mismatch consumed invite: %v", err)
+	}
+	if node.Name != "invited-laptop" || node.EnrollmentClass != EnrollmentClassEphemeral {
+		t.Fatalf("resolved enrollment = %+v", node)
+	}
+}
+
 func TestCreateNetworkWithAdministratorGeneratedID(t *testing.T) {
 	s, _ := openTestStore(t)
 	want, err := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")
