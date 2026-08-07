@@ -88,10 +88,12 @@ services:
   exit-node:
     image: ghcr.io/doout/laneway-exit-node:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
     profiles: [exit-node]
-    user: "65532:65532"
+    # setpriv drops these one-shot bootstrap privileges before tini starts;
+    # the long-running UID 65532 process retains only NET_ADMIN.
+    user: "0:0"
     read_only: true
     cap_drop: [ALL]
-    cap_add: [NET_ADMIN]
+    cap_add: [NET_ADMIN, SETGID, SETPCAP, SETUID]
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
@@ -119,7 +121,7 @@ services:
       - "${LANEWAY_BIND_ADDRESS:-0.0.0.0}:${LANEWAY_EXIT_DIRECT_PORT:-4434}:4434/udp"
     networks: [control]
     healthcheck:
-      test: [CMD, /usr/local/bin/laneway-healthcheck, -unix, /run/laneway/lanewayd.sock]
+      test: [CMD, /bin/setpriv, --reuid=65532, --regid=65532, --clear-groups, --bounding-set=-all, --no-new-privs, /usr/local/bin/laneway-healthcheck, -unix, /run/laneway/lanewayd.sock]
       interval: 10s
       timeout: 3s
       retries: 6

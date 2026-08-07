@@ -8,12 +8,12 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/lanewayd ./cmd/lan
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
 
 FROM alpine:3.23
-RUN apk add --no-cache ca-certificates iproute2 nftables tini \
+RUN apk add --no-cache ca-certificates iproute2 nftables procps-ng tini util-linux \
     && addgroup -g 65532 laneway \
     && adduser -D -H -u 65532 -G laneway laneway \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway
 COPY --from=build /out/lanewayd /usr/local/bin/lanewayd
 COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
-USER 65532:65532
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/lanewayd"]
+USER 0:0
+ENTRYPOINT ["/bin/setpriv", "--reuid=65532", "--regid=65532", "--clear-groups", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--bounding-set=-all,+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/lanewayd"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]
