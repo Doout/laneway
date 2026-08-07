@@ -735,7 +735,7 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, str::FromStr};
+    use std::{fs, os::unix::fs::OpenOptionsExt, path::Path, str::FromStr};
 
     use ipnet::IpNet;
     use rcgen::{
@@ -746,6 +746,16 @@ mod tests {
 
     use super::*;
     use crate::RoutingTable;
+
+    fn write_private_key(path: &Path, pem: &str) {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, pem.as_bytes()).unwrap();
+    }
 
     #[test]
     fn identity_binding_matches_go_format_and_is_strict() {
@@ -877,7 +887,7 @@ mod tests {
         let key_path = directory.join(format!("{node}.key"));
         fs::write(&ca_path, ca.pem()).unwrap();
         fs::write(&cert_path, local.certificate.pem()).unwrap();
-        fs::write(&key_path, local.key.serialize_pem()).unwrap();
+        write_private_key(&key_path, &local.key.serialize_pem());
         toml::from_str(&format!(
             r#"
 mode = "node"

@@ -895,6 +895,8 @@ mod tests {
     use std::{
         fs,
         net::SocketAddr,
+        os::unix::fs::OpenOptionsExt,
+        path::Path,
         str::FromStr,
         sync::atomic::{AtomicBool, Ordering},
     };
@@ -912,6 +914,16 @@ mod tests {
 
     use super::*;
     use crate::{config::Config, routing::RoutingTable};
+
+    fn write_private_key(path: &Path, pem: &str) {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        std::io::Write::write_all(&mut file, pem.as_bytes()).unwrap();
+    }
 
     #[test]
     fn reconnect_jitter_is_bounded() {
@@ -1106,9 +1118,9 @@ mod tests {
         let node_key = directory.path().join("node.key");
         fs::write(&ca_path, ca.pem()).unwrap();
         fs::write(&relay_cert, relay.certificate.pem()).unwrap();
-        fs::write(&relay_key, relay.key.serialize_pem()).unwrap();
+        write_private_key(&relay_key, &relay.key.serialize_pem());
         fs::write(&node_cert, node_credential.certificate.pem()).unwrap();
-        fs::write(&node_key, node_credential.key.serialize_pem()).unwrap();
+        write_private_key(&node_key, &node_credential.key.serialize_pem());
 
         let relay_config: laneway_relay::Config = toml::from_str(&format!(
             r#"
@@ -1384,11 +1396,11 @@ via_node = "202122232425262728292a2b2c2d2e2f"
         let second_key = directory.path().join("second.key");
         fs::write(&ca_path, ca.pem()).unwrap();
         fs::write(&relay_cert, relay.certificate.pem()).unwrap();
-        fs::write(&relay_key, relay.key.serialize_pem()).unwrap();
+        write_private_key(&relay_key, &relay.key.serialize_pem());
         fs::write(&first_cert, first.certificate.pem()).unwrap();
-        fs::write(&first_key, first.key.serialize_pem()).unwrap();
+        write_private_key(&first_key, &first.key.serialize_pem());
         fs::write(&second_cert, second.certificate.pem()).unwrap();
-        fs::write(&second_key, second.key.serialize_pem()).unwrap();
+        write_private_key(&second_key, &second.key.serialize_pem());
 
         let relay_config: laneway_relay::Config = toml::from_str(&format!(
             r#"
