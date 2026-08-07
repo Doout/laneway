@@ -19,3 +19,27 @@ ca_private_key = "/etc/laneway/ca.key"
 # issuer_certificate = "/etc/laneway/intermediate.crt"
 admin_token_file = "/etc/laneway/admin.token"
 leaf_validity = "720h"
+
+# Optional public discovery listener. This certificate MUST chain to public
+# Web PKI and is deliberately separate from the Laneway-CA controller identity.
+# Both Linux architectures are required when bootstrap is enabled.
+# [bootstrap]
+# listen = ":443"
+# certificate = "/etc/letsencrypt/live/lane.example.com/fullchain.pem"
+# private_key = "/etc/letsencrypt/live/lane.example.com/privkey.pem"
+# network_id = "replace-with-network-id"
+# controller_endpoint = "https://controller.example.com:8443"
+# controller_quic_endpoint = "controller.example.com:8443"
+# controller_server_name = "controller.example.com"
+# [[bootstrap.artifacts]]
+# os = "linux"
+# arch = "amd64"
+# url = "https://github.com/Doout/laneway/releases/download/vX.Y.Z/laneway_linux_amd64.tar.gz"
+# sha256 = "replace-with-64-lowercase-hex-characters"
+# size_bytes = 1
+# [[bootstrap.artifacts]]
+# os = "linux"
+# arch = "arm64"
+# url = "https://github.com/Doout/laneway/releases/download/vX.Y.Z/laneway_linux_arm64.tar.gz"
+# sha256 = "replace-with-64-lowercase-hex-characters"
+# size_bytes = 1

@@ -44,6 +44,7 @@ ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=$version"
       go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/$command" "./cmd/$command"
   done
 	ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
+	ln -s laneway "$package_dir/bin/lane"
 )
 
 cp "$project_dir/deploy/examples/controller.toml" \

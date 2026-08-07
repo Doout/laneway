@@ -20,6 +20,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/buildinfo"
 	"laneway.dev/laneway/internal/config"
 	"laneway.dev/laneway/internal/controllerclient"
@@ -65,6 +67,10 @@ func run(args []string) error {
 		return runLocal(args[0], args[1:])
 	case "join":
 		return runJoin(args[1:])
+	case "invite":
+		return runInvite(args[1:])
+	case "bootstrap":
+		return runBootstrap(args[1:])
 	case "renew":
 		return runRenew(args[1:])
 	case "node":
@@ -107,6 +113,8 @@ commands:
   peers             list configured peers
   routes            list installed overlay routes
   join TOKEN        enroll with a controller (or use --token-file PATH)
+  invite            issue a short-lived single-use join code on a controller
+  bootstrap         inspect metadata or download a verified release artifact
   renew             renew this node's controller-issued certificate
   node run          run the persistent host Node service
   controller        manage controller networks, relays, routes, ACLs, and audit events
@@ -326,6 +334,7 @@ func flagProvided(args []string, name string) bool {
 func runJoin(args []string) error {
 	fs := flag.NewFlagSet("join", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the one-time enrollment token")
+	bootstrapAuthority := fs.String("bootstrap", "", "public Web PKI discovery authority (for example lane.example.com)")
 	endpoint := fs.String("controller", "", "controller HTTPS origin")
 	caPath := fs.String("ca", "/etc/laneway/ca.crt", "controller CA certificate")
 	serverName := fs.String("server-name", "", "optional controller DNS name")
@@ -336,11 +345,13 @@ func runJoin(args []string) error {
 	outKey := fs.String("out-key", "/etc/laneway/node.key", "output node private key")
 	joinArgs := args
 	token := ""
+	tokenFromArg := false
 	// The documented product spelling puts TOKEN before connection flags. The
 	// standard flag package stops at the first positional argument, so extract
 	// that leading selector while retaining flag-first compatibility.
 	if len(joinArgs) != 0 && !strings.HasPrefix(joinArgs[0], "-") {
 		token, joinArgs = joinArgs[0], joinArgs[1:]
+		tokenFromArg = true
 	}
 	if err := fs.Parse(joinArgs); err != nil {
 		return err
@@ -350,6 +361,13 @@ func runJoin(args []string) error {
 	}
 	if fs.NArg() == 1 {
 		token = fs.Arg(0)
+		tokenFromArg = true
+	}
+	// A hostname in the documented leading position selects the safe discovery
+	// flow. Enrollment tokens are base64url and therefore cannot contain a dot.
+	if *bootstrapAuthority == "" && *endpoint == "" && strings.Contains(token, ".") {
+		*bootstrapAuthority, token = token, ""
+		tokenFromArg = false
 	}
 	if *tokenFile != "" {
 		if token != "" {
@@ -371,8 +389,39 @@ func runJoin(args []string) error {
 			return errors.New("--token-file contains an invalid enrollment token")
 		}
 	}
-	if token == "" || *endpoint == "" || *name == "" {
-		return errors.New("usage: laneway join TOKEN|--token-file PATH --controller https://host:port --name NAME [options]")
+	var authenticatedCAPEM []byte
+	if *bootstrapAuthority != "" {
+		for _, advanced := range []string{"controller", "ca", "server-name", "controller-network-id", "controller-service-id"} {
+			if flagProvided(args, advanced) {
+				return fmt.Errorf("--%s cannot override authenticated bootstrap metadata", advanced)
+			}
+		}
+		if tokenFromArg {
+			return errors.New("bootstrap enrollment refuses a code in argv; use the prompt or --token-file")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		metadata, err := bootstrap.Fetch(ctx, *bootstrapAuthority)
+		cancel()
+		if err != nil {
+			return err
+		}
+		if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
+			return err
+		}
+		*endpoint = metadata.Controller.EnrollmentEndpoint
+		*serverName = metadata.Controller.ServerName
+		*controllerNetwork = metadata.NetworkID
+		*controllerService = metadata.Controller.ServiceID
+		authenticatedCAPEM = []byte(metadata.Trust.CAPEM)
+		if *tokenFile == "" {
+			token, err = promptEnrollmentCode("Enrollment code: ")
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if token == "" || *endpoint == "" || (*name == "" && *bootstrapAuthority == "") {
+		return errors.New("usage: laneway join lane.example.com [--token-file PATH], or laneway join TOKEN --controller https://host:port --name NAME [advanced options]")
 	}
 	expectedNetwork, err := identity.ParseNetworkID(*controllerNetwork)
 	if err != nil {
@@ -386,12 +435,20 @@ func runJoin(args []string) error {
 	if err != nil {
 		return fmt.Errorf("generate node key: %w", err)
 	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: *name}}, private)
+	csrName := *name
+	if csrName == "" {
+		csrName = "laneway-bootstrap-enrollment"
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: csrName}}, private)
 	if err != nil {
 		return fmt.Errorf("create enrollment CSR: %w", err)
 	}
+	trustedCAFile := *caPath
+	if len(authenticatedCAPEM) != 0 {
+		trustedCAFile = ""
+	}
 	client, err := controllerclient.New(controllerclient.Options{
-		Endpoint: *endpoint, CAFile: *caPath, ServerName: *serverName,
+		Endpoint: *endpoint, CAFile: trustedCAFile, CAPEM: authenticatedCAPEM, ServerName: *serverName,
 		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedService,
 	})
 	if err != nil {
@@ -399,7 +456,7 @@ func runJoin(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	response, err := client.Enroll(ctx, token, *name, csrDER)
+	response, err := client.EnrollForNetwork(ctx, token, *name, csrDER, expectedNetwork)
 	if err != nil {
 		return err
 	}
@@ -426,6 +483,9 @@ func runJoin(args []string) error {
 	if !bytes.Equal(authenticated.NetworkID[:], response.GetNetworkId()) || !bytes.Equal(authenticated.NodeID[:], response.GetNodeId()) {
 		return errors.New("issued certificate identity does not match enrollment response")
 	}
+	if authenticated.NetworkID != expectedNetwork {
+		return errors.New("enrollment code belongs to a different network than authenticated bootstrap metadata")
+	}
 	wantPublic, _ := x509.MarshalPKIXPublicKey(public)
 	gotPublic, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
 	if err != nil || !bytes.Equal(wantPublic, gotPublic) {
@@ -447,6 +507,32 @@ func runJoin(args []string) error {
 	}
 	fmt.Printf("enrolled network=%s node=%s overlay=%s certificate=%s\n", authenticated.NetworkID, authenticated.NodeID, strings.Join(overlays, ","), *outCert)
 	return nil
+}
+
+func promptEnrollmentCode(prompt string) (string, error) {
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return "", errors.New("open controlling terminal for enrollment code; use --token-file on non-interactive input")
+	}
+	defer tty.Close()
+	if _, err := fmt.Fprint(tty, prompt); err != nil {
+		return "", err
+	}
+	secret, err := term.ReadPassword(int(tty.Fd()))
+	_, _ = fmt.Fprintln(tty)
+	if err != nil {
+		return "", fmt.Errorf("read enrollment code: %w", err)
+	}
+	defer func() {
+		for i := range secret {
+			secret[i] = 0
+		}
+	}()
+	value := strings.TrimSpace(string(secret))
+	if value == "" || len(value) > 4096 || strings.ContainsAny(value, " \t\r\n") {
+		return "", errors.New("enrollment code is invalid")
+	}
+	return value, nil
 }
 
 func runRenew(args []string) error {

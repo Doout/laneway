@@ -79,8 +79,12 @@ type EnrollmentRequest struct {
 	// DER PKCS#10 CSR. The private key is never transmitted.
 	Pkcs10CsrDer  []byte `protobuf:"bytes,2,opt,name=pkcs10_csr_der,json=pkcs10CsrDer,proto3" json:"pkcs10_csr_der,omitempty"`
 	RequestedName string `protobuf:"bytes,3,opt,name=requested_name,json=requestedName,proto3" json:"requested_name,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// The NetworkID authenticated through public bootstrap metadata. The
+	// controller compares it with the token's immutable network before token
+	// consumption, preventing cross-network code confusion.
+	ExpectedNetworkId []byte `protobuf:"bytes,4,opt,name=expected_network_id,json=expectedNetworkId,proto3" json:"expected_network_id,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *EnrollmentRequest) Reset() {
@@ -132,6 +136,13 @@ func (x *EnrollmentRequest) GetRequestedName() string {
 		return x.RequestedName
 	}
 	return ""
+}
+
+func (x *EnrollmentRequest) GetExpectedNetworkId() []byte {
+	if x != nil {
+		return x.ExpectedNetworkId
+	}
+	return nil
 }
 
 type CertificateChain struct {
@@ -1425,11 +1436,12 @@ var File_laneway_v1_controller_proto protoreflect.FileDescriptor
 const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\n" +
 	"\x1blaneway/v1/controller.proto\x12\n" +
-	"laneway.v1\x1a\x18laneway/v1/control.proto\x1a\x17laneway/v1/policy.proto\x1a\x17laneway/v1/routes.proto\"\x8b\x01\n" +
+	"laneway.v1\x1a\x18laneway/v1/control.proto\x1a\x17laneway/v1/policy.proto\x1a\x17laneway/v1/routes.proto\"\xbb\x01\n" +
 	"\x11EnrollmentRequest\x12)\n" +
 	"\x10enrollment_token\x18\x01 \x01(\tR\x0fenrollmentToken\x12$\n" +
 	"\x0epkcs10_csr_der\x18\x02 \x01(\fR\fpkcs10CsrDer\x12%\n" +
-	"\x0erequested_name\x18\x03 \x01(\tR\rrequestedName\"r\n" +
+	"\x0erequested_name\x18\x03 \x01(\tR\rrequestedName\x12.\n" +
+	"\x13expected_network_id\x18\x04 \x01(\fR\x11expectedNetworkId\"r\n" +
 	"\x10CertificateChain\x12)\n" +
 	"\x10certificates_der\x18\x01 \x03(\fR\x0fcertificatesDer\x123\n" +
 	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\xce\x02\n" +

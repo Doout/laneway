@@ -167,6 +167,9 @@ ALTER TABLE enrollment_tokens ADD COLUMN enrollment_class TEXT NOT NULL DEFAULT 
 ALTER TABLE enrollment_tokens ADD COLUMN session_lifetime_seconds INTEGER;
 CREATE INDEX enrollment_tokens_class_expiry ON enrollment_tokens(enrollment_class,expires_at)
     WHERE consumed_at IS NULL;
+`, `
+ALTER TABLE enrollment_tokens ADD COLUMN requested_name TEXT
+    CHECK(requested_name IS NULL OR length(requested_name) BETWEEN 1 AND 253);
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

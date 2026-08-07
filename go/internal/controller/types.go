@@ -44,6 +44,8 @@ var (
 	ErrTokenInvalid    = errors.New("invalid enrollment token")
 	ErrTokenExpired    = errors.New("enrollment token expired")
 	ErrTokenConsumed   = errors.New("enrollment token already consumed")
+	ErrTokenNetwork    = errors.New("enrollment token belongs to a different network")
+	ErrTokenName       = errors.New("enrollment token is bound to a different name")
 	ErrPoolExhausted   = errors.New("overlay address pool exhausted")
 	ErrAlreadyApproved = errors.New("route already approved")
 	ErrUnsupportedDB   = errors.New("database schema is newer than this controller")
@@ -84,11 +86,13 @@ type EnrollmentToken struct {
 	ConsumedBy      *identity.NodeID
 	EnrollmentClass EnrollmentClass
 	SessionLifetime time.Duration
+	RequestedName   string
 }
 
 type EnrollmentTokenOptions struct {
 	Class           EnrollmentClass
 	SessionLifetime time.Duration
+	RequestedName   string
 }
 
 type RouteKind string

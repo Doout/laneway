@@ -46,6 +46,11 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 	if !options.Class.Valid() {
 		return EnrollmentToken{}, fmt.Errorf("%w: invalid enrollment class %q", ErrInvalid, options.Class)
 	}
+	if options.RequestedName != "" {
+		if err := validateName("requested enrollment", options.RequestedName); err != nil {
+			return EnrollmentToken{}, err
+		}
+	}
 	if options.Class == EnrollmentClassEphemeral {
 		options.SessionLifetime = options.SessionLifetime.Truncate(time.Second)
 		if options.SessionLifetime < MinEphemeralLifetime || options.SessionLifetime > MaxEphemeralLifetime {
@@ -73,18 +78,22 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 	if options.Class == EnrollmentClassEphemeral {
 		sessionLifetime = int64(options.SessionLifetime / time.Second)
 	}
+	var requestedName any
+	if options.RequestedName != "" {
+		requestedName = options.RequestedName
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_tokens
-        (id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds) VALUES(?,?,?,?,?,?,?,?)`,
-		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime); err != nil {
+		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name) VALUES(?,?,?,?,?,?,?,?,?)`,
+		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName); err != nil {
 		if isConstraint(err) {
 			return EnrollmentToken{}, fmt.Errorf("%w: network does not exist", ErrNotFound)
 		}
 		return EnrollmentToken{}, fmt.Errorf("insert enrollment token: %w", err)
 	}
 	target := id
-	details := fmt.Sprintf(`{"enrollment_class":%q}`, options.Class)
+	details := fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q}`, options.Class, options.RequestedName)
 	if options.Class == EnrollmentClassEphemeral {
-		details = fmt.Sprintf(`{"enrollment_class":%q,"session_lifetime_seconds":%d}`, options.Class, int64(options.SessionLifetime/time.Second))
+		details = fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q,"session_lifetime_seconds":%d}`, options.Class, options.RequestedName, int64(options.SessionLifetime/time.Second))
 	}
 	if err := auditTx(ctx, tx, networkID, nil, "enrollment_token.issue", "enrollment_token", &target, details, now); err != nil {
 		return EnrollmentToken{}, err
@@ -93,14 +102,14 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 		return EnrollmentToken{}, fmt.Errorf("commit enrollment token: %w", err)
 	}
 	return EnrollmentToken{ID: id, NetworkID: networkID, Label: label, Secret: secret, ExpiresAt: expiresAt, CreatedAt: now,
-		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime}, nil
+		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName}, nil
 }
 
 // EnrollNode atomically consumes a single-use bearer token, creates a node and
 // assigns its IPv4 and optional IPv6 overlay addresses. Any failure rolls back
 // all changes.
 func (s *Store) EnrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64) (Node, error) {
-	enrollment, err := s.enrollNode(ctx, secret, name, enabledCapabilities, nil)
+	enrollment, err := s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, nil)
 	return enrollment.Node, err
 }
 
@@ -111,13 +120,23 @@ func (s *Store) EnrollNodeWithCertificate(ctx context.Context, secret, name stri
 	if issuer == nil {
 		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
 	}
-	return s.enrollNode(ctx, secret, name, enabledCapabilities, issuer)
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, identity.NetworkID{}, issuer)
 }
 
-func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
-	if err := validateName("node", name); err != nil {
-		return Enrollment{}, err
+// EnrollNodeWithCertificateForNetwork additionally binds enrollment to the
+// NetworkID authenticated by bootstrap discovery. A mismatch is checked before
+// token consumption and leaves the code reusable on its intended network.
+func (s *Store) EnrollNodeWithCertificateForNetwork(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
+	if expectedNetwork.IsZero() {
+		return Enrollment{}, fmt.Errorf("%w: expected enrollment network is required", ErrInvalid)
 	}
+	if issuer == nil {
+		return Enrollment{}, fmt.Errorf("%w: enrollment certificate issuer is required", ErrInvalid)
+	}
+	return s.enrollNode(ctx, secret, name, enabledCapabilities, expectedNetwork, issuer)
+}
+
+func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapabilities uint64, expectedNetwork identity.NetworkID, issuer EnrollmentCertificateIssuer) (Enrollment, error) {
 	if enabledCapabilities > math.MaxInt64 {
 		return Enrollment{}, fmt.Errorf("%w: capability mask exceeds SQLite integer range", ErrInvalid)
 	}
@@ -142,7 +161,8 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	var consumed sql.NullInt64
 	var class string
 	var sessionLifetime sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed, &class, &sessionLifetime)
+	var requestedName sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds,requested_name FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed, &class, &sessionLifetime, &requestedName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Enrollment{}, ErrTokenInvalid
 	}
@@ -164,6 +184,19 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		return Enrollment{}, err
 	}
 	networkID := identity.NetworkID(networkRaw)
+	if !expectedNetwork.IsZero() && networkID != expectedNetwork {
+		return Enrollment{}, ErrTokenNetwork
+	}
+	if requestedName.Valid {
+		if name == "" {
+			name = requestedName.String
+		} else if name != requestedName.String {
+			return Enrollment{}, ErrTokenName
+		}
+	}
+	if err := validateName("node", name); err != nil {
+		return Enrollment{}, err
+	}
 	enrollmentClass := EnrollmentClass(class)
 	if !enrollmentClass.Valid() || (enrollmentClass == EnrollmentClassEphemeral) != sessionLifetime.Valid {
 		return Enrollment{}, errors.New("corrupt enrollment token class")

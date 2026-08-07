@@ -40,8 +40,12 @@ type Options struct {
 	QUICEndpoint string
 	// QUICDialAddress optionally pins QUIC UDP dialing to a numeric IP:port
 	// while QUICEndpoint and ServerName remain authoritative for identity.
-	QUICDialAddress   string
-	CAFile            string
+	QUICDialAddress string
+	CAFile          string
+	// CAPEM supplies an authenticated in-memory trust bundle, primarily from
+	// public-Web-PKI bootstrap discovery. Exactly one of CAFile and CAPEM is
+	// required so an untrusted file cannot silently override discovered trust.
+	CAPEM             []byte
 	CertificateFile   string
 	PrivateKeyFile    string
 	ServerName        string
@@ -69,9 +73,15 @@ func New(options Options) (*Client, error) {
 	if options.ExpectedNetworkID.IsZero() || options.ExpectedServiceID.IsZero() {
 		return nil, errors.New("controller client: expected controller network and service IDs are required")
 	}
-	caPEM, err := os.ReadFile(options.CAFile)
-	if err != nil {
-		return nil, fmt.Errorf("controller client: read CA: %w", err)
+	if (options.CAFile == "") == (len(options.CAPEM) == 0) {
+		return nil, errors.New("controller client: exactly one CA file or in-memory CA bundle is required")
+	}
+	caPEM := append([]byte(nil), options.CAPEM...)
+	if options.CAFile != "" {
+		caPEM, err = os.ReadFile(options.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("controller client: read CA: %w", err)
+		}
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caPEM) {
@@ -212,7 +222,21 @@ func normalizeEndpoint(value string) (string, error) {
 }
 
 func (c *Client) Enroll(ctx context.Context, token, name string, csrDER []byte) (*lanewayv1.EnrollmentResponse, error) {
+	return c.enroll(ctx, token, name, csrDER, identity.NetworkID{})
+}
+
+func (c *Client) EnrollForNetwork(ctx context.Context, token, name string, csrDER []byte, expectedNetwork identity.NetworkID) (*lanewayv1.EnrollmentResponse, error) {
+	if expectedNetwork.IsZero() {
+		return nil, errors.New("controller client: expected enrollment network is required")
+	}
+	return c.enroll(ctx, token, name, csrDER, expectedNetwork)
+}
+
+func (c *Client) enroll(ctx context.Context, token, name string, csrDER []byte, expectedNetwork identity.NetworkID) (*lanewayv1.EnrollmentResponse, error) {
 	request := &lanewayv1.EnrollmentRequest{EnrollmentToken: token, RequestedName: name, Pkcs10CsrDer: csrDER}
+	if !expectedNetwork.IsZero() {
+		request.ExpectedNetworkId = append([]byte(nil), expectedNetwork[:]...)
+	}
 	response := new(lanewayv1.EnrollmentResponse)
 	if err := c.post(ctx, "/v1/enroll", request, response); err != nil {
 		return nil, err
@@ -266,11 +290,13 @@ type EnrollmentToken struct {
 	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
 	EnrollmentClass        string `json:"enrollment_class"`
 	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
+	RequestedName          string `json:"requested_name,omitempty"`
 }
 
 type EnrollmentTokenOptions struct {
 	Class           string
 	SessionLifetime time.Duration
+	RequestedName   string
 }
 
 type Route struct {
@@ -443,7 +469,8 @@ func (c *Client) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID 
 		ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
 		EnrollmentClass        string `json:"enrollment_class"`
 		SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
-	}{networkID.String(), label, expiresAt.Unix(), options.Class, int64(options.SessionLifetime / time.Second)}, response, true)
+		RequestedName          string `json:"requested_name,omitempty"`
+	}{networkID.String(), label, expiresAt.Unix(), options.Class, int64(options.SessionLifetime / time.Second), options.RequestedName}, response, true)
 	return response, err
 }
 
