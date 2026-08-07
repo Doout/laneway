@@ -1,0 +1,45 @@
+mode = "node"
+state_dir = "/var/lib/laneway"
+socket_path = "/run/laneway/lanewayd.sock"
+
+[tls]
+certificate = "/run/laneway-secrets/exit-node.crt"
+private_key = "/run/laneway-secrets/exit-node.key"
+ca = "/run/laneway-secrets/ca.crt"
+server_name = "relay.example.com"
+
+[node]
+name = "exit-node"
+relay_address = "relay:4433"
+relay_network_id = "REPLACE_NETWORK_ID"
+relay_service_id = "REPLACE_RELAY_SERVICE_ID"
+reconnect_min = "1s"
+reconnect_max = "30s"
+
+[controller]
+endpoint = "https://controller:8443"
+quic_endpoint = "controller:8443"
+server_name = "controller.example.com"
+network_id = "REPLACE_NETWORK_ID"
+service_id = "REPLACE_CONTROLLER_SERVICE_ID"
+poll_interval = "30s"
+
+[tcp_fallback]
+address = "relay:8443"
+quic_probe_interval = "30s"
+
+[direct]
+# Exit Nodes publish one fixed host port for stable Docker/NAT rendezvous.
+enabled = true
+listen = "0.0.0.0:4434"
+
+[routing]
+# eth0 is the container's Docker bridge interface. Internet traffic is NATed
+# once here and may be NATed again by Docker on the host (double NAT).
+output_interface = "eth0"
+nat = true
+
+[exit]
+enabled = false
+serve = true
+failure_mode = "closed"

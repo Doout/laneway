@@ -169,6 +169,65 @@ func TestDirectControllerAppliesDynamicCandidateAuthority(t *testing.T) {
 	}
 }
 
+func TestDirectControllerFreshRendezvousDetachesStalePath(t *testing.T) {
+	authority := newDirectTestAuthority(t)
+	network := networkID(1)
+	local := identity.NodeIdentity{NetworkID: network, NodeID: nodeID(1)}
+	peerIdentity := identity.NodeIdentity{NetworkID: network, NodeID: nodeID(2)}
+	localEndpoint := directEndpoint(t, local, directCredentials(t, authority, local))
+	peerEndpoint := directEndpoint(t, peerIdentity, directCredentials(t, authority, peerIdentity))
+	engine, _, manager, routes := directEngine(t, local, netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("100.64.0.2"), peerIdentity.NodeID)
+	controller, err := NewDirectController(DirectConfig{
+		Local: local, Endpoint: localEndpoint, Engine: engine, Authorizer: RouteAuthorizer{Routes: routes},
+		CandidatePolicy: directpath.CandidatePolicy{AllowLoopback: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	accepted := make(chan *directpath.Path, 1)
+	acceptErrors := make(chan error, 1)
+	go func() {
+		path, acceptErr := peerEndpoint.Accept(ctx)
+		if acceptErr != nil {
+			acceptErrors <- acceptErr
+			return
+		}
+		accepted <- path
+	}()
+	path, err := localEndpoint.Dial(ctx, directCandidate(t, peerEndpoint, peerIdentity.NodeID), peerIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case peerPath := <-accepted:
+		t.Cleanup(func() { _ = peerPath.Close() })
+	case err := <-acceptErrors:
+		t.Fatal(err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	if err := controller.replaceDirect(peerIdentity.NodeID, path); err != nil {
+		t.Fatal(err)
+	}
+	if manager.BestPath(peerIdentity.NodeID) == nil {
+		t.Fatal("direct path was not attached")
+	}
+
+	message := directCandidate(t, peerEndpoint, peerIdentity.NodeID).Proto()
+	message.RendezvousToken = make([]byte, identity.IDSize)
+	message.RendezvousToken[0] = 1
+	message.ProbeStartUnixNano = uint64(time.Now().UnixNano())
+	if err := controller.HandleCandidate(context.Background(), message); err != nil {
+		t.Fatal(err)
+	}
+	if manager.BestPath(peerIdentity.NodeID) != nil {
+		t.Fatal("stale direct path survived a fresh rendezvous epoch")
+	}
+}
+
 func TestUnifiedEngineRealDirectQUICEndToEnd(t *testing.T) {
 	authority := newDirectTestAuthority(t)
 	network := networkID(1)

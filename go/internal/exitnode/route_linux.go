@@ -156,11 +156,12 @@ func (m *linuxRouteManager) activateLocked(ctx context.Context, plan RoutePlan) 
 	sort.Strings(orderedFamilies)
 	installedRules := make([]exitRuleRecord, 0, len(orderedFamilies))
 	for _, family := range orderedFamilies {
-		adopted, err := m.installRule(ctx, family)
+		adopted, stale, err := m.installRule(ctx, family)
 		if err != nil {
 			return m.rollbackActivation(err, installed, installedRules)
 		}
 		if adopted {
+			installed = append(installed, stale...)
 			for index := range installed {
 				if exitRouteFamily(installed[index].prefix) == family {
 					installed[index].hadPrior = false
@@ -250,24 +251,27 @@ func (m *linuxRouteManager) restoreLocked(ctx context.Context) error {
 	return result
 }
 
-func (m *linuxRouteManager) installRule(ctx context.Context, family string) (bool, error) {
+func (m *linuxRouteManager) installRule(ctx context.Context, family string) (bool, []exitRouteRecord, error) {
 	lines, err := m.ruleSnapshot(ctx, family)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if len(lines) != 0 {
-		if len(lines) == 1 && ownedRule(lines[0], m.config.RulePriority, m.config.Table) && m.canAdoptFamily(ctx, family) {
-			return true, nil
+		if len(lines) == 1 && ownedRule(lines[0], m.config.RulePriority, m.config.Table) {
+			stale, adoptable := m.adoptableFamilyResidue(ctx, family)
+			if adoptable {
+				return true, stale, nil
+			}
 		}
-		return false, fmt.Errorf("%w: policy-rule priority %d is already occupied for %s", ErrOwnership, m.config.RulePriority, family)
+		return false, nil, fmt.Errorf("%w: policy-rule priority %d is already occupied for %s", ErrOwnership, m.config.RulePriority, family)
 	}
 	if _, err := m.run(ctx, family, "rule", "add", "priority", strconv.Itoa(m.config.RulePriority), "lookup", strconv.Itoa(m.config.Table)); err != nil {
-		return false, fmt.Errorf("exitnode: install %s policy rule: %w", family, err)
+		return false, nil, fmt.Errorf("exitnode: install %s policy rule: %w", family, err)
 	}
-	return false, nil
+	return false, nil, nil
 }
 
-func (m *linuxRouteManager) canAdoptFamily(ctx context.Context, family string) bool {
+func (m *linuxRouteManager) adoptableFamilyResidue(ctx context.Context, family string) ([]exitRouteRecord, bool) {
 	expected := make(map[string]struct{})
 	ownedResidue := false
 	for _, record := range m.records {
@@ -276,7 +280,7 @@ func (m *linuxRouteManager) canAdoptFamily(ctx context.Context, family string) b
 		}
 		if record.hadPrior {
 			if !hasFieldValue(record.prior, "proto", strconv.Itoa(m.config.Protocol)) {
-				return false
+				return nil, false
 			}
 			ownedResidue = true
 		}
@@ -288,35 +292,51 @@ func (m *linuxRouteManager) canAdoptFamily(ctx context.Context, family string) b
 	// missing desired routes may be recreated, but an otherwise empty or foreign
 	// table never authorizes adoption of an occupied rule priority.
 	if len(expected) == 0 || !ownedResidue {
-		return false
+		return nil, false
 	}
 	args := []string{"-N", family, "-o", "route", "show", "table", strconv.Itoa(m.config.Table)}
 	output, err := m.runner.Run(ctx, m.config.IPCommand, args...)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	lines := nonempty(string(output))
-	if len(lines) != len(expected) {
-		return false
-	}
+	found := make(map[string]struct{}, len(lines))
+	stale := make([]exitRouteRecord, 0)
 	for _, line := range lines {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
-			return false
+			return nil, false
 		}
 		prefix, err := netip.ParsePrefix(fields[0])
 		if err != nil {
 			address, addressErr := netip.ParseAddr(fields[0])
 			if addressErr != nil {
-				return false
+				return nil, false
 			}
 			prefix = netip.PrefixFrom(address, address.BitLen())
 		}
-		if _, ok := expected[prefix.Masked().String()]; !ok || !hasFieldValue(fields, "proto", strconv.Itoa(m.config.Protocol)) {
-			return false
+		prefix = prefix.Masked()
+		if exitRouteFamily(prefix) != family || !hasFieldValue(fields, "proto", strconv.Itoa(m.config.Protocol)) {
+			return nil, false
+		}
+		key := prefix.String()
+		found[key] = struct{}{}
+		if _, wanted := expected[key]; !wanted {
+			// Dynamic direct endpoints can change across a crash. Only reclaim
+			// stale, protocol-marked native host bypasses; broad or lane0 routes
+			// still fail closed as an ownership conflict.
+			if prefix.Bits() != prefix.Addr().BitLen() || fieldAfter(fields, "dev") == m.config.InterfaceName {
+				return nil, false
+			}
+			stale = append(stale, exitRouteRecord{prefix: prefix})
 		}
 	}
-	return true
+	for prefix := range expected {
+		if _, ok := found[prefix]; !ok {
+			return nil, false
+		}
+	}
+	return stale, true
 }
 
 func (m *linuxRouteManager) removeRule(ctx context.Context, record exitRuleRecord) error {

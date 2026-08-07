@@ -34,6 +34,7 @@ the example TOML files without their `.example` suffix, replace every
 | `generated/pki/intermediate.key` | `0400` | online intermediate private key |
 | `generated/pki/controller.{crt,key}` | `0444`,`0400` | controller identity |
 | `generated/pki/relay.{crt,key}` | `0444`,`0400` | relay identity |
+| `generated/pki/exit-node.{crt,key}` | `0444`,`0400` | optional Exit Node identity |
 | `generated/secrets/admin.token` | `0400` | independent random bearer secret, at least 32 characters |
 | `generated/config/*.toml` | `0444` | strict service configuration |
 
@@ -67,6 +68,47 @@ service:
 ```sh
 sudo docker compose --profile tools run --rm admin version
 ```
+
+## Isolated Exit Node profile
+
+The optional `exit-node` profile runs the node dataplane in Docker's bridge
+network namespace. It is not privileged and does not use host networking. Its
+only added capability is `NET_ADMIN`, and its only device is `/dev/net/tun`.
+The entrypoint uses one-shot `SETUID`, `SETGID`, and `SETPCAP` bootstrap
+capabilities to become UID/GID 65532, reduce its bounding set to `NET_ADMIN`,
+enable `no-new-privileges`, and only then start the minimal init and daemon.
+The long-running process and the networking tools it invokes therefore have
+only `NET_ADMIN`; the health check has no effective capability.
+The root filesystem is read-only; `/var/lib/laneway` is the named persistent
+state volume and `/run/laneway` plus `/tmp` are size-bounded tmpfs mounts. Laneway's
+TUN, policy routes, forwarding sysctls, and nftables table therefore remain in
+the container namespace and cannot alter the host ruleset.
+
+Issue an ordinary controller-authorized node identity with Exit capability,
+install its certificate/key using the modes above, and copy
+`generated/config/exit-node.toml.example` to `exit-node.toml`. Replace every
+identity and DNS placeholder, then validate and start only that profile:
+
+```sh
+sudo ./validate.sh
+sudo docker compose --profile exit-node up -d --wait exit-node
+```
+
+The container publishes fixed UDP port `LANEWAY_EXIT_DIRECT_PORT` (4434 by
+default) for direct rendezvous. Its `lane0` MTU is 1200, leaving conservative
+headroom for the TUN, encrypted overlay, and Docker bridge. IPv4 and IPv6
+forwarding are enabled only in the container namespace; IPv6 exit service is
+effective only when the controller authorizes an IPv6 default and the Docker
+network has IPv6 egress. Without both, IPv6 fails closed.
+
+Bridge mode usually applies Laneway masquerade in the container and Docker
+masquerade on the host. This double NAT is deliberate isolation but makes
+inbound Internet connections unsuitable and adds modest conntrack overhead.
+Use routed Docker networking only as an operator-reviewed deployment variant.
+Graceful stop restores the owned nftables table and routes before exit; after
+an abrupt stop Docker destroys the namespace, so no Laneway network state can
+remain on the host. The persistent volume contains only credentials-independent
+runtime state and may be retained across container recreation.
 
 Never expose diagnostics ports. Back up the controller database using a
 database-consistent procedure before upgrades; copying a live SQLite file is not

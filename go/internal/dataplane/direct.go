@@ -74,6 +74,8 @@ type DirectController struct {
 	mu       sync.Mutex
 	peers    map[identity.NodeID]storedCandidates
 	requests chan probeRequest
+	pathMu   sync.Mutex
+	active   map[identity.NodeID]*directpath.Path
 }
 
 func NewDirectController(config DirectConfig) (*DirectController, error) {
@@ -110,7 +112,10 @@ func NewDirectController(config DirectConfig) (*DirectController, error) {
 	if config.ProbeInterval <= 0 || config.ProbeInterval > time.Second || config.ProbeTimeout <= 0 || config.ProbeTimeout > 30*time.Second {
 		return nil, ErrInvalidConfiguration
 	}
-	return &DirectController{config: config, peers: make(map[identity.NodeID]storedCandidates), requests: make(chan probeRequest, config.MaxCandidatePeers)}, nil
+	return &DirectController{
+		config: config, peers: make(map[identity.NodeID]storedCandidates),
+		requests: make(chan probeRequest, config.MaxCandidatePeers), active: make(map[identity.NodeID]*directpath.Path),
+	}, nil
 }
 
 func (c *DirectController) HandleCandidate(_ context.Context, message *lanewayv1.EndpointCandidate) error {
@@ -189,6 +194,13 @@ func (c *DirectController) HandleCandidate(_ context.Context, message *lanewayv1
 	c.peers[peer] = record
 	c.mu.Unlock()
 	if request != nil {
+		// A relay-coordinated rendezvous is also an authenticated peer-session
+		// epoch boundary. Retaining the previous datagram path here can silently
+		// black-hole replies after a peer restart: QUIC datagram writes may
+		// succeed until keepalive detects that the old process disappeared.
+		// Remove it before probing so traffic immediately uses the relay until
+		// the replacement direct session is authenticated and attached.
+		c.detachDirect(peer)
 		select {
 		case c.requests <- *request:
 		default:
@@ -264,7 +276,7 @@ func (c *DirectController) ProbeAndConnect(ctx context.Context, peer identity.No
 		if dialErr != nil {
 			return dialErr
 		}
-		if err := c.config.Engine.Attach(peer, pathmanager.PathDirect, path); err != nil {
+		if err := c.replaceDirect(peer, path); err != nil {
 			_ = path.Close()
 			return err
 		}
@@ -340,13 +352,42 @@ func (c *DirectController) acceptLoop(ctx context.Context) error {
 			_ = path.Close()
 			continue
 		}
-		if err := c.config.Engine.Attach(peer, pathmanager.PathDirect, path); err != nil {
+		if err := c.replaceDirect(peer, path); err != nil {
 			_ = path.Close()
 			if !errors.Is(err, ErrPathNameConflict) {
 				return fmt.Errorf("dataplane: attach accepted direct path: %w", err)
 			}
 		}
 	}
+}
+
+func (c *DirectController) replaceDirect(peer identity.NodeID, path *directpath.Path) error {
+	if path == nil {
+		return ErrInvalidConfiguration
+	}
+	c.pathMu.Lock()
+	defer c.pathMu.Unlock()
+	if previous := c.active[peer]; previous != nil && previous != path {
+		c.config.Engine.Detach(peer, previous.Name())
+		_ = previous.Close()
+	}
+	if err := c.config.Engine.Attach(peer, pathmanager.PathDirect, path); err != nil {
+		return err
+	}
+	c.active[peer] = path
+	return nil
+}
+
+func (c *DirectController) detachDirect(peer identity.NodeID) {
+	c.pathMu.Lock()
+	defer c.pathMu.Unlock()
+	path := c.active[peer]
+	if path == nil {
+		return
+	}
+	delete(c.active, peer)
+	c.config.Engine.Detach(peer, path.Name())
+	_ = path.Close()
 }
 
 // RouteAuthorizer permits only peers currently named as a route next hop.

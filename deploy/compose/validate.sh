@@ -91,6 +91,38 @@ do
   esac
 done
 
+exit_artifacts="generated/config/exit-node.toml generated/pki/exit-node.crt generated/pki/exit-node.key"
+exit_configured=false
+for path in $exit_artifacts; do
+  if [ -e "$base_dir/$path" ]; then
+    exit_configured=true
+  fi
+done
+if [ "$exit_configured" = true ]; then
+  for path in $exit_artifacts; do
+    target=$base_dir/$path
+    if [ ! -f "$target" ] || [ -L "$target" ]; then
+      echo "missing regular, non-symlink Exit Node file: $path" >&2
+      exit 1
+    fi
+    mode=$(stat -c '%a' "$target")
+    case "$path" in
+      *.key)
+        [ "$mode" = 400 ] || { echo "$path must have mode 0400 (found $mode)" >&2; exit 1; }
+        owner=$(stat -c '%u' "$target")
+        [ "$owner" = 65532 ] || { echo "$path must be owned by container UID 65532 (found $owner)" >&2; exit 1; }
+        ;;
+      *)
+        [ "$mode" = 444 ] || { echo "$path must have mode 0444 (found $mode)" >&2; exit 1; }
+        ;;
+    esac
+  done
+  if grep -E 'REPLACE_|CHANGE_ME|latest([:@]|$)' "$base_dir/generated/config/exit-node.toml" >/dev/null 2>&1; then
+    echo "generated Exit Node configuration still contains a placeholder or mutable tag" >&2
+    exit 1
+  fi
+fi
+
 if grep -E 'REPLACE_|CHANGE_ME|latest([:@]|$)' \
   "$base_dir/generated/config/controller.toml" \
   "$base_dir/generated/config/relay.toml" \
@@ -105,4 +137,8 @@ chmod 0700 "$base_dir/generated/backups"
 docker compose --project-directory "$base_dir" \
   --env-file "$base_dir/.env" \
   -f "$base_dir/compose.yaml" config --quiet
+if [ "$exit_configured" = true ]; then
+  docker compose --project-directory "$base_dir" --profile exit-node \
+    --env-file "$base_dir/.env" -f "$base_dir/compose.yaml" config --quiet
+fi
 echo "Laneway Compose inputs are valid"
