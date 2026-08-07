@@ -340,6 +340,33 @@ func TestEnrollmentInviteNameIsBoundAndMayBeOmittedByClient(t *testing.T) {
 	}
 }
 
+func TestEnrollmentExpectedClassMismatchIsClearAndDoesNotConsumeCode(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	token, err := f.store.IssueEnrollmentTokenWithOptions(context.Background(), f.network.ID, "remembered-user", time.Now().Add(time.Hour), controller.EnrollmentTokenOptions{
+		Class: controller.EnrollmentClassRemembered, RequestedName: "remembered-user",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := &lanewayv1.EnrollmentRequest{
+		EnrollmentToken: token.Secret, Pkcs10CsrDer: csrDER(t, ""), ExpectedNetworkId: append([]byte(nil), f.network.ID[:]...),
+		ExpectedEnrollmentClass: lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER,
+	}
+	mismatch := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
+	if mismatch.Code != http.StatusForbidden {
+		t.Fatalf("class mismatch status=%d body=%x", mismatch.Code, mismatch.Body.Bytes())
+	}
+	problem := new(lanewayv1.ProtocolError)
+	if err := proto.Unmarshal(mismatch.Body.Bytes(), problem); err != nil || !strings.Contains(problem.GetDetail(), "enrollment class") {
+		t.Fatalf("class mismatch problem=%+v err=%v", problem, err)
+	}
+	request.ExpectedEnrollmentClass = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER
+	retry := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/enroll", request)
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("class mismatch consumed invite: status=%d body=%x", retry.Code, retry.Body.Bytes())
+	}
+}
+
 func TestEphemeralEnrollmentCertificateAndResponseAreLeaseBound(t *testing.T) {
 	f := newFixture(t, DefaultMaxBodyBytes, nil)
 	token, err := f.store.IssueEnrollmentTokenWithOptions(context.Background(), f.network.ID, "ephemeral-user", time.Now().Add(time.Minute), controller.EnrollmentTokenOptions{

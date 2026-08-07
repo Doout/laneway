@@ -46,6 +46,7 @@ var (
 	ErrTokenConsumed   = errors.New("enrollment token already consumed")
 	ErrTokenNetwork    = errors.New("enrollment token belongs to a different network")
 	ErrTokenName       = errors.New("enrollment token is bound to a different name")
+	ErrTokenClass      = errors.New("enrollment token has a different enrollment class")
 	ErrPoolExhausted   = errors.New("overlay address pool exhausted")
 	ErrAlreadyApproved = errors.New("route already approved")
 	ErrUnsupportedDB   = errors.New("database schema is newer than this controller")

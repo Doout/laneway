@@ -95,6 +95,9 @@ func TestEnrollAndConfiguration(t *testing.T) {
 			if request.GetRequestedName() == "network-bound" && len(request.GetExpectedNetworkId()) != identity.IDSize {
 				t.Errorf("network-bound enrollment omitted expected NetworkID: %#v", request)
 			}
+			if request.GetRequestedName() == "class-bound" && request.GetExpectedEnrollmentClass() != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER {
+				t.Errorf("class-bound enrollment omitted expected class: %#v", request)
+			}
 			payload, _ := proto.Marshal(&lanewayv1.EnrollmentResponse{NetworkId: make([]byte, 16), NodeId: make([]byte, 16)})
 			_, _ = w.Write(payload)
 		case "/v1/configuration":
@@ -114,6 +117,10 @@ func TestEnrollAndConfiguration(t *testing.T) {
 	networkID, _ := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")
 	if _, err := client.EnrollForNetwork(context.Background(), "secret", "network-bound", []byte{1}, networkID); err != nil {
 		t.Fatalf("EnrollForNetwork = %v", err)
+	}
+	if _, err := client.EnrollForNetworkAndClass(context.Background(), "secret", "class-bound", []byte{1}, networkID,
+		lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER); err != nil {
+		t.Fatalf("EnrollForNetworkAndClass = %v", err)
 	}
 	configuration, unchanged, err := client.Configuration(context.Background(), 4)
 	if err != nil || !unchanged || configuration.GetValidUntilUnixSeconds() != 2_000_000_000 {

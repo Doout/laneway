@@ -391,9 +391,6 @@ func (c Config) Validate() error {
 		if c.Exit.FailureMode != "open" && c.Exit.FailureMode != "closed" {
 			return errors.New("exit.failure_mode must be explicitly set to open or closed")
 		}
-		if len(c.Exit.DNSServers) == 0 {
-			return errors.New("at least one exit.dns_servers entry is required")
-		}
 	}
 	if c.Exit.Serve && c.Controller.Endpoint == "" {
 		return errors.New("controller.endpoint is required when serving as an exit node")

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"laneway.dev/laneway/internal/exitnode"
 	"laneway.dev/laneway/internal/platform"
 )
 
@@ -35,17 +36,24 @@ func (c *unixPacketConn) WritePacket(data, oob []byte) error {
 	_, _, err := c.conn.WriteMsgUnix(data, oob, nil)
 	return err
 }
-func (c *unixPacketConn) Close() error { return c.conn.Close() }
+func (c *unixPacketConn) Close() error                         { return c.conn.Close() }
+func (c *unixPacketConn) SetDeadline(deadline time.Time) error { return c.conn.SetDeadline(deadline) }
 
 type ServiceConfig struct {
-	OpenTUN   func(context.Context, platform.TUNConfig) (platform.TUNDevice, error)
-	NewRoutes func(platform.RouteManagerConfig) (platform.RouteManager, error)
-	Duplicate func(platform.TUNDevice) (*os.File, error)
-	Harden    func() error
+	OpenTUN       func(context.Context, platform.TUNConfig) (platform.TUNDevice, error)
+	NewRoutes     func(platform.RouteManagerConfig) (platform.RouteManager, error)
+	NewExitRoutes func(exitnode.RouteManagerConfig) (exitnode.RouteManager, error)
+	NewDNS        func(exitnode.DNSManagerConfig) (exitnode.DNSManager, error)
+	Duplicate     func(platform.TUNDevice) (*os.File, error)
+	Harden        func() error
 }
 
 func ProductionConfig() ServiceConfig {
-	return ServiceConfig{OpenTUN: platform.OpenTUN, NewRoutes: platform.NewRouteManager, Duplicate: platform.DuplicateTUNFile, Harden: hardenProcess}
+	return ServiceConfig{
+		OpenTUN: platform.OpenTUN, NewRoutes: platform.NewRouteManager,
+		NewExitRoutes: exitnode.NewRouteManager, NewDNS: exitnode.NewDNSManager,
+		Duplicate: platform.DuplicateTUNFile, Harden: hardenProcess,
+	}
 }
 
 type StartOptions struct {
@@ -123,6 +131,11 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 		args = append([]string{"--", executable}, args...)
 	}
 	command := exec.Command(commandName, args...)
+	// The foreground client owns signal handling. Keep the privileged helper in
+	// a separate process group so terminal Ctrl-C/SIGTERM cannot kill it before
+	// the parent sends the authenticated close request and receives cleanup
+	// confirmation.
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Stdin = childFile
 	command.Stdout = childFile
 	command.Stderr = os.Stderr
@@ -133,14 +146,22 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 	childFile.Close()
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- command.Wait() }()
-	wait := func() error { return <-waitDone }
 	fail := func(cause error) (*Session, error) {
 		unixConn.Close()
-		_ = wait()
+		_ = command.Process.Kill()
+		<-waitDone
 		return nil, cause
 	}
 
 	client := &unixPacketConn{conn: unixConn}
+	deadline := time.Now().Add(roundTripTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := client.SetDeadline(deadline); err != nil {
+		return fail(err)
+	}
+	defer client.SetDeadline(time.Time{})
 	request := request{Version: ProtocolVersion, ID: 1, Op: "setup", Setup: &setup}
 	payload, err := json.Marshal(request)
 	if err != nil {
@@ -185,7 +206,7 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 		files[0].Close()
 		return fail(err)
 	}
-	return &Session{conn: client, TUN: tun, next: 1, wait: wait, helperPID: reply.HelperPID}, nil
+	return &Session{conn: client, TUN: tun, next: 1, wait: waitDone, kill: command.Process.Kill, helperPID: reply.HelperPID}, nil
 }
 
 func validateRootOwnedExecutable(path string) error {
@@ -258,7 +279,7 @@ func ServeInheritedFD(ctx context.Context, fd int, config ServiceConfig) error {
 }
 
 func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error {
-	if config.OpenTUN == nil || config.NewRoutes == nil || config.Duplicate == nil || config.Harden == nil {
+	if config.OpenTUN == nil || config.NewRoutes == nil || config.NewExitRoutes == nil || config.NewDNS == nil || config.Duplicate == nil || config.Harden == nil {
 		return errors.New("network helper service is incompletely configured")
 	}
 	raw, err := conn.SyscallConn()
@@ -288,7 +309,7 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 	if err != nil {
 		return err
 	}
-	if req.Op != "setup" || req.Setup == nil || req.Routes != nil {
+	if req.Op != "setup" || req.Setup == nil || req.Routes != nil || req.Exit != nil || req.DNS != nil {
 		_ = writeResponse(packet, req.ID, errors.New("first operation must be setup"), nil)
 		return errors.New("first operation must be setup")
 	}
@@ -312,6 +333,20 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 		return err
 	}
 	defer routes.Close()
+	exitRoutes, err := config.NewExitRoutes(exitnode.RouteManagerConfig{InterfaceName: tun.Name()})
+	if err != nil {
+		cancelSetup()
+		_ = writeResponse(packet, req.ID, err, nil)
+		return err
+	}
+	defer exitRoutes.Close()
+	dns, err := config.NewDNS(exitnode.DNSManagerConfig{InterfaceName: tun.Name()})
+	if err != nil {
+		cancelSetup()
+		_ = writeResponse(packet, req.ID, err, nil)
+		return err
+	}
+	defer dns.Close()
 	if err := routes.Apply(setupCtx, initialPlan); err != nil {
 		cancelSetup()
 		_ = writeResponse(packet, req.ID, err, nil)
@@ -356,7 +391,7 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 		lastID = req.ID
 		switch req.Op {
 		case "apply-routes":
-			if req.Routes == nil || req.Setup != nil {
+			if req.Routes == nil || req.Setup != nil || req.Exit != nil || req.DNS != nil {
 				err = errors.New("apply-routes requires exactly one route plan")
 			} else if plan, parseErr := parseRoutePlan(*req.Routes); parseErr != nil {
 				err = parseErr
@@ -368,8 +403,56 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 			if writeErr := writeResponse(packet, req.ID, err, nil); writeErr != nil {
 				return writeErr
 			}
+		case "apply-exit-routes":
+			if req.Exit == nil || req.Setup != nil || req.Routes != nil || req.DNS != nil {
+				err = errors.New("apply-exit-routes requires exactly one exit route plan")
+			} else if plan, parseErr := parseExitRoutePlan(*req.Exit); parseErr != nil {
+				err = parseErr
+			} else {
+				applyCtx, cancelApply := context.WithTimeout(ctx, operationTimeout)
+				err = exitRoutes.Apply(applyCtx, plan)
+				cancelApply()
+			}
+			if writeErr := writeResponse(packet, req.ID, err, nil); writeErr != nil {
+				return writeErr
+			}
+		case "restore-exit-routes":
+			if req.Setup != nil || req.Routes != nil || req.Exit != nil || req.DNS != nil {
+				err = errors.New("restore-exit-routes does not accept fields")
+			} else {
+				restoreCtx, cancelRestore := context.WithTimeout(ctx, operationTimeout)
+				err = exitRoutes.Restore(restoreCtx)
+				cancelRestore()
+			}
+			if writeErr := writeResponse(packet, req.ID, err, nil); writeErr != nil {
+				return writeErr
+			}
+		case "apply-dns":
+			if req.DNS == nil || req.Setup != nil || req.Routes != nil || req.Exit != nil {
+				err = errors.New("apply-dns requires exactly one DNS plan")
+			} else if servers, parseErr := parseDNSPlan(*req.DNS); parseErr != nil {
+				err = parseErr
+			} else {
+				applyCtx, cancelApply := context.WithTimeout(ctx, operationTimeout)
+				err = dns.Apply(applyCtx, servers)
+				cancelApply()
+			}
+			if writeErr := writeResponse(packet, req.ID, err, nil); writeErr != nil {
+				return writeErr
+			}
+		case "restore-dns":
+			if req.Setup != nil || req.Routes != nil || req.Exit != nil || req.DNS != nil {
+				err = errors.New("restore-dns does not accept fields")
+			} else {
+				restoreCtx, cancelRestore := context.WithTimeout(ctx, operationTimeout)
+				err = dns.Restore(restoreCtx)
+				cancelRestore()
+			}
+			if writeErr := writeResponse(packet, req.ID, err, nil); writeErr != nil {
+				return writeErr
+			}
 		case "close":
-			if req.Routes != nil || req.Setup != nil {
+			if req.Routes != nil || req.Setup != nil || req.Exit != nil || req.DNS != nil {
 				err = errors.New("close does not accept fields")
 			}
 			if writeErr := writeResponse(packet, req.ID, err, nil); writeErr != nil {

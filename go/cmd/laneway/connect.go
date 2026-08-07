@@ -1,0 +1,566 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"net/netip"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/bootstrap"
+	"laneway.dev/laneway/internal/config"
+	"laneway.dev/laneway/internal/controllerclient"
+	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/nethelper"
+	"laneway.dev/laneway/internal/netvalidate"
+	"laneway.dev/laneway/internal/nodeapp"
+	"laneway.dev/laneway/internal/pki"
+	"laneway.dev/laneway/internal/platform"
+)
+
+type connectEnrollment struct {
+	identity       identity.NodeIdentity
+	certificatePEM []byte
+	privateKeyPEM  []byte
+	overlays       []netip.Prefix
+	class          lanewayv1.EnrollmentClass
+	leaseExpiresAt time.Time
+}
+
+type runtimeCredentialFiles struct {
+	files []*os.File
+}
+
+func (f *runtimeCredentialFiles) add(directory, label string, contents []byte) (string, error) {
+	file, err := os.CreateTemp(directory, "."+label+"-*")
+	if err != nil {
+		return "", err
+	}
+	f.files = append(f.files, file)
+	if err := file.Chmod(0o600); err != nil {
+		return "", err
+	}
+	if _, err := file.Write(contents); err != nil {
+		return "", err
+	}
+	if _, err := file.Seek(0, 0); err != nil {
+		return "", err
+	}
+	// Keep credential bytes reachable only through this process's open file
+	// descriptors. A crash closes the descriptors and leaves no pathname.
+	if err := os.Remove(file.Name()); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("/proc/self/fd/%d", file.Fd()), nil
+}
+
+func (f *runtimeCredentialFiles) close() error {
+	var result error
+	for _, file := range f.files {
+		result = errors.Join(result, file.Close())
+	}
+	f.files = nil
+	return result
+}
+
+func runConnect(args []string) error {
+	if runtime.GOOS != "linux" {
+		return errors.New("foreground connect currently requires Linux TUN and policy-routing support")
+	}
+	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
+	tokenFile := fs.String("token-file", "", "protected file containing the one-time enrollment code")
+	exitSelector := fs.String("exit", "", "controller-authorized exit node name or NodeID")
+	remembered := fs.Bool("remembered", false, "require a remembered-user invite instead of an ephemeral invite")
+	ephemeral := fs.Bool("ephemeral", false, "explicitly require an ephemeral-user invite (the default)")
+	failureMode := fs.String("failure-mode", "closed", "exit path failure behavior: closed or open")
+	var routeValues, dnsValues, localLANValues []string
+	fs.Func("route", "controller-authorized subnet prefix (repeatable)", func(value string) error {
+		routeValues = append(routeValues, value)
+		return nil
+	})
+	fs.Func("dns", "temporary exit DNS server (repeatable; omitted preserves native DNS)", func(value string) error {
+		dnsValues = append(dnsValues, value)
+		return nil
+	})
+	fs.Func("local-lan", "native local-LAN bypass prefix for exit mode (repeatable)", func(value string) error {
+		localLANValues = append(localLANValues, value)
+		return nil
+	})
+	connectArgs := args
+	authority := ""
+	if len(connectArgs) != 0 && !strings.HasPrefix(connectArgs[0], "-") {
+		authority, connectArgs = connectArgs[0], connectArgs[1:]
+	}
+	if err := fs.Parse(connectArgs); err != nil {
+		return err
+	}
+	if fs.NArg() > 1 || (fs.NArg() == 1 && authority != "") {
+		return connectUsage()
+	}
+	if fs.NArg() == 1 {
+		authority = fs.Arg(0)
+	}
+	if authority == "" || (*remembered && *ephemeral) {
+		return connectUsage()
+	}
+	if *failureMode != "closed" && *failureMode != "open" {
+		return errors.New("--failure-mode must be closed or open")
+	}
+	if *exitSelector == "" && (len(dnsValues) != 0 || len(localLANValues) != 0 || flagProvided(args, "failure-mode")) {
+		return errors.New("--dns, --local-lan, and --failure-mode require --exit")
+	}
+	routes, err := parseConnectPrefixes(routeValues, false)
+	if err != nil {
+		return fmt.Errorf("--route: %w", err)
+	}
+	localLAN, err := parseConnectPrefixes(localLANValues, false)
+	if err != nil {
+		return fmt.Errorf("--local-lan: %w", err)
+	}
+	dns, err := parseConnectAddresses(dnsValues)
+	if err != nil {
+		return fmt.Errorf("--dns: %w", err)
+	}
+	code, err := connectEnrollmentCode(*tokenFile)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 20*time.Second)
+	metadata, err := bootstrap.Fetch(discoveryCtx, authority)
+	cancelDiscovery()
+	if err != nil {
+		return err
+	}
+	if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
+		return err
+	}
+	expectedClass := lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER
+	if *remembered {
+		expectedClass = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER
+	}
+	enrollmentCtx, cancelEnrollment := context.WithTimeout(ctx, 30*time.Second)
+	enrollment, err := enrollForConnect(enrollmentCtx, metadata, code, expectedClass)
+	cancelEnrollment()
+	code = ""
+	if err != nil {
+		return err
+	}
+	runtimeDir, err := os.MkdirTemp("", "laneway-connect-*")
+	if err != nil {
+		return fmt.Errorf("create temporary runtime directory: %w", err)
+	}
+	defer os.RemoveAll(runtimeDir)
+	if err := os.Chmod(runtimeDir, 0o700); err != nil {
+		return err
+	}
+	credentials := new(runtimeCredentialFiles)
+	defer credentials.close()
+	caPath, err := credentials.add(runtimeDir, "ca", []byte(metadata.Trust.CAPEM))
+	if err != nil {
+		return err
+	}
+	certPath, err := credentials.add(runtimeDir, "certificate", enrollment.certificatePEM)
+	if err != nil {
+		return err
+	}
+	keyPath, err := credentials.add(runtimeDir, "private-key", enrollment.privateKeyPEM)
+	if err != nil {
+		return err
+	}
+	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
+	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
+	configurationClient, err := controllerclient.New(controllerclient.Options{
+		Endpoint: metadata.Controller.EnrollmentEndpoint, QUICEndpoint: metadata.Controller.QUICEndpoint,
+		CAFile: caPath, CertificateFile: certPath, PrivateKeyFile: keyPath, ServerName: metadata.Controller.ServerName,
+		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedController,
+	})
+	if err != nil {
+		return err
+	}
+	configurationCtx, cancelConfiguration := context.WithTimeout(ctx, 20*time.Second)
+	initial, _, err := configurationClient.Configuration(configurationCtx, 0)
+	cancelConfiguration()
+	if err != nil {
+		return fmt.Errorf("fetch temporary session configuration: %w", err)
+	}
+	name := connectLocalName(initial, enrollment.identity.NodeID)
+	selectedExit, err := resolveConnectExit(initial, *exitSelector, enrollment.identity.NodeID)
+	if err != nil {
+		return err
+	}
+	filter := connectConfigurationFilter(routes, selectedExit, enrollment.identity.NodeID)
+	if _, err := filter(initial); err != nil {
+		return err
+	}
+	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, selectedExit, *failureMode, dns, localLAN)
+	if err != nil {
+		return err
+	}
+	selection := "overlay-only"
+	if len(routes) != 0 {
+		values := make([]string, 0, len(routes))
+		for _, prefix := range routes {
+			values = append(values, prefix.String())
+		}
+		selection = "routes=" + strings.Join(values, ",")
+	}
+	if !selectedExit.IsZero() {
+		selection = "exit=" + *exitSelector + " failure-mode=" + *failureMode
+	}
+	lastPath := ""
+	status := func(value nodeapp.RuntimeStatus) {
+		if value.Path == lastPath {
+			return
+		}
+		lastPath = value.Path
+		overlays := make([]string, 0, len(value.OverlayAddresses))
+		for _, prefix := range value.OverlayAddresses {
+			overlays = append(overlays, prefix.String())
+		}
+		fmt.Printf("laneway connected network=%s node=%s name=%s overlay=%s interface=%s selection=%s path=%s\n",
+			value.NetworkID, value.NodeID, name, strings.Join(overlays, ","), value.Interface, selection, value.Path)
+	}
+	err = nodeapp.RunForeground(ctx, cfg, nodeapp.ForegroundOptions{
+		NetworkOpener: helperNetworkOpener, Status: status, FilterConfiguration: filter,
+	})
+	if err == nil {
+		fmt.Println("laneway disconnected; temporary networking restored")
+	}
+	return err
+}
+
+func connectUsage() error {
+	return errors.New("usage: laneway connect lane.example.com [--token-file PATH] [--route PREFIX] [--exit NAME_OR_NODE_ID] [--dns ADDRESS] [--remembered]")
+}
+
+func connectEnrollmentCode(path string) (string, error) {
+	if path == "" {
+		return promptEnrollmentCode("Enrollment code: ")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 4096 || info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("--token-file must be a nonempty mode-0600 regular file no larger than 4096 bytes")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read --token-file: %w", err)
+	}
+	value := strings.TrimSpace(string(contents))
+	if value == "" || strings.ContainsAny(value, " \t\r\n") {
+		return "", errors.New("--token-file contains an invalid enrollment code")
+	}
+	return value, nil
+}
+
+func enrollForConnect(ctx context.Context, metadata bootstrap.Metadata, code string, expectedClass lanewayv1.EnrollmentClass) (connectEnrollment, error) {
+	expectedNetwork, err := identity.ParseNetworkID(metadata.NetworkID)
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	expectedService, err := identity.ParseID(metadata.Controller.ServiceID)
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "laneway-temporary-user"}}, private)
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	client, err := controllerclient.New(controllerclient.Options{
+		Endpoint: metadata.Controller.EnrollmentEndpoint, CAPEM: []byte(metadata.Trust.CAPEM), ServerName: metadata.Controller.ServerName,
+		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedService,
+	})
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	response, err := client.EnrollForNetworkAndClass(ctx, code, "", csrDER, expectedNetwork, expectedClass)
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	if len(response.GetNetworkId()) != identity.IDSize || len(response.GetNodeId()) != identity.IDSize || response.GetCertificateChain() == nil ||
+		len(response.GetCertificateChain().GetCertificatesDer()) == 0 || len(response.GetOverlayAddresses()) == 0 || response.GetEnrollmentClass() != expectedClass {
+		return connectEnrollment{}, errors.New("controller returned an incomplete or class-mismatched enrollment response")
+	}
+	leaf, err := x509.ParseCertificate(response.GetCertificateChain().GetCertificatesDer()[0])
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	authenticated, err := identity.IdentityFromCertificate(leaf)
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	if authenticated.NetworkID != expectedNetwork || !bytes.Equal(authenticated.NetworkID[:], response.GetNetworkId()) || !bytes.Equal(authenticated.NodeID[:], response.GetNodeId()) {
+		return connectEnrollment{}, errors.New("issued certificate identity does not match authenticated bootstrap and enrollment response")
+	}
+	wantPublic, _ := x509.MarshalPKIXPublicKey(public)
+	gotPublic, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
+	if err != nil || !bytes.Equal(wantPublic, gotPublic) {
+		return connectEnrollment{}, errors.New("issued certificate does not contain the locally generated public key")
+	}
+	overlays := make([]netip.Prefix, 0, len(response.GetOverlayAddresses()))
+	for i, raw := range response.GetOverlayAddresses() {
+		address, ok := netip.AddrFromSlice(raw)
+		if !ok || address.Is4In6() || address.IsUnspecified() || address.IsMulticast() {
+			return connectEnrollment{}, fmt.Errorf("controller returned invalid overlay address %d", i)
+		}
+		overlays = append(overlays, netip.PrefixFrom(address, address.BitLen()))
+	}
+	var certificatePEM []byte
+	for _, der := range response.GetCertificateChain().GetCertificatesDer() {
+		if _, err := x509.ParseCertificate(der); err != nil {
+			return connectEnrollment{}, err
+		}
+		certificatePEM = append(certificatePEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+	}
+	privatePEM, err := pki.PrivateKeyPEM(private)
+	if err != nil {
+		return connectEnrollment{}, err
+	}
+	var lease time.Time
+	if expectedClass == lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER {
+		seconds := response.GetLeaseExpiresAtUnixSeconds()
+		if seconds == 0 || seconds > uint64(1<<63-1) {
+			return connectEnrollment{}, errors.New("ephemeral enrollment response has no bounded lease")
+		}
+		lease = time.Unix(int64(seconds), 0).UTC()
+		if !lease.After(time.Now()) || leaf.NotAfter.After(lease) {
+			return connectEnrollment{}, errors.New("ephemeral certificate exceeds or outlives its session lease")
+		}
+	} else if response.GetLeaseExpiresAtUnixSeconds() != 0 {
+		return connectEnrollment{}, errors.New("remembered enrollment response unexpectedly contains an ephemeral lease")
+	}
+	return connectEnrollment{identity: authenticated, certificatePEM: certificatePEM, privateKeyPEM: privatePEM, overlays: overlays, class: expectedClass, leaseExpiresAt: lease}, nil
+}
+
+func connectConfig(runtimeDir string, metadata bootstrap.Metadata, name, caPath, certPath, keyPath string, selectedExit identity.NodeID,
+	failureMode string, dns []netip.Addr, localLAN []netip.Prefix,
+) (config.Config, error) {
+	if len(metadata.Relays) == 0 {
+		return config.Config{}, errors.New("bootstrap metadata contains no relay")
+	}
+	cfg := config.Defaults()
+	cfg.Mode = config.ModeNode
+	cfg.StateDir = filepath.Join(runtimeDir, "state")
+	cfg.SocketPath = filepath.Join(runtimeDir, "laneway.sock")
+	cfg.TLS = config.TLS{CertificateFile: certPath, PrivateKeyFile: keyPath, CAFile: caPath}
+	cfg.Node.Name = name
+	cfg.Node.RelayAddress = metadata.Relays[0].Endpoint
+	cfg.Node.RelayNetworkID = metadata.NetworkID
+	cfg.Node.RelayServiceID = metadata.Relays[0].ServiceID
+	cfg.Controller.Endpoint = metadata.Controller.EnrollmentEndpoint
+	cfg.Controller.QUICEndpoint = metadata.Controller.QUICEndpoint
+	cfg.Controller.ServerName = metadata.Controller.ServerName
+	cfg.Controller.NetworkID = metadata.NetworkID
+	cfg.Controller.ServiceID = metadata.Controller.ServiceID
+	cfg.Controller.PollInterval = config.Duration(5 * time.Second)
+	cfg.Direct.Enabled = true
+	cfg.Direct.Listen = ":0"
+	if !selectedExit.IsZero() {
+		cfg.Exit.Enabled = true
+		cfg.Exit.SelectedNodeID = selectedExit.String()
+		cfg.Exit.FailureMode = failureMode
+		for _, address := range dns {
+			cfg.Exit.DNSServers = append(cfg.Exit.DNSServers, address.String())
+		}
+		for _, prefix := range localLAN {
+			cfg.Exit.LocalLANBypasses = append(cfg.Exit.LocalLANBypasses, prefix.String())
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return config.Config{}, err
+	}
+	return cfg, nil
+}
+
+func helperNetworkOpener(ctx context.Context, tunConfig platform.TUNConfig, routes platform.RoutePlan) (nodeapp.HostNetwork, error) {
+	setup := nethelper.Setup{Name: tunConfig.Name, MTU: tunConfig.MTU}
+	for _, address := range tunConfig.Addresses {
+		setup.Addresses = append(setup.Addresses, address.String())
+	}
+	for _, route := range routes.Routes {
+		setup.Routes.Routes = append(setup.Routes.Routes, nethelper.Route{Prefix: route.Prefix.String(), Metric: route.Metric})
+	}
+	for _, bypass := range routes.TransportBypass {
+		setup.Routes.Bypasses = append(setup.Routes.Bypasses, bypass.String())
+	}
+	session, err := nethelper.Start(ctx, setup, nethelper.StartOptions{})
+	if err != nil {
+		return nodeapp.HostNetwork{}, err
+	}
+	return nodeapp.HostNetwork{
+		TUN: session.TUN, Routes: session.RouteManager(), ExitRoutes: session.ExitRouteManager(), DNS: session.DNSManager(), Close: session.Close,
+	}, nil
+}
+
+func parseConnectPrefixes(values []string, allowDefault bool) ([]netip.Prefix, error) {
+	seen := make(map[netip.Prefix]struct{}, len(values))
+	result := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil || prefix != prefix.Masked() || netvalidate.RoutablePrefix(prefix, allowDefault) != nil {
+			return nil, fmt.Errorf("%q is not a canonical routable prefix", value)
+		}
+		if _, duplicate := seen[prefix]; duplicate {
+			continue
+		}
+		seen[prefix] = struct{}{}
+		result = append(result, prefix)
+	}
+	return result, nil
+}
+
+func parseConnectAddresses(values []string) ([]netip.Addr, error) {
+	seen := make(map[netip.Addr]struct{}, len(values))
+	result := make([]netip.Addr, 0, len(values))
+	for _, value := range values {
+		address, err := netip.ParseAddr(value)
+		if err != nil || address.Is4In6() || address.IsUnspecified() || address.IsMulticast() {
+			return nil, fmt.Errorf("%q is not a unicast IP address", value)
+		}
+		if _, duplicate := seen[address]; duplicate {
+			continue
+		}
+		seen[address] = struct{}{}
+		result = append(result, address)
+	}
+	return result, nil
+}
+
+func connectLocalName(configuration *lanewayv1.NodeConfiguration, local identity.NodeID) string {
+	for _, peer := range configuration.GetPeers() {
+		if bytes.Equal(peer.GetNodeId(), local[:]) {
+			return peer.GetName()
+		}
+	}
+	return "temporary-user"
+}
+
+func resolveConnectExit(configuration *lanewayv1.NodeConfiguration, selector string, local identity.NodeID) (identity.NodeID, error) {
+	if selector == "" {
+		return identity.NodeID{}, nil
+	}
+	selected, parseErr := identity.ParseNodeID(selector)
+	if parseErr != nil {
+		for _, peer := range configuration.GetPeers() {
+			if peer.GetName() != selector || len(peer.GetNodeId()) != identity.IDSize {
+				continue
+			}
+			if !selected.IsZero() {
+				return identity.NodeID{}, fmt.Errorf("exit name %q is ambiguous", selector)
+			}
+			copy(selected[:], peer.GetNodeId())
+		}
+	}
+	if selected.IsZero() || selected == local {
+		return identity.NodeID{}, fmt.Errorf("exit %q does not identify a different controller peer", selector)
+	}
+	authorized := false
+	for _, raw := range configuration.GetExitPolicy().GetAuthorizedNodeIds() {
+		authorized = authorized || bytes.Equal(raw, selected[:])
+	}
+	if !authorized {
+		return identity.NodeID{}, fmt.Errorf("exit %q is not controller-authorized", selector)
+	}
+	for _, route := range configuration.GetRoutes().GetRoutes() {
+		if route.GetKind() == lanewayv1.RouteKind_ROUTE_KIND_EXIT && bytes.Equal(route.GetViaNodeId(), selected[:]) {
+			return selected, nil
+		}
+	}
+	return identity.NodeID{}, fmt.Errorf("exit %q has no approved exit route", selector)
+}
+
+func connectConfigurationFilter(requested []netip.Prefix, selectedExit, local identity.NodeID) func(*lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error) {
+	wanted := make(map[netip.Prefix]struct{}, len(requested))
+	for _, prefix := range requested {
+		wanted[prefix] = struct{}{}
+	}
+	return func(configuration *lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error) {
+		if configuration == nil || configuration.GetRoutes() == nil {
+			return nil, errors.New("controller configuration is incomplete")
+		}
+		filtered := proto.Clone(configuration).(*lanewayv1.NodeConfiguration)
+		kept := filtered.Routes.Routes[:0]
+		seen := make(map[netip.Prefix]struct{}, len(wanted))
+		exitRoute := false
+		for _, route := range filtered.Routes.Routes {
+			switch route.GetKind() {
+			case lanewayv1.RouteKind_ROUTE_KIND_OVERLAY:
+				kept = append(kept, route)
+			case lanewayv1.RouteKind_ROUTE_KIND_SUBNET:
+				prefix, err := connectProtoPrefix(route.GetDestination())
+				if err != nil {
+					return nil, err
+				}
+				if _, ok := wanted[prefix]; ok && !bytes.Equal(route.GetViaNodeId(), local[:]) {
+					kept = append(kept, route)
+					seen[prefix] = struct{}{}
+				}
+			case lanewayv1.RouteKind_ROUTE_KIND_EXIT:
+				if !selectedExit.IsZero() && bytes.Equal(route.GetViaNodeId(), selectedExit[:]) {
+					kept = append(kept, route)
+					exitRoute = true
+				}
+			}
+		}
+		filtered.Routes.Routes = kept
+		for prefix := range wanted {
+			if _, ok := seen[prefix]; !ok {
+				return nil, fmt.Errorf("requested route %s is no longer controller-authorized", prefix)
+			}
+		}
+		if !selectedExit.IsZero() {
+			if !exitRoute {
+				return nil, errors.New("selected exit is no longer controller-authorized")
+			}
+			authorized := false
+			for _, raw := range configuration.GetExitPolicy().GetAuthorizedNodeIds() {
+				authorized = authorized || bytes.Equal(raw, selectedExit[:])
+			}
+			if !authorized {
+				return nil, errors.New("selected exit was withdrawn from controller exit policy")
+			}
+			if filtered.ExitPolicy == nil {
+				filtered.ExitPolicy = new(lanewayv1.ExitNodePolicy)
+			}
+			filtered.ExitPolicy.AuthorizedNodeIds = [][]byte{append([]byte(nil), selectedExit[:]...)}
+		} else if filtered.ExitPolicy != nil {
+			filtered.ExitPolicy.AuthorizedNodeIds = nil
+		}
+		return filtered, nil
+	}
+}
+
+func connectProtoPrefix(value *lanewayv1.IpPrefix) (netip.Prefix, error) {
+	if value == nil {
+		return netip.Prefix{}, errors.New("controller route has no destination")
+	}
+	address, ok := netip.AddrFromSlice(value.GetAddress())
+	if !ok || address.Is4In6() || value.GetPrefixLength() > uint32(address.BitLen()) {
+		return netip.Prefix{}, errors.New("controller route has an invalid destination")
+	}
+	prefix := netip.PrefixFrom(address, int(value.GetPrefixLength()))
+	if prefix != prefix.Masked() {
+		return netip.Prefix{}, errors.New("controller route has a noncanonical destination")
+	}
+	return prefix, nil
+}

@@ -83,8 +83,11 @@ type EnrollmentRequest struct {
 	// controller compares it with the token's immutable network before token
 	// consumption, preventing cross-network code confusion.
 	ExpectedNetworkId []byte `protobuf:"bytes,4,opt,name=expected_network_id,json=expectedNetworkId,proto3" json:"expected_network_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Optional client-side class expectation authenticated by the bootstrap
+	// flow. A mismatch is rejected before the single-use token is consumed.
+	ExpectedEnrollmentClass EnrollmentClass `protobuf:"varint,5,opt,name=expected_enrollment_class,json=expectedEnrollmentClass,proto3,enum=laneway.v1.EnrollmentClass" json:"expected_enrollment_class,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *EnrollmentRequest) Reset() {
@@ -143,6 +146,13 @@ func (x *EnrollmentRequest) GetExpectedNetworkId() []byte {
 		return x.ExpectedNetworkId
 	}
 	return nil
+}
+
+func (x *EnrollmentRequest) GetExpectedEnrollmentClass() EnrollmentClass {
+	if x != nil {
+		return x.ExpectedEnrollmentClass
+	}
+	return EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED
 }
 
 type CertificateChain struct {
@@ -1436,12 +1446,13 @@ var File_laneway_v1_controller_proto protoreflect.FileDescriptor
 const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\n" +
 	"\x1blaneway/v1/controller.proto\x12\n" +
-	"laneway.v1\x1a\x18laneway/v1/control.proto\x1a\x17laneway/v1/policy.proto\x1a\x17laneway/v1/routes.proto\"\xbb\x01\n" +
+	"laneway.v1\x1a\x18laneway/v1/control.proto\x1a\x17laneway/v1/policy.proto\x1a\x17laneway/v1/routes.proto\"\x94\x02\n" +
 	"\x11EnrollmentRequest\x12)\n" +
 	"\x10enrollment_token\x18\x01 \x01(\tR\x0fenrollmentToken\x12$\n" +
 	"\x0epkcs10_csr_der\x18\x02 \x01(\fR\fpkcs10CsrDer\x12%\n" +
 	"\x0erequested_name\x18\x03 \x01(\tR\rrequestedName\x12.\n" +
-	"\x13expected_network_id\x18\x04 \x01(\fR\x11expectedNetworkId\"r\n" +
+	"\x13expected_network_id\x18\x04 \x01(\fR\x11expectedNetworkId\x12W\n" +
+	"\x19expected_enrollment_class\x18\x05 \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x17expectedEnrollmentClass\"r\n" +
 	"\x10CertificateChain\x12)\n" +
 	"\x10certificates_der\x18\x01 \x03(\fR\x0fcertificatesDer\x123\n" +
 	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\xce\x02\n" +
@@ -1582,37 +1593,38 @@ var file_laneway_v1_controller_proto_goTypes = []any{
 	(*ProtocolError)(nil),             // 22: laneway.v1.ProtocolError
 }
 var file_laneway_v1_controller_proto_depIdxs = []int32{
-	2,  // 0: laneway.v1.EnrollmentResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
-	0,  // 1: laneway.v1.EnrollmentResponse.enrollment_class:type_name -> laneway.v1.EnrollmentClass
-	2,  // 2: laneway.v1.RenewalResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
-	19, // 3: laneway.v1.NodeConfiguration.routes:type_name -> laneway.v1.RouteSnapshot
-	20, // 4: laneway.v1.NodeConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
-	7,  // 5: laneway.v1.NodeConfiguration.peers:type_name -> laneway.v1.NodePeer
-	8,  // 6: laneway.v1.NodeConfiguration.relays:type_name -> laneway.v1.RelayEndpoint
-	9,  // 7: laneway.v1.NodeConfiguration.candidate_exchange:type_name -> laneway.v1.CandidateExchangePolicy
-	10, // 8: laneway.v1.NodeConfiguration.exit_policy:type_name -> laneway.v1.ExitNodePolicy
-	11, // 9: laneway.v1.NodeConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
-	0,  // 10: laneway.v1.NodeConfiguration.enrollment_class:type_name -> laneway.v1.EnrollmentClass
-	21, // 11: laneway.v1.RelayPeerAuthorization.authorized_prefixes:type_name -> laneway.v1.IpPrefix
-	14, // 12: laneway.v1.RelayConfiguration.peers:type_name -> laneway.v1.RelayPeerAuthorization
-	20, // 13: laneway.v1.RelayConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
-	11, // 14: laneway.v1.RelayConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
-	1,  // 15: laneway.v1.ControllerEnvelope.enrollment_request:type_name -> laneway.v1.EnrollmentRequest
-	3,  // 16: laneway.v1.ControllerEnvelope.enrollment_response:type_name -> laneway.v1.EnrollmentResponse
-	4,  // 17: laneway.v1.ControllerEnvelope.renewal_request:type_name -> laneway.v1.RenewalRequest
-	5,  // 18: laneway.v1.ControllerEnvelope.renewal_response:type_name -> laneway.v1.RenewalResponse
-	12, // 19: laneway.v1.ControllerEnvelope.configuration_request:type_name -> laneway.v1.ConfigurationRequest
-	6,  // 20: laneway.v1.ControllerEnvelope.node_configuration:type_name -> laneway.v1.NodeConfiguration
-	17, // 21: laneway.v1.ControllerEnvelope.certificate_revocation:type_name -> laneway.v1.CertificateRevocation
-	22, // 22: laneway.v1.ControllerEnvelope.error:type_name -> laneway.v1.ProtocolError
-	13, // 23: laneway.v1.ControllerEnvelope.relay_configuration_request:type_name -> laneway.v1.RelayConfigurationRequest
-	15, // 24: laneway.v1.ControllerEnvelope.relay_configuration:type_name -> laneway.v1.RelayConfiguration
-	16, // 25: laneway.v1.ControllerEnvelope.configuration_lease:type_name -> laneway.v1.ConfigurationLease
-	26, // [26:26] is the sub-list for method output_type
-	26, // [26:26] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	0,  // 0: laneway.v1.EnrollmentRequest.expected_enrollment_class:type_name -> laneway.v1.EnrollmentClass
+	2,  // 1: laneway.v1.EnrollmentResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
+	0,  // 2: laneway.v1.EnrollmentResponse.enrollment_class:type_name -> laneway.v1.EnrollmentClass
+	2,  // 3: laneway.v1.RenewalResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
+	19, // 4: laneway.v1.NodeConfiguration.routes:type_name -> laneway.v1.RouteSnapshot
+	20, // 5: laneway.v1.NodeConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
+	7,  // 6: laneway.v1.NodeConfiguration.peers:type_name -> laneway.v1.NodePeer
+	8,  // 7: laneway.v1.NodeConfiguration.relays:type_name -> laneway.v1.RelayEndpoint
+	9,  // 8: laneway.v1.NodeConfiguration.candidate_exchange:type_name -> laneway.v1.CandidateExchangePolicy
+	10, // 9: laneway.v1.NodeConfiguration.exit_policy:type_name -> laneway.v1.ExitNodePolicy
+	11, // 10: laneway.v1.NodeConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
+	0,  // 11: laneway.v1.NodeConfiguration.enrollment_class:type_name -> laneway.v1.EnrollmentClass
+	21, // 12: laneway.v1.RelayPeerAuthorization.authorized_prefixes:type_name -> laneway.v1.IpPrefix
+	14, // 13: laneway.v1.RelayConfiguration.peers:type_name -> laneway.v1.RelayPeerAuthorization
+	20, // 14: laneway.v1.RelayConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
+	11, // 15: laneway.v1.RelayConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
+	1,  // 16: laneway.v1.ControllerEnvelope.enrollment_request:type_name -> laneway.v1.EnrollmentRequest
+	3,  // 17: laneway.v1.ControllerEnvelope.enrollment_response:type_name -> laneway.v1.EnrollmentResponse
+	4,  // 18: laneway.v1.ControllerEnvelope.renewal_request:type_name -> laneway.v1.RenewalRequest
+	5,  // 19: laneway.v1.ControllerEnvelope.renewal_response:type_name -> laneway.v1.RenewalResponse
+	12, // 20: laneway.v1.ControllerEnvelope.configuration_request:type_name -> laneway.v1.ConfigurationRequest
+	6,  // 21: laneway.v1.ControllerEnvelope.node_configuration:type_name -> laneway.v1.NodeConfiguration
+	17, // 22: laneway.v1.ControllerEnvelope.certificate_revocation:type_name -> laneway.v1.CertificateRevocation
+	22, // 23: laneway.v1.ControllerEnvelope.error:type_name -> laneway.v1.ProtocolError
+	13, // 24: laneway.v1.ControllerEnvelope.relay_configuration_request:type_name -> laneway.v1.RelayConfigurationRequest
+	15, // 25: laneway.v1.ControllerEnvelope.relay_configuration:type_name -> laneway.v1.RelayConfiguration
+	16, // 26: laneway.v1.ControllerEnvelope.configuration_lease:type_name -> laneway.v1.ConfigurationLease
+	27, // [27:27] is the sub-list for method output_type
+	27, // [27:27] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_laneway_v1_controller_proto_init() }

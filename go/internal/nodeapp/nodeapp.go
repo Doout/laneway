@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -89,6 +90,15 @@ func run(path, diagnostics string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runConfig(ctx, cfg, diagnostics, runtimeOptions{})
+}
+
+func runConfig(ctx context.Context, cfg config.Config, diagnostics string, options runtimeOptions) (retErr error) {
+	if ctx == nil {
+		return errors.New("node runtime requires a context")
+	}
 	if cfg.Mode != config.ModeNode {
 		return fmt.Errorf("configuration mode is %q, want %q", cfg.Mode, config.ModeNode)
 	}
@@ -97,6 +107,7 @@ func run(path, diagnostics string) (retErr error) {
 	}
 	exitIntentStore := newExitIntentStore(cfg.StateDir)
 	var exitIntentPersisted bool
+	var err error
 	cfg.Exit, exitIntentPersisted, err = exitIntentStore.Load(cfg.Exit)
 	if err != nil {
 		return fmt.Errorf("load persisted exit intent: %w", err)
@@ -128,8 +139,6 @@ func run(path, diagnostics string) (retErr error) {
 			return err
 		}
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	// Resolve each native transport exactly once. The numeric dial targets and
 	// installed host-route bypasses below are therefore the same endpoints for
 	// every reconnect, even if DNS rotates after lane0 becomes active.
@@ -180,11 +189,18 @@ func run(path, diagnostics string) (retErr error) {
 		if err != nil {
 			return fmt.Errorf("fetch initial controller configuration: %w", err)
 		}
+		configurationClient = client
+		if options.filterConfiguration != nil {
+			initialConfiguration, err = options.filterConfiguration(initialConfiguration)
+			if err != nil {
+				return fmt.Errorf("filter initial controller configuration: %w", err)
+			}
+			configurationClient = filteredConfigurationSource{source: client, filter: options.filterConfiguration}
+		}
 		addresses, err = controllerOverlayAddresses(initialConfiguration, local, time.Now())
 		if err != nil {
 			return fmt.Errorf("initial controller configuration: %w", err)
 		}
-		configurationClient = client
 	} else {
 		addresses, err = overlayAddresses(cfg.Node.OverlayAddresses)
 		if err != nil {
@@ -259,27 +275,28 @@ func run(path, diagnostics string) (retErr error) {
 	staticBypass := append([]netip.Addr(nil), bypass...)
 	bypass = append(bypass, controllerRelayBypass...)
 
-	tun, err := platform.OpenTUN(ctx, platform.TUNConfig{Name: platform.DefaultTUNName, MTU: laneMTU, Addresses: addresses})
+	tunConfig := platform.TUNConfig{Name: platform.DefaultTUNName, MTU: laneMTU, Addresses: addresses}
+	initialRoutePlan := platform.RoutePlan{Routes: osRoutes, TransportBypass: bypass}
+	networkOpener := options.networkOpener
+	if networkOpener == nil {
+		networkOpener = openDirectHostNetwork
+	}
+	hostNetwork, err := networkOpener(ctx, tunConfig, initialRoutePlan)
 	if err != nil {
 		return err
 	}
+	if hostNetwork.TUN == nil || hostNetwork.Routes == nil || hostNetwork.Close == nil {
+		if hostNetwork.Close != nil {
+			_ = hostNetwork.Close()
+		}
+		return errors.New("network opener returned an incomplete host network")
+	}
+	tun, routeManager := hostNetwork.TUN, hostNetwork.Routes
 	defer func() {
-		if closeErr := tun.Close(); closeErr != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("close TUN: %w", closeErr))
+		if closeErr := hostNetwork.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore host networking: %w", closeErr))
 		}
 	}()
-	routeManager, err := platform.NewRouteManager(platform.RouteManagerConfig{InterfaceName: tun.Name()})
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := routeManager.Close(); closeErr != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("restore overlay routes: %w", closeErr))
-		}
-	}()
-	if err := routeManager.Apply(ctx, platform.RoutePlan{Routes: osRoutes, TransportBypass: bypass}); err != nil {
-		return err
-	}
 	var ipForwardManager *daemonIPForwardManager
 	if cfg.Controller.Endpoint != "" && (cfg.Routing.OutputInterface != "" || cfg.Exit.Serve) {
 		ipForwardManager = newDaemonIPForwardManager()
@@ -316,7 +333,8 @@ func run(path, diagnostics string) (retErr error) {
 
 	var exitManagers *daemonExitManagers
 	if cfg.Controller.Endpoint != "" || cfg.Exit.Serve {
-		exitManagers, err = newDaemonExitManagers(cfg, local, tun.Name(), staticBypass, routeTable, exitIntentStore, exitIntentPersisted)
+		exitManagers, err = newDaemonExitManagers(cfg, local, tun.Name(), staticBypass, routeTable, exitIntentStore, exitIntentPersisted,
+			hostNetwork.ExitRoutes, hostNetwork.DNS)
 		if err != nil {
 			return err
 		}
@@ -462,9 +480,41 @@ func run(path, diagnostics string) (retErr error) {
 			return fmt.Errorf("apply initial controller configuration: %w", err)
 		}
 	}
-	fmt.Printf("lanewayd node=%s interface=%s mtu=%d relay=%s\n", local.NodeID, tun.Name(), tun.MTU(), cfg.Node.RelayAddress)
+	if !options.foreground {
+		fmt.Printf("lanewayd node=%s interface=%s mtu=%d relay=%s\n", local.NodeID, tun.Name(), tun.MTU(), cfg.Node.RelayAddress)
+	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	if options.status != nil {
+		baseStatus := RuntimeStatus{
+			NetworkID: local.NetworkID.String(), NodeID: local.NodeID.String(), Interface: tun.Name(),
+			OverlayAddresses: append([]netip.Prefix(nil), addresses...),
+		}
+		emitStatus := func(path string) {
+			status := baseStatus
+			status.OverlayAddresses = append([]netip.Prefix(nil), baseStatus.OverlayAddresses...)
+			status.Path = path
+			options.status(status)
+		}
+		emitStatus("connecting")
+		go func() {
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			last := "connecting"
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					path := foregroundPath(local.NodeID, controllerState, pathManager, service)
+					if path != last {
+						last = path
+						emitStatus(path)
+					}
+				}
+			}
+		}()
+	}
 	if exitManagers != nil {
 		go exitManagers.MonitorPath(runCtx, time.Second)
 	}
@@ -616,8 +666,10 @@ func run(path, diagnostics string) (retErr error) {
 		dataMetrics := unifiedDataPlane.Metrics()
 		sent, received, dropped = dataMetrics.PacketsSent, dataMetrics.PacketsReceived, dataMetrics.PacketsDropped
 	}
-	fmt.Printf("lanewayd stopped connections=%d sent=%d received=%d dropped=%d\n",
-		metrics.Connections, sent, received, dropped)
+	if !options.foreground {
+		fmt.Printf("lanewayd stopped connections=%d sent=%d received=%d dropped=%d\n",
+			metrics.Connections, sent, received, dropped)
+	}
 	return err
 }
 
@@ -645,12 +697,50 @@ func peerPathState(peer identity.NodeID, manager *pathmanager.Manager, service *
 	return "disconnected"
 }
 
+func foregroundPath(local identity.NodeID, state *controllerApplyState, manager *pathmanager.Manager, service *nodeservice.Service) string {
+	if state != nil && manager != nil {
+		state.mu.Lock()
+		if state.accepted != nil {
+			for _, peer := range state.accepted.configuration.GetPeers() {
+				if len(peer.GetNodeId()) != identity.IDSize {
+					continue
+				}
+				var peerID identity.NodeID
+				copy(peerID[:], peer.GetNodeId())
+				if peerID == local {
+					continue
+				}
+				if path := manager.BestPath(peerID); path != nil && strings.HasPrefix(path.Name(), "direct-quic/") {
+					state.mu.Unlock()
+					return "direct"
+				}
+			}
+		}
+		state.mu.Unlock()
+	}
+	return service.SelectedCarrier()
+}
+
 func directCandidatePolicy(config config.Direct) directpath.CandidatePolicy {
 	return directpath.CandidatePolicy{MaxCandidates: config.MaxCandidates, AllowLoopback: config.AllowLoopback, AllowLinkLocal: config.AllowLinkLocal}
 }
 
 type configurationSource interface {
 	Configuration(context.Context, uint64) (*lanewayv1.NodeConfiguration, bool, error)
+}
+
+type filteredConfigurationSource struct {
+	source configurationSource
+	filter func(*lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error)
+}
+
+func (s filteredConfigurationSource) Configuration(ctx context.Context, epoch uint64) (*lanewayv1.NodeConfiguration, bool, error) {
+	configuration, unchanged, err := s.source.Configuration(ctx, epoch)
+	if err != nil || unchanged {
+		return configuration, unchanged, err
+	}
+	filtered, err := s.filter(configuration)
+	return filtered, false, err
 }
 
 func controllerOverlayAddresses(configuration *lanewayv1.NodeConfiguration, local identity.NodeIdentity, now time.Time) ([]netip.Prefix, error) {
@@ -1039,7 +1129,7 @@ type daemonExitManagers struct {
 }
 
 func newDaemonExitManagers(cfg config.Config, local identity.NodeIdentity, interfaceName string, bypass []netip.Addr, routeTable *routing.Table,
-	intentStore *exitIntentStore, intentPersisted bool,
+	intentStore *exitIntentStore, intentPersisted bool, externalRoutes exitnode.RouteManager, externalDNS exitnode.DNSManager,
 ) (*daemonExitManagers, error) {
 	managers := &daemonExitManagers{local: local, staticBypass: append([]netip.Addr(nil), bypass...), bypass: append([]netip.Addr(nil), bypass...), enabled: cfg.Exit.Enabled,
 		routeTable: routeTable, failureModeConfigured: cfg.Exit.FailureMode == "open" || cfg.Exit.FailureMode == "closed",
@@ -1071,14 +1161,20 @@ func newDaemonExitManagers(cfg config.Config, local identity.NodeIdentity, inter
 		managers.localLAN = append(managers.localLAN, netip.MustParsePrefix(value))
 	}
 	if cfg.Controller.Endpoint != "" {
-		routes, err := exitnode.NewRouteManager(exitnode.RouteManagerConfig{InterfaceName: interfaceName})
-		if err != nil {
-			return nil, err
+		if (externalRoutes == nil) != (externalDNS == nil) {
+			return nil, errors.New("exit route and DNS managers must be supplied together")
 		}
-		dns, err := exitnode.NewDNSManager(exitnode.DNSManagerConfig{InterfaceName: interfaceName})
-		if err != nil {
-			routes.Close()
-			return nil, err
+		routes, dns := externalRoutes, externalDNS
+		if routes == nil {
+			routes, err = exitnode.NewRouteManager(exitnode.RouteManagerConfig{InterfaceName: interfaceName})
+			if err != nil {
+				return nil, err
+			}
+			dns, err = exitnode.NewDNSManager(exitnode.DNSManagerConfig{InterfaceName: interfaceName})
+			if err != nil {
+				routes.Close()
+				return nil, err
+			}
 		}
 		managers.client, err = exitnode.NewClientManager(routes, dns, 0)
 		if err != nil {
