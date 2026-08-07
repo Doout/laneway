@@ -165,6 +165,26 @@ controller routes and forwarding authorization and relays reject/re-authorize
 sessions fail-closed; service resumes from the retained complete snapshot only
 after the controller renews it.
 
+Issue a fully temporary identity code with its authorization lifetime fixed by
+the controller (the client cannot extend it):
+
+```sh
+laneway controller enrollment-token issue \
+  --network-id NETWORK_ID --label laptop-session \
+  --class ephemeral --session-lifetime 8h --expires-in 10m \
+  --controller https://controller:8443 \
+  --controller-network-id NETWORK_ID --controller-service-id CONTROLLER_ID \
+  --admin-token-file /etc/laneway/admin.token --ca /etc/laneway/ca.crt
+```
+
+Use `--class remembered` for an explicitly remembered user or the default
+`--class durable` for a persistent Node. The JSON response is the only command
+output containing the single-use bearer secret; protect or prompt for it rather
+than placing it in shell history. Ephemeral certificates and all distributed
+authorization expire at `lease_expires_at_unix_seconds`. The controller keeps
+expired session records for seven days, prunes them in bounded batches, and
+retains their audit events.
+
 Statically configured daemon transport endpoints are DNS-pinned at process startup. A node resolves
 the bootstrap relay QUIC address, TCP fallback address, and controller HTTPS and QUIC endpoints once,
 installs native bypass host routes for exactly those IP addresses, and uses

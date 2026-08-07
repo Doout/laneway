@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -278,6 +279,55 @@ func TestEnrollmentUsesCSRKeyButOverridesIdentityAndRejectsReplay(t *testing.T) 
 	}
 }
 
+func TestEphemeralEnrollmentCertificateAndResponseAreLeaseBound(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	token, err := f.store.IssueEnrollmentTokenWithOptions(context.Background(), f.network.ID, "ephemeral-user", time.Now().Add(time.Minute), controller.EnrollmentTokenOptions{
+		Class: controller.EnrollmentClassEphemeral, SessionLifetime: controller.MinEphemeralLifetime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	csrBytes := csrDER(t, "")
+	response, result := enroll(t, f, token.Secret, csrBytes, "ephemeral-user")
+	if result.Code != http.StatusCreated {
+		t.Fatalf("enroll status=%d body=%x", result.Code, result.Body.Bytes())
+	}
+	wantExpiry := time.Unix(int64(response.GetLeaseExpiresAtUnixSeconds()), 0).UTC()
+	if response.GetEnrollmentClass() != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER || response.GetLeaseExpiresAtUnixSeconds() != uint64(wantExpiry.Unix()) {
+		t.Fatalf("ephemeral response=%+v", response)
+	}
+	leaf := parseLeaf(t, response.GetCertificateChain())
+	if !leaf.NotAfter.Equal(wantExpiry) || response.GetCertificateChain().GetNotAfterUnixSeconds() != uint64(wantExpiry.Unix()) {
+		t.Fatalf("certificate expiry=%s chain=%d want=%s", leaf.NotAfter, response.GetCertificateChain().GetNotAfterUnixSeconds(), wantExpiry)
+	}
+	var nodeID identity.NodeID
+	copy(nodeID[:], response.GetNodeId())
+	node, err := f.store.Node(context.Background(), nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := buildConfiguration(f.network, node, []controller.Node{node}, nil, nil, nil, uint64(wantExpiry.Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.GetEnrollmentClass() != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER || configuration.GetIdentityLeaseExpiresAtUnixSeconds() != uint64(wantExpiry.Unix()) {
+		t.Fatalf("configuration lease metadata=%+v", configuration)
+	}
+	csr, err := x509.ParseCertificateRequest(csrBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.service.now = func() time.Time { return wantExpiry.Add(-time.Second) }
+	renewed, err := f.service.issueCertificate(node, csr)
+	if err != nil || !renewed.NotAfter.Equal(wantExpiry) {
+		t.Fatalf("renewal at boundary cert=%+v err=%v", renewed, err)
+	}
+	f.service.now = func() time.Time { return wantExpiry }
+	if _, err := f.service.issueCertificate(node, csr); err == nil {
+		t.Fatal("renewal at exact lease expiry unexpectedly succeeded")
+	}
+}
+
 func TestEnrollmentSigningFailureRollsBackTokenNodeAndAddress(t *testing.T) {
 	f := newFixture(t, DefaultMaxBodyBytes, nil)
 	token := issueToken(t, f, time.Now().Add(time.Hour))
@@ -529,6 +579,44 @@ func TestConfigurationEpochRoutesAndPolicy(t *testing.T) {
 	if route := config.Routes.Routes[1]; route.GetKind() != lanewayv1.RouteKind_ROUTE_KIND_SUBNET ||
 		route.GetMode() != lanewayv1.RouteAdvertisementMode_ROUTE_ADVERTISEMENT_MODE_NAT {
 		t.Fatalf("subnet route mode not preserved in snapshot: %+v", route)
+	}
+}
+
+func TestEveryNodeSnapshotIsCappedByEarliestEphemeralLease(t *testing.T) {
+	var authenticated identity.NodeIdentity
+	f := newFixture(t, DefaultMaxBodyBytes, func(*http.Request) (identity.NodeIdentity, error) { return authenticated, nil })
+	durable, result := enroll(t, f, issueToken(t, f, time.Now().Add(time.Hour)), csrDER(t, ""), "durable-peer")
+	if result.Code != http.StatusCreated {
+		t.Fatalf("durable enrollment status=%d", result.Code)
+	}
+	copy(authenticated.NetworkID[:], durable.GetNetworkId())
+	copy(authenticated.NodeID[:], durable.GetNodeId())
+	token, err := f.store.IssueEnrollmentTokenWithOptions(context.Background(), f.network.ID, "short-user", time.Now().Add(time.Minute), controller.EnrollmentTokenOptions{
+		Class: controller.EnrollmentClassEphemeral, SessionLifetime: 10 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ephemeral, result := enroll(t, f, token.Secret, csrDER(t, ""), "short-user")
+	if result.Code != http.StatusCreated {
+		t.Fatalf("ephemeral enrollment status=%d body=%x", result.Code, result.Body.Bytes())
+	}
+	f.service.snapshotValidity = time.Hour
+	configuration := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", &lanewayv1.ConfigurationRequest{})
+	if configuration.Code != http.StatusOK {
+		t.Fatalf("configuration status=%d body=%x", configuration.Code, configuration.Body.Bytes())
+	}
+	want := strconv.FormatUint(ephemeral.GetLeaseExpiresAtUnixSeconds(), 10)
+	var body lanewayv1.NodeConfiguration
+	if err := proto.Unmarshal(configuration.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if got := strconv.FormatUint(body.GetValidUntilUnixSeconds(), 10); got != want {
+		t.Fatalf("snapshot deadline=%s want earliest ephemeral lease %s", got, want)
+	}
+	unchanged := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", &lanewayv1.ConfigurationRequest{KnownConfigurationEpoch: body.GetConfigurationEpoch()})
+	if unchanged.Code != http.StatusNotModified || unchanged.Header().Get(SnapshotValidityHeader) != want {
+		t.Fatalf("unchanged status=%d deadline=%s want=%s", unchanged.Code, unchanged.Header().Get(SnapshotValidityHeader), want)
 	}
 }
 

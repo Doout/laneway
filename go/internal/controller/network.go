@@ -113,14 +113,16 @@ func (s *Store) Node(ctx context.Context, nodeID identity.NodeID) (Node, error) 
 	var name string
 	var capabilities, created int64
 	var revoked sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT n.network_id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address
+	var enrollmentClass string
+	var leaseExpires sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT n.network_id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at
 		FROM nodes n LEFT JOIN overlay_addresses a ON a.id=(
 			SELECT oa.id FROM overlay_addresses oa WHERE oa.node_id=n.id AND length(oa.address)=4
 			ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
 		LEFT JOIN overlay_addresses a6 ON a6.id=(
 			SELECT oa.id FROM overlay_addresses oa WHERE oa.node_id=n.id AND length(oa.address)=16
 			ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
-		WHERE n.id=?`, idBytes(nodeID)).Scan(&network, &name, &capabilities, &created, &revoked, &address, &address6)
+		WHERE n.id=?`, idBytes(nodeID)).Scan(&network, &name, &capabilities, &created, &revoked, &address, &address6, &enrollmentClass, &leaseExpires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Node{}, ErrNotFound
 	}
@@ -131,11 +133,20 @@ func (s *Store) Node(ctx context.Context, nodeID identity.NodeID) (Node, error) 
 	if err != nil {
 		return Node{}, err
 	}
-	addr, ok := netip.AddrFromSlice(address)
-	if !ok || !addr.Is4() {
-		return Node{}, errors.New("corrupt node overlay address")
+	class := EnrollmentClass(enrollmentClass)
+	if !class.Valid() || (class == EnrollmentClassEphemeral) != leaseExpires.Valid {
+		return Node{}, errors.New("corrupt node enrollment class")
 	}
-	result := Node{ID: nodeID, NetworkID: identity.NetworkID(nid), Name: name, EnabledCapabilities: uint64(capabilities), IPv4Address: addr, CreatedAt: fromUnix(created), RevokedAt: nullableTime(revoked)}
+	result := Node{ID: nodeID, NetworkID: identity.NetworkID(nid), Name: name, EnabledCapabilities: uint64(capabilities), CreatedAt: fromUnix(created), RevokedAt: nullableTime(revoked), EnrollmentClass: class, LeaseExpiresAt: nullableTime(leaseExpires)}
+	if len(address) != 0 {
+		addr, ok := netip.AddrFromSlice(address)
+		if !ok || !addr.Is4() {
+			return Node{}, errors.New("corrupt node overlay address")
+		}
+		result.IPv4Address = addr
+	} else if !revoked.Valid {
+		return Node{}, errors.New("active node has no IPv4 overlay address")
+	}
 	if len(address6) != 0 {
 		ipv6, ok := netip.AddrFromSlice(address6)
 		if !ok || !ipv6.Is6() {
@@ -223,9 +234,16 @@ func allocateIPv4Tx(ctx context.Context, tx *sql.Tx, networkID identity.NetworkI
 			idBytes(addressID), idBytes(networkID), idBytes(nodeID), candidate[:], unix(now))
 		if err != nil {
 			if isConstraint(err) {
-				continue
+				reused, reuseErr := reuseReleasedAddressTx(ctx, tx, addressID, networkID, nodeID, candidate[:], 32, now)
+				if reuseErr != nil {
+					return netip.Addr{}, reuseErr
+				}
+				if !reused {
+					continue
+				}
+			} else {
+				return netip.Addr{}, fmt.Errorf("insert overlay address: %w", err)
 			}
-			return netip.Addr{}, fmt.Errorf("insert overlay address: %w", err)
 		}
 		nextOffset := offset + 1
 		if nextOffset > usable {
@@ -281,9 +299,16 @@ func allocateIPv6Tx(ctx context.Context, tx *sql.Tx, networkID identity.NetworkI
 			idBytes(addressID), idBytes(networkID), idBytes(nodeID), candidate[:], unix(now))
 		if err != nil {
 			if isConstraint(err) {
-				continue
+				reused, reuseErr := reuseReleasedAddressTx(ctx, tx, addressID, networkID, nodeID, candidate[:], 128, now)
+				if reuseErr != nil {
+					return netip.Addr{}, reuseErr
+				}
+				if !reused {
+					continue
+				}
+			} else {
+				return netip.Addr{}, fmt.Errorf("insert IPv6 overlay address: %w", err)
 			}
-			return netip.Addr{}, fmt.Errorf("insert IPv6 overlay address: %w", err)
 		}
 		nextOffset := offset + 1
 		if nextOffset > usable {
@@ -295,4 +320,19 @@ func allocateIPv6Tx(ctx context.Context, tx *sql.Tx, networkID identity.NetworkI
 		return netip.AddrFrom16(candidate), nil
 	}
 	return netip.Addr{}, ErrPoolExhausted
+}
+
+func reuseReleasedAddressTx(ctx context.Context, tx *sql.Tx, addressID identity.ID, networkID identity.NetworkID, nodeID identity.NodeID, address []byte, bits int, now time.Time) (bool, error) {
+	result, err := tx.ExecContext(ctx, `UPDATE overlay_addresses SET id=?,node_id=?,prefix_length=?,created_at=?,released_at=NULL
+		WHERE network_id=? AND address=? AND released_at IS NOT NULL
+		AND NOT EXISTS (SELECT 1 FROM certificates c WHERE c.node_id=overlay_addresses.node_id AND c.not_after>? AND c.revoked_at IS NULL)`,
+		idBytes(addressID), idBytes(nodeID), bits, unix(now), idBytes(networkID), address, unix(now))
+	if err != nil {
+		return false, fmt.Errorf("reuse released overlay address: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("check released overlay address reuse: %w", err)
+	}
+	return changed == 1, nil
 }

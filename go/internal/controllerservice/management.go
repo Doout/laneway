@@ -128,14 +128,16 @@ func (s *Service) readNetworks(w http.ResponseWriter, r *http.Request) {
 }
 
 type nodeResponse struct {
-	NodeID               string `json:"node_id"`
-	NetworkID            string `json:"network_id"`
-	Name                 string `json:"name"`
-	EnabledCapabilities  uint64 `json:"enabled_capabilities"`
-	IPv4Address          string `json:"ipv4_address,omitempty"`
-	IPv6Address          string `json:"ipv6_address,omitempty"`
-	CreatedAtUnixSeconds int64  `json:"created_at_unix_seconds"`
-	RevokedAtUnixSeconds *int64 `json:"revoked_at_unix_seconds,omitempty"`
+	NodeID                    string `json:"node_id"`
+	NetworkID                 string `json:"network_id"`
+	Name                      string `json:"name"`
+	EnabledCapabilities       uint64 `json:"enabled_capabilities"`
+	IPv4Address               string `json:"ipv4_address,omitempty"`
+	IPv6Address               string `json:"ipv6_address,omitempty"`
+	CreatedAtUnixSeconds      int64  `json:"created_at_unix_seconds"`
+	RevokedAtUnixSeconds      *int64 `json:"revoked_at_unix_seconds,omitempty"`
+	EnrollmentClass           string `json:"enrollment_class"`
+	LeaseExpiresAtUnixSeconds *int64 `json:"lease_expires_at_unix_seconds,omitempty"`
 }
 
 func (s *Service) readNodes(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +163,8 @@ func (s *Service) readNodes(w http.ResponseWriter, r *http.Request) {
 	response := make([]nodeResponse, 0, len(values))
 	for _, value := range values {
 		item := nodeResponse{NodeID: value.ID.String(), NetworkID: networkID.String(), Name: value.Name,
-			EnabledCapabilities: value.EnabledCapabilities, CreatedAtUnixSeconds: value.CreatedAt.Unix(), RevokedAtUnixSeconds: unixPointer(value.RevokedAt)}
+			EnabledCapabilities: value.EnabledCapabilities, CreatedAtUnixSeconds: value.CreatedAt.Unix(), RevokedAtUnixSeconds: unixPointer(value.RevokedAt),
+			EnrollmentClass: string(value.EnrollmentClass), LeaseExpiresAtUnixSeconds: unixPointer(value.LeaseExpiresAt)}
 		if value.IPv4Address.IsValid() {
 			item.IPv4Address = value.IPv4Address.String()
 		}

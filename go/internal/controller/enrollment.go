@@ -28,6 +28,10 @@ func tokenDigest(secret string) ([32]byte, error) {
 }
 
 func (s *Store) IssueEnrollmentToken(ctx context.Context, networkID identity.NetworkID, label string, expiresAt time.Time) (EnrollmentToken, error) {
+	return s.IssueEnrollmentTokenWithOptions(ctx, networkID, label, expiresAt, EnrollmentTokenOptions{Class: EnrollmentClassDurable})
+}
+
+func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID identity.NetworkID, label string, expiresAt time.Time, options EnrollmentTokenOptions) (EnrollmentToken, error) {
 	if label != strings.TrimSpace(label) || len(label) > MaxTokenLabelLength || strings.IndexByte(label, 0) >= 0 {
 		return EnrollmentToken{}, fmt.Errorf("%w: invalid enrollment token label", ErrInvalid)
 	}
@@ -35,6 +39,20 @@ func (s *Store) IssueEnrollmentToken(ctx context.Context, networkID identity.Net
 	expiresAt = expiresAt.UTC().Truncate(time.Second)
 	if !expiresAt.After(now) || expiresAt.Sub(now) > MaxTokenLifetime {
 		return EnrollmentToken{}, fmt.Errorf("%w: token expiry must be in the next %s", ErrInvalid, MaxTokenLifetime)
+	}
+	if options.Class == "" {
+		options.Class = EnrollmentClassDurable
+	}
+	if !options.Class.Valid() {
+		return EnrollmentToken{}, fmt.Errorf("%w: invalid enrollment class %q", ErrInvalid, options.Class)
+	}
+	if options.Class == EnrollmentClassEphemeral {
+		options.SessionLifetime = options.SessionLifetime.Truncate(time.Second)
+		if options.SessionLifetime < MinEphemeralLifetime || options.SessionLifetime > MaxEphemeralLifetime {
+			return EnrollmentToken{}, fmt.Errorf("%w: ephemeral lifetime must be in [%s,%s]", ErrInvalid, MinEphemeralLifetime, MaxEphemeralLifetime)
+		}
+	} else if options.SessionLifetime != 0 {
+		return EnrollmentToken{}, fmt.Errorf("%w: session lifetime is valid only for ephemeral enrollment", ErrInvalid)
 	}
 	raw := make([]byte, enrollmentSecretBytes)
 	if _, err := rand.Read(raw); err != nil {
@@ -51,22 +69,31 @@ func (s *Store) IssueEnrollmentToken(ctx context.Context, networkID identity.Net
 		return EnrollmentToken{}, fmt.Errorf("begin issue enrollment token: %w", err)
 	}
 	defer tx.Rollback()
+	var sessionLifetime any
+	if options.Class == EnrollmentClassEphemeral {
+		sessionLifetime = int64(options.SessionLifetime / time.Second)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_tokens
-        (id,network_id,token_hash,label,expires_at,created_at) VALUES(?,?,?,?,?,?)`,
-		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now)); err != nil {
+        (id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds) VALUES(?,?,?,?,?,?,?,?)`,
+		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime); err != nil {
 		if isConstraint(err) {
 			return EnrollmentToken{}, fmt.Errorf("%w: network does not exist", ErrNotFound)
 		}
 		return EnrollmentToken{}, fmt.Errorf("insert enrollment token: %w", err)
 	}
 	target := id
-	if err := auditTx(ctx, tx, networkID, nil, "enrollment_token.issue", "enrollment_token", &target, `{}`, now); err != nil {
+	details := fmt.Sprintf(`{"enrollment_class":%q}`, options.Class)
+	if options.Class == EnrollmentClassEphemeral {
+		details = fmt.Sprintf(`{"enrollment_class":%q,"session_lifetime_seconds":%d}`, options.Class, int64(options.SessionLifetime/time.Second))
+	}
+	if err := auditTx(ctx, tx, networkID, nil, "enrollment_token.issue", "enrollment_token", &target, details, now); err != nil {
 		return EnrollmentToken{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return EnrollmentToken{}, fmt.Errorf("commit enrollment token: %w", err)
 	}
-	return EnrollmentToken{ID: id, NetworkID: networkID, Label: label, Secret: secret, ExpiresAt: expiresAt, CreatedAt: now}, nil
+	return EnrollmentToken{ID: id, NetworkID: networkID, Label: label, Secret: secret, ExpiresAt: expiresAt, CreatedAt: now,
+		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime}, nil
 }
 
 // EnrollNode atomically consumes a single-use bearer token, creates a node and
@@ -101,6 +128,9 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	if err != nil {
 		return Enrollment{}, err
 	}
+	if _, err := s.ExpireEphemeral(ctx, MaxExpireBatch); err != nil {
+		return Enrollment{}, fmt.Errorf("maintain ephemeral identities before enrollment: %w", err)
+	}
 	now := s.now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -110,7 +140,9 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	var tokenIDBytes, networkIDBytes []byte
 	var expires int64
 	var consumed sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed)
+	var class string
+	var sessionLifetime sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed, &class, &sessionLifetime)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Enrollment{}, ErrTokenInvalid
 	}
@@ -132,13 +164,37 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		return Enrollment{}, err
 	}
 	networkID := identity.NetworkID(networkRaw)
+	enrollmentClass := EnrollmentClass(class)
+	if !enrollmentClass.Valid() || (enrollmentClass == EnrollmentClassEphemeral) != sessionLifetime.Valid {
+		return Enrollment{}, errors.New("corrupt enrollment token class")
+	}
+	var leaseExpiresAt *time.Time
+	if enrollmentClass == EnrollmentClassEphemeral {
+		lifetime := time.Duration(sessionLifetime.Int64) * time.Second
+		if lifetime < MinEphemeralLifetime || lifetime > MaxEphemeralLifetime {
+			return Enrollment{}, errors.New("corrupt ephemeral enrollment lifetime")
+		}
+		lease := now.Add(lifetime).UTC().Truncate(time.Second)
+		leaseExpiresAt = &lease
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM nodes WHERE network_id=? AND enrollment_class='ephemeral' AND revoked_at IS NULL AND lease_expires_at>?`, idBytes(networkID), unix(now)).Scan(&active); err != nil {
+			return Enrollment{}, fmt.Errorf("count active ephemeral identities: %w", err)
+		}
+		if active >= MaxActiveEphemeral {
+			return Enrollment{}, fmt.Errorf("%w: active ephemeral identity limit reached", ErrConflict)
+		}
+	}
 	nodeID, err := identity.NewNodeID()
 	if err != nil {
 		return Enrollment{}, fmt.Errorf("generate node ID: %w", err)
 	}
+	var leaseUnix any
+	if leaseExpiresAt != nil {
+		leaseUnix = unix(*leaseExpiresAt)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes
-        (id,network_id,name,enabled_capabilities,created_at) VALUES(?,?,?,?,?)`,
-		idBytes(nodeID), idBytes(networkID), name, int64(enabledCapabilities), unix(now)); err != nil {
+        (id,network_id,name,enabled_capabilities,created_at,enrollment_class,lease_expires_at) VALUES(?,?,?,?,?,?,?)`,
+		idBytes(nodeID), idBytes(networkID), name, int64(enabledCapabilities), unix(now), string(enrollmentClass), leaseUnix); err != nil {
 		if isConstraint(err) {
 			return Enrollment{}, fmt.Errorf("%w: node name already exists", ErrConflict)
 		}
@@ -171,14 +227,18 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		return Enrollment{}, err
 	}
 	target := identity.ID(nodeID)
-	details := fmt.Sprintf(`{"ipv4_address":%q}`, address.String())
+	details := fmt.Sprintf(`{"enrollment_class":%q,"ipv4_address":%q}`, enrollmentClass, address.String())
 	if address6.IsValid() {
-		details = fmt.Sprintf(`{"ipv4_address":%q,"ipv6_address":%q}`, address.String(), address6.String())
+		details = fmt.Sprintf(`{"enrollment_class":%q,"ipv4_address":%q,"ipv6_address":%q}`, enrollmentClass, address.String(), address6.String())
+	}
+	if leaseExpiresAt != nil {
+		details = strings.TrimSuffix(details, "}") + fmt.Sprintf(`,"lease_expires_at":%d}`, leaseExpiresAt.Unix())
 	}
 	if err := auditTx(ctx, tx, networkID, nil, "node.enroll", "node", &target, details, now); err != nil {
 		return Enrollment{}, err
 	}
-	node := Node{ID: nodeID, NetworkID: networkID, Name: name, EnabledCapabilities: enabledCapabilities, IPv4Address: address, IPv6Address: address6, CreatedAt: now}
+	node := Node{ID: nodeID, NetworkID: networkID, Name: name, EnabledCapabilities: enabledCapabilities, IPv4Address: address, IPv6Address: address6, CreatedAt: now,
+		EnrollmentClass: enrollmentClass, LeaseExpiresAt: leaseExpiresAt}
 	var certificate Certificate
 	if issuer != nil {
 		material, err := issuer(ctx, node)
@@ -191,6 +251,9 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		material, err = normalizeCertificateMaterial(material)
 		if err != nil {
 			return Enrollment{}, fmt.Errorf("persist enrollment certificate: %w", err)
+		}
+		if leaseExpiresAt != nil && material.NotAfter.After(*leaseExpiresAt) {
+			return Enrollment{}, fmt.Errorf("persist enrollment certificate: %w: certificate exceeds ephemeral lease", ErrInvalid)
 		}
 		certificate, err = addCertificateTx(ctx, tx, networkID, nodeID, material, now)
 		if err != nil {

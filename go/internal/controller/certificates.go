@@ -24,11 +24,17 @@ func (s *Store) AddCertificate(ctx context.Context, networkID identity.NetworkID
 		return Certificate{}, fmt.Errorf("begin add certificate: %w", err)
 	}
 	defer tx.Rollback()
-	var found int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id=? AND network_id=? AND revoked_at IS NULL`, idBytes(nodeID), idBytes(networkID)).Scan(&found); errors.Is(err, sql.ErrNoRows) {
+	var class string
+	var lease sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT enrollment_class,lease_expires_at FROM nodes WHERE id=? AND network_id=? AND revoked_at IS NULL`, idBytes(nodeID), idBytes(networkID)).Scan(&class, &lease); errors.Is(err, sql.ErrNoRows) {
 		return Certificate{}, ErrNotFound
 	} else if err != nil {
 		return Certificate{}, fmt.Errorf("read certificate node: %w", err)
+	}
+	if EnrollmentClass(class) == EnrollmentClassEphemeral {
+		if !lease.Valid || material.NotAfter.After(fromUnix(lease.Int64)) {
+			return Certificate{}, fmt.Errorf("%w: ephemeral certificate exceeds identity lease", ErrInvalid)
+		}
 	}
 	certificate, err := addCertificateTx(ctx, tx, networkID, nodeID, material, now)
 	if err != nil {

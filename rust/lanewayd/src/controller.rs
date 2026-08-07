@@ -15,7 +15,10 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use laneway_protocol::{
     AuthenticatedIdentity, Id, Role, identity_from_certificate_der,
     policy::{CompiledPolicy, prefix_from_wire},
-    v1::{Capability, ConfigurationRequest, NodeConfiguration, RouteAdvertisementMode, RouteKind},
+    v1::{
+        Capability, ConfigurationRequest, EnrollmentClass, NodeConfiguration,
+        RouteAdvertisementMode, RouteKind,
+    },
 };
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
@@ -599,6 +602,27 @@ impl Snapshot {
             !expired(configuration.valid_until_unix_seconds),
             "controller configuration lease is expired"
         );
+        let enrollment_class = EnrollmentClass::try_from(configuration.enrollment_class)
+            .context("controller enrollment class is unknown")?;
+        let identity_lease_expires_at = configuration.identity_lease_expires_at_unix_seconds;
+        match enrollment_class {
+            EnrollmentClass::Unspecified
+            | EnrollmentClass::DurableNode
+            | EnrollmentClass::RememberedUser => ensure!(
+                identity_lease_expires_at == 0,
+                "non-ephemeral controller identity has an unexpected lease"
+            ),
+            EnrollmentClass::EphemeralUser => {
+                ensure!(
+                    identity_lease_expires_at != 0 && !expired(identity_lease_expires_at),
+                    "ephemeral controller identity lease is missing or expired"
+                );
+                ensure!(
+                    configuration.valid_until_unix_seconds <= identity_lease_expires_at,
+                    "controller snapshot exceeds the ephemeral identity lease"
+                );
+            }
+        }
         ensure!(
             configuration.peers.len() <= MAX_PEERS,
             "controller peer snapshot exceeds limit"
@@ -1202,6 +1226,8 @@ mod tests {
                 renew_after_unix_seconds: 3_000_000_000,
                 revoked: false,
             }),
+            enrollment_class: EnrollmentClass::DurableNode as i32,
+            identity_lease_expires_at_unix_seconds: 0,
         }
     }
 
@@ -1231,6 +1257,28 @@ mod tests {
         let snapshot =
             Snapshot::compile(configuration, id(1), id(2), &local_certificate()).unwrap();
         assert!(snapshot.local_certificate_revoked);
+    }
+
+    #[test]
+    fn enforces_ephemeral_identity_lease() {
+        let now = unix_now();
+        let mut configuration = valid();
+        configuration.enrollment_class = EnrollmentClass::EphemeralUser as i32;
+        configuration.valid_until_unix_seconds = now + 60;
+        configuration.identity_lease_expires_at_unix_seconds = now + 120;
+        Snapshot::compile(configuration.clone(), id(1), id(2), &local_certificate()).unwrap();
+
+        configuration.valid_until_unix_seconds = now + 121;
+        assert!(
+            Snapshot::compile(configuration.clone(), id(1), id(2), &local_certificate()).is_err()
+        );
+        configuration.valid_until_unix_seconds = now + 60;
+        configuration.identity_lease_expires_at_unix_seconds = now;
+        assert!(
+            Snapshot::compile(configuration.clone(), id(1), id(2), &local_certificate()).is_err()
+        );
+        configuration.enrollment_class = EnrollmentClass::DurableNode as i32;
+        assert!(Snapshot::compile(configuration, id(1), id(2), &local_certificate()).is_err());
     }
 
     #[test]

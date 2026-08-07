@@ -8,6 +8,13 @@ import "laneway/v1/control.proto";
 import "laneway/v1/policy.proto";
 import "laneway/v1/routes.proto";
 
+enum EnrollmentClass {
+  ENROLLMENT_CLASS_UNSPECIFIED = 0;
+  ENROLLMENT_CLASS_DURABLE_NODE = 1;
+  ENROLLMENT_CLASS_EPHEMERAL_USER = 2;
+  ENROLLMENT_CLASS_REMEMBERED_USER = 3;
+}
+
 message EnrollmentRequest {
   string enrollment_token = 1;
   // DER PKCS#10 CSR. The private key is never transmitted.
@@ -28,6 +35,10 @@ message EnrollmentResponse {
   CertificateChain certificate_chain = 3;
   // Controller-assigned canonical overlay addresses for initial lane0 setup.
   repeated bytes overlay_addresses = 4;
+  EnrollmentClass enrollment_class = 5;
+  // Nonzero only for a fully ephemeral identity. Authentication and every
+  // authorization derived from it fail closed at this UTC deadline.
+  uint64 lease_expires_at_unix_seconds = 6;
 }
 
 message RenewalRequest {
@@ -64,6 +75,8 @@ message NodeConfiguration {
   ExitNodePolicy exit_policy = 11;
   // Health of the certificate used to authenticate this request.
   CertificateHealth certificate_health = 12;
+  EnrollmentClass enrollment_class = 13;
+  uint64 identity_lease_expires_at_unix_seconds = 14;
 }
 
 message NodePeer {

@@ -249,15 +249,19 @@ func (s *Service) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 type tokenRequest struct {
-	NetworkID     string `json:"network_id"`
-	Label         string `json:"label"`
-	ExpiresAtUnix int64  `json:"expires_at_unix_seconds"`
+	NetworkID              string `json:"network_id"`
+	Label                  string `json:"label"`
+	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
+	EnrollmentClass        string `json:"enrollment_class,omitempty"`
+	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
 }
 
 type tokenResponse struct {
-	TokenID         string `json:"token_id"`
-	EnrollmentToken string `json:"enrollment_token"`
-	ExpiresAtUnix   int64  `json:"expires_at_unix_seconds"`
+	TokenID                string `json:"token_id"`
+	EnrollmentToken        string `json:"enrollment_token"`
+	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
+	EnrollmentClass        string `json:"enrollment_class"`
+	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
 }
 
 func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
@@ -275,12 +279,19 @@ func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed("invalid network_id"), false)
 		return
 	}
-	token, err := s.store.IssueEnrollmentToken(r.Context(), networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0))
+	class := controller.EnrollmentClass(req.EnrollmentClass)
+	if class == "" {
+		class = controller.EnrollmentClassDurable
+	}
+	token, err := s.store.IssueEnrollmentTokenWithOptions(r.Context(), networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
+		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second,
+	})
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	s.writeJSON(w, http.StatusCreated, tokenResponse{TokenID: token.ID.String(), EnrollmentToken: token.Secret, ExpiresAtUnix: token.ExpiresAt.Unix()})
+	s.writeJSON(w, http.StatusCreated, tokenResponse{TokenID: token.ID.String(), EnrollmentToken: token.Secret, ExpiresAtUnix: token.ExpiresAt.Unix(),
+		EnrollmentClass: string(token.EnrollmentClass), SessionLifetimeSeconds: int64(token.SessionLifetime / time.Second)})
 }
 
 func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
@@ -317,7 +328,10 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 	node := enrollment.Node
 	resp := &lanewayv1.EnrollmentResponse{
 		NetworkId: append([]byte(nil), node.NetworkID[:]...), NodeId: append([]byte(nil), node.ID[:]...),
-		CertificateChain: s.certificateChain(cert), OverlayAddresses: nodeOverlayAddresses(node),
+		CertificateChain: s.certificateChain(cert), OverlayAddresses: nodeOverlayAddresses(node), EnrollmentClass: enrollmentClassProto(node.EnrollmentClass),
+	}
+	if node.LeaseExpiresAt != nil {
+		resp.LeaseExpiresAtUnixSeconds = uint64(node.LeaseExpiresAt.Unix())
 	}
 	s.writeProto(w, http.StatusCreated, resp)
 }
@@ -336,6 +350,10 @@ func (s *Service) renew(w http.ResponseWriter, r *http.Request) {
 	csr, err := parseCSR(req.GetPkcs10CsrDer())
 	if err != nil {
 		s.writeError(w, malformed(err.Error()), true)
+		return
+	}
+	if _, err := s.store.ExpireEphemeral(r.Context(), controller.MaxExpireBatch); err != nil {
+		s.writeError(w, err, true)
 		return
 	}
 	node, err := s.store.Node(r.Context(), caller.NodeID)
@@ -385,6 +403,9 @@ func (s *Service) issueCertificate(node controller.Node, csr *x509.CertificateRe
 	if notAfter.After(s.ca.NotAfter) {
 		notAfter = s.ca.NotAfter
 	}
+	if node.LeaseExpiresAt != nil && notAfter.After(*node.LeaseExpiresAt) {
+		notAfter = *node.LeaseExpiresAt
+	}
 	if !notAfter.After(now) {
 		return nil, errors.New("controller CA has expired")
 	}
@@ -413,6 +434,19 @@ func (s *Service) issueCertificate(node controller.Node, csr *x509.CertificateRe
 		return nil, fmt.Errorf("parse issued certificate: %w", err)
 	}
 	return cert, nil
+}
+
+func enrollmentClassProto(class controller.EnrollmentClass) lanewayv1.EnrollmentClass {
+	switch class {
+	case controller.EnrollmentClassDurable:
+		return lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE
+	case controller.EnrollmentClassEphemeral:
+		return lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER
+	case controller.EnrollmentClassRemembered:
+		return lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER
+	default:
+		return lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED
+	}
 }
 
 func randomSerial() (*big.Int, error) {
@@ -506,12 +540,32 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, true)
 		return
 	}
+	if _, err := s.store.ExpireEphemeral(r.Context(), controller.MaxExpireBatch); err != nil {
+		s.writeError(w, err, true)
+		return
+	}
 	network, err := s.store.Network(r.Context(), caller.NetworkID)
 	if err != nil {
 		s.writeError(w, err, true)
 		return
 	}
+	node, err := s.store.Node(r.Context(), caller.NodeID)
+	if err != nil || node.RevokedAt != nil {
+		s.writeError(w, ErrPermissionDenied, true)
+		return
+	}
 	validUntil := s.now().Add(s.snapshotValidity).UTC().Unix()
+	if node.LeaseExpiresAt != nil && node.LeaseExpiresAt.Unix() < validUntil {
+		validUntil = node.LeaseExpiresAt.Unix()
+	}
+	nextEphemeralExpiry, err := s.store.NextEphemeralExpiry(r.Context(), caller.NetworkID)
+	if err != nil {
+		s.writeError(w, err, true)
+		return
+	}
+	if nextEphemeralExpiry != nil && nextEphemeralExpiry.Unix() < validUntil {
+		validUntil = nextEphemeralExpiry.Unix()
+	}
 	if req.GetKnownConfigurationEpoch() == network.ConfigurationEpoch {
 		w.Header().Set(SnapshotValidityHeader, strconv.FormatInt(validUntil, 10))
 		w.WriteHeader(http.StatusNotModified)
@@ -519,11 +573,6 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.GetKnownConfigurationEpoch() > network.ConfigurationEpoch {
 		s.writeProtocolError(w, http.StatusConflict, lanewayv1.ErrorCode_ERROR_CODE_STALE_EPOCH, "known configuration epoch is ahead of controller", false)
-		return
-	}
-	node, err := s.store.Node(r.Context(), caller.NodeID)
-	if err != nil {
-		s.writeError(w, err, true)
 		return
 	}
 	overlayRoutes, err := s.store.OverlayRoutes(r.Context(), caller.NetworkID)
@@ -616,14 +665,19 @@ func buildConfiguration(network controller.Network, node controller.Node, nodes 
 			}
 		}
 	}
-	return &lanewayv1.NodeConfiguration{
+	response := &lanewayv1.NodeConfiguration{
 		ConfigurationEpoch: network.ConfigurationEpoch,
 		OverlayAddresses:   nodeOverlayAddresses(node),
 		Routes:             routeSnapshot, Policy: policy, EnabledCapabilities: node.EnabledCapabilities,
 		ValidUntilUnixSeconds: validUntil, RevokedCertificateSerials: cloneByteSlices(revokedSerials), Peers: peers,
 		CandidateExchange: &lanewayv1.CandidateExchangePolicy{Enabled: true, MaxCandidates: 8, CandidateTtlSeconds: 120},
 		ExitPolicy:        &lanewayv1.ExitNodePolicy{AuthorizedNodeIds: exitNodes},
-	}, nil
+		EnrollmentClass:   enrollmentClassProto(node.EnrollmentClass),
+	}
+	if node.LeaseExpiresAt != nil {
+		response.IdentityLeaseExpiresAtUnixSeconds = uint64(node.LeaseExpiresAt.Unix())
+	}
+	return response, nil
 }
 
 func certificateHealth(cert *x509.Certificate, revokedSerials [][]byte) *lanewayv1.CertificateHealth {
@@ -699,12 +753,24 @@ func (s *Service) relayConfiguration(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, true)
 		return
 	}
+	if _, err := s.store.ExpireEphemeral(r.Context(), controller.MaxExpireBatch); err != nil {
+		s.writeError(w, err, true)
+		return
+	}
 	network, err := s.store.Network(r.Context(), relayIdentity.NetworkID)
 	if err != nil {
 		s.writeError(w, ErrPermissionDenied, true)
 		return
 	}
 	validUntil := s.now().Add(s.snapshotValidity).UTC().Unix()
+	nextEphemeralExpiry, err := s.store.NextEphemeralExpiry(r.Context(), relayIdentity.NetworkID)
+	if err != nil {
+		s.writeError(w, err, true)
+		return
+	}
+	if nextEphemeralExpiry != nil && nextEphemeralExpiry.Unix() < validUntil {
+		validUntil = nextEphemeralExpiry.Unix()
+	}
 	if request.GetKnownConfigurationEpoch() == network.ConfigurationEpoch {
 		w.Header().Set(SnapshotValidityHeader, strconv.FormatInt(validUntil, 10))
 		w.WriteHeader(http.StatusNotModified)

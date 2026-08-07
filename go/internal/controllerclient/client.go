@@ -261,9 +261,16 @@ type Network struct {
 }
 
 type EnrollmentToken struct {
-	TokenID         string `json:"token_id"`
-	EnrollmentToken string `json:"enrollment_token"`
-	ExpiresAtUnix   int64  `json:"expires_at_unix_seconds"`
+	TokenID                string `json:"token_id"`
+	EnrollmentToken        string `json:"enrollment_token"`
+	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
+	EnrollmentClass        string `json:"enrollment_class"`
+	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
+}
+
+type EnrollmentTokenOptions struct {
+	Class           string
+	SessionLifetime time.Duration
 }
 
 type Route struct {
@@ -298,14 +305,16 @@ type Relay struct {
 }
 
 type Node struct {
-	NodeID               string `json:"node_id"`
-	NetworkID            string `json:"network_id"`
-	Name                 string `json:"name"`
-	EnabledCapabilities  uint64 `json:"enabled_capabilities"`
-	IPv4Address          string `json:"ipv4_address,omitempty"`
-	IPv6Address          string `json:"ipv6_address,omitempty"`
-	CreatedAtUnixSeconds int64  `json:"created_at_unix_seconds"`
-	RevokedAtUnixSeconds *int64 `json:"revoked_at_unix_seconds,omitempty"`
+	NodeID                    string `json:"node_id"`
+	NetworkID                 string `json:"network_id"`
+	Name                      string `json:"name"`
+	EnabledCapabilities       uint64 `json:"enabled_capabilities"`
+	IPv4Address               string `json:"ipv4_address,omitempty"`
+	IPv6Address               string `json:"ipv6_address,omitempty"`
+	CreatedAtUnixSeconds      int64  `json:"created_at_unix_seconds"`
+	RevokedAtUnixSeconds      *int64 `json:"revoked_at_unix_seconds,omitempty"`
+	EnrollmentClass           string `json:"enrollment_class"`
+	LeaseExpiresAtUnixSeconds *int64 `json:"lease_expires_at_unix_seconds,omitempty"`
 }
 
 type Certificate struct {
@@ -414,15 +423,27 @@ func (c *Client) Nodes(ctx context.Context, networkID identity.NetworkID, limit 
 }
 
 func (c *Client) IssueEnrollmentToken(ctx context.Context, networkID identity.NetworkID, label string, expiresAt time.Time) (*EnrollmentToken, error) {
+	return c.IssueEnrollmentTokenWithOptions(ctx, networkID, label, expiresAt, EnrollmentTokenOptions{Class: "durable"})
+}
+
+func (c *Client) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID identity.NetworkID, label string, expiresAt time.Time, options EnrollmentTokenOptions) (*EnrollmentToken, error) {
 	if networkID.IsZero() || label == "" || expiresAt.IsZero() {
 		return nil, errors.New("controller client: network ID, label, and expiry are required")
 	}
 	response := new(EnrollmentToken)
+	if options.Class == "" {
+		options.Class = "durable"
+	}
+	if (options.Class != "durable" && options.Class != "ephemeral" && options.Class != "remembered") || options.SessionLifetime < 0 || (options.Class != "ephemeral" && options.SessionLifetime != 0) {
+		return nil, errors.New("controller client: invalid enrollment class or session lifetime")
+	}
 	err := c.json(ctx, http.MethodPost, "/v1/admin/enrollment-tokens", struct {
-		NetworkID     string `json:"network_id"`
-		Label         string `json:"label"`
-		ExpiresAtUnix int64  `json:"expires_at_unix_seconds"`
-	}{networkID.String(), label, expiresAt.Unix()}, response, true)
+		NetworkID              string `json:"network_id"`
+		Label                  string `json:"label"`
+		ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
+		EnrollmentClass        string `json:"enrollment_class"`
+		SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
+	}{networkID.String(), label, expiresAt.Unix(), options.Class, int64(options.SessionLifetime / time.Second)}, response, true)
 	return response, err
 }
 

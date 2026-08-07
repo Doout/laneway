@@ -146,6 +146,7 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 		"POST /v1/admin/relays/" + objectID.String() + "/disable":                     true,
 		"GET /v1/admin/networks/" + networkID.String() + "/audit?limit=9":             true,
 	}
+	var lastTokenBody []byte
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.RequestURI()
 		if adminPaths[key] {
@@ -163,6 +164,9 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 			if key == "POST /v1/admin/networks" && bytes.Contains(body, []byte(`"name":"preidentified"`)) &&
 				!bytes.Contains(body, []byte(`"network_id":"`+networkID.String()+`"`)) {
 				t.Errorf("preidentified network request omitted network_id: %s", body)
+			}
+			if key == "POST /v1/admin/enrollment-tokens" {
+				lastTokenBody = append(lastTokenBody[:0], body...)
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -199,6 +203,12 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 	}
 	if token, err := client.IssueEnrollmentToken(ctx, networkID, "label", time.Unix(100, 0)); err != nil || token.EnrollmentToken != "issued-secret" {
 		t.Fatalf("token=%+v err=%v", token, err)
+	}
+	if _, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, "temporary", time.Unix(200, 0), EnrollmentTokenOptions{Class: "ephemeral", SessionLifetime: 8 * time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(lastTokenBody, []byte(`"enrollment_class":"ephemeral"`)) || !bytes.Contains(lastTokenBody, []byte(`"session_lifetime_seconds":28800`)) {
+		t.Fatalf("ephemeral token request=%s", lastTokenBody)
 	}
 	if _, err := client.AdvertiseRoute(ctx, netip.MustParsePrefix("192.0.2.0/24"), "subnet", "nat", 5, nil); err != nil {
 		t.Fatal(err)

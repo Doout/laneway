@@ -34,6 +34,8 @@ func TestControllerCommandValidation(t *testing.T) {
 		"network noncanonical pool":     {"network", "create", "--name", "n", "--ipv4-pool", "10.0.0.1/24"},
 		"network list bad ID":           {"network", "list", "--network-id", "bad"},
 		"token bad expiry":              {"enrollment-token", "issue", "--network-id", validNetwork, "--label", "x", "--expires-in", "0s"},
+		"token bad class":               {"enrollment-token", "issue", "--network-id", validNetwork, "--label", "x", "--class", "root"},
+		"durable token with lease":      {"enrollment-token", "issue", "--network-id", validNetwork, "--label", "x", "--session-lifetime", "1h"},
 		"route bad kind":                {"route", "advertise", "--prefix", "192.0.2.0/24", "--kind", "overlay"},
 		"route bad ID":                  {"route", "withdraw", "--route-id", "bad"},
 		"route bad limit":               {"route", "list", "--network-id", validNetwork, "--limit", "0"},

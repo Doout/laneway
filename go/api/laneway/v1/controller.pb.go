@@ -21,6 +21,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type EnrollmentClass int32
+
+const (
+	EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED     EnrollmentClass = 0
+	EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE    EnrollmentClass = 1
+	EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER  EnrollmentClass = 2
+	EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER EnrollmentClass = 3
+)
+
+// Enum value maps for EnrollmentClass.
+var (
+	EnrollmentClass_name = map[int32]string{
+		0: "ENROLLMENT_CLASS_UNSPECIFIED",
+		1: "ENROLLMENT_CLASS_DURABLE_NODE",
+		2: "ENROLLMENT_CLASS_EPHEMERAL_USER",
+		3: "ENROLLMENT_CLASS_REMEMBERED_USER",
+	}
+	EnrollmentClass_value = map[string]int32{
+		"ENROLLMENT_CLASS_UNSPECIFIED":     0,
+		"ENROLLMENT_CLASS_DURABLE_NODE":    1,
+		"ENROLLMENT_CLASS_EPHEMERAL_USER":  2,
+		"ENROLLMENT_CLASS_REMEMBERED_USER": 3,
+	}
+)
+
+func (x EnrollmentClass) Enum() *EnrollmentClass {
+	p := new(EnrollmentClass)
+	*p = x
+	return p
+}
+
+func (x EnrollmentClass) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EnrollmentClass) Descriptor() protoreflect.EnumDescriptor {
+	return file_laneway_v1_controller_proto_enumTypes[0].Descriptor()
+}
+
+func (EnrollmentClass) Type() protoreflect.EnumType {
+	return &file_laneway_v1_controller_proto_enumTypes[0]
+}
+
+func (x EnrollmentClass) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EnrollmentClass.Descriptor instead.
+func (EnrollmentClass) EnumDescriptor() ([]byte, []int) {
+	return file_laneway_v1_controller_proto_rawDescGZIP(), []int{0}
+}
+
 type EnrollmentRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	EnrollmentToken string                 `protobuf:"bytes,1,opt,name=enrollment_token,json=enrollmentToken,proto3" json:"enrollment_token,omitempty"`
@@ -142,9 +194,13 @@ type EnrollmentResponse struct {
 	NodeId           []byte                 `protobuf:"bytes,2,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	CertificateChain *CertificateChain      `protobuf:"bytes,3,opt,name=certificate_chain,json=certificateChain,proto3" json:"certificate_chain,omitempty"`
 	// Controller-assigned canonical overlay addresses for initial lane0 setup.
-	OverlayAddresses [][]byte `protobuf:"bytes,4,rep,name=overlay_addresses,json=overlayAddresses,proto3" json:"overlay_addresses,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	OverlayAddresses [][]byte        `protobuf:"bytes,4,rep,name=overlay_addresses,json=overlayAddresses,proto3" json:"overlay_addresses,omitempty"`
+	EnrollmentClass  EnrollmentClass `protobuf:"varint,5,opt,name=enrollment_class,json=enrollmentClass,proto3,enum=laneway.v1.EnrollmentClass" json:"enrollment_class,omitempty"`
+	// Nonzero only for a fully ephemeral identity. Authentication and every
+	// authorization derived from it fail closed at this UTC deadline.
+	LeaseExpiresAtUnixSeconds uint64 `protobuf:"varint,6,opt,name=lease_expires_at_unix_seconds,json=leaseExpiresAtUnixSeconds,proto3" json:"lease_expires_at_unix_seconds,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *EnrollmentResponse) Reset() {
@@ -203,6 +259,20 @@ func (x *EnrollmentResponse) GetOverlayAddresses() [][]byte {
 		return x.OverlayAddresses
 	}
 	return nil
+}
+
+func (x *EnrollmentResponse) GetEnrollmentClass() EnrollmentClass {
+	if x != nil {
+		return x.EnrollmentClass
+	}
+	return EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED
+}
+
+func (x *EnrollmentResponse) GetLeaseExpiresAtUnixSeconds() uint64 {
+	if x != nil {
+		return x.LeaseExpiresAtUnixSeconds
+	}
+	return 0
 }
 
 type RenewalRequest struct {
@@ -319,9 +389,11 @@ type NodeConfiguration struct {
 	// Explicitly authorized exit gateways derived from approved exit routes.
 	ExitPolicy *ExitNodePolicy `protobuf:"bytes,11,opt,name=exit_policy,json=exitPolicy,proto3" json:"exit_policy,omitempty"`
 	// Health of the certificate used to authenticate this request.
-	CertificateHealth *CertificateHealth `protobuf:"bytes,12,opt,name=certificate_health,json=certificateHealth,proto3" json:"certificate_health,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	CertificateHealth                 *CertificateHealth `protobuf:"bytes,12,opt,name=certificate_health,json=certificateHealth,proto3" json:"certificate_health,omitempty"`
+	EnrollmentClass                   EnrollmentClass    `protobuf:"varint,13,opt,name=enrollment_class,json=enrollmentClass,proto3,enum=laneway.v1.EnrollmentClass" json:"enrollment_class,omitempty"`
+	IdentityLeaseExpiresAtUnixSeconds uint64             `protobuf:"varint,14,opt,name=identity_lease_expires_at_unix_seconds,json=identityLeaseExpiresAtUnixSeconds,proto3" json:"identity_lease_expires_at_unix_seconds,omitempty"`
+	unknownFields                     protoimpl.UnknownFields
+	sizeCache                         protoimpl.SizeCache
 }
 
 func (x *NodeConfiguration) Reset() {
@@ -436,6 +508,20 @@ func (x *NodeConfiguration) GetCertificateHealth() *CertificateHealth {
 		return x.CertificateHealth
 	}
 	return nil
+}
+
+func (x *NodeConfiguration) GetEnrollmentClass() EnrollmentClass {
+	if x != nil {
+		return x.EnrollmentClass
+	}
+	return EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED
+}
+
+func (x *NodeConfiguration) GetIdentityLeaseExpiresAtUnixSeconds() uint64 {
+	if x != nil {
+		return x.IdentityLeaseExpiresAtUnixSeconds
+	}
+	return 0
 }
 
 type NodePeer struct {
@@ -1346,17 +1432,19 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x0erequested_name\x18\x03 \x01(\tR\rrequestedName\"r\n" +
 	"\x10CertificateChain\x12)\n" +
 	"\x10certificates_der\x18\x01 \x03(\fR\x0fcertificatesDer\x123\n" +
-	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\xc4\x01\n" +
+	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\xce\x02\n" +
 	"\x12EnrollmentResponse\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\fR\tnetworkId\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\fR\x06nodeId\x12I\n" +
 	"\x11certificate_chain\x18\x03 \x01(\v2\x1c.laneway.v1.CertificateChainR\x10certificateChain\x12+\n" +
-	"\x11overlay_addresses\x18\x04 \x03(\fR\x10overlayAddresses\"6\n" +
+	"\x11overlay_addresses\x18\x04 \x03(\fR\x10overlayAddresses\x12F\n" +
+	"\x10enrollment_class\x18\x05 \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x0fenrollmentClass\x12@\n" +
+	"\x1dlease_expires_at_unix_seconds\x18\x06 \x01(\x04R\x19leaseExpiresAtUnixSeconds\"6\n" +
 	"\x0eRenewalRequest\x12$\n" +
 	"\x0epkcs10_csr_der\x18\x01 \x01(\fR\fpkcs10CsrDer\"\\\n" +
 	"\x0fRenewalResponse\x12I\n" +
-	"\x11certificate_chain\x18\x01 \x01(\v2\x1c.laneway.v1.CertificateChainR\x10certificateChain\"\xc2\x05\n" +
+	"\x11certificate_chain\x18\x01 \x01(\v2\x1c.laneway.v1.CertificateChainR\x10certificateChain\"\xdd\x06\n" +
 	"\x11NodeConfiguration\x12/\n" +
 	"\x13configuration_epoch\x18\x01 \x01(\x04R\x12configurationEpoch\x12+\n" +
 	"\x11overlay_addresses\x18\x02 \x03(\fR\x10overlayAddresses\x121\n" +
@@ -1371,7 +1459,9 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	" \x01(\v2#.laneway.v1.CandidateExchangePolicyR\x11candidateExchange\x12;\n" +
 	"\vexit_policy\x18\v \x01(\v2\x1a.laneway.v1.ExitNodePolicyR\n" +
 	"exitPolicy\x12L\n" +
-	"\x12certificate_health\x18\f \x01(\v2\x1d.laneway.v1.CertificateHealthR\x11certificateHealth\"d\n" +
+	"\x12certificate_health\x18\f \x01(\v2\x1d.laneway.v1.CertificateHealthR\x11certificateHealth\x12F\n" +
+	"\x10enrollment_class\x18\r \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x0fenrollmentClass\x12Q\n" +
+	"&identity_lease_expires_at_unix_seconds\x18\x0e \x01(\x04R!identityLeaseExpiresAtUnixSeconds\"d\n" +
 	"\bNodePeer\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12+\n" +
@@ -1433,7 +1523,12 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x1brelay_configuration_request\x18\x12 \x01(\v2%.laneway.v1.RelayConfigurationRequestH\x00R\x19relayConfigurationRequest\x12Q\n" +
 	"\x13relay_configuration\x18\x13 \x01(\v2\x1e.laneway.v1.RelayConfigurationH\x00R\x12relayConfiguration\x12Q\n" +
 	"\x13configuration_lease\x18\x14 \x01(\v2\x1e.laneway.v1.ConfigurationLeaseH\x00R\x12configurationLeaseB\x06\n" +
-	"\x04bodyB.Z,laneway.dev/laneway/api/laneway/v1;lanewayv1b\x06proto3"
+	"\x04body*\xa1\x01\n" +
+	"\x0fEnrollmentClass\x12 \n" +
+	"\x1cENROLLMENT_CLASS_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dENROLLMENT_CLASS_DURABLE_NODE\x10\x01\x12#\n" +
+	"\x1fENROLLMENT_CLASS_EPHEMERAL_USER\x10\x02\x12$\n" +
+	" ENROLLMENT_CLASS_REMEMBERED_USER\x10\x03B.Z,laneway.dev/laneway/api/laneway/v1;lanewayv1b\x06proto3"
 
 var (
 	file_laneway_v1_controller_proto_rawDescOnce sync.Once
@@ -1447,61 +1542,65 @@ func file_laneway_v1_controller_proto_rawDescGZIP() []byte {
 	return file_laneway_v1_controller_proto_rawDescData
 }
 
+var file_laneway_v1_controller_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_laneway_v1_controller_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_laneway_v1_controller_proto_goTypes = []any{
-	(*EnrollmentRequest)(nil),         // 0: laneway.v1.EnrollmentRequest
-	(*CertificateChain)(nil),          // 1: laneway.v1.CertificateChain
-	(*EnrollmentResponse)(nil),        // 2: laneway.v1.EnrollmentResponse
-	(*RenewalRequest)(nil),            // 3: laneway.v1.RenewalRequest
-	(*RenewalResponse)(nil),           // 4: laneway.v1.RenewalResponse
-	(*NodeConfiguration)(nil),         // 5: laneway.v1.NodeConfiguration
-	(*NodePeer)(nil),                  // 6: laneway.v1.NodePeer
-	(*RelayEndpoint)(nil),             // 7: laneway.v1.RelayEndpoint
-	(*CandidateExchangePolicy)(nil),   // 8: laneway.v1.CandidateExchangePolicy
-	(*ExitNodePolicy)(nil),            // 9: laneway.v1.ExitNodePolicy
-	(*CertificateHealth)(nil),         // 10: laneway.v1.CertificateHealth
-	(*ConfigurationRequest)(nil),      // 11: laneway.v1.ConfigurationRequest
-	(*RelayConfigurationRequest)(nil), // 12: laneway.v1.RelayConfigurationRequest
-	(*RelayPeerAuthorization)(nil),    // 13: laneway.v1.RelayPeerAuthorization
-	(*RelayConfiguration)(nil),        // 14: laneway.v1.RelayConfiguration
-	(*ConfigurationLease)(nil),        // 15: laneway.v1.ConfigurationLease
-	(*CertificateRevocation)(nil),     // 16: laneway.v1.CertificateRevocation
-	(*ControllerEnvelope)(nil),        // 17: laneway.v1.ControllerEnvelope
-	(*RouteSnapshot)(nil),             // 18: laneway.v1.RouteSnapshot
-	(*PolicySnapshot)(nil),            // 19: laneway.v1.PolicySnapshot
-	(*IpPrefix)(nil),                  // 20: laneway.v1.IpPrefix
-	(*ProtocolError)(nil),             // 21: laneway.v1.ProtocolError
+	(EnrollmentClass)(0),              // 0: laneway.v1.EnrollmentClass
+	(*EnrollmentRequest)(nil),         // 1: laneway.v1.EnrollmentRequest
+	(*CertificateChain)(nil),          // 2: laneway.v1.CertificateChain
+	(*EnrollmentResponse)(nil),        // 3: laneway.v1.EnrollmentResponse
+	(*RenewalRequest)(nil),            // 4: laneway.v1.RenewalRequest
+	(*RenewalResponse)(nil),           // 5: laneway.v1.RenewalResponse
+	(*NodeConfiguration)(nil),         // 6: laneway.v1.NodeConfiguration
+	(*NodePeer)(nil),                  // 7: laneway.v1.NodePeer
+	(*RelayEndpoint)(nil),             // 8: laneway.v1.RelayEndpoint
+	(*CandidateExchangePolicy)(nil),   // 9: laneway.v1.CandidateExchangePolicy
+	(*ExitNodePolicy)(nil),            // 10: laneway.v1.ExitNodePolicy
+	(*CertificateHealth)(nil),         // 11: laneway.v1.CertificateHealth
+	(*ConfigurationRequest)(nil),      // 12: laneway.v1.ConfigurationRequest
+	(*RelayConfigurationRequest)(nil), // 13: laneway.v1.RelayConfigurationRequest
+	(*RelayPeerAuthorization)(nil),    // 14: laneway.v1.RelayPeerAuthorization
+	(*RelayConfiguration)(nil),        // 15: laneway.v1.RelayConfiguration
+	(*ConfigurationLease)(nil),        // 16: laneway.v1.ConfigurationLease
+	(*CertificateRevocation)(nil),     // 17: laneway.v1.CertificateRevocation
+	(*ControllerEnvelope)(nil),        // 18: laneway.v1.ControllerEnvelope
+	(*RouteSnapshot)(nil),             // 19: laneway.v1.RouteSnapshot
+	(*PolicySnapshot)(nil),            // 20: laneway.v1.PolicySnapshot
+	(*IpPrefix)(nil),                  // 21: laneway.v1.IpPrefix
+	(*ProtocolError)(nil),             // 22: laneway.v1.ProtocolError
 }
 var file_laneway_v1_controller_proto_depIdxs = []int32{
-	1,  // 0: laneway.v1.EnrollmentResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
-	1,  // 1: laneway.v1.RenewalResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
-	18, // 2: laneway.v1.NodeConfiguration.routes:type_name -> laneway.v1.RouteSnapshot
-	19, // 3: laneway.v1.NodeConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
-	6,  // 4: laneway.v1.NodeConfiguration.peers:type_name -> laneway.v1.NodePeer
-	7,  // 5: laneway.v1.NodeConfiguration.relays:type_name -> laneway.v1.RelayEndpoint
-	8,  // 6: laneway.v1.NodeConfiguration.candidate_exchange:type_name -> laneway.v1.CandidateExchangePolicy
-	9,  // 7: laneway.v1.NodeConfiguration.exit_policy:type_name -> laneway.v1.ExitNodePolicy
-	10, // 8: laneway.v1.NodeConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
-	20, // 9: laneway.v1.RelayPeerAuthorization.authorized_prefixes:type_name -> laneway.v1.IpPrefix
-	13, // 10: laneway.v1.RelayConfiguration.peers:type_name -> laneway.v1.RelayPeerAuthorization
-	19, // 11: laneway.v1.RelayConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
-	10, // 12: laneway.v1.RelayConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
-	0,  // 13: laneway.v1.ControllerEnvelope.enrollment_request:type_name -> laneway.v1.EnrollmentRequest
-	2,  // 14: laneway.v1.ControllerEnvelope.enrollment_response:type_name -> laneway.v1.EnrollmentResponse
-	3,  // 15: laneway.v1.ControllerEnvelope.renewal_request:type_name -> laneway.v1.RenewalRequest
-	4,  // 16: laneway.v1.ControllerEnvelope.renewal_response:type_name -> laneway.v1.RenewalResponse
-	11, // 17: laneway.v1.ControllerEnvelope.configuration_request:type_name -> laneway.v1.ConfigurationRequest
-	5,  // 18: laneway.v1.ControllerEnvelope.node_configuration:type_name -> laneway.v1.NodeConfiguration
-	16, // 19: laneway.v1.ControllerEnvelope.certificate_revocation:type_name -> laneway.v1.CertificateRevocation
-	21, // 20: laneway.v1.ControllerEnvelope.error:type_name -> laneway.v1.ProtocolError
-	12, // 21: laneway.v1.ControllerEnvelope.relay_configuration_request:type_name -> laneway.v1.RelayConfigurationRequest
-	14, // 22: laneway.v1.ControllerEnvelope.relay_configuration:type_name -> laneway.v1.RelayConfiguration
-	15, // 23: laneway.v1.ControllerEnvelope.configuration_lease:type_name -> laneway.v1.ConfigurationLease
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	2,  // 0: laneway.v1.EnrollmentResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
+	0,  // 1: laneway.v1.EnrollmentResponse.enrollment_class:type_name -> laneway.v1.EnrollmentClass
+	2,  // 2: laneway.v1.RenewalResponse.certificate_chain:type_name -> laneway.v1.CertificateChain
+	19, // 3: laneway.v1.NodeConfiguration.routes:type_name -> laneway.v1.RouteSnapshot
+	20, // 4: laneway.v1.NodeConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
+	7,  // 5: laneway.v1.NodeConfiguration.peers:type_name -> laneway.v1.NodePeer
+	8,  // 6: laneway.v1.NodeConfiguration.relays:type_name -> laneway.v1.RelayEndpoint
+	9,  // 7: laneway.v1.NodeConfiguration.candidate_exchange:type_name -> laneway.v1.CandidateExchangePolicy
+	10, // 8: laneway.v1.NodeConfiguration.exit_policy:type_name -> laneway.v1.ExitNodePolicy
+	11, // 9: laneway.v1.NodeConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
+	0,  // 10: laneway.v1.NodeConfiguration.enrollment_class:type_name -> laneway.v1.EnrollmentClass
+	21, // 11: laneway.v1.RelayPeerAuthorization.authorized_prefixes:type_name -> laneway.v1.IpPrefix
+	14, // 12: laneway.v1.RelayConfiguration.peers:type_name -> laneway.v1.RelayPeerAuthorization
+	20, // 13: laneway.v1.RelayConfiguration.policy:type_name -> laneway.v1.PolicySnapshot
+	11, // 14: laneway.v1.RelayConfiguration.certificate_health:type_name -> laneway.v1.CertificateHealth
+	1,  // 15: laneway.v1.ControllerEnvelope.enrollment_request:type_name -> laneway.v1.EnrollmentRequest
+	3,  // 16: laneway.v1.ControllerEnvelope.enrollment_response:type_name -> laneway.v1.EnrollmentResponse
+	4,  // 17: laneway.v1.ControllerEnvelope.renewal_request:type_name -> laneway.v1.RenewalRequest
+	5,  // 18: laneway.v1.ControllerEnvelope.renewal_response:type_name -> laneway.v1.RenewalResponse
+	12, // 19: laneway.v1.ControllerEnvelope.configuration_request:type_name -> laneway.v1.ConfigurationRequest
+	6,  // 20: laneway.v1.ControllerEnvelope.node_configuration:type_name -> laneway.v1.NodeConfiguration
+	17, // 21: laneway.v1.ControllerEnvelope.certificate_revocation:type_name -> laneway.v1.CertificateRevocation
+	22, // 22: laneway.v1.ControllerEnvelope.error:type_name -> laneway.v1.ProtocolError
+	13, // 23: laneway.v1.ControllerEnvelope.relay_configuration_request:type_name -> laneway.v1.RelayConfigurationRequest
+	15, // 24: laneway.v1.ControllerEnvelope.relay_configuration:type_name -> laneway.v1.RelayConfiguration
+	16, // 25: laneway.v1.ControllerEnvelope.configuration_lease:type_name -> laneway.v1.ConfigurationLease
+	26, // [26:26] is the sub-list for method output_type
+	26, // [26:26] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_laneway_v1_controller_proto_init() }
@@ -1530,13 +1629,14 @@ func file_laneway_v1_controller_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_laneway_v1_controller_proto_rawDesc), len(file_laneway_v1_controller_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
 		GoTypes:           file_laneway_v1_controller_proto_goTypes,
 		DependencyIndexes: file_laneway_v1_controller_proto_depIdxs,
+		EnumInfos:         file_laneway_v1_controller_proto_enumTypes,
 		MessageInfos:      file_laneway_v1_controller_proto_msgTypes,
 	}.Build()
 	File_laneway_v1_controller_proto = out.File
