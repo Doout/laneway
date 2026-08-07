@@ -27,6 +27,9 @@ message EnrollmentRequest {
   // Optional client-side class expectation authenticated by the bootstrap
   // flow. A mismatch is rejected before the single-use token is consumed.
   EnrollmentClass expected_enrollment_class = 5;
+  // Raw 32-byte X25519 public key generated locally for the WireGuard
+  // dataplane. The corresponding private key never leaves the client.
+  bytes wireguard_public_key = 6;
 }
 
 message CertificateChain {
@@ -46,14 +49,21 @@ message EnrollmentResponse {
   // Nonzero only for a fully ephemeral identity. Authentication and every
   // authorization derived from it fail closed at this UTC deadline.
   uint64 lease_expires_at_unix_seconds = 6;
+  // The controller-authoritative key bound to network_id and node_id. Clients
+  // must compare this with the locally generated public key before use.
+  bytes wireguard_public_key = 7;
 }
 
 message RenewalRequest {
   bytes pkcs10_csr_der = 1;
+  // The current or replacement locally generated WireGuard public key. A key
+  // change is committed atomically with the replacement certificate.
+  bytes wireguard_public_key = 2;
 }
 
 message RenewalResponse {
   CertificateChain certificate_chain = 1;
+  bytes wireguard_public_key = 2;
 }
 
 message NodeConfiguration {
@@ -90,6 +100,8 @@ message NodePeer {
   bytes node_id = 1;
   string name = 2;
   repeated bytes overlay_addresses = 3;
+  // Controller-authenticated WireGuard key for this exact NetworkID/NodeID.
+  bytes wireguard_public_key = 4;
 }
 
 message RelayEndpoint {

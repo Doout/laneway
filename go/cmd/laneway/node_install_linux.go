@@ -35,6 +35,7 @@ import (
 	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 const managedNodeManifestVersion = 1
@@ -108,7 +109,7 @@ func runNodeInstall(args []string) error {
 			return loadErr
 		}
 		if manifest.Authority != authority || manifest.Direct != !*noDirect {
-			return errors.New("existing managed node was installed with different authority or direct-path settings")
+			return errors.New("existing managed node was installed with different authority or dataplane settings")
 		}
 		if err := validateManagedNodeFiles(groupID); err != nil {
 			return err
@@ -212,6 +213,7 @@ func runNodeInstall(args []string) error {
 		"/etc/laneway/ca.crt":            []byte(metadata.Trust.CAPEM),
 		"/etc/laneway/node.crt":          enrollment.certificatePEM,
 		"/etc/laneway/node.key":          enrollment.privateKeyPEM,
+		"/etc/laneway/wireguard.key":     enrollment.wireGuardPrivateKey.Bytes(),
 		"/etc/laneway/laneway.toml":      configBytes,
 		"/etc/laneway/node-install.json": manifestBytes,
 	}
@@ -326,13 +328,13 @@ func runManagedNodeRenew(args []string) error {
 	if err := os.Chmod(workDir, 0o700); err != nil {
 		return err
 	}
-	stagedCert, stagedKey := filepath.Join(workDir, "node.crt"), filepath.Join(workDir, "node.key")
+	stagedCert, stagedKey, stagedWireGuardKey := filepath.Join(workDir, "node.crt"), filepath.Join(workDir, "node.key"), filepath.Join(workDir, "wireguard.key")
 	if err := runRenew([]string{
 		"--controller", cfg.Controller.Endpoint, "--controller-quic", cfg.Controller.QUICEndpoint,
 		"--server-name", cfg.Controller.ServerName, "--controller-network-id", cfg.Controller.NetworkID,
 		"--controller-service-id", cfg.Controller.ServiceID, "--ca", cfg.TLS.CAFile,
 		"--cert", cfg.TLS.CertificateFile, "--key", cfg.TLS.PrivateKeyFile,
-		"--out-cert", stagedCert, "--out-key", stagedKey,
+		"--out-cert", stagedCert, "--out-key", stagedKey, "--out-wireguard-key", stagedWireGuardKey,
 	}); err != nil {
 		return err
 	}
@@ -341,6 +343,10 @@ func runManagedNodeRenew(args []string) error {
 		return err
 	}
 	newKey, err := os.ReadFile(stagedKey)
+	if err != nil {
+		return err
+	}
+	newWireGuardKey, err := os.ReadFile(stagedWireGuardKey)
 	if err != nil {
 		return err
 	}
@@ -358,15 +364,22 @@ func runManagedNodeRenew(args []string) error {
 	if stopErr != nil {
 		return fmt.Errorf("stop managed node for credential rotation: %w", stopErr)
 	}
-	if err := replaceManagedCredentialPair(cfg.TLS.CertificateFile, cfg.TLS.PrivateKeyFile, newCertificate, newKey, groupID); err != nil {
+	if err := replaceManagedCredentialTriple(cfg.TLS.CertificateFile, cfg.TLS.PrivateKeyFile, cfg.WireGuard.PrivateKeyFile, newCertificate, newKey, newWireGuardKey, groupID); err != nil {
+		// The controller has already committed the new WireGuard binding. Keep or
+		// reconcile that key even while restoring the independently usable old TLS
+		// pair; restoring the old WireGuard key would strand this identity.
+		wireGuardReconcileErr := replaceManagedNodeFile(cfg.WireGuard.PrivateKeyFile, newWireGuardKey, 0o640, groupID)
 		rollbackErr := replaceManagedCredentialPair(cfg.TLS.CertificateFile, cfg.TLS.PrivateKeyFile, oldCertificate, oldKey, groupID)
 		ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
-		restartErr := nodeSystemctl(ctx, "start", "lanewayd.service")
-		if restartErr == nil {
+		var restartErr error
+		if wireGuardReconcileErr == nil {
+			restartErr = nodeSystemctl(ctx, "start", "lanewayd.service")
+		}
+		if restartErr == nil && wireGuardReconcileErr == nil {
 			restartErr = waitManagedNodeActive(ctx)
 		}
 		cancel()
-		return fmt.Errorf("promote renewed credential; restored previous pair: %w", errors.Join(err, rollbackErr, restartErr))
+		return fmt.Errorf("promote renewed credential; restored previous TLS pair and retained controller-bound WireGuard key: %w", errors.Join(err, wireGuardReconcileErr, rollbackErr, restartErr))
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
 	startErr := nodeSystemctl(ctx, "start", "lanewayd.service")
@@ -386,7 +399,7 @@ func runManagedNodeRenew(args []string) error {
 			restartErr = waitManagedNodeActive(ctx)
 		}
 		cancel()
-		return fmt.Errorf("renewed credential failed to start; restored previous credential: %w", errors.Join(startErr, stopNewErr, rollbackErr, restartErr))
+		return fmt.Errorf("renewed credential failed to start; restored previous TLS credential and retained controller-bound WireGuard key: %w", errors.Join(startErr, stopNewErr, rollbackErr, restartErr))
 	}
 	fmt.Printf("managed node renewed network=%s node=%s\n", manifest.NetworkID, manifest.NodeID)
 	return nil
@@ -400,6 +413,16 @@ func replaceManagedCredentialPair(certPath, keyPath string, certificate, key []b
 		return err
 	}
 	return replaceManagedNodeFile(certPath, certificate, 0o640, groupID)
+}
+
+func replaceManagedCredentialTriple(certPath, keyPath, wireGuardKeyPath string, certificate, key, wireGuardKey []byte, groupID int) error {
+	if filepath.Clean(wireGuardKeyPath) == filepath.Clean(certPath) || filepath.Clean(wireGuardKeyPath) == filepath.Clean(keyPath) || len(wireGuardKey) != wireguard.KeySize {
+		return errors.New("managed credential replacement has an invalid WireGuard key or overlapping path")
+	}
+	if err := replaceManagedNodeFile(wireGuardKeyPath, wireGuardKey, 0o640, groupID); err != nil {
+		return err
+	}
+	return replaceManagedCredentialPair(certPath, keyPath, certificate, key, groupID)
 }
 
 func replaceManagedNodeFile(path string, contents []byte, mode os.FileMode, gid int) error {
@@ -496,6 +519,10 @@ func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, r
 	if err != nil {
 		return connectEnrollment{}, err
 	}
+	wireGuardPrivateKey, wireGuardPublicKey, err := wireguard.GenerateKey()
+	if err != nil {
+		return connectEnrollment{}, err
+	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "laneway-persistent-node"}}, private)
 	if err != nil {
 		return connectEnrollment{}, err
@@ -504,7 +531,7 @@ func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, r
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	response, err := client.EnrollForNetworkAndClass(ctx, code, requestedName, csrDER, expectedNetwork, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE)
+	response, err := client.EnrollForNetworkAndClass(ctx, code, requestedName, csrDER, wireGuardPublicKey.Bytes(), expectedNetwork, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE)
 	if err != nil {
 		return connectEnrollment{}, err
 	}
@@ -518,6 +545,9 @@ func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, r
 	authenticated, err := identity.IdentityFromCertificate(leaf)
 	if err != nil || authenticated.NetworkID != expectedNetwork || !bytes.Equal(authenticated.NetworkID[:], response.GetNetworkId()) || !bytes.Equal(authenticated.NodeID[:], response.GetNodeId()) {
 		return connectEnrollment{}, errors.New("issued certificate identity does not match authenticated bootstrap and enrollment response")
+	}
+	if !wireGuardPublicKey.Equal(response.GetWireguardPublicKey()) {
+		return connectEnrollment{}, errors.New("controller returned a different WireGuard public key than the locally generated key")
 	}
 	wantPublic, _ := x509.MarshalPKIXPublicKey(public)
 	gotPublic, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
@@ -543,7 +573,7 @@ func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, r
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	return connectEnrollment{identity: authenticated, certificatePEM: certificatePEM, privateKeyPEM: privatePEM, overlays: overlays, class: response.GetEnrollmentClass()}, nil
+	return connectEnrollment{identity: authenticated, certificatePEM: certificatePEM, privateKeyPEM: privatePEM, overlays: overlays, class: response.GetEnrollmentClass(), wireGuardPrivateKey: wireGuardPrivateKey}, nil
 }
 
 func managedNodeRelayFromConfiguration(configuration *lanewayv1.NodeConfiguration) (managedNodeRelay, error) {
@@ -602,6 +632,13 @@ func renderManagedNodeConfig(metadata bootstrap.Metadata, name string, relay man
 		Enabled     bool   `toml:"enabled"`
 		FailureMode string `toml:"failure_mode"`
 	}
+	type wireGuardSection struct {
+		Enabled    bool   `toml:"enabled"`
+		PrivateKey string `toml:"private_key"`
+		Interface  string `toml:"interface"`
+		ListenPort uint16 `toml:"listen_port"`
+		MTU        int    `toml:"mtu"`
+	}
 	value := struct {
 		Mode       string            `toml:"mode"`
 		StateDir   string            `toml:"state_dir"`
@@ -611,6 +648,7 @@ func renderManagedNodeConfig(metadata bootstrap.Metadata, name string, relay man
 		Controller controllerSection `toml:"controller"`
 		Direct     directSection     `toml:"direct"`
 		Exit       exitSection       `toml:"exit"`
+		WireGuard  wireGuardSection  `toml:"wireguard"`
 	}{
 		Mode: "node", StateDir: "/var/lib/laneway", SocketPath: "/run/laneway/lanewayd.sock",
 		TLS:        tlsSection{Certificate: "/etc/laneway/node.crt", PrivateKey: "/etc/laneway/node.key", CA: "/etc/laneway/ca.crt"},
@@ -618,6 +656,7 @@ func renderManagedNodeConfig(metadata bootstrap.Metadata, name string, relay man
 		Controller: controllerSection{Endpoint: metadata.Controller.EnrollmentEndpoint, QUICEndpoint: metadata.Controller.QUICEndpoint, ServerName: metadata.Controller.ServerName, NetworkID: metadata.NetworkID, ServiceID: metadata.Controller.ServiceID, PollInterval: "30s"},
 		Direct:     directSection{Enabled: direct, Listen: "0.0.0.0:0", CandidateTTL: "2m", ProbeInterval: "200ms", ProbeTimeout: "3s", RendezvousInterval: "30s", MaxCandidates: 8},
 		Exit:       exitSection{FailureMode: "closed"},
+		WireGuard:  wireGuardSection{Enabled: false, PrivateKey: "/etc/laneway/wireguard.key", Interface: "lane0", MTU: 1280},
 	}
 	contents, err := toml.Marshal(value)
 	if err != nil {
@@ -630,7 +669,7 @@ func renderManagedNodeConfig(metadata bootstrap.Metadata, name string, relay man
 }
 
 func managedNodeFiles() []string {
-	return []string{"/etc/laneway/ca.crt", "/etc/laneway/node.crt", "/etc/laneway/node.key", "/etc/laneway/laneway.toml"}
+	return []string{"/etc/laneway/ca.crt", "/etc/laneway/node.crt", "/etc/laneway/node.key", "/etc/laneway/wireguard.key", "/etc/laneway/laneway.toml"}
 }
 
 func installManagedNodeFiles(contents map[string][]byte, groupID int) error {

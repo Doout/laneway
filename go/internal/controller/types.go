@@ -72,6 +72,7 @@ type Node struct {
 	RevokedAt           *time.Time
 	EnrollmentClass     EnrollmentClass
 	LeaseExpiresAt      *time.Time
+	WireGuardPublicKey  WireGuardPublicKey
 }
 
 // EnrollmentToken contains the immutable token record and, only when returned
@@ -170,6 +171,14 @@ type Enrollment struct {
 // committed. Returning an error rolls back token consumption and all records.
 // Implementations must honor ctx, do bounded local work, and not call Store.
 type EnrollmentCertificateIssuer func(ctx context.Context, node Node) (CertificateMaterial, error)
+
+// NodeRenewal contains the certificate and authoritative WireGuard binding
+// committed by one authenticated renewal transaction.
+type NodeRenewal struct {
+	Node        Node
+	Certificate Certificate
+	Epoch       uint64
+}
 
 type AuditEvent struct {
 	ID          identity.ID

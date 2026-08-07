@@ -170,6 +170,11 @@ CREATE INDEX enrollment_tokens_class_expiry ON enrollment_tokens(enrollment_clas
 `, `
 ALTER TABLE enrollment_tokens ADD COLUMN requested_name TEXT
     CHECK(requested_name IS NULL OR length(requested_name) BETWEEN 1 AND 253);
+`, `
+ALTER TABLE nodes ADD COLUMN wireguard_public_key BLOB
+    CHECK(wireguard_public_key IS NULL OR length(wireguard_public_key) = 32);
+CREATE UNIQUE INDEX nodes_wireguard_public_key ON nodes(wireguard_public_key)
+    WHERE wireguard_public_key IS NOT NULL;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

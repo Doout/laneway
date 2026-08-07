@@ -30,6 +30,7 @@ import (
 	"laneway.dev/laneway/internal/nethelper"
 	"laneway.dev/laneway/internal/nodeapp"
 	"laneway.dev/laneway/internal/pki"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 func main() {
@@ -360,6 +361,7 @@ func runJoin(args []string) error {
 	name := fs.String("name", "", "requested node name")
 	outCert := fs.String("out-cert", "/etc/laneway/node.crt", "output node certificate")
 	outKey := fs.String("out-key", "/etc/laneway/node.key", "output node private key")
+	outWireGuardKey := fs.String("out-wireguard-key", "/etc/laneway/wireguard.key", "output raw WireGuard private key")
 	joinArgs := args
 	token := ""
 	tokenFromArg := false
@@ -440,6 +442,9 @@ func runJoin(args []string) error {
 	if token == "" || *endpoint == "" || (*name == "" && *bootstrapAuthority == "") {
 		return errors.New("usage: laneway join lane.example.com [--token-file PATH], or laneway join TOKEN --controller https://host:port --name NAME [advanced options]")
 	}
+	if err := requireAbsentCredentialOutputs(*outCert, *outKey, *outWireGuardKey); err != nil {
+		return err
+	}
 	expectedNetwork, err := identity.ParseNetworkID(*controllerNetwork)
 	if err != nil {
 		return fmt.Errorf("--controller-network-id: %w", err)
@@ -451,6 +456,10 @@ func runJoin(args []string) error {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generate node key: %w", err)
+	}
+	wireGuardPrivateKey, wireGuardPublicKey, err := wireguard.GenerateKey()
+	if err != nil {
+		return err
 	}
 	csrName := *name
 	if csrName == "" {
@@ -473,7 +482,7 @@ func runJoin(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	response, err := client.EnrollForNetwork(ctx, token, *name, csrDER, expectedNetwork)
+	response, err := client.EnrollForNetwork(ctx, token, *name, csrDER, wireGuardPublicKey.Bytes(), expectedNetwork)
 	if err != nil {
 		return err
 	}
@@ -503,6 +512,9 @@ func runJoin(args []string) error {
 	if authenticated.NetworkID != expectedNetwork {
 		return errors.New("enrollment code belongs to a different network than authenticated bootstrap metadata")
 	}
+	if !wireGuardPublicKey.Equal(response.GetWireguardPublicKey()) {
+		return errors.New("controller returned a different WireGuard public key than the locally generated key")
+	}
 	wantPublic, _ := x509.MarshalPKIXPublicKey(public)
 	gotPublic, err := x509.MarshalPKIXPublicKey(leaf.PublicKey)
 	if err != nil || !bytes.Equal(wantPublic, gotPublic) {
@@ -519,7 +531,7 @@ func runJoin(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writePair(*outCert, certificatePEM, *outKey, privatePEM); err != nil {
+	if err := writeCredentialTriple(*outCert, certificatePEM, *outKey, privatePEM, *outWireGuardKey, wireGuardPrivateKey.Bytes()); err != nil {
 		return err
 	}
 	fmt.Printf("enrolled network=%s node=%s overlay=%s certificate=%s\n", authenticated.NetworkID, authenticated.NodeID, strings.Join(overlays, ","), *outCert)
@@ -565,6 +577,7 @@ func runRenew(args []string) error {
 	currentKey := fs.String("key", "/etc/laneway/node.key", "current node private key")
 	outCert := fs.String("out-cert", "/etc/laneway/node.next.crt", "new certificate output (must not be current path)")
 	outKey := fs.String("out-key", "/etc/laneway/node.next.key", "new private key output (must not be current path)")
+	outWireGuardKey := fs.String("out-wireguard-key", "/etc/laneway/wireguard.next.key", "new raw WireGuard private key output")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -582,6 +595,9 @@ func runRenew(args []string) error {
 	if filepath.Clean(*outCert) == filepath.Clean(*currentCert) || filepath.Clean(*outKey) == filepath.Clean(*currentKey) {
 		return errors.New("renewal output paths must differ from the active certificate and key paths")
 	}
+	if err := requireAbsentCredentialOutputs(*outCert, *outKey, *outWireGuardKey); err != nil {
+		return err
+	}
 	currentPEM, err := os.ReadFile(*currentCert)
 	if err != nil {
 		return fmt.Errorf("read current node certificate: %w", err)
@@ -598,6 +614,10 @@ func runRenew(args []string) error {
 	if err != nil {
 		return fmt.Errorf("generate renewal key: %w", err)
 	}
+	wireGuardPrivateKey, wireGuardPublicKey, err := wireguard.GenerateKey()
+	if err != nil {
+		return err
+	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: currentLeaf.Subject}, private)
 	if err != nil {
 		return fmt.Errorf("create renewal CSR: %w", err)
@@ -612,7 +632,7 @@ func runRenew(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	response, err := client.Renew(ctx, csrDER)
+	response, err := client.Renew(ctx, csrDER, wireGuardPublicKey.Bytes())
 	if err != nil {
 		return err
 	}
@@ -630,6 +650,9 @@ func runRenew(args []string) error {
 	if issuedIdentity != currentIdentity {
 		return errors.New("renewed certificate changed the node identity")
 	}
+	if !wireGuardPublicKey.Equal(response.GetWireguardPublicKey()) {
+		return errors.New("controller returned a different WireGuard public key than the locally generated renewal key")
+	}
 	wantPublic, _ := x509.MarshalPKIXPublicKey(public)
 	gotPublic, err := x509.MarshalPKIXPublicKey(issuedLeaf.PublicKey)
 	if err != nil || !bytes.Equal(wantPublic, gotPublic) {
@@ -646,7 +669,7 @@ func runRenew(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := writePair(*outCert, certificatePEM, *outKey, privatePEM); err != nil {
+	if err := writeCredentialTriple(*outCert, certificatePEM, *outKey, privatePEM, *outWireGuardKey, wireGuardPrivateKey.Bytes()); err != nil {
 		return err
 	}
 	fmt.Printf("renewed network=%s node=%s certificate=%s\n", issuedIdentity.NetworkID, issuedIdentity.NodeID, *outCert)
@@ -988,6 +1011,42 @@ func writePair(certPath string, certificate []byte, keyPath string, key []byte) 
 		return fmt.Errorf("write certificate: %w", err)
 	}
 	_ = writtenCert
+	return nil
+}
+
+func writeCredentialTriple(certPath string, certificate []byte, keyPath string, key []byte, wireGuardKeyPath string, wireGuardKey []byte) error {
+	cleanCert, cleanKey, cleanWireGuard := filepath.Clean(certPath), filepath.Clean(keyPath), filepath.Clean(wireGuardKeyPath)
+	if cleanWireGuard == cleanCert || cleanWireGuard == cleanKey || len(wireGuardKey) != wireguard.KeySize {
+		return errors.New("certificate, TLS key, and valid WireGuard key paths must be distinct")
+	}
+	if err := os.MkdirAll(filepath.Dir(wireGuardKeyPath), 0o700); err != nil {
+		return err
+	}
+	writtenWireGuardKey, err := linkExclusive(wireGuardKeyPath, wireGuardKey, 0o600)
+	if err != nil {
+		return fmt.Errorf("write WireGuard private key: %w", err)
+	}
+	if err := writePair(certPath, certificate, keyPath, key); err != nil {
+		_ = os.Remove(writtenWireGuardKey)
+		return err
+	}
+	return nil
+}
+
+func requireAbsentCredentialOutputs(paths ...string) error {
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		clean := filepath.Clean(path)
+		if _, duplicate := seen[clean]; duplicate {
+			return errors.New("credential output paths must be distinct")
+		}
+		seen[clean] = struct{}{}
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("refusing to replace existing credential output %s", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect credential output %s: %w", path, err)
+		}
+	}
 	return nil
 }
 

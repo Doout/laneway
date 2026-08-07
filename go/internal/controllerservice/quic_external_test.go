@@ -20,6 +20,7 @@ import (
 	"laneway.dev/laneway/internal/controllerservice"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 func TestGoClientAndControllerReliableQUICInterop(t *testing.T) {
@@ -168,7 +169,11 @@ func TestGoClientAndControllerReliableQUICInterop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	renewal, err := nodeClient.Renew(ctx, csr)
+	_, wireGuardPublicKey, err := wireguard.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	renewal, err := nodeClient.Renew(ctx, csr, wireGuardPublicKey.Bytes())
 	if err != nil || renewal.GetCertificateChain() == nil || len(renewal.GetCertificateChain().GetCertificatesDer()) == 0 {
 		t.Fatalf("node QUIC renewal failed: response=%v err=%v", renewal, err)
 	}

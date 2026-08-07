@@ -46,6 +46,88 @@ func (s *Store) AddCertificate(ctx context.Context, networkID identity.NetworkID
 	return certificate, nil
 }
 
+// RenewNodeBound validates the current durable identity and commits the
+// replacement certificate and WireGuard key as one transaction. If the key
+// changes, the network epoch advances in that same commit so no successful
+// response can leave peers indefinitely authorizing the old key.
+func (s *Store) RenewNodeBound(ctx context.Context, networkID identity.NetworkID, nodeID identity.NodeID, wireGuardPublicKey WireGuardPublicKey, issuer EnrollmentCertificateIssuer) (NodeRenewal, error) {
+	if networkID.IsZero() || nodeID.IsZero() || issuer == nil {
+		return NodeRenewal{}, fmt.Errorf("%w: renewal identity and issuer are required", ErrInvalid)
+	}
+	now := s.now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return NodeRenewal{}, fmt.Errorf("begin node renewal: %w", err)
+	}
+	defer tx.Rollback()
+	var name, class string
+	var capabilities, created, epoch int64
+	var lease sql.NullInt64
+	var currentKey []byte
+	if err := tx.QueryRowContext(ctx, `SELECT n.name,n.enabled_capabilities,n.created_at,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key,w.configuration_epoch
+		FROM nodes n JOIN networks w ON w.id=n.network_id
+		WHERE n.id=? AND n.network_id=? AND n.revoked_at IS NULL AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?)`,
+		idBytes(nodeID), idBytes(networkID), unix(now)).Scan(&name, &capabilities, &created, &class, &lease, &currentKey, &epoch); errors.Is(err, sql.ErrNoRows) {
+		return NodeRenewal{}, ErrNotFound
+	} else if err != nil {
+		return NodeRenewal{}, fmt.Errorf("read renewal node: %w", err)
+	}
+	enrollmentClass := EnrollmentClass(class)
+	if !enrollmentClass.Valid() || (enrollmentClass == EnrollmentClassEphemeral) != lease.Valid || epoch < 1 {
+		return NodeRenewal{}, errors.New("corrupt renewal node")
+	}
+	existingKey, err := scanWireGuardPublicKey(currentKey)
+	if err != nil {
+		return NodeRenewal{}, err
+	}
+	// Absence is the stable-v1 compatibility value: an already-bound node keeps
+	// its key, while a pre-v6 node remains unbound and therefore ineligible for
+	// the hybrid dataplane. Updated clients always send an explicit key.
+	if wireGuardPublicKey.IsZero() {
+		wireGuardPublicKey = existingKey
+	}
+	node := Node{ID: nodeID, NetworkID: networkID, Name: name, EnabledCapabilities: uint64(capabilities), CreatedAt: fromUnix(created), EnrollmentClass: enrollmentClass, LeaseExpiresAt: nullableTime(lease), WireGuardPublicKey: wireGuardPublicKey}
+	material, err := issuer(ctx, node)
+	if err != nil {
+		return NodeRenewal{}, fmt.Errorf("issue renewal certificate: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return NodeRenewal{}, fmt.Errorf("issue renewal certificate: %w", err)
+	}
+	material, err = normalizeCertificateMaterial(material)
+	if err != nil {
+		return NodeRenewal{}, fmt.Errorf("persist renewal certificate: %w", err)
+	}
+	if lease.Valid && material.NotAfter.After(fromUnix(lease.Int64)) {
+		return NodeRenewal{}, fmt.Errorf("persist renewal certificate: %w: certificate exceeds identity lease", ErrInvalid)
+	}
+	certificate, err := addCertificateTx(ctx, tx, networkID, nodeID, material, now)
+	if err != nil {
+		return NodeRenewal{}, fmt.Errorf("persist renewal certificate: %w", err)
+	}
+	if existingKey != wireGuardPublicKey {
+		if _, err := tx.ExecContext(ctx, `UPDATE nodes SET wireguard_public_key=? WHERE id=? AND network_id=?`, wireGuardPublicKey[:], idBytes(nodeID), idBytes(networkID)); err != nil {
+			if isConstraint(err) {
+				return NodeRenewal{}, fmt.Errorf("%w: WireGuard public key already belongs to another node", ErrConflict)
+			}
+			return NodeRenewal{}, fmt.Errorf("rotate WireGuard public key: %w", err)
+		}
+		newEpoch, err := incrementEpochTx(ctx, tx, networkID)
+		if err != nil {
+			return NodeRenewal{}, err
+		}
+		epoch = int64(newEpoch)
+		target := identity.ID(nodeID)
+		if err := auditTx(ctx, tx, networkID, &nodeID, "node.wireguard_key.rotate", "node", &target, `{}`, now); err != nil {
+			return NodeRenewal{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return NodeRenewal{}, fmt.Errorf("commit node renewal: %w", err)
+	}
+	return NodeRenewal{Node: node, Certificate: certificate, Epoch: uint64(epoch)}, nil
+}
+
 func normalizeCertificateMaterial(material CertificateMaterial) (CertificateMaterial, error) {
 	material.NotBefore = material.NotBefore.UTC().Truncate(time.Second)
 	material.NotAfter = material.NotAfter.UTC().Truncate(time.Second)
