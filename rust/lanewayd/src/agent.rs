@@ -700,6 +700,7 @@ impl RuntimeControl {
                                 .to_string()
                         })
                         .collect(),
+                    path: self.peer_path(peer.node, selected_path),
                 });
             }
         } else {
@@ -715,6 +716,7 @@ impl RuntimeControl {
                     node_id: node.to_string(),
                     name: String::new(),
                     prefixes,
+                    path: self.peer_path(node, selected_path),
                 });
             }
         }
@@ -744,6 +746,16 @@ impl RuntimeControl {
             status,
             peers,
             routes,
+        }
+    }
+
+    fn peer_path(&self, peer: Id, relay_carrier: &str) -> String {
+        if self.state.has_direct_path(peer) {
+            "direct".to_owned()
+        } else if self.state.has_relay_path(peer) {
+            relay_carrier.to_owned()
+        } else {
+            "disconnected".to_owned()
         }
     }
 

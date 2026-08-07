@@ -201,6 +201,14 @@ impl State {
         self.direct.load().contains_key(&peer) || self.handles.load().outbound.contains_key(&peer)
     }
 
+    pub(crate) fn has_direct_path(&self, peer: Id) -> bool {
+        self.direct.load().contains_key(&peer)
+    }
+
+    pub(crate) fn has_relay_path(&self, peer: Id) -> bool {
+        self.handles.load().outbound.contains_key(&peer)
+    }
+
     pub(crate) fn owns(&self, static_owned: &[ipnet::IpNet], address: std::net::IpAddr) -> bool {
         if !self.controller_managed {
             return crate::routing::locally_owned(static_owned, address);

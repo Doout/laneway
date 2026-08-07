@@ -37,7 +37,7 @@ func TestDecodeNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Mode != ModeNode || cfg.Node.ReconnectMin.Duration() != 250*time.Millisecond || cfg.Relay.QueueDepth != 256 {
+	if cfg.Mode != ModeNode || cfg.Node.ReconnectMin.Duration() != 250*time.Millisecond || cfg.Relay.QueueDepth != 256 || !cfg.Direct.Enabled || cfg.Direct.Listen != ":0" {
 		t.Fatalf("unexpected configuration: %#v", cfg)
 	}
 	if len(cfg.Peers) != 1 || cfg.Peers[0].Prefixes[0] != "100.96.0.2/32" {
@@ -97,6 +97,16 @@ allow_link_local = false
 	cfg.Direct.MaxCandidates = 33
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("unbounded direct candidates accepted")
+	}
+}
+
+func TestDecodeDirectConnectivityCanBeExplicitlyDisabled(t *testing.T) {
+	cfg, err := Decode(strings.NewReader(validNode + "\n[direct]\nenabled = false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Direct.Enabled {
+		t.Fatal("explicit direct opt-out was ignored")
 	}
 }
 

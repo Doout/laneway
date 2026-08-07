@@ -95,6 +95,9 @@ direct paths can rendezvous again. Keep
 `direct.candidate_refresh_interval` above the Rust relay's
 `relay.candidate_republish_floor`; accepted refreshes generate at most one
 fresh pairing per peer and floor interval.
+Host nodes use an ephemeral shared UDP port by default. The local `/v1/peers`
+response reports the selected `direct`, `relay-quic`, `tcp-fallback`, or
+`disconnected` path independently for every peer.
 
 `forwarding.owned_prefixes` declares LAN prefixes that may cross the TUN.
 Enabling `subnet_router` requires an exact `subnet_routes` entry for every

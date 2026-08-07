@@ -39,11 +39,17 @@ func TestPathManagerDiagnosticsExposeAutomaticFailover(t *testing.T) {
 	peer := identity.NodeID(testID(9))
 	if err := manager.SetPaths(peer, []pathmanager.Candidate{
 		{Kind: pathmanager.PathDirect, Path: diagnosticsPath{name: "direct"}},
-		{Kind: pathmanager.PathRelayQUIC, Path: diagnosticsPath{name: "relay"}},
+		{Kind: pathmanager.PathRelayQUIC, Path: diagnosticsPath{name: "relay-quic"}},
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if got := peerPathState(peer, manager, nil); got != "direct" {
+		t.Fatalf("initial peer path = %q, want direct", got)
+	}
 	manager.Observe(peer, pathmanager.PathSample{Path: "direct", HardFailure: true, Reason: "probe timeout"})
+	if got := peerPathState(peer, manager, nil); got != "relay-quic" {
+		t.Fatalf("failed-over peer path = %q, want relay-quic", got)
+	}
 	values := map[string]uint64{}
 	addPathManagerDiagnostics(values, manager)
 	for name, want := range map[string]uint64{

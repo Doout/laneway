@@ -72,6 +72,7 @@ type Peer struct {
 	NodeID   string   `json:"node_id"`
 	Name     string   `json:"name,omitempty"`
 	Prefixes []string `json:"prefixes"`
+	Path     string   `json:"path"`
 }
 
 type Route struct {

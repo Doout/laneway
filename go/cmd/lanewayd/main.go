@@ -532,7 +532,8 @@ func run(path, diagnostics string) (retErr error) {
 		}
 		peers := make([]localapi.Peer, 0, len(cfg.Peers))
 		for _, peer := range cfg.Peers {
-			peers = append(peers, localapi.Peer{NodeID: peer.NodeID, Name: peer.Name, Prefixes: append([]string(nil), peer.Prefixes...)})
+			nodeID, _ := identity.ParseNodeID(peer.NodeID)
+			peers = append(peers, localapi.Peer{NodeID: peer.NodeID, Name: peer.Name, Prefixes: append([]string(nil), peer.Prefixes...), Path: peerPathState(nodeID, pathManager, service)})
 		}
 		controllerState.mu.Lock()
 		if controllerState.accepted != nil {
@@ -548,7 +549,7 @@ func run(path, diagnostics string) (retErr error) {
 						prefixes = append(prefixes, netip.PrefixFrom(address, address.BitLen()).String())
 					}
 				}
-				peers = append(peers, localapi.Peer{NodeID: nodeID.String(), Name: peer.GetName(), Prefixes: prefixes})
+				peers = append(peers, localapi.Peer{NodeID: nodeID.String(), Name: peer.GetName(), Prefixes: prefixes, Path: peerPathState(nodeID, pathManager, service)})
 			}
 		}
 		controllerState.mu.Unlock()
@@ -625,6 +626,18 @@ func addPathManagerDiagnostics(values map[string]uint64, manager *pathmanager.Ma
 	values["path_direct_failures_total"] = metrics.DirectFailures
 	values["path_switches_total"] = metrics.Switches
 	values["path_peers"] = uint64(metrics.Peers)
+}
+
+func peerPathState(peer identity.NodeID, manager *pathmanager.Manager, service *nodeservice.Service) string {
+	if manager != nil {
+		if path := manager.BestPath(peer); path != nil {
+			return path.Name()
+		}
+	}
+	if service != nil && service.PathAvailable(peer) {
+		return service.SelectedCarrier()
+	}
+	return "disconnected"
 }
 
 func directCandidatePolicy(config config.Direct) directpath.CandidatePolicy {
