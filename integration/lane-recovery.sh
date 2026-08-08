@@ -39,10 +39,18 @@ case " $* " in
   *" -backup /backups/"*)
     name=${*##* /backups/}; name=${name%% *}
     printf '%s\n' sqlite-backup > "$LANE_TEST_BASE/generated/backups/$name"
+    printf '%s\n' sqlite-wal > "$LANE_TEST_BASE/generated/backups/$name-wal"
+    printf '%s\n' sqlite-shm > "$LANE_TEST_BASE/generated/backups/$name-shm"
+    printf '%s\n' sqlite-journal > "$LANE_TEST_BASE/generated/backups/$name-journal"
     chmod 0600 "$LANE_TEST_BASE/generated/backups/$name"
     chown 65532:65532 "$LANE_TEST_BASE/generated/backups/$name"
+    [ "${LANE_TEST_BACKUP_FAIL:-0}" = 0 ] || exit 1
     ;;
   *" -restore /backups/"*)
+    name=${*##* /backups/}; name=${name%% *}
+    printf '%s\n' sqlite-wal > "$LANE_TEST_BASE/generated/backups/$name-wal"
+    printf '%s\n' sqlite-shm > "$LANE_TEST_BASE/generated/backups/$name-shm"
+    printf '%s\n' sqlite-journal > "$LANE_TEST_BASE/generated/backups/$name-journal"
     printf '%s\n' restored > "$LANE_TEST_BASE/restored.db"
     ;;
 esac
@@ -102,6 +110,10 @@ done
 
 export PATH="$fake_bin:$PATH" LANE_TEST_BASE="$source_dir"
 "$source_dir/recovery.sh" backup control-recovery.age
+if find "$source_dir/generated/backups" -mindepth 1 -maxdepth 1 -print | grep .; then
+  echo "recovery backup left plaintext database staging files" >&2
+  exit 1
+fi
 bundle=$test_dir/control-recovery.age
 cp "$source_dir/generated/recovery/control-recovery.age" "$bundle"
 [ "$(stat -c '%a:%u:%g' "$source_dir/generated/recovery/control-recovery.age")" = 600:0:0 ]
@@ -110,11 +122,27 @@ if "$source_dir/recovery.sh" backup control-recovery.age >/dev/null 2>&1; then
   exit 1
 fi
 
+LANE_TEST_BACKUP_FAIL=1; export LANE_TEST_BACKUP_FAIL
+if "$source_dir/recovery.sh" backup failed-recovery.age >/dev/null 2>&1; then
+  echo "recovery backup accepted a failed database snapshot" >&2
+  exit 1
+fi
+unset LANE_TEST_BACKUP_FAIL
+[ ! -e "$source_dir/generated/recovery/failed-recovery.age" ]
+if find "$source_dir/generated/backups" -mindepth 1 -maxdepth 1 -print | grep .; then
+  echo "failed recovery backup left plaintext database staging files" >&2
+  exit 1
+fi
+
 mkdir -p "$fresh_dir"
 install_runtime "$fresh_dir"
 LANE_TEST_BASE=$fresh_dir; export LANE_TEST_BASE
 "$fresh_dir/recovery.sh" restore "$bundle" "$identity"
 [ -f "$fresh_dir/restored.db" ]
+if find "$fresh_dir/generated/backups" -mindepth 1 -maxdepth 1 -print | grep .; then
+  echo "recovery restore left plaintext database staging files" >&2
+  exit 1
+fi
 for relative in \
   .env generated/config/controller.toml generated/config/relay.toml generated/config/exit-node.toml \
   generated/pki/ca.crt generated/pki/intermediate-chain.crt generated/pki/intermediate.key \

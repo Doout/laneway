@@ -10,14 +10,27 @@ published=
 database_snapshot=
 umask 077
 
+cleanup_database_snapshot() {
+  [ -n "$database_snapshot" ] || return 0
+  # SQLite can create these beside both online backup and restore databases.
+  # The controller-writable staging directory must not retain plaintext state
+  # after the encrypted bundle is published or an operation fails.
+  for suffix in '' -wal -shm -journal; do
+    path=$database_snapshot$suffix
+    [ ! -e "$path" ] && [ ! -L "$path" ] || find "$path" -maxdepth 0 -delete
+  done
+  database_snapshot=
+}
+
 cleanup() {
   if [ -n "$published" ]; then
     for path in $published; do
       [ ! -e "$path" ] || find "$path" -maxdepth 0 -delete
     done
   fi
-  [ -z "$database_snapshot" ] || [ ! -e "$database_snapshot" ] || find "$database_snapshot" -maxdepth 0 -delete
+  cleanup_database_snapshot
   [ -z "$work" ] || [ ! -e "$work" ] || find "$work" -depth -delete
+  return 0
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -77,8 +90,7 @@ case "${1:-}" in
     compose run --rm --no-deps controller -config /etc/laneway/controller.toml -backup "/backups/$database_name"
     require_regular "$database_snapshot"
     install -m 0600 "$database_snapshot" "$work/database/controller.db"
-    find "$database_snapshot" -maxdepth 0 -delete
-    database_snapshot=
+    cleanup_database_snapshot
 
     files="
 generated/config/controller.toml
@@ -225,8 +237,7 @@ generated/pki/exit-node.key"
     database_snapshot=$restore_db
     compose run --rm --no-deps controller -config /etc/laneway/controller.toml -restore "/backups/$(basename "$restore_db")"
     published=
-    find "$restore_db" -maxdepth 0 -delete
-    database_snapshot=
+    cleanup_database_snapshot
     echo "lane: recovery bundle restored; run ./lane init to verify signed images and start the stack"
     ;;
   *) die "usage: recovery.sh <backup NAME.age|restore BUNDLE.age IDENTITY>" ;;
