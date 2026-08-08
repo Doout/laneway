@@ -163,9 +163,9 @@ sudo docker compose --profile tools run --rm admin version
 The optional `exit-node` profile runs the node dataplane in Docker's bridge
 network namespace. It is not privileged and does not use host networking. Its
 only added capability is `NET_ADMIN`, and its only device is `/dev/net/tun`.
-The entrypoint uses one-shot `SETUID`, `SETGID`, and `SETPCAP` bootstrap
-capabilities to become UID/GID 65532, reduce its bounding set to `NET_ADMIN`,
-enable `no-new-privileges`, and only then start the minimal init and daemon.
+The image assigns `NET_ADMIN` only to the node binary, while Docker bounds the
+container to that same single capability. The node runs as UID/GID 65532 and
+irreversibly enables `no-new-privileges` before it initializes networking.
 The long-running process and the networking tools it invokes therefore have
 only `NET_ADMIN`; the health check has no effective capability.
 The root filesystem is read-only; `/var/lib/laneway` is the named persistent

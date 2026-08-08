@@ -353,7 +353,6 @@ for node_name in "${client_name}" "${gateway_name}"; do
     .[0].HostConfig.NetworkMode != "host" and
     (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
     ((.[0].HostConfig.SecurityOpt // []) == []) and
-    (.[0].Config.Entrypoint | index("--no-new-privs") != null) and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and
     .[0].HostConfig.Devices[0].PathInContainer == "/dev/net/tun"
@@ -366,6 +365,15 @@ docker network connect "${egress_network}" "${gateway_name}"
 docker start "${client_name}" "${gateway_name}" >/dev/null
 wait_log "${client_name}" "interface=lane0"
 wait_log "${gateway_name}" "interface=lane0"
+for node_name in "${client_name}" "${gateway_name}"; do
+  docker exec "${node_name}" sh -eu -c '
+    pid="$(pgrep -xo laneway)"
+    status="$(cat "/proc/${pid}/status")"
+    printf "%s\n" "${status}" | grep -Eq "^Uid:[[:space:]]+65532[[:space:]]+65532[[:space:]]+65532[[:space:]]+65532$"
+    printf "%s\n" "${status}" | grep -Eq "^NoNewPrivs:[[:space:]]+1$"
+    test "$(printf "%s\n" "${status}" | grep -Ec "^Cap(Inh|Prm|Eff|Bnd|Amb):[[:space:]]+0000000000001000$")" -eq 5
+  '
+done
 docker exec "${client_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200'
 docker exec "${gateway_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200 && ip link show eth1 >/dev/null'
 
