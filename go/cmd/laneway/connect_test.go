@@ -26,6 +26,15 @@ func TestConnectRejectsUnsafeOrAmbiguousFlagsBeforePrompt(t *testing.T) {
 	}
 }
 
+func TestConnectPrefixListMakesTemporaryOwnershipExplicit(t *testing.T) {
+	if got := connectPrefixList(nil); got != "none" {
+		t.Fatalf("empty prefix list = %q", got)
+	}
+	if got := connectPrefixList([]netip.Prefix{netip.MustParsePrefix("10.20.0.0/16"), netip.MustParsePrefix("fd00::/64")}); got != "10.20.0.0/16,fd00::/64" {
+		t.Fatalf("prefix list = %q", got)
+	}
+}
+
 func TestRuntimeCredentialsHaveNoFilesystemName(t *testing.T) {
 	directory := t.TempDir()
 	credentials := new(runtimeCredentialFiles)

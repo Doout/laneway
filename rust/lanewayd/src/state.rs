@@ -379,6 +379,7 @@ mod tests {
         let original = Arc::new(Snapshot {
             epoch,
             valid_until: now + 1,
+            identity_lease_expires_at: 0,
             overlays: vec!["100.96.0.1/32".parse::<IpNet>().unwrap()],
             peers: HashMap::from([
                 (

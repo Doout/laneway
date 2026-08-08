@@ -40,11 +40,17 @@ pub(crate) struct ExitStatus {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) selected_node_id: String,
     pub(crate) authorized: bool,
+    pub(crate) serving: bool,
+    pub(crate) forwarding_ready: bool,
+    pub(crate) nat_ready: bool,
+    pub(crate) forwarded_packets: u64,
+    pub(crate) namespace_cleanup_failures: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Status {
     pub(crate) running: bool,
+    pub(crate) actor: String,
     pub(crate) product_version: String,
     pub(crate) control_version: String,
     pub(crate) packet_version: u8,
@@ -53,6 +59,8 @@ pub(crate) struct Status {
     pub(crate) network_id: String,
     pub(crate) node_id: String,
     pub(crate) name: String,
+    pub(crate) overlay_addresses: Vec<String>,
+    pub(crate) selected_routes: Vec<String>,
     pub(crate) interface: String,
     pub(crate) relay: String,
     pub(crate) mtu: u16,
@@ -68,6 +76,9 @@ pub(crate) struct ControllerStatus {
     pub(crate) certificate_renewal_needed: bool,
     pub(crate) certificate_renew_after_unix_seconds: u64,
     pub(crate) certificate_not_after_unix_seconds: u64,
+    pub(crate) identity_lease_expires_at_unix_seconds: u64,
+    pub(crate) configuration_lease_valid_until_unix_seconds: u64,
+    pub(crate) configuration_lease_expired: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -429,6 +440,7 @@ mod tests {
         Snapshot {
             status: Status {
                 running: true,
+                actor: "node".into(),
                 product_version: "1.0.0".into(),
                 control_version: "1.0".into(),
                 packet_version: 1,
@@ -437,6 +449,8 @@ mod tests {
                 network_id: "00".repeat(16),
                 node_id: "11".repeat(16),
                 name: "node".into(),
+                overlay_addresses: vec!["100.96.0.1/32".into()],
+                selected_routes: vec!["100.96.0.2/32".into()],
                 interface: "lane0".into(),
                 relay: "127.0.0.1:4433".into(),
                 mtu: 1280,
@@ -493,10 +507,15 @@ mod tests {
         let response = request(&path, "GET /v1/status HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("\"packet_version\":1"));
+        assert!(response.contains("\"actor\":\"node\""));
+        assert!(response.contains("\"overlay_addresses\":[\"100.96.0.1/32\"]"));
         assert!(response.contains("\"controller\":{"));
         assert!(response.contains("\"certificate_presented_serial\":\"\""));
         assert!(response.contains("\"certificate_renew_after_unix_seconds\":0"));
         assert!(response.contains("\"certificate_not_after_unix_seconds\":0"));
+        assert!(response.contains("\"identity_lease_expires_at_unix_seconds\":0"));
+        assert!(response.contains("\"configuration_lease_valid_until_unix_seconds\":0"));
+        assert!(response.contains("\"configuration_lease_expired\":false"));
         let response = request(&path, "GET /v1/peers HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
         assert!(response.contains("\"path\":\"direct\""));
         let body = r#"{"enabled":true,"selected_node_id":"202122232425262728292a2b2c2d2e2f"}"#;

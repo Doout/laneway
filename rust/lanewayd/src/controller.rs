@@ -560,6 +560,7 @@ pub(crate) struct Route {
 pub(crate) struct Snapshot {
     pub(crate) epoch: u64,
     pub(crate) valid_until: u64,
+    pub(crate) identity_lease_expires_at: u64,
     pub(crate) overlays: Vec<IpNet>,
     pub(crate) peers: HashMap<Id, Peer>,
     pub(crate) routes: Vec<Route>,
@@ -902,6 +903,7 @@ impl Snapshot {
         Ok(Self {
             epoch,
             valid_until: configuration.valid_until_unix_seconds,
+            identity_lease_expires_at,
             overlays,
             peers,
             routes,

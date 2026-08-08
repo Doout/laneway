@@ -580,7 +580,7 @@ func TestDaemonExitManagersAuthorizationAndSelection(t *testing.T) {
 	if err := managers.Apply(context.Background(), configuration, nil); err != nil {
 		t.Fatal(err)
 	}
-	if status := managers.Status(); !status.Enabled || !status.Authorized || status.SelectedNodeID != selected.String() {
+	if status := managers.Status(); !status.Enabled || !status.Authorized || status.SelectedNodeID != selected.String() || !status.ForwardingReady || !status.NATReady {
 		t.Fatalf("exit status = %#v", status)
 	}
 	if _, active := routes.Snapshot(); !active {

@@ -396,6 +396,39 @@ identity-derived labels.
 Diagnostics are disabled when the flag is omitted; node counters also remain
 available through `laneway status`.
 
+`laneway status` is the concise readiness view for either node
+implementation. It reports the actor, overlay addresses, selected route
+prefixes, active carrier, controller certificate and ephemeral identity-lease
+deadlines, and Exit selection. A serving Exit Node also reports forwarding/NAT
+readiness, forwarded packets, and cleanup failures. The JSON form uses the same
+fields and is preferred for automation:
+
+```sh
+laneway status -json
+```
+
+Foreground `laneway connect` sessions identify `actor=user`, their owned
+routes, local-LAN bypasses, DNS owner, lease deadline, and active helper cleanup
+journal. The final `temporary networking restored` message confirms successful
+cleanup. None of these diagnostics include an invite, enrollment token, private
+key, rendezvous token, or packet content.
+
+The Go Exit Node diagnostics names are
+`laneway_exit_forwarded_packets_total`, `laneway_exit_forwarding_ready`,
+`laneway_exit_nat_ready`, and
+`laneway_exit_namespace_cleanup_failures_total`. Forwarded packets count
+encrypted-carrier/TUN transfers, not confirmed Internet replies.
+The native Rust node exposes the same classes with the
+`laneway_rust_node_exit_` prefix and additionally counts forwarded bytes.
+
+Recommended alerts are: certificate or identity lease approaching its renewal
+safety window; sustained `laneway_relay_limiter_saturated` or increasing
+throttled bytes; a sustained rise in direct failures/switches with loss of
+active direct paths; any cleanup-failure increment; and a configured Exit Node
+whose forwarding or NAT readiness is zero. Tune time and rate windows to the
+deployment's normal reconnect behavior to avoid alerting on brief, successful
+fallback.
+
 The native Rust node enables its metrics endpoint in strict TOML instead of a
 command-line flag:
 

@@ -13,7 +13,7 @@ func TestServerClientLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lanewayd.sock")
 	var selected ExitSelection
 	server := Server{SocketPath: path, Snapshot: func() (Status, []Peer, []Route) {
-		return Status{Running: true, NodeID: "node", MTU: 1200, ProductVersion: "1.0.0", ControlVersion: "1.0", PacketVersion: 1, Capabilities: "relay-v1", SelectedPath: "relay-quic", Controller: ControllerStatus{CandidateExchangeEnabled: true, CertificateRenewalNeeded: true, CertificateNotAfterUnixSeconds: 12345}},
+		return Status{Running: true, Actor: "exit-node", NodeID: "node", OverlayAddresses: []string{"100.96.0.1/32"}, SelectedRoutes: []string{"0.0.0.0/0"}, MTU: 1200, ProductVersion: "1.0.0", ControlVersion: "1.0", PacketVersion: 1, Capabilities: "relay-v1", SelectedPath: "relay-quic", Controller: ControllerStatus{CandidateExchangeEnabled: true, CertificateRenewalNeeded: true, CertificateNotAfterUnixSeconds: 12345, IdentityLeaseExpiresAtUnixSeconds: 23456, ConfigurationLeaseValidUntilUnixSeconds: 34567, ConfigurationLeaseExpired: true}, Exit: ExitStatus{Serving: true, ForwardingReady: true, NATReady: true, ForwardedPackets: 12, NamespaceCleanupFailures: 1}},
 			[]Peer{{NodeID: "peer", Name: "homelab-gateway", Prefixes: []string{"100.96.0.2/32"}, Path: "direct"}},
 			[]Route{{Prefix: "100.96.0.2/32", ViaNode: "peer", Kind: "peer"}}
 	}, SetExit: func(_ context.Context, selection ExitSelection) error {
@@ -35,7 +35,7 @@ func TestServerClientLifecycle(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if err != nil || !status.Running || status.MTU != 1200 || status.ProductVersion != "1.0.0" || status.ControlVersion != "1.0" || status.PacketVersion != 1 || status.Capabilities != "relay-v1" || status.SelectedPath != "relay-quic" || !status.Controller.CandidateExchangeEnabled || !status.Controller.CertificateRenewalNeeded || status.Controller.CertificateNotAfterUnixSeconds != 12345 {
+	if err != nil || !status.Running || status.Actor != "exit-node" || len(status.OverlayAddresses) != 1 || len(status.SelectedRoutes) != 1 || status.MTU != 1200 || status.ProductVersion != "1.0.0" || status.ControlVersion != "1.0" || status.PacketVersion != 1 || status.Capabilities != "relay-v1" || status.SelectedPath != "relay-quic" || !status.Controller.CandidateExchangeEnabled || !status.Controller.CertificateRenewalNeeded || status.Controller.CertificateNotAfterUnixSeconds != 12345 || status.Controller.IdentityLeaseExpiresAtUnixSeconds != 23456 || status.Controller.ConfigurationLeaseValidUntilUnixSeconds != 34567 || !status.Controller.ConfigurationLeaseExpired || !status.Exit.Serving || !status.Exit.NATReady || status.Exit.ForwardedPackets != 12 || status.Exit.NamespaceCleanupFailures != 1 {
 		t.Fatalf("status = %#v, %v", status, err)
 	}
 	peers, err := client.Peers(context.Background())

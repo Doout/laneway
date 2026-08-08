@@ -60,6 +60,13 @@ pub struct Metrics {
     pub direct_active_paths: AtomicU64,
     /// Selected exit path state (one healthy, zero unavailable/not selected).
     pub exit_path_available: AtomicU64,
+    /// Traffic forwarded by an active Exit Node.
+    pub exit_forwarded_packets_total: AtomicU64,
+    pub exit_forwarded_bytes_total: AtomicU64,
+    /// Exit Node kernel forwarding/NAT readiness and failed cleanup attempts.
+    pub exit_forwarding_ready: AtomicU64,
+    pub exit_nat_ready: AtomicU64,
+    pub exit_namespace_cleanup_failures_total: AtomicU64,
     /// Controller candidate-exchange and local-certificate state.
     pub controller_candidate_exchange_enabled: AtomicU64,
     pub controller_certificate_renewal_forced: AtomicU64,
@@ -155,6 +162,13 @@ impl Metrics {
             direct_switches: self.direct_switches.load(Ordering::Relaxed),
             direct_active_paths: self.direct_active_paths.load(Ordering::Relaxed),
             exit_path_available: self.exit_path_available.load(Ordering::Relaxed),
+            exit_forwarded_packets_total: self.exit_forwarded_packets_total.load(Ordering::Relaxed),
+            exit_forwarded_bytes_total: self.exit_forwarded_bytes_total.load(Ordering::Relaxed),
+            exit_forwarding_ready: self.exit_forwarding_ready.load(Ordering::Relaxed),
+            exit_nat_ready: self.exit_nat_ready.load(Ordering::Relaxed),
+            exit_namespace_cleanup_failures_total: self
+                .exit_namespace_cleanup_failures_total
+                .load(Ordering::Relaxed),
             controller_candidate_exchange_enabled: self
                 .controller_candidate_exchange_enabled
                 .load(Ordering::Relaxed),
@@ -224,6 +238,27 @@ impl Metrics {
         metric!("direct_switches_total", "counter", snapshot.direct_switches);
         metric!("direct_active_paths", "gauge", snapshot.direct_active_paths);
         metric!("exit_path_available", "gauge", snapshot.exit_path_available);
+        metric!(
+            "exit_forwarded_packets_total",
+            "counter",
+            snapshot.exit_forwarded_packets_total
+        );
+        metric!(
+            "exit_forwarded_bytes_total",
+            "counter",
+            snapshot.exit_forwarded_bytes_total
+        );
+        metric!(
+            "exit_forwarding_ready",
+            "gauge",
+            snapshot.exit_forwarding_ready
+        );
+        metric!("exit_nat_ready", "gauge", snapshot.exit_nat_ready);
+        metric!(
+            "exit_namespace_cleanup_failures_total",
+            "counter",
+            snapshot.exit_namespace_cleanup_failures_total
+        );
         metric!(
             "controller_candidate_exchange_enabled",
             "gauge",
@@ -318,6 +353,11 @@ pub struct MetricsSnapshot {
     pub direct_switches: u64,
     pub direct_active_paths: u64,
     pub exit_path_available: u64,
+    pub exit_forwarded_packets_total: u64,
+    pub exit_forwarded_bytes_total: u64,
+    pub exit_forwarding_ready: u64,
+    pub exit_nat_ready: u64,
+    pub exit_namespace_cleanup_failures_total: u64,
     pub controller_candidate_exchange_enabled: u64,
     pub controller_certificate_renewal_needed: u64,
     pub controller_certificate_renew_after_seconds: u64,
@@ -355,6 +395,10 @@ mod tests {
             "laneway_rust_node_tcp_active 0",
             "laneway_rust_node_direct_active_paths 0",
             "laneway_rust_node_exit_path_available 0",
+            "laneway_rust_node_exit_forwarded_packets_total 0",
+            "laneway_rust_node_exit_forwarding_ready 0",
+            "laneway_rust_node_exit_nat_ready 0",
+            "laneway_rust_node_exit_namespace_cleanup_failures_total 0",
             "laneway_rust_node_controller_certificate_renew_after_seconds 0",
             "laneway_rust_node_outbound_queue_depth 0",
             "laneway_rust_node_inject_queue_depth 3",

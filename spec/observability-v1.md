@@ -35,7 +35,30 @@ Packet contents and credentials MUST NOT be logged. Repeated malformed traffic
 SHOULD be represented by counters and rate-limited summaries rather than one log
 entry per packet.
 
-## 4. Go diagnostics endpoint
+## 4. Local readiness status
+
+The authenticated, mode-0600 Unix status API and `laneway status` MUST provide
+a bounded readiness summary. The stable summary identifies the actor (`user`,
+`node`, or `exit-node`), network and NodeID, overlay addresses, installed route
+prefixes, active carrier, controller certificate health, and an ephemeral
+identity-lease deadline when one exists. The configuration-lease deadline and
+an explicit expired flag distinguish controller authority health from
+certificate health. Exit clients identify the selected
+Exit Node and authorization state. Exit servers additionally report forwarding
+and NAT readiness, forwarded packets, and namespace-cleanup failures.
+
+Per-peer status is local-only and distinguishes `direct`, `relay-quic`,
+`tcp-fallback`, and `disconnected`. JSON field names are shared by the Go and
+Rust local APIs. Unknown or unavailable deadlines are zero, and empty bounded
+lists are encoded as empty arrays.
+
+A foreground temporary User session prints `actor=user`, owned routes,
+local-LAN bypasses, DNS ownership (`native` or `temporary-session`), the
+identity lease deadline, and `cleanup_journal=helper-active`. Successful exit
+prints that temporary networking was restored. These fields describe ownership
+only; tokens, keys, rendezvous material, and packet data are never included.
+
+## 5. Go diagnostics endpoint
 
 The Go daemons accept an opt-in `-diagnostics` TCP address. The address MUST be
 an explicit loopback address or `localhost`; wildcard and non-loopback binds are
@@ -61,7 +84,20 @@ authorization-failure, and internal-failure counters. These classifications
 are deliberately label-free; peer identities, routes, and credentials never
 become metric dimensions.
 
-## 5. Rust node diagnostics endpoint
+Go Exit Nodes export `laneway_exit_forwarded_packets_total`,
+`laneway_exit_forwarding_ready`, `laneway_exit_nat_ready`, and
+`laneway_exit_namespace_cleanup_failures_total`. A forwarded packet is one
+accepted between the encrypted carrier and Exit TUN; it is not proof that an
+Internet destination replied. Readiness is one only after the owned gateway
+configuration applied successfully. Cleanup failures count failed attempts to
+restore command-owned namespace or gateway state.
+
+Rust Exit Nodes expose the equivalent label-free
+`laneway_rust_node_exit_forwarded_packets_total`,
+`laneway_rust_node_exit_forwarded_bytes_total`, readiness gauges, and
+`laneway_rust_node_exit_namespace_cleanup_failures_total`.
+
+## 6. Rust node diagnostics endpoint
 
 The native Rust node accepts an optional `diagnostics.listen` socket in its
 strict TOML configuration. The address MUST be an explicit, nonzero loopback
@@ -85,7 +121,7 @@ injection queue depths, and the maximum observed queue depth. These metrics
 are node-global and label-free; they do not identify a peer, route, address,
 or credential.
 
-## 6. Rust relay diagnostics endpoint
+## 7. Rust relay diagnostics endpoint
 
 The native Rust relay accepts an optional `relay.metrics_listen` socket in its
 strict TOML configuration. The address MUST be an explicit loopback IP socket;
@@ -107,7 +143,18 @@ requested allocation bytes from the production system-allocator wrapper.
 Periodic structured metric logs remain
 available independently of the HTTP listener.
 
-## 7. Backpressure
+## 8. Alert guidance
+
+Operators SHOULD alert when a nonzero controller certificate or identity lease
+deadline is approaching inside their renewal safety window, or when certificate
+renewal-needed remains one. Alert on sustained relay limiter saturation or a
+positive throttled-byte rate. Compare direct attempts/failures, switches, and
+active-direct gauges over a normal baseline to detect direct-path regression;
+a relay fallback is healthy behavior, while a sustained loss of direct paths is
+an operational signal. Any cleanup-failure increment is actionable. An Exit
+Node configured to serve with forwarding or NAT readiness at zero is not ready.
+
+## 9. Backpressure
 
 All dataplane queues MUST be bounded and MUST expose drops caused by a full
 queue. Profiling and metrics serving run outside packet loops. A slow metrics
