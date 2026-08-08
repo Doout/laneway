@@ -1127,8 +1127,20 @@ EOF
     sed -n '1,260p' "${case_dir}/b.log" >&2
     return 1
   fi
-  ip netns exec "${node_a}" "${work_dir}/laneway" exit use wireguard-b \
-    --config "${case_dir}/a.toml" >"${case_dir}/exit-use.txt"
+  local exit_use_ready=0
+  for _ in $(seq 1 200); do
+    if ip netns exec "${node_a}" "${work_dir}/laneway" exit use wireguard-b \
+      --config "${case_dir}/a.toml" >"${case_dir}/exit-use.txt" 2>"${case_dir}/exit-use.err"; then
+      exit_use_ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${exit_use_ready}" != "1" ]]; then
+    echo "ERROR: client did not observe the approved WireGuard exit route" >&2
+    cat "${case_dir}/exit-use.err" >&2
+    return 1
+  fi
   local exit_selected=0
   for _ in $(seq 1 200); do
     if ip -n "${node_a}" -4 rule show priority 11000 | grep -q 'lookup 51820' && \

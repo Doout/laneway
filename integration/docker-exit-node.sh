@@ -316,6 +316,7 @@ nat = true
 [exit]
 serve = ${serve}
 failure_mode = "closed"
+dns_servers = ["1.1.1.1"]
 EOF
 }
 node_config "${work_dir}/client" docker-client 4435 false eth0
@@ -406,7 +407,20 @@ for _ in $(seq 1 120); do
   sleep 0.25
 done
 node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null
-docker exec --user 65532:65532 "${client_name}" /usr/local/bin/laneway exit use docker-gateway -config /secrets/node.toml >/dev/null
+exit_selected=0
+for _ in $(seq 1 240); do
+  if docker exec --user 65532:65532 "${client_name}" /usr/local/bin/laneway exit use docker-gateway \
+    -config /secrets/node.toml >/dev/null 2>"${work_dir}/exit-use.err"; then
+    exit_selected=1
+    break
+  fi
+  sleep 0.25
+done
+if [[ "${exit_selected}" != "1" ]]; then
+  echo "ERROR: client did not observe the approved container Exit route" >&2
+  cat "${work_dir}/exit-use.err" >&2
+  exit 1
+fi
 wait_status "${client_name}" /secrets/node.toml "exit=${gateway_id} authorized=true"
 
 run_external_flow() {
