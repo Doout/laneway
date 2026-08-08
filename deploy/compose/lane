@@ -8,6 +8,8 @@ state_dir=$base_dir/generated/lifecycle
 usage() {
   cat >&2 <<'EOF'
 usage: ./lane <init|invite|status|backup|restore|upgrade|rollback> [options]
+
+  init [--issuer OFFLINE_BUNDLE | --dev]
 EOF
 }
 die() { echo "lane: $*" >&2; exit 1; }
@@ -85,6 +87,60 @@ backup_database() {
 }
 admin() { compose --profile tools run --rm --no-deps admin "$@"; }
 
+service_health() {
+  service=$1; required=$2
+  container=$(compose --profile exit-node ps -q "$service")
+  if [ -z "$container" ]; then
+    echo "$service=not-running"
+    [ "$required" = false ]
+    return
+  fi
+  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container") || {
+    echo "$service=inspect-failed"
+    return 1
+  }
+  echo "$service=$health"
+  [ "$health" = healthy ] || [ "$health" = running ]
+}
+
+run_status() {
+  [ "$#" -eq 0 ] || die "status accepts no arguments"
+  compose --profile exit-node ps
+  failed=false
+  service_health controller true || failed=true
+  service_health relay true || failed=true
+  relay_config=$base_dir/generated/config/relay.toml
+  if [ -f "$relay_config" ] && [ ! -L "$relay_config" ]; then
+    rate=$(sed -n 's/^packet_rate_bits_per_second[[:space:]]*=[[:space:]]*//p' "$relay_config")
+    burst=$(sed -n 's/^packet_burst_bytes[[:space:]]*=[[:space:]]*//p' "$relay_config")
+    if [ -n "$rate" ] && [ -n "$burst" ]; then
+      echo "relay-limiter=configured rate_bits_per_second=$rate burst_bytes=$burst health_follows_relay"
+    else
+      echo "relay-limiter=disabled"
+    fi
+  else
+    echo "relay-limiter=configuration-unavailable"
+  fi
+  if [ -f "$base_dir/generated/config/exit-node.toml" ] && [ ! -L "$base_dir/generated/config/exit-node.toml" ]; then
+    if service_health exit-node false; then
+      exit_container=$(compose --profile exit-node ps -q exit-node)
+      if [ -n "$exit_container" ]; then
+        echo "exit-direct-path:"
+        compose --profile exit-node exec -T --user 65532:65532 exit-node \
+          /usr/local/bin/laneway status --socket /run/laneway/lanewayd.sock || failed=true
+      else
+        echo "exit-direct-path=not-running"
+      fi
+    else
+      failed=true
+    fi
+  else
+    echo "exit-node=not-configured"
+    echo "exit-direct-path=not-configured"
+  fi
+  [ "$failed" = false ] || die "one or more configured services are unhealthy"
+}
+
 run_invite() {
   name=; class=durable; expires=10m; session=
   while [ "$#" -gt 0 ]; do
@@ -160,10 +216,19 @@ activate_release() {
 
 run_init() {
   case "${1:-}" in
-    --dev) [ "$#" -eq 1 ] || die "init accepts only --dev"; exec "$base_dir/bootstrap.sh" --dev ;;
-    '') [ "$#" -eq 0 ] || die "init accepts only --dev" ;;
-    *) die "init accepts only --dev" ;;
+    --dev)
+      [ "$#" -eq 1 ] || die "init accepts only --dev"
+      "$base_dir/preflight.sh" --dev
+      exec "$base_dir/bootstrap.sh" --dev
+      ;;
+    --issuer)
+      [ "$#" -eq 2 ] || die "init --issuer requires one offline issuer directory"
+      "$base_dir/prepare.sh" "$2"
+      ;;
+    '') [ "$#" -eq 0 ] || die "init accepts --issuer DIR or --dev" ;;
+    *) die "init accepts --issuer DIR or --dev" ;;
   esac
+  "$base_dir/preflight.sh"
   validate_release_env "$env_file"
   verify_release_images "$env_file"
   compose pull
@@ -174,7 +239,7 @@ command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 case "$command" in
   init) run_init "$@" ;;
   invite) run_invite "$@" ;;
-  status) [ "$#" -eq 0 ] || die "status accepts no arguments"; compose --profile exit-node ps ;;
+  status) run_status "$@" ;;
   backup) [ "$#" -le 1 ] || die "backup accepts one name"; backup_database "${1:-controller-$(date -u +%Y%m%dT%H%M%SZ).db}" ;;
   restore)
     [ "$#" -eq 1 ] || die "restore requires one backup name"; validate_backup_name "$1"

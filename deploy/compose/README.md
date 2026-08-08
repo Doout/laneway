@@ -14,8 +14,34 @@ images from this checkout.
 - Docker Engine 26 or newer with Compose v2
 - public DNS for the control host
 - inbound TCP+UDP 8443, UDP 4433, and TCP 443
-- an offline root, an online intermediate, and service identities created as
-  described in [../../docs/operations.md](../../docs/operations.md)
+- an offline root and an exported online-intermediate bundle created as
+  described below and in [../../docs/operations.md](../../docs/operations.md)
+
+On an offline Linux workstation, create the root and online intermediate. Keep
+the entire `offline-root` directory offline and backed up; only the three files
+shown in `issuer-export` may be transferred to the control host:
+
+```sh
+install -d -m 0700 offline-root issuer-export
+laneway pki init --out-dir offline-root --name "Laneway Offline Root"
+laneway pki intermediate \
+  --ca-cert offline-root/ca.crt --ca-key offline-root/ca.key \
+  --out-cert issuer-export/intermediate-chain.crt \
+  --out-key issuer-export/intermediate.key
+cp offline-root/ca.crt issuer-export/ca.crt
+chmod 0400 issuer-export/intermediate.key
+test ! -e issuer-export/ca.key
+```
+
+After completing `.env`, run `sudo ./lane init --issuer /path/to/issuer-export`.
+The command validates that the online key matches an ordered, currently valid
+chain anchored by the exact offline root certificate. It generates controller
+and relay service identities, strict configurations, and an independent admin
+token, publishes them without overwriting, verifies host/DNS/port prerequisites
+read-only, verifies signed images, and starts the ready stack. A root private
+key or unexpected private key in the export is rejected. Repeating the command
+with the same completed material is idempotent; partial generated state is
+rejected for manual inspection.
 
 Copy `.env.example` to `.env` and pin a release. Download that release's
 `image-digests.txt`, verify the release as described below, and copy each
@@ -60,8 +86,9 @@ sudo ./bootstrap.sh
 ```
 
 The packaged `./lane` wrapper is the normal operator entry point. `lane init`
-performs the same idempotent validation/bootstrap, `lane status` reports the
-Compose health state, and `lane invite --name DEVICE` issues a single-use token
+performs idempotent validation/bootstrap. `lane status` reports controller,
+relay, limiter, optional Exit Node, and live Exit direct-path health, and exits
+nonzero for an unhealthy required service. `lane invite --name DEVICE` issues a single-use token
 through the isolated admin container. `lane backup [NAME.db]` and
 `lane restore NAME.db` use the guarded database maintenance modes documented
 below.
