@@ -76,7 +76,7 @@ func backupDatabase(ctx context.Context, source *sql.DB, destination string, max
 	}
 	temporaryPath := temporary.Name()
 	defer func() {
-		if removeErr := os.Remove(temporaryPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		if removeErr := removeTemporaryDatabaseFiles(temporaryPath); removeErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("remove temporary backup: %w", removeErr))
 		}
 	}()
@@ -147,6 +147,17 @@ func backupDatabase(ctx context.Context, source *sql.DB, destination string, max
 		return err
 	}
 	return nil
+}
+
+func removeTemporaryDatabaseFiles(path string) error {
+	var result error
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		candidate := path + suffix
+		if err := os.Remove(candidate); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, fmt.Errorf("remove %s: %w", filepath.Base(candidate), err))
+		}
+	}
+	return result
 }
 
 func validateNewDatabasePath(path string) (string, error) {

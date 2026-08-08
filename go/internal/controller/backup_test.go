@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ func TestBackupAndFreshRestore(t *testing.T) {
 	if err := store.Backup(ctx, backupPath); err != nil {
 		t.Fatal(err)
 	}
+	assertNoTemporaryDatabaseFiles(t, filepath.Dir(backupPath))
 	info, err := os.Stat(backupPath)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +59,7 @@ func TestBackupAndFreshRestore(t *testing.T) {
 	if err := RestoreDatabase(ctx, backupPath, restoredPath); err != nil {
 		t.Fatal(err)
 	}
+	assertNoTemporaryDatabaseFiles(t, filepath.Dir(restoredPath))
 	restored, err := Open(ctx, restoredPath)
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +75,27 @@ func TestBackupAndFreshRestore(t *testing.T) {
 	if afterCount != 0 {
 		t.Fatalf("post-backup record count = %d, want 0", afterCount)
 	}
+}
+
+func assertNoTemporaryDatabaseFiles(t *testing.T, directory string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(directory, ".laneway-database-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) == 0 {
+		return
+	}
+	var details []string
+	for _, match := range matches {
+		info, statErr := os.Lstat(match)
+		if statErr != nil {
+			details = append(details, match+": "+statErr.Error())
+			continue
+		}
+		details = append(details, fmt.Sprintf("%s (%d bytes, %s)", match, info.Size(), info.Mode()))
+	}
+	t.Fatalf("temporary SQLite files remain: %s", strings.Join(details, ", "))
 }
 
 func TestBackupNeverOverwritesDestination(t *testing.T) {
@@ -158,13 +182,15 @@ func TestBackupHonorsCanceledContext(t *testing.T) {
 	store, _ := openTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	destination := filepath.Join(t.TempDir(), "canceled.db")
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "canceled.db")
 	if err := store.Backup(ctx, destination); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Backup error = %v, want context canceled", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("canceled backup published destination: %v", err)
 	}
+	assertNoTemporaryDatabaseFiles(t, directory)
 }
 
 func TestRestoreRejectsFutureSchema(t *testing.T) {
