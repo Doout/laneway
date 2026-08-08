@@ -52,7 +52,8 @@ jq -e '
   ([.services["exit-node"].volumes[] | select(.type == "bind") | .read_only == true] | all) and
   (.services["exit-node"].healthcheck.test == ["CMD", "/bin/setpriv", "--reuid=65532", "--regid=65532", "--clear-groups", "--bounding-set=-all", "--no-new-privs", "/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]) and
   (.services.controller.volumes | any(.type == "volume" and .target == "/var/lib/laneway-controller")) and
-  ([.services.controller.volumes[] | select(.type == "bind") | .read_only == true] | all) and
+  (.services.controller.volumes | any(.type == "bind" and .target == "/backups" and ((.read_only // false) == false))) and
+  ([.services.controller.volumes[] | select(.type == "bind" and .target != "/backups") | .read_only == true] | all) and
   ([.services.relay.volumes[] | select(.type == "bind") | .read_only == true] | all) and
   (.services.controller.healthcheck.test[-1] == "controller.example.test") and
   (.services.relay.healthcheck.test[0] == "CMD")

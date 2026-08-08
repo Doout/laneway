@@ -151,8 +151,25 @@ if grep -E 'REPLACE_|CHANGE_ME|latest([:@]|$)' \
   exit 1
 fi
 
-mkdir -p "$base_dir/generated/backups"
-chmod 0700 "$base_dir/generated/backups"
+backup_dir=$base_dir/generated/backups
+if [ -e "$backup_dir" ] && { [ ! -d "$backup_dir" ] || [ -L "$backup_dir" ]; }; then
+  echo "generated/backups must be a real directory" >&2
+  exit 1
+fi
+install -d -m 0700 -o 65532 -g 65532 "$backup_dir"
+for path in "$backup_dir"/*; do
+  [ -e "$path" ] || continue
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
+    echo "backup entries must be regular, non-symlink files: $path" >&2
+    exit 1
+  fi
+  mode=$(stat -c '%a' "$path")
+  owner=$(stat -c '%u' "$path")
+  if [ "$mode" != 600 ] || [ "$owner" != 65532 ]; then
+    echo "backup files must be owned by UID 65532 with mode 0600: $path" >&2
+    exit 1
+  fi
+done
 
 docker compose --project-directory "$base_dir" \
   --env-file "$base_dir/.env" \
