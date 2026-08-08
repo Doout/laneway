@@ -126,6 +126,9 @@ func TestManagerRuntimePrefersDirectAndKeepsRelayFallback(t *testing.T) {
 	if err := manager.ApplyPeers(context.Background(), []ManagedPeer{peer}); err != nil {
 		t.Fatal(err)
 	}
+	if got := manager.CarrierSummary(); got != "disconnected" {
+		t.Fatalf("initial carrier summary=%q", got)
+	}
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
 	go func() { runDone <- manager.Run(runCtx) }()
@@ -144,6 +147,12 @@ func TestManagerRuntimePrefersDirectAndKeepsRelayFallback(t *testing.T) {
 	for !manager.PathAvailable(peer.NodeID) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
+	if got := manager.SelectedCarrier(peer.NodeID); got != "wireguard-relay-quic" {
+		t.Fatalf("relay carrier=%q", got)
+	}
+	if got := manager.CarrierSummary(); got != "wireguard-relay-quic" {
+		t.Fatalf("relay summary=%q", got)
+	}
 	packet := wireGuardInitiation()
 	peerEndpoint := manager.endpoint.Endpoints()[peer.NodeID]
 	if _, err := kernel.WriteToUDPAddrPort(packet, peerEndpoint); err != nil {
@@ -158,6 +167,9 @@ func TestManagerRuntimePrefersDirectAndKeepsRelayFallback(t *testing.T) {
 	direct := newTestCarrierPath("direct-test", peer.NodeID)
 	if err := manager.Attach(peer.NodeID, pathmanager.PathDirect, direct); err != nil {
 		t.Fatal(err)
+	}
+	if got := manager.SelectedCarrier(peer.NodeID); got != "direct-wireguard" {
+		t.Fatalf("direct carrier=%q", got)
 	}
 	if _, err := kernel.WriteToUDPAddrPort(packet, peerEndpoint); err != nil {
 		t.Fatal(err)

@@ -71,15 +71,25 @@ func TestCarrierMuxPrefersDirectAndFallsBackToRelay(t *testing.T) {
 	peer := relayNode(71)
 	direct := newTestCarrierPath("direct", peer)
 	relay := newTestCarrierPath("relay", peer)
+	tcp := newTestCarrierPath("tcp", peer)
 	mux, err := NewCarrierMux(pathmanager.Config{})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mux.Attach(peer, pathmanager.PathTCPFallback, tcp); err != nil {
 		t.Fatal(err)
 	}
 	if err := mux.Attach(peer, pathmanager.PathRelayQUIC, relay); err != nil {
 		t.Fatal(err)
 	}
+	if status := mux.Carrier(peer); status.Selected != "wireguard-relay-quic" || status.State != pathmanager.HealthHealthy {
+		t.Fatalf("relay status=%+v", status)
+	}
 	if err := mux.Attach(peer, pathmanager.PathDirect, direct); err != nil {
 		t.Fatal(err)
+	}
+	if status := mux.Carrier(peer); status.Selected != "direct-wireguard" || status.State != pathmanager.HealthHealthy {
+		t.Fatalf("direct status=%+v", status)
 	}
 	packet := wireGuardInitiation()
 	if err := mux.Send(context.Background(), peer, packet); err != nil {
@@ -97,9 +107,62 @@ func TestCarrierMuxPrefersDirectAndFallsBackToRelay(t *testing.T) {
 	if relay.sentCount() != 1 {
 		t.Fatalf("relay sends=%d", relay.sentCount())
 	}
+	if status := mux.Carrier(peer); status.Selected != "wireguard-relay-quic" || status.State != pathmanager.HealthHealthy {
+		t.Fatalf("fallback status=%+v", status)
+	}
+	relay.mu.Lock()
+	relay.sendErr = errors.New("relay QUIC failed")
+	relay.mu.Unlock()
+	if err := mux.Send(context.Background(), peer, packet); err != nil {
+		t.Fatal(err)
+	}
+	if tcp.sentCount() != 1 {
+		t.Fatalf("TCP sends=%d", tcp.sentCount())
+	}
+	if status := mux.Carrier(peer); status.Selected != "wireguard-relay-tcp" || status.State != pathmanager.HealthHealthy {
+		t.Fatalf("TCP fallback status=%+v", status)
+	}
+	if !mux.Detach(peer, direct.Name()) {
+		t.Fatal("failed direct path was not detached")
+	}
+	recovered := newTestCarrierPath("direct", peer)
+	if err := mux.Attach(peer, pathmanager.PathDirect, recovered); err != nil {
+		t.Fatal(err)
+	}
+	if err := mux.Send(context.Background(), peer, packet); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.sentCount() != 1 {
+		t.Fatalf("recovered direct sends=%d", recovered.sentCount())
+	}
+	if status := mux.Carrier(peer); status.Selected != "direct-wireguard" || status.State != pathmanager.HealthHealthy {
+		t.Fatalf("recovered direct status=%+v", status)
+	}
 	metrics := mux.Metrics()
-	if metrics.PacketsSent != 2 || metrics.PathFailures != 1 || metrics.PathSwitchRetries != 1 {
+	if metrics.PacketsSent != 4 || metrics.PathFailures != 2 || metrics.PathSwitchRetries != 2 {
 		t.Fatalf("metrics=%+v", metrics)
+	}
+	pathMetrics := mux.PathMetrics()
+	if pathMetrics.Observations != 6 || pathMetrics.DirectFailures != 1 || pathMetrics.Switches != 5 || pathMetrics.Peers != 1 {
+		t.Fatalf("path metrics=%+v", pathMetrics)
+	}
+}
+
+func TestCarrierMuxReportsDisconnectedAndTCPProductStates(t *testing.T) {
+	peer := relayNode(75)
+	mux, err := NewCarrierMux(pathmanager.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := mux.Carrier(peer); status.Selected != "disconnected" || status.State != pathmanager.HealthUnknown {
+		t.Fatalf("unknown status=%+v", status)
+	}
+	tcp := newTestCarrierPath("opaque-session-name", peer)
+	if err := mux.Attach(peer, pathmanager.PathTCPFallback, tcp); err != nil {
+		t.Fatal(err)
+	}
+	if status := mux.Carrier(peer); status.Selected != "wireguard-relay-tcp" || status.State != pathmanager.HealthHealthy {
+		t.Fatalf("tcp status=%+v", status)
 	}
 }
 

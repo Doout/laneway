@@ -32,6 +32,14 @@ type CarrierMuxMetrics struct {
 	PathSwitchRetries uint64
 }
 
+// CarrierStatus is the bounded, non-secret view of one peer's encrypted
+// carrier selection. Transport object names and endpoint addresses are not
+// exposed because they may contain peer or network details.
+type CarrierStatus struct {
+	Selected string
+	State    pathmanager.HealthState
+}
+
 type carrierMuxCounters struct {
 	packetsSent       atomic.Uint64
 	packetsReceived   atomic.Uint64
@@ -300,6 +308,54 @@ func (m *CarrierMux) Metrics() CarrierMuxMetrics {
 		PacketsSent: m.metrics.packetsSent.Load(), PacketsReceived: m.metrics.packetsReceived.Load(),
 		PacketsDropped: m.metrics.packetsDropped.Load(), PathFailures: m.metrics.pathFailures.Load(),
 		PathSwitchRetries: m.metrics.pathSwitchRetries.Load(),
+	}
+}
+
+// PathMetrics reports aggregate selection health without exposing peers,
+// endpoint addresses, or failure strings.
+func (m *CarrierMux) PathMetrics() pathmanager.Metrics {
+	if m == nil {
+		return pathmanager.Metrics{}
+	}
+	return m.paths.Snapshot().Metrics()
+}
+
+// Carrier reports the selected product carrier for one authenticated peer.
+// Peers with attached but unhealthy paths are degraded; peers whose paths are
+// not yet selected are negotiating. Unknown peers are disconnected.
+func (m *CarrierMux) Carrier(peer identity.NodeID) CarrierStatus {
+	if m == nil || peer.IsZero() {
+		return CarrierStatus{Selected: "disconnected", State: pathmanager.HealthUnknown}
+	}
+	view, ok := m.paths.Snapshot().Peer(peer)
+	if !ok || len(view.Paths) == 0 {
+		return CarrierStatus{Selected: "disconnected", State: pathmanager.HealthUnknown}
+	}
+	if view.Selected != "" {
+		for _, path := range view.Paths {
+			if path.Selected {
+				return CarrierStatus{Selected: carrierProductName(path.Kind), State: path.State}
+			}
+		}
+	}
+	for _, path := range view.Paths {
+		if path.State == pathmanager.HealthFailed || path.State == pathmanager.HealthProbing {
+			return CarrierStatus{Selected: "degraded", State: path.State}
+		}
+	}
+	return CarrierStatus{Selected: "negotiating", State: pathmanager.HealthUnknown}
+}
+
+func carrierProductName(kind pathmanager.PathKind) string {
+	switch kind {
+	case pathmanager.PathDirect:
+		return "direct-wireguard"
+	case pathmanager.PathRelayQUIC:
+		return "wireguard-relay-quic"
+	case pathmanager.PathTCPFallback:
+		return "wireguard-relay-tcp"
+	default:
+		return "disconnected"
 	}
 }
 

@@ -95,6 +95,37 @@ func (m *Manager) Peers() []ManagedPeer {
 }
 
 func (m *Manager) RelayMetrics() RelayEndpointMetrics { return m.endpoint.Metrics() }
+func (m *Manager) CarrierMetrics() CarrierMuxMetrics  { return m.carriers.Metrics() }
+func (m *Manager) CarrierPathMetrics() pathmanager.Metrics {
+	return m.carriers.PathMetrics()
+}
+
+func (m *Manager) SelectedCarrier(peer identity.NodeID) string {
+	return m.carriers.Carrier(peer).Selected
+}
+
+// CarrierSummary reports one carrier when every managed peer agrees, "mixed"
+// when peers use different carriers, and disconnected when no peer has a path.
+func (m *Manager) CarrierSummary() string {
+	m.mu.Lock()
+	peers := cloneManagedPeers(m.peers)
+	m.mu.Unlock()
+	selected := ""
+	for _, peer := range peers {
+		carrier := m.SelectedCarrier(peer.NodeID)
+		if selected == "" {
+			selected = carrier
+			continue
+		}
+		if carrier != selected {
+			return "mixed"
+		}
+	}
+	if selected == "" {
+		return "disconnected"
+	}
+	return selected
+}
 
 // ApplyPeers commits an exact peer snapshot. It first stages the union of old
 // and new loopback sockets, then replaces the kernel snapshot, then removes

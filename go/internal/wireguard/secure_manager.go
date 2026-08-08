@@ -30,6 +30,10 @@ type managedWireGuard interface {
 	Peers() []ManagedPeer
 	ApplyPeers(context.Context, []ManagedPeer) error
 	RelayMetrics() RelayEndpointMetrics
+	CarrierMetrics() CarrierMuxMetrics
+	CarrierPathMetrics() pathmanager.Metrics
+	SelectedCarrier(identity.NodeID) string
+	CarrierSummary() string
 	Run(context.Context) error
 	PathAvailable(identity.NodeID) bool
 	RunRelay(context.Context, *RelayMux, pathmanager.PathKind, string) error
@@ -81,7 +85,15 @@ func (m *SecureManager) PublicKey() PublicKey               { return m.manager.P
 func (m *SecureManager) Addresses() []netip.Prefix          { return m.manager.Addresses() }
 func (m *SecureManager) Peers() []ManagedPeer               { return m.manager.Peers() }
 func (m *SecureManager) RelayMetrics() RelayEndpointMetrics { return m.manager.RelayMetrics() }
-func (m *SecureManager) Run(ctx context.Context) error      { return m.manager.Run(ctx) }
+func (m *SecureManager) CarrierMetrics() CarrierMuxMetrics  { return m.manager.CarrierMetrics() }
+func (m *SecureManager) CarrierPathMetrics() pathmanager.Metrics {
+	return m.manager.CarrierPathMetrics()
+}
+func (m *SecureManager) SelectedCarrier(peer identity.NodeID) string {
+	return m.manager.SelectedCarrier(peer)
+}
+func (m *SecureManager) CarrierSummary() string        { return m.manager.CarrierSummary() }
+func (m *SecureManager) Run(ctx context.Context) error { return m.manager.Run(ctx) }
 func (m *SecureManager) PathAvailable(peer identity.NodeID) bool {
 	return m.manager.PathAvailable(peer)
 }

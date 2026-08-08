@@ -11,6 +11,7 @@ import (
 	"laneway.dev/laneway/internal/exitnode"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/nodeservice"
+	"laneway.dev/laneway/internal/pathmanager"
 	"laneway.dev/laneway/internal/platform"
 	"laneway.dev/laneway/internal/wireguard"
 )
@@ -101,6 +102,10 @@ type secureWireGuardRuntime interface {
 	RestoreGuard(context.Context) error
 	ApplySnapshot(context.Context, wireguard.SecureSnapshot) error
 	RelayMetrics() wireguard.RelayEndpointMetrics
+	CarrierMetrics() wireguard.CarrierMuxMetrics
+	CarrierPathMetrics() pathmanager.Metrics
+	SelectedCarrier(identity.NodeID) string
+	CarrierSummary() string
 	PathAvailable(identity.NodeID) bool
 	Close() error
 }

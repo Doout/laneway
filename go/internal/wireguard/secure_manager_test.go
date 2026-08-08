@@ -35,6 +35,12 @@ func (d *fakeSecureDevice) ApplyPeers(_ context.Context, peers []ManagedPeer) er
 	return nil
 }
 func (d *fakeSecureDevice) RelayMetrics() RelayEndpointMetrics { return RelayEndpointMetrics{} }
+func (d *fakeSecureDevice) CarrierMetrics() CarrierMuxMetrics  { return CarrierMuxMetrics{} }
+func (d *fakeSecureDevice) CarrierPathMetrics() pathmanager.Metrics {
+	return pathmanager.Metrics{}
+}
+func (d *fakeSecureDevice) SelectedCarrier(identity.NodeID) string { return "wireguard-relay-quic" }
+func (d *fakeSecureDevice) CarrierSummary() string                 { return "wireguard-relay-quic" }
 func (d *fakeSecureDevice) Run(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()

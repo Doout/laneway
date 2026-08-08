@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"laneway.dev/laneway/internal/policy"
 	"laneway.dev/laneway/internal/protocol"
 	"laneway.dev/laneway/internal/routing"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 type diagnosticsPath struct{ name string }
@@ -58,6 +60,49 @@ func TestPathManagerDiagnosticsExposeAutomaticFailover(t *testing.T) {
 	} {
 		if got := values[name]; got != want {
 			t.Errorf("%s = %d, want %d", name, got, want)
+		}
+	}
+}
+
+func TestWireGuardCarrierStatusOverridesRelaySessionStatus(t *testing.T) {
+	peer := identity.NodeID(testID(10))
+	secure := &fakeNodeWireGuard{carrier: "direct-wireguard", summary: "mixed"}
+	if got := peerPathState(peer, nil, nil, secure); got != "direct-wireguard" {
+		t.Fatalf("peer carrier=%q", got)
+	}
+	if got := foregroundPath(identity.NodeID(testID(11)), nil, nil, nil, secure); got != "mixed" {
+		t.Fatalf("foreground carrier=%q", got)
+	}
+}
+
+func TestWireGuardDiagnosticsExposeCarrierFailoverWithoutLabels(t *testing.T) {
+	secure := &fakeNodeWireGuard{
+		relayMetrics: wireguard.RelayEndpointMetrics{
+			PacketsSent: 1, PacketsReceived: 2, PacketsDropped: 3, UnknownSources: 4, UnauthorizedPeers: 5,
+		},
+		carrierMetrics: wireguard.CarrierMuxMetrics{
+			PacketsSent: 6, PacketsReceived: 7, PacketsDropped: 8, PathFailures: 9, PathSwitchRetries: 10,
+		},
+		carrierPathMetrics: pathmanager.Metrics{Observations: 11, DirectFailures: 12, Switches: 13, Peers: 14},
+	}
+	values := map[string]uint64{}
+	addWireGuardDiagnostics(values, secure)
+	for name, want := range map[string]uint64{
+		"wireguard_packets_sent_total": 1, "wireguard_packets_received_total": 2,
+		"wireguard_packets_dropped_total": 3, "wireguard_unknown_sources_total": 4,
+		"wireguard_unauthorized_peers_total": 5, "wireguard_carrier_packets_sent_total": 6,
+		"wireguard_carrier_packets_received_total": 7, "wireguard_carrier_packets_dropped_total": 8,
+		"wireguard_carrier_path_failures_total": 9, "wireguard_carrier_path_switch_retries_total": 10,
+		"wireguard_carrier_observations_total": 11, "wireguard_carrier_direct_failures_total": 12,
+		"wireguard_carrier_switches_total": 13, "wireguard_carrier_peers": 14,
+	} {
+		if got := values[name]; got != want {
+			t.Errorf("%s=%d, want %d", name, got, want)
+		}
+	}
+	for name := range values {
+		if strings.Contains(name, "peer") && name != "wireguard_carrier_peers" && name != "wireguard_unauthorized_peers_total" {
+			t.Fatalf("identity-derived metric name=%q", name)
 		}
 	}
 }

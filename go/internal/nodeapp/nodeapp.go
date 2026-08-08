@@ -584,7 +584,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 				case <-runCtx.Done():
 					return
 				case <-ticker.C:
-					path := foregroundPath(local.NodeID, controllerState, pathManager, service)
+					path := foregroundPath(local.NodeID, controllerState, pathManager, service, secureWireGuard)
 					if path != last {
 						last = path
 						emitStatus(path)
@@ -620,12 +620,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			values["dataplane_path_switch_retries_total"] = dataMetrics.PathSwitchRetries
 		}
 		if secureWireGuard != nil {
-			wireGuardMetrics := secureWireGuard.RelayMetrics()
-			values["wireguard_packets_sent_total"] = wireGuardMetrics.PacketsSent
-			values["wireguard_packets_received_total"] = wireGuardMetrics.PacketsReceived
-			values["wireguard_packets_dropped_total"] = wireGuardMetrics.PacketsDropped
-			values["wireguard_unknown_sources_total"] = wireGuardMetrics.UnknownSources
-			values["wireguard_unauthorized_peers_total"] = wireGuardMetrics.UnauthorizedPeers
+			addWireGuardDiagnostics(values, secureWireGuard)
 		}
 		addPathManagerDiagnostics(values, pathManager)
 		values["controller_certificate_renewal_needed"] = 0
@@ -654,11 +649,15 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			wireGuardMetrics := secureWireGuard.RelayMetrics()
 			packetSent, packetReceived, packetDropped = wireGuardMetrics.PacketsSent, wireGuardMetrics.PacketsReceived, wireGuardMetrics.PacketsDropped
 		}
+		selectedPath := service.SelectedCarrier()
+		if secureWireGuard != nil {
+			selectedPath = secureWireGuard.CarrierSummary()
+		}
 		status := localapi.Status{
 			Running: true, NetworkID: local.NetworkID.String(), NodeID: local.NodeID.String(), Name: cfg.Node.Name,
 			Interface: interfaceName, Relay: cfg.Node.RelayAddress, MTU: interfaceMTU,
 			ProductVersion: productVersion, ControlVersion: "1.0", PacketVersion: uint8(protocol.PacketVersion1),
-			Capabilities: service.AdvertisedCapabilities().String(), SelectedPath: service.SelectedCarrier(),
+			Capabilities: service.AdvertisedCapabilities().String(), SelectedPath: selectedPath,
 			Metrics: localapi.Metrics{
 				Connections: metrics.Connections, Reconnects: metrics.Reconnects, PacketsSent: packetSent,
 				PacketsReceived: packetReceived, PacketsDropped: packetDropped,
@@ -678,7 +677,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		peers := make([]localapi.Peer, 0, len(cfg.Peers))
 		for _, peer := range cfg.Peers {
 			nodeID, _ := identity.ParseNodeID(peer.NodeID)
-			peers = append(peers, localapi.Peer{NodeID: peer.NodeID, Name: peer.Name, Prefixes: append([]string(nil), peer.Prefixes...), Path: peerPathState(nodeID, pathManager, service)})
+			peers = append(peers, localapi.Peer{NodeID: peer.NodeID, Name: peer.Name, Prefixes: append([]string(nil), peer.Prefixes...), Path: peerPathState(nodeID, pathManager, service, secureWireGuard)})
 		}
 		controllerState.mu.Lock()
 		if controllerState.accepted != nil {
@@ -694,7 +693,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 						prefixes = append(prefixes, netip.PrefixFrom(address, address.BitLen()).String())
 					}
 				}
-				peers = append(peers, localapi.Peer{NodeID: nodeID.String(), Name: peer.GetName(), Prefixes: prefixes, Path: peerPathState(nodeID, pathManager, service)})
+				peers = append(peers, localapi.Peer{NodeID: nodeID.String(), Name: peer.GetName(), Prefixes: prefixes, Path: peerPathState(nodeID, pathManager, service, secureWireGuard)})
 			}
 		}
 		controllerState.mu.Unlock()
@@ -789,7 +788,33 @@ func addPathManagerDiagnostics(values map[string]uint64, manager *pathmanager.Ma
 	values["path_peers"] = uint64(metrics.Peers)
 }
 
-func peerPathState(peer identity.NodeID, manager *pathmanager.Manager, service *nodeservice.Service) string {
+func addWireGuardDiagnostics(values map[string]uint64, secure secureWireGuardRuntime) {
+	if secure == nil {
+		return
+	}
+	wireGuardMetrics := secure.RelayMetrics()
+	carrierMetrics := secure.CarrierMetrics()
+	carrierPathMetrics := secure.CarrierPathMetrics()
+	values["wireguard_packets_sent_total"] = wireGuardMetrics.PacketsSent
+	values["wireguard_packets_received_total"] = wireGuardMetrics.PacketsReceived
+	values["wireguard_packets_dropped_total"] = wireGuardMetrics.PacketsDropped
+	values["wireguard_unknown_sources_total"] = wireGuardMetrics.UnknownSources
+	values["wireguard_unauthorized_peers_total"] = wireGuardMetrics.UnauthorizedPeers
+	values["wireguard_carrier_packets_sent_total"] = carrierMetrics.PacketsSent
+	values["wireguard_carrier_packets_received_total"] = carrierMetrics.PacketsReceived
+	values["wireguard_carrier_packets_dropped_total"] = carrierMetrics.PacketsDropped
+	values["wireguard_carrier_path_failures_total"] = carrierMetrics.PathFailures
+	values["wireguard_carrier_path_switch_retries_total"] = carrierMetrics.PathSwitchRetries
+	values["wireguard_carrier_observations_total"] = carrierPathMetrics.Observations
+	values["wireguard_carrier_direct_failures_total"] = carrierPathMetrics.DirectFailures
+	values["wireguard_carrier_switches_total"] = carrierPathMetrics.Switches
+	values["wireguard_carrier_peers"] = uint64(carrierPathMetrics.Peers)
+}
+
+func peerPathState(peer identity.NodeID, manager *pathmanager.Manager, service *nodeservice.Service, secure ...secureWireGuardRuntime) string {
+	if len(secure) != 0 && secure[0] != nil {
+		return secure[0].SelectedCarrier(peer)
+	}
 	if manager != nil {
 		if path := manager.BestPath(peer); path != nil {
 			return path.Name()
@@ -801,7 +826,10 @@ func peerPathState(peer identity.NodeID, manager *pathmanager.Manager, service *
 	return "disconnected"
 }
 
-func foregroundPath(local identity.NodeID, state *controllerApplyState, manager *pathmanager.Manager, service *nodeservice.Service) string {
+func foregroundPath(local identity.NodeID, state *controllerApplyState, manager *pathmanager.Manager, service *nodeservice.Service, secure ...secureWireGuardRuntime) string {
+	if len(secure) != 0 && secure[0] != nil {
+		return secure[0].CarrierSummary()
+	}
 	if state != nil && manager != nil {
 		state.mu.Lock()
 		if state.accepted != nil {
