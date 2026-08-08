@@ -411,7 +411,20 @@ for node_name in "${client_name}" "${gateway_name}"; do
 done
 docker exec "${client_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200'
 docker exec "${gateway_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200 && ip link show eth1 >/dev/null'
-echo "==> fixed-port peers establish a direct path before Exit selection"
+echo "==> seed an authenticated relay binding, then promote the fixed-port direct path"
+gateway_overlay="$(docker exec "${gateway_name}" ip -o -4 address show dev lane0 | awk '{sub(/\/.*/, "", $4); print $4}')"
+[[ "${gateway_overlay}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "ERROR: gateway overlay address is unavailable" >&2; exit 1; }
+docker exec -d "${gateway_name}" /test/netprobe udp-echo-server -listen :9199
+relay_seeded=0
+for _ in $(seq 1 40); do
+  if docker exec "${client_name}" /test/netprobe udp-client -target "${gateway_overlay}:9199" \
+    -message direct-seed -timeout 1s >/dev/null 2>&1; then
+    relay_seeded=1
+    break
+  fi
+  sleep 0.1
+done
+[[ "${relay_seeded}" == "1" ]] || { echo "ERROR: initial authenticated relay flow failed" >&2; exit 1; }
 wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" direct
 
 echo "==> create a second, disposable cone-like NAT between the Exit bridge and Internet fixture"
