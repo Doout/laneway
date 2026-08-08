@@ -75,6 +75,16 @@ func TestLinuxDNSSnapshotApplyRestore(t *testing.T) {
 	}
 }
 
+func TestLinuxDNSUsesTrustedAbsoluteResolverByDefault(t *testing.T) {
+	manager, err := NewDNSManager(DNSManagerConfig{InterfaceName: "lane0", Runner: &fakeResolveRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := manager.(*linuxDNSManager).config.ResolveCommand; got != DefaultResolveCommand {
+		t.Fatalf("default resolver command = %q, want %q", got, DefaultResolveCommand)
+	}
+}
+
 func TestLinuxDNSRollsBackPartialApply(t *testing.T) {
 	prior := dnsState{servers: []string{"192.0.2.53"}, domains: []string{"corp.example"}, defaultRoute: "no"}
 	r := &fakeResolveRunner{state: cloneDNSState(prior), failDomainOnce: true}
