@@ -630,6 +630,17 @@ the semantic version and each verified manifest digest; it never consumes a
 mutable `latest` tag. Follow the exact verification commands in
 `deploy/compose/README.md` before an initial deployment, upgrade, or rollback.
 
+Laneway currently has one release channel: immutable semantic-version tags.
+There is no `latest`, edge, or floating production channel. Patch releases keep
+the same control/packet protocol contract; minor releases within one major must
+retain documented rolling compatibility long enough to upgrade controller and
+relay first, then nodes. A release that cannot do so must increment the major
+version and document an explicit migration. GitHub release assets and GHCR
+manifests for earlier versions are retained so operators can roll application
+images back to the immediately previous compatible version. Database state is
+never rolled back independently: restore a tested matching backup when a
+schema migration is not backward compatible.
+
 ## Containers and rootless operation
 
 The supplied scratch image is intended for the relay or controller. It runs as
