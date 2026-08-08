@@ -54,7 +54,10 @@ for value in \
   'cosign sign-blob' \
   'actions/attest-build-provenance@' \
   'aquasecurity/trivy-action@' \
-  "input: /tmp/\${{ matrix.name }}.oci.tar" \
+  'Extract OCI layout for vulnerability scanning' \
+  "tar -xf \"/tmp/\${{ matrix.name }}.oci.tar\" -C \"/tmp/\${{ matrix.name }}.oci\"" \
+  "test -f \"/tmp/\${{ matrix.name }}.oci/index.json\"" \
+  "input: /tmp/\${{ matrix.name }}.oci" \
   'ignore-unfixed: false' \
   'severity: HIGH,CRITICAL' \
   'version: v0.73.0' \
