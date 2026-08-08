@@ -71,9 +71,10 @@ func newManager(device Device, endpoint *RelayEndpoint, publicKey PublicKey) *Ma
 	return &Manager{device: device, endpoint: endpoint, publicKey: publicKey}
 }
 
-func (m *Manager) Name() string       { return m.device.Name() }
-func (m *Manager) MTU() int           { return m.device.MTU() }
-func (m *Manager) ListenPort() uint16 { return m.device.ListenPort() }
+func (m *Manager) Name() string         { return m.device.Name() }
+func (m *Manager) MTU() int             { return m.device.MTU() }
+func (m *Manager) ListenPort() uint16   { return m.device.ListenPort() }
+func (m *Manager) PublicKey() PublicKey { return m.publicKey }
 func (m *Manager) Addresses() []netip.Prefix {
 	return m.device.Addresses()
 }

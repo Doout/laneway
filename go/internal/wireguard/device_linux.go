@@ -27,6 +27,12 @@ func (execRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
+func (execRunner) RunInput(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdin = strings.NewReader(string(input))
+	return command.CombinedOutput()
+}
+
 type controlClient interface {
 	ConfigureDevice(string, wgtypes.Config) error
 	Close() error
