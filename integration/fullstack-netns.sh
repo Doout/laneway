@@ -798,12 +798,15 @@ EOF
   token_b="$(ip netns exec "${controller}" "${work_dir}/laneway" controller enrollment-token issue \
     --network-id "${network_id}" --label wireguard-b --expires-in 10m "${admin_connection[@]}" | \
     json_string_field enrollment_token)"
-  join_a="$(ip netns exec "${node_a}" "${work_dir}/laneway" join "${token_a}" \
+  printf '%s\n' "${token_a}" >"${case_dir}/a.token"
+  printf '%s\n' "${token_b}" >"${case_dir}/b.token"
+  chmod 0600 "${case_dir}/a.token" "${case_dir}/b.token"
+  join_a="$(ip netns exec "${node_a}" "${work_dir}/laneway" join --token-file "${case_dir}/a.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name wireguard-a --out-cert "${case_dir}/a.crt" --out-key "${case_dir}/a.key" \
     --out-wireguard-key "${case_dir}/a.wireguard.key")"
-  join_b="$(ip netns exec "${node_b}" "${work_dir}/laneway" join "${token_b}" \
+  join_b="$(ip netns exec "${node_b}" "${work_dir}/laneway" join --token-file "${case_dir}/b.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name wireguard-b --out-cert "${case_dir}/b.crt" --out-key "${case_dir}/b.key" \
@@ -1736,14 +1739,17 @@ EOF
     echo "ERROR: controller did not return enrollment tokens" >&2
     return 1
   fi
+  printf '%s\n' "${client_token}" >"${case_dir}/client.token"
+  printf '%s\n' "${gateway_token}" >"${case_dir}/gateway.token"
+  chmod 0600 "${case_dir}/client.token" "${case_dir}/gateway.token"
 
   local client_join gateway_join client_id gateway_id client_overlays gateway_overlays client_overlay gateway_overlay
-  client_join="$(ip netns exec "${client}" "${work_dir}/laneway" join "${client_token}" \
+  client_join="$(ip netns exec "${client}" "${work_dir}/laneway" join --token-file "${case_dir}/client.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name controller-client --out-cert "${case_dir}/client.crt" --out-key "${case_dir}/client.key" \
     --out-wireguard-key "${case_dir}/client.wireguard.key")"
-  gateway_join="$(ip netns exec "${gateway}" "${work_dir}/laneway" join "${gateway_token}" \
+  gateway_join="$(ip netns exec "${gateway}" "${work_dir}/laneway" join --token-file "${case_dir}/gateway.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name controller-gateway --out-cert "${case_dir}/gateway.crt" --out-key "${case_dir}/gateway.key" \

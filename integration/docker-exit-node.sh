@@ -135,6 +135,8 @@ wait_peer_path() {
     sleep 0.25
   done
   echo "ERROR: ${container} peer ${peer} did not reach ${expected}" >&2
+  docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway status -config "${config}" -json >&2 || true
+  docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway peers -config "${config}" -json >&2 || true
   return 1
 }
 

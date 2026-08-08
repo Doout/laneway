@@ -280,13 +280,16 @@ if [[ -z "${rust_token}" || -z "${gateway_token}" ]]; then
   echo "ERROR: controller enrollment tokens were not returned" >&2
   exit 1
 fi
+printf '%s\n' "${rust_token}" >"${work_dir}/rust.token"
+printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token"
+chmod 0600 "${work_dir}/rust.token" "${work_dir}/gateway.token"
 
-rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join "${rust_token}" \
+rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/rust.token" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
   --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key" \
   --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
-gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join "${gateway_token}" \
+gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/gateway.token" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
   --name go-gateway --out-cert "${work_dir}/pki/gateway.crt" --out-key "${work_dir}/pki/gateway.key" \
