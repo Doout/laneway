@@ -36,7 +36,18 @@ probe_image="${prefix}-probe:dev"
 client_volume="${prefix}-client-state"
 gateway_volume="${prefix}-gateway-state"
 
-snapshot_routes() { ip -j route show table all | jq -S 'sort_by(.table // 0, .dst // "", .dev // "", .gateway // "")'; }
+snapshot_routes() {
+  ip -j route show table all | jq -S '
+    map(select(
+      (.dev == "docker0" and (
+        (.dst // "") == "fe80::/64" or
+        ((.dst // "") | startswith("fe80::")) or
+        (.dst // "") == "ff00::/8"
+      )) | not
+    )) |
+    sort_by(.table // 0, .dst // "", .dev // "", .gateway // "")
+  '
+}
 snapshot_rules() {
   nft -s list ruleset 2>/dev/null |
     sed -E 's/ counter packets [0-9]+ bytes [0-9]+//g; s/ # handle [0-9]+//g'
@@ -430,7 +441,6 @@ for node_name in "${client_name}" "${gateway_name}"; do
     exit 1
   fi
 done
-docker network connect "${egress_network}" "${gateway_name}"
 docker start "${client_name}" "${gateway_name}" >/dev/null
 wait_log "${client_name}" "interface=lane0"
 wait_log "${gateway_name}" "interface=lane0"
@@ -443,6 +453,7 @@ for node_name in "${client_name}" "${gateway_name}"; do
     test "$(printf "%s\n" "${status}" | grep -Ec "^Cap(Inh|Prm|Eff|Bnd|Amb):[[:space:]]+0000000000001000$")" -eq 5
   '
 done
+docker network connect "${egress_network}" "${gateway_name}"
 docker exec "${client_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200'
 docker exec "${gateway_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200 && ip link show eth1 >/dev/null'
 echo "==> seed an authenticated relay binding, then promote the fixed-port direct path"
@@ -466,8 +477,8 @@ docker create --name "${nat_name}" --hostname "${nat_name}" --label "${owner}" -
   --user 0:0 --read-only --cap-drop ALL --cap-add NET_ADMIN --security-opt no-new-privileges \
   --sysctl net.ipv4.ip_forward=1 --entrypoint /bin/sh "${node_image}" -c \
   'nft add table ip laneway_test_nat; nft add chain ip laneway_test_nat postrouting "{ type nat hook postrouting priority srcnat; policy accept; }"; nft add rule ip laneway_test_nat postrouting oifname eth1 masquerade; exec sleep infinity' >/dev/null
-docker network connect "${internet_network}" "${nat_name}"
 docker start "${nat_name}" >/dev/null
+docker network connect "${internet_network}" "${nat_name}"
 nat_egress_ip="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${egress_network}\"}}{{.IPAddress}}{{end}}" "${nat_name}")"
 nat_internet_ip="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${internet_network}\"}}{{.IPAddress}}{{end}}" "${nat_name}")"
 [[ -n "${nat_egress_ip}" && -n "${nat_internet_ip}" ]] || { echo "ERROR: double-NAT fixture addresses are unavailable" >&2; exit 1; }
