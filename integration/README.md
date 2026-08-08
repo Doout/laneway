@@ -42,7 +42,9 @@ namespace, and runs the following checks inside it:
   recreating the interface or changing its controller-assigned addresses. The
   same gate selects a controller-approved WireGuard exit, verifies protected
   underlay bypasses, and carries a real Internet-side packet through gateway
-  NAT while the encrypted tunnel uses relay QUIC; and
+  NAT while the encrypted tunnel uses relay QUIC. A forced node `SIGKILL`
+  followed by restart proves exact WireGuard/Exit ownership reconciliation,
+  restored direct traffic, and final graceful device cleanup; and
 - the foreground `laneway connect` User workflow using authenticated public
   bootstrap discovery, mode-0600 single-use ephemeral invites, the privileged
   network-helper protocol, forced relay QUIC traffic, direct-path promotion,
@@ -68,11 +70,15 @@ sudo --preserve-env=LANEWAY_RUN_PRIVILEGED \
   env LANEWAY_RUN_PRIVILEGED=1 ./integration/linux-netns.sh
 ```
 
-Set `LANEWAY_KERNEL_BENCHMARK_OUTPUT` to an absolute JSONL path to add four
-bounded measurements over the live topology: subnet NAT, subnet routed mode,
-static selected-exit NAT, and controller-approved, CLI-selected exit NAT. Each
-echo workload crosses the production kernel TUN,
-route policy, relay, gateway forwarding, and nftables state and reports
+Set `LANEWAY_KERNEL_BENCHMARK_OUTPUT` to an absolute JSONL path to add eight
+bounded measurements over the live topology: native Laneway relay QUIC,
+direct WireGuard, WireGuard-over-relay QUIC, WireGuard-over-relay TCP, subnet
+NAT, subnet routed mode, static selected-exit NAT, and controller-approved,
+CLI-selected exit NAT. Four additional rows report direct↔relay-QUIC and
+relay-QUIC↔relay-TCP promotion/demotion time while the same kernel WireGuard
+interface remains installed. Each echo workload crosses the production kernel
+TUN/WireGuard device, route policy, selected carrier, gateway forwarding, and
+nftables state and reports
 throughput, successful-send loss, bounded latency-sample percentiles, client
 CPU/RSS/allocations, and GC. `duration_ms` is the active send window used for
 throughput; `resource_duration_ms` covers that window plus the bounded reply
@@ -80,7 +86,8 @@ drain used for CPU, allocation, GC, and final receive accounting.
 Generated-versus-sent errors and the exact latency sample count are recorded
 explicitly. The
 scheduled privileged workflow enables this mode and archives the validated
-JSONL; it is intentionally distinct from the unprivileged forwarding adapter.
+12-row JSONL; it is intentionally distinct from the unprivileged forwarding
+adapter.
 
 Without `LANEWAY_RUN_PRIVILEGED=1`, the script exits successfully with a clear
 skip message. The Go package also skips when invoked directly, which prevents

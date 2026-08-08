@@ -49,5 +49,13 @@ JSONL, checksums, tool versions, and architecture classification. ARM64 QEMU
 smoke results prove architecture compatibility only and must not be compared
 with native AMD64 performance.
 
+The privileged integration artifact adds production-kernel comparisons for the
+native Laneway QUIC dataplane and the same application workload over direct
+WireGuard, WireGuard-over-relay QUIC, and WireGuard-over-relay TCP. It also
+records direct↔relay and QUIC↔TCP carrier transition time without recreating the
+stable WireGuard interface. Those rows include throughput, loss, latency,
+client CPU/RSS/allocations, and exact packet accounting; they are the
+authoritative hybrid-carrier evidence rather than the TUN-less quick matrix.
+
 Privileged kernel benchmarks and complete reproduction notes live in
 [`integration/README.md`](../integration/README.md).

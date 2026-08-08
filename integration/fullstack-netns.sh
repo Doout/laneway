@@ -243,6 +243,37 @@ run_kernel_udp_benchmark() {
   stop_process "${benchmark_server_pid}"
 }
 
+carrier_transition_started_ms() {
+  date +%s%3N
+}
+
+record_carrier_transition() {
+  local scenario="$1" from_carrier="$2" to_carrier="$3" started_ms="$4"
+  if [[ -z "${LANEWAY_KERNEL_BENCHMARK_OUTPUT:-}" ]]; then
+    return 0
+  fi
+  local completed_ms duration_ms
+  completed_ms="$(carrier_transition_started_ms)"
+  duration_ms=$((completed_ms - started_ms))
+  if [[ ${duration_ms} -le 0 || ${duration_ms} -gt 60000 ]]; then
+    echo "ERROR: invalid ${scenario} carrier transition duration: ${duration_ms}ms" >&2
+    return 1
+  fi
+  jq -cn \
+    --arg scenario "${scenario}" \
+    --arg from_carrier "${from_carrier}" \
+    --arg to_carrier "${to_carrier}" \
+    --argjson duration_ms "${duration_ms}" \
+    '{
+      schema: "laneway-wireguard-carrier-transition-v1",
+      scenario: $scenario,
+      scope: "stable-kernel-wireguard-interface",
+      from_carrier: $from_carrier,
+      to_carrier: $to_carrier,
+      duration_ms: $duration_ms
+    }' >>"${LANEWAY_KERNEL_BENCHMARK_OUTPUT}"
+}
+
 issue_identity_set() {
   local directory="$1" relay_ip="$2" network_id="$3" node_a="$4" node_b="$5" service_id="$6"
   mkdir -p "${directory}"
@@ -377,6 +408,8 @@ EOF
   ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target '[fd42:96::2]:9104' -message overlay6
   wait "${server_pid}"
   grep -q 'remote=\[fd42:96::1\]:' "${case_dir}/overlay6-server.log"
+  run_kernel_udp_benchmark "${node_b}" "${node_a}" 100.96.0.2:9191 100.96.0.2:9191 \
+    native-laneway-relay-quic-kernel "${case_dir}/overlay-benchmark-server.log"
 
   echo "==> real subnet packet is NATed at the Laneway gateway"
   start_process "${lan_host}" "${case_dir}/nat-server.log" "${work_dir}/netprobe" udp-server -listen 192.168.50.2:9102
@@ -1026,8 +1059,12 @@ EOF
   wait_log "${server_pid}" "${case_dir}/relay-quic6.log" "ready=udp-server"
   ip netns exec "${node_b}" "${work_dir}/netprobe" udp-client -target "[${overlay_a6%/*}]:9602" -message wireguard-relay-quic6
   wait "${server_pid}"
+  run_kernel_udp_benchmark "${node_b}" "${node_a}" "${overlay_b4%/*}:9611" "${overlay_b4%/*}:9611" \
+    wireguard-relay-quic-kernel "${case_dir}/wireguard-relay-quic-benchmark.log"
 
   echo "==> blocking external UDP demotes the same WireGuard tunnel to relay TCP"
+  local transition_started_ms
+  transition_started_ms="$(carrier_transition_started_ms)"
   for namespace in "${node_a}" "${node_b}"; do
     ip netns exec "${namespace}" nft add table inet laneway_wg_udp_block
     ip netns exec "${namespace}" nft add chain inet laneway_wg_udp_block output \
@@ -1037,6 +1074,7 @@ EOF
   done
   wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-tcp "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-tcp "${node_b_pid}" "${case_dir}/b.log"
+  record_carrier_transition wireguard-quic-to-tcp wireguard-relay-quic wireguard-relay-tcp "${transition_started_ms}"
   start_process "${node_b}" "${case_dir}/relay-tcp4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9603"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/relay-tcp4.log" "ready=udp-server"
@@ -1047,18 +1085,24 @@ EOF
   wait_log "${server_pid}" "${case_dir}/relay-tcp6.log" "ready=udp-server"
   ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "[${overlay_b6%/*}]:9604" -message wireguard-relay-tcp6
   wait "${server_pid}"
+  run_kernel_udp_benchmark "${node_b}" "${node_a}" "${overlay_b4%/*}:9612" "${overlay_b4%/*}:9612" \
+    wireguard-relay-tcp-kernel "${case_dir}/wireguard-relay-tcp-benchmark.log"
 
   echo "==> restoring UDP promotes TCP fallback back to WireGuard relay QUIC"
+  transition_started_ms="$(carrier_transition_started_ms)"
   ip netns exec "${node_a}" nft delete table inet laneway_wg_udp_block
   ip netns exec "${node_b}" nft delete table inet laneway_wg_udp_block
   wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-quic "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-quic "${node_b_pid}" "${case_dir}/b.log"
+  record_carrier_transition wireguard-tcp-to-quic wireguard-relay-tcp wireguard-relay-quic "${transition_started_ms}"
 
   echo "==> restoring peer UDP promotes the unchanged tunnel to direct WireGuard"
+  transition_started_ms="$(carrier_transition_started_ms)"
   ip netns exec "${node_a}" nft delete table inet laneway_wg_direct_block
   ip netns exec "${node_b}" nft delete table inet laneway_wg_direct_block
   wait_selected_path "${node_a}" "${case_dir}/a.toml" direct-wireguard "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" direct-wireguard "${node_b_pid}" "${case_dir}/b.log"
+  record_carrier_transition wireguard-quic-to-direct wireguard-relay-quic direct-wireguard "${transition_started_ms}"
   start_process "${node_b}" "${case_dir}/direct4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9605"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/direct4.log" "ready=udp-server"
@@ -1079,8 +1123,11 @@ EOF
   wait_log "${server_pid}" "${case_dir}/direct6.log" "ready=udp-server"
   ip netns exec "${node_b}" "${work_dir}/netprobe" udp-client -target "[${overlay_a6%/*}]:9606" -message direct-wireguard6
   wait "${server_pid}"
+  run_kernel_udp_benchmark "${node_b}" "${node_a}" "${overlay_b4%/*}:9613" "${overlay_b4%/*}:9613" \
+    direct-wireguard-kernel "${case_dir}/direct-wireguard-benchmark.log"
 
   echo "==> direct failure demotes without recreating lane0 or changing overlay identity"
+  transition_started_ms="$(carrier_transition_started_ms)"
   for namespace in "${node_a}" "${node_b}"; do
     ip netns exec "${namespace}" nft add table inet laneway_wg_direct_reject
     ip netns exec "${namespace}" nft add chain inet laneway_wg_direct_reject output \
@@ -1092,6 +1139,7 @@ EOF
     ip daddr 10.254.0.3 udp dport 41001 drop
   wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-quic "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-quic "${node_b_pid}" "${case_dir}/b.log"
+  record_carrier_transition wireguard-direct-to-quic direct-wireguard wireguard-relay-quic "${transition_started_ms}"
   if [[ "$(ip netns exec "${node_a}" cat /sys/class/net/lane0/ifindex)" != "${lane_a_ifindex}" || \
         "$(ip netns exec "${node_b}" cat /sys/class/net/lane0/ifindex)" != "${lane_b_ifindex}" ]]; then
     echo "ERROR: carrier switching recreated the stable WireGuard interface" >&2
@@ -1191,8 +1239,34 @@ EOF
     return 1
   fi
 
+  echo "==> SIGKILL restart reconciles WireGuard and persisted Exit ownership"
+  kill -KILL "${node_a_pid}" >/dev/null 2>&1 || true
+  wait "${node_a_pid}" >/dev/null 2>&1 || true
+  start_process "${node_a}" "${case_dir}/a-crash-restart.log" env \
+    PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
+    "${work_dir}/lanewayd" -config "${case_dir}/a.toml" -diagnostics 127.0.0.1:6061
+  node_a_pid="${last_pid}"
+  wait_log "${node_a_pid}" "${case_dir}/a-crash-restart.log" "interface=lane0"
+  wait_selected_path "${node_a}" "${case_dir}/a.toml" direct-wireguard "${node_a_pid}" "${case_dir}/a-crash-restart.log"
+  start_process "${internet}" "${case_dir}/exit-crash-restart.log" "${work_dir}/netprobe" \
+    udp-server -listen 198.51.100.2:9703
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/exit-crash-restart.log" "ready=udp-server"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client \
+    -target 198.51.100.2:9703 -message wireguard-exit-crash-restart
+  wait "${server_pid}"
+  grep -q 'remote=198.51.100.1:' "${case_dir}/exit-crash-restart.log"
+
   stop_process "${node_a_pid}"
+  if ip -n "${node_a}" link show dev lane0 >/dev/null 2>&1; then
+    echo "ERROR: graceful WireGuard shutdown left lane0 behind after crash reconciliation" >&2
+    return 1
+  fi
   stop_process "${node_b_pid}"
+  if ip -n "${node_b}" link show dev lane0 >/dev/null 2>&1; then
+    echo "ERROR: graceful WireGuard shutdown left peer lane0 behind" >&2
+    return 1
+  fi
   stop_process "${relay_pid}"
   stop_process "${controller_pid}"
 }
@@ -2432,9 +2506,21 @@ esac
 if [[ -n "${LANEWAY_KERNEL_BENCHMARK_OUTPUT:-}" && "${LANEWAY_INTEGRATION_CASE:-all}" == "all" ]]; then
   command -v jq >/dev/null
   jq -e -s '
-    length == 4 and
-    ([.[].scenario] | sort == ["controller-exit-nat-kernel", "exit-nat-kernel", "subnet-nat-kernel", "subnet-routed-kernel"]) and
-    all(.schema == "laneway-kernel-datapath-benchmark-v1" and
+    [.[] | select(.schema == "laneway-kernel-datapath-benchmark-v1")] as $datapath |
+    [.[] | select(.schema == "laneway-wireguard-carrier-transition-v1")] as $transitions |
+    length == 12 and
+    ($datapath | length == 8) and
+    ([$datapath[].scenario] | sort == [
+      "controller-exit-nat-kernel",
+      "direct-wireguard-kernel",
+      "exit-nat-kernel",
+      "native-laneway-relay-quic-kernel",
+      "subnet-nat-kernel",
+      "subnet-routed-kernel",
+      "wireguard-relay-quic-kernel",
+      "wireguard-relay-tcp-kernel"
+    ]) and
+    all($datapath[];
         .scope == "production-kernel-tun-routes-nat-nftables" and
         .generated > 0 and .sent > 0 and .received > 0 and .bytes > 0 and
         .generated == (.sent + .send_errors) and .sent == (.received + .drops) and
@@ -2446,7 +2532,23 @@ if [[ -n "${LANEWAY_KERNEL_BENCHMARK_OUTPUT:-}" && "${LANEWAY_INTEGRATION_CASE:-
         .loss_percent >= 0 and .loss_percent <= 100 and
         .latency_samples > 0 and .latency_samples <= .received and
         .bad == 0 and .rss_bytes > 0 and .allocations >= 0 and
-        .cpu_percent >= 0 and .p50_us >= 0 and .p95_us >= .p50_us and .p99_us >= .p95_us)
+        .cpu_percent >= 0 and .p50_us >= 0 and .p95_us >= .p50_us and .p99_us >= .p95_us) and
+    ($transitions | length == 4) and
+    ([$transitions[].scenario] | sort == [
+      "wireguard-direct-to-quic",
+      "wireguard-quic-to-direct",
+      "wireguard-quic-to-tcp",
+      "wireguard-tcp-to-quic"
+    ]) and
+    all($transitions[];
+        .scope == "stable-kernel-wireguard-interface" and
+        .duration_ms > 0 and .duration_ms <= 60000 and
+        (
+          (.scenario == "wireguard-direct-to-quic" and .from_carrier == "direct-wireguard" and .to_carrier == "wireguard-relay-quic") or
+          (.scenario == "wireguard-quic-to-direct" and .from_carrier == "wireguard-relay-quic" and .to_carrier == "direct-wireguard") or
+          (.scenario == "wireguard-quic-to-tcp" and .from_carrier == "wireguard-relay-quic" and .to_carrier == "wireguard-relay-tcp") or
+          (.scenario == "wireguard-tcp-to-quic" and .from_carrier == "wireguard-relay-tcp" and .to_carrier == "wireguard-relay-quic")
+        ))
   ' "${LANEWAY_KERNEL_BENCHMARK_OUTPUT}" >/dev/null
 fi
 
