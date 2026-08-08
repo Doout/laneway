@@ -11,17 +11,25 @@ database_snapshot=
 umask 077
 
 cleanup_database_snapshot() {
-  [ -n "$database_snapshot" ] || return 0
-  # SQLite can create these beside both online backup and restore databases.
-  # The controller-writable staging directory must not retain plaintext state
-  # after the encrypted bundle is published or an operation fails.
-  for suffix in '' -wal -shm -journal; do
-    path=$database_snapshot$suffix
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      find "$path" -maxdepth 0 -delete
-    fi
-  done
-  database_snapshot=
+  if [ -n "$database_snapshot" ]; then
+    # SQLite can create these beside both online backup and restore databases.
+    # The controller-writable staging directory must not retain plaintext state
+    # after the encrypted bundle is published or an operation fails.
+    for suffix in '' -wal -shm -journal; do
+      path=$database_snapshot$suffix
+      if [ -e "$path" ] || [ -L "$path" ]; then
+        find "$path" -maxdepth 0 -delete
+      fi
+    done
+    database_snapshot=
+  fi
+  # Controllers predating the owner-level cleanup used an independent random
+  # temporary name. Remove only that reserved internal namespace so upgrading
+  # from an affected release cannot strand its plaintext SQLite sidecars.
+  if [ -d "$backup_dir" ] && [ ! -L "$backup_dir" ]; then
+    find "$backup_dir" -mindepth 1 -maxdepth 1 \
+      \( -type f -o -type l \) -name '.laneway-database-*' -delete
+  fi
 }
 
 cleanup() {
