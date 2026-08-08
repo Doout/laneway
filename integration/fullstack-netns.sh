@@ -18,6 +18,8 @@ fi
 prefix="lw$$_"
 declare -a namespaces=()
 declare -a processes=()
+declare -a netns_etc_dirs=()
+netns_etc_parent_created=0
 link_index=0
 last_pid=""
 
@@ -39,6 +41,13 @@ cleanup() {
   for namespace in "${namespaces[@]:-}"; do
     ip netns delete "${namespace}" >/dev/null 2>&1 || true
   done
+  for directory in "${netns_etc_dirs[@]:-}"; do
+    rm -f -- "${directory}/hosts"
+    rmdir -- "${directory}" >/dev/null 2>&1 || true
+  done
+  if [[ "${netns_etc_parent_created}" == "1" ]]; then
+    rmdir -- /etc/netns >/dev/null 2>&1 || true
+  fi
   if [[ "${owns_work_dir}" == "1" ]]; then
     rm -rf -- "${work_dir}"
   fi
@@ -57,6 +66,23 @@ add_namespace() {
   ip netns add "${namespace}"
   namespaces+=("${namespace}")
   ip -n "${namespace}" link set lo up
+}
+
+set_namespace_host() {
+  local namespace="$1" address="$2" hostname="$3"
+  local directory="/etc/netns/${namespace}"
+  if [[ -e "${directory}" ]]; then
+    echo "ERROR: refusing to replace existing namespace configuration ${directory}" >&2
+    return 1
+  fi
+  if [[ ! -d /etc/netns ]]; then
+    mkdir -- /etc/netns
+    netns_etc_parent_created=1
+  fi
+  mkdir -- "${directory}"
+  netns_etc_dirs+=("${directory}")
+  printf '127.0.0.1 localhost\n%s %s\n' "${address}" "${hostname}" >"${directory}/hosts"
+  chmod 644 "${directory}/hosts"
 }
 
 add_switch() {
@@ -1093,6 +1119,262 @@ EOF
   stop_process "${controller_pid}"
 }
 
+run_controller_connect_flow() {
+  local case_dir="${work_dir}/controller-connect"
+  local switch="${prefix}us" controller="${prefix}uc" relay="${prefix}ur"
+  local user="${prefix}uu" node="${prefix}un"
+  local network_id="30000000000000000000000000000001"
+  local controller_service="30000000000000000000000000000002"
+  local relay_service="30000000000000000000000000000003"
+  local controller_endpoint="https://10.252.0.1:8443"
+  local controller_quic_endpoint="10.252.0.1:8443"
+  local bootstrap_authority="lane.example.test:9443"
+  local admin_token="laneway-connect-fullstack-admin-token-000000000000000001"
+
+  mkdir -p "${case_dir}"
+  printf '%s\n' "${admin_token}" >"${case_dir}/admin.token"
+  chmod 600 "${case_dir}/admin.token"
+  "${work_dir}/laneway" pki init -out-dir "${case_dir}" >/dev/null
+  "${work_dir}/laneway" pki controller -ca-cert "${case_dir}/ca.crt" -ca-key "${case_dir}/ca.key" \
+    -network-id "${network_id}" -service-id "${controller_service}" \
+    -dns lane.example.test -ip 10.252.0.1 \
+    -out-cert "${case_dir}/controller.crt" -out-key "${case_dir}/controller.key"
+  "${work_dir}/laneway" pki relay -ca-cert "${case_dir}/ca.crt" -ca-key "${case_dir}/ca.key" \
+    -network-id "${network_id}" -service-id "${relay_service}" -ip 10.252.0.2 \
+    -out-cert "${case_dir}/relay.crt" -out-key "${case_dir}/relay.key"
+
+  add_switch "${switch}"
+  add_namespace "${controller}"
+  add_namespace "${relay}"
+  add_namespace "${user}"
+  add_namespace "${node}"
+  attach_switch "${switch}" "${controller}" eth0 10.252.0.1/24
+  attach_switch "${switch}" "${relay}" eth0 10.252.0.2/24
+  attach_switch "${switch}" "${user}" eth0 10.252.0.3/24
+  attach_switch "${switch}" "${node}" eth0 10.252.0.4/24
+  set_namespace_host "${user}" 10.252.0.1 lane.example.test
+
+  cat >"${case_dir}/controller.toml" <<EOF
+mode = "controller"
+state_dir = "${case_dir}/controller-state"
+socket_path = "${case_dir}/controller.sock"
+[tls]
+certificate = "${case_dir}/controller.crt"
+private_key = "${case_dir}/controller.key"
+ca = "${case_dir}/ca.crt"
+[controller]
+listen = "10.252.0.1:8443"
+quic_listen = "10.252.0.1:8443"
+database = "${case_dir}/controller.db"
+ca_private_key = "${case_dir}/ca.key"
+admin_token_file = "${case_dir}/admin.token"
+leaf_validity = "24h"
+EOF
+  start_process "${controller}" "${case_dir}/controller-initialize.log" \
+    "${work_dir}/laneway-controller" -config "${case_dir}/controller.toml" -diagnostics 127.0.0.1:6063
+  local controller_pid="${last_pid}"
+  wait_log "${controller_pid}" "${case_dir}/controller-initialize.log" "laneway-controller HTTPS="
+
+  local -a admin_connection=(
+    --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt"
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
+    --admin-token-file "${case_dir}/admin.token"
+  )
+  ip netns exec "${controller}" "${work_dir}/laneway" controller network create \
+    --network-id "${network_id}" --name connect-fullstack --ipv4-pool 100.101.0.0/24 \
+    "${admin_connection[@]}" >"${case_dir}/network.json"
+  ip netns exec "${controller}" "${work_dir}/laneway" controller relay register \
+    --network-id "${network_id}" --service-id "${relay_service}" \
+    --name connect-relay --endpoint 10.252.0.2:4433 \
+    "${admin_connection[@]}" >"${case_dir}/relay-registration.json"
+  stop_process "${controller_pid}"
+
+  cat >>"${case_dir}/controller.toml" <<EOF
+[bootstrap]
+listen = "10.252.0.1:9443"
+certificate = "${case_dir}/controller.crt"
+private_key = "${case_dir}/controller.key"
+network_id = "${network_id}"
+controller_endpoint = "${controller_endpoint}"
+controller_quic_endpoint = "${controller_quic_endpoint}"
+controller_server_name = "lane.example.test"
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "amd64"
+url = "https://lane.example.test:9443/artifacts/laneway-linux-amd64"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size_bytes = 1
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "arm64"
+url = "https://lane.example.test:9443/artifacts/laneway-linux-arm64"
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+size_bytes = 1
+EOF
+  start_process "${controller}" "${case_dir}/controller.log" \
+    "${work_dir}/laneway-controller" -config "${case_dir}/controller.toml" -diagnostics 127.0.0.1:6063
+  controller_pid="${last_pid}"
+  wait_log "${controller_pid}" "${case_dir}/controller.log" "bootstrap=10.252.0.1:9443"
+
+  local node_join node_id node_overlays node_overlay
+  (
+    umask 077
+    ip netns exec "${controller}" "${work_dir}/laneway" controller enrollment-token issue \
+      --network-id "${network_id}" --label connect-node --expires-in 10m \
+      "${admin_connection[@]}" | json_string_field enrollment_token >"${case_dir}/node.token"
+  )
+  node_join="$(ip netns exec "${node}" "${work_dir}/laneway" join \
+    --token-file "${case_dir}/node.token" --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
+    --server-name lane.example.test --controller-network-id "${network_id}" \
+    --controller-service-id "${controller_service}" --name connect-node \
+    --out-cert "${case_dir}/node.crt" --out-key "${case_dir}/node.key" \
+    --out-wireguard-key "${case_dir}/node.wireguard.key")"
+  rm -f -- "${case_dir}/node.token"
+  node_id="$(printf '%s\n' "${node_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
+  node_overlays="$(printf '%s\n' "${node_join}" | sed -n 's/.* overlay=\([^ ]*\) certificate=.*/\1/p')"
+  node_overlay="${node_overlays%%,*}"
+  node_overlay="${node_overlay%/*}"
+  if [[ ! "${node_id}" =~ ^[0-9a-f]{32}$ || -z "${node_overlay}" ]]; then
+    echo "ERROR: failed to parse durable node enrollment" >&2
+    printf '%s\n' "${node_join}" >&2
+    return 1
+  fi
+  ip netns exec "${controller}" "${work_dir}/laneway" controller acl add \
+    --network-id "${network_id}" --priority 100 --action accept \
+    --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description connect-fullstack-allow \
+    "${admin_connection[@]}" >"${case_dir}/acl.json"
+
+  cat >"${case_dir}/relay.toml" <<EOF
+mode = "relay"
+state_dir = "${case_dir}/relay-state"
+socket_path = "${case_dir}/relay.sock"
+[tls]
+certificate = "${case_dir}/relay.crt"
+private_key = "${case_dir}/relay.key"
+ca = "${case_dir}/ca.crt"
+[relay]
+listen = "10.252.0.2:4433"
+[controller]
+endpoint = "${controller_endpoint}"
+quic_endpoint = "${controller_quic_endpoint}"
+server_name = "lane.example.test"
+network_id = "${network_id}"
+service_id = "${controller_service}"
+poll_interval = "100ms"
+EOF
+  cat >"${case_dir}/node.toml" <<EOF
+mode = "node"
+state_dir = "${case_dir}/node-state"
+socket_path = "${case_dir}/node.sock"
+[tls]
+certificate = "${case_dir}/node.crt"
+private_key = "${case_dir}/node.key"
+ca = "${case_dir}/ca.crt"
+[node]
+name = "connect-node"
+relay_address = "10.252.0.2:4433"
+relay_network_id = "${network_id}"
+relay_service_id = "${relay_service}"
+reconnect_min = "50ms"
+reconnect_max = "500ms"
+[controller]
+endpoint = "${controller_endpoint}"
+quic_endpoint = "${controller_quic_endpoint}"
+server_name = "lane.example.test"
+network_id = "${network_id}"
+service_id = "${controller_service}"
+poll_interval = "100ms"
+[direct]
+enabled = true
+listen = "10.252.0.4:41004"
+candidate_ttl = "30s"
+probe_interval = "100ms"
+probe_timeout = "2s"
+rendezvous_interval = "1s"
+max_candidates = 8
+EOF
+  start_process "${relay}" "${case_dir}/relay.log" \
+    "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+  local relay_pid="${last_pid}"
+  wait_log "${relay_pid}" "${case_dir}/relay.log" "listening"
+  start_process "${node}" "${case_dir}/node.log" \
+    "${work_dir}/lanewayd" -config "${case_dir}/node.toml" -diagnostics 127.0.0.1:6061
+  local node_pid="${last_pid}"
+  wait_log "${node_pid}" "${case_dir}/node.log" "interface=lane0"
+
+  local iteration invite_file connect_log connect_pid server_pid
+  for iteration in 1 2; do
+    if [[ "${iteration}" == "1" ]]; then
+      # Block only direct peer UDP in this disposable namespace. Controller and
+      # relay transports remain reachable, proving the authenticated relay path.
+      ip netns exec "${user}" nft add table inet laneway_connect_direct_block
+      ip netns exec "${user}" nft add chain inet laneway_connect_direct_block output \
+        '{ type filter hook output priority -20; policy accept; }'
+      ip netns exec "${user}" nft add chain inet laneway_connect_direct_block input \
+        '{ type filter hook input priority -20; policy accept; }'
+      ip netns exec "${user}" nft add rule inet laneway_connect_direct_block output \
+        ip daddr 10.252.0.4 meta l4proto udp drop
+      ip netns exec "${user}" nft add rule inet laneway_connect_direct_block input \
+        ip saddr 10.252.0.4 meta l4proto udp drop
+    fi
+
+    invite_file="${case_dir}/user-${iteration}.token"
+    connect_log="${case_dir}/connect-${iteration}.log"
+    (
+      umask 077
+      ip netns exec "${controller}" "${work_dir}/laneway" invite \
+        --config "${case_dir}/controller.toml" --name "temporary-user-${iteration}" \
+        --ephemeral --session-lifetime 5m >"${invite_file}" 2>"${case_dir}/invite-${iteration}.log"
+    )
+    start_process "${user}" "${connect_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+      "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${invite_file}"
+    connect_pid="${last_pid}"
+    if [[ "${iteration}" == "1" ]]; then
+      wait_log "${connect_pid}" "${connect_log}" "path=relay-quic"
+    else
+      wait_log "${connect_pid}" "${connect_log}" "path=direct"
+    fi
+    rm -f -- "${invite_file}"
+    ip -n "${user}" link show lane0 >/dev/null
+    if [[ "${iteration}" == "1" ]]; then
+      start_process "${node}" "${case_dir}/relay-traffic.log" \
+        "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9801"
+      server_pid="${last_pid}"
+      wait_log "${server_pid}" "${case_dir}/relay-traffic.log" "ready=udp-server"
+      ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+        -target "${node_overlay}:9801" -message connect-relay -once -timeout 3s
+      wait "${server_pid}"
+      ip netns exec "${user}" nft delete table inet laneway_connect_direct_block
+    else
+      start_process "${node}" "${case_dir}/direct-traffic.log" \
+        "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9811"
+      server_pid="${last_pid}"
+      wait_log "${server_pid}" "${case_dir}/direct-traffic.log" "ready=udp-server"
+      ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+        -target "${node_overlay}:9811" -message connect-direct -once -timeout 3s
+      wait "${server_pid}"
+    fi
+
+    stop_process "${connect_pid}"
+    grep -q 'laneway disconnected; temporary networking restored' "${connect_log}"
+    if ip -n "${user}" link show lane0 >/dev/null 2>&1 || \
+       ip -n "${user}" rule show | grep -q 'lookup 51820' || \
+       ip -n "${user}" route show table 51820 2>/dev/null | grep -q . || \
+       ip netns exec "${user}" pgrep -f '[l]aneway.*_network-helper' >/dev/null 2>&1; then
+      echo "ERROR: foreground connect ${iteration} left temporary networking or helper state" >&2
+      ip -n "${user}" link show >&2
+      ip -n "${user}" rule show >&2
+      ip -n "${user}" route show table 51820 >&2 2>/dev/null || true
+      sed -n '1,260p' "${connect_log}" >&2
+      return 1
+    fi
+  done
+
+  stop_process "${node_pid}"
+  stop_process "${relay_pid}"
+  stop_process "${controller_pid}"
+}
+
 run_controller_subnet_flow() {
   local case_dir="${work_dir}/controller-subnet"
   local switch="${prefix}cs" controller="${prefix}cc" relay="${prefix}cr"
@@ -1841,12 +2123,14 @@ case "${LANEWAY_INTEGRATION_CASE:-all}" in
     run_exit_flow
     run_direct_nat_flow
     run_controller_wireguard_carriers
+    run_controller_connect_flow
     run_controller_subnet_flow
     ;;
   overlay-subnet) run_overlay_and_subnet ;;
   exit) run_exit_flow ;;
   direct-nat) run_direct_nat_flow ;;
   controller-wireguard) run_controller_wireguard_carriers ;;
+  controller-connect) run_controller_connect_flow ;;
   controller-subnet) run_controller_subnet_flow ;;
   *)
     echo "ERROR: unknown LANEWAY_INTEGRATION_CASE=${LANEWAY_INTEGRATION_CASE}" >&2
