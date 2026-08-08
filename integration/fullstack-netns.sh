@@ -1153,6 +1153,29 @@ EOF
   wait "${server_pid}"
   grep -q 'remote=198.51.100.1:' "${case_dir}/exit-relay-quic.log"
 
+  echo "==> restoring direct reachability promotes Node-to-Exit traffic away from the relay"
+  ip netns exec "${node_a}" nft delete table inet laneway_wg_direct_reject
+  ip netns exec "${node_b}" nft delete table inet laneway_wg_direct_reject
+  wait_selected_path "${node_a}" "${case_dir}/a.toml" direct-wireguard "${node_a_pid}" "${case_dir}/a.log"
+  wait_selected_path "${node_b}" "${case_dir}/b.toml" direct-wireguard "${node_b_pid}" "${case_dir}/b.log"
+  start_process "${internet}" "${case_dir}/exit-direct.log" "${work_dir}/netprobe" \
+    udp-server -listen 198.51.100.2:9702
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/exit-direct.log" "ready=udp-server"
+  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client \
+    -target 198.51.100.2:9702 -message wireguard-exit-direct
+  wait "${server_pid}"
+  grep -q 'remote=198.51.100.1:' "${case_dir}/exit-direct.log"
+  sleep 0.1
+  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  if [[ "${relay_after}" != "${relay_before}" ]]; then
+    echo "ERROR: direct Node-to-Exit application packet traversed the relay" >&2
+    return 1
+  fi
+
   stop_process "${node_a_pid}"
   stop_process "${node_b_pid}"
   stop_process "${relay_pid}"
