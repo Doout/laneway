@@ -705,9 +705,6 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	}}
 	if exitManagers != nil && exitManagers.client != nil {
 		api.SetExit = func(ctx context.Context, selection localapi.ExitSelection) error {
-			if secureWireGuard != nil && selection.Enabled {
-				return errors.New("WireGuard exit selection requires an isolated cryptokey-routing boundary")
-			}
 			var selected identity.NodeID
 			if selection.Enabled {
 				var err error
@@ -715,6 +712,9 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 				if err != nil {
 					return err
 				}
+			}
+			if secureWireGuard != nil {
+				return setWireGuardExitSelection(ctx, selection.Enabled, selected, local, exitManagers, controllerState)
 			}
 			return exitManagers.SetSelection(ctx, selection.Enabled, selected)
 		}

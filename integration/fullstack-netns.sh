@@ -658,7 +658,7 @@ json_string_field() {
 run_controller_wireguard_carriers() {
   local case_dir="${work_dir}/controller-wireguard"
   local switch="${prefix}ws" controller="${prefix}wc" relay="${prefix}wr"
-  local node_a="${prefix}wa" node_b="${prefix}wb"
+  local node_a="${prefix}wa" node_b="${prefix}wb" internet="${prefix}wi"
   local network_id="20000000000000000000000000000001"
   local controller_service="20000000000000000000000000000002"
   local relay_service="20000000000000000000000000000003"
@@ -682,10 +682,12 @@ run_controller_wireguard_carriers() {
   add_namespace "${relay}"
   add_namespace "${node_a}"
   add_namespace "${node_b}"
+	add_namespace "${internet}"
   attach_switch "${switch}" "${controller}" eth0 10.254.0.1/24
   attach_switch "${switch}" "${relay}" eth0 10.254.0.2/24
   attach_switch "${switch}" "${node_a}" eth0 10.254.0.3/24
   attach_switch "${switch}" "${node_b}" eth0 10.254.0.4/24
+  connect_namespaces "${node_b}" wan0 198.51.100.1/24 "${internet}" eth0 198.51.100.2/24
 
   cat >"${case_dir}/controller.toml" <<EOF
 mode = "controller"
@@ -757,6 +759,8 @@ EOF
     --network-id "${network_id}" --priority 100 --action accept \
     --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description wireguard-fullstack-allow \
     "${admin_connection[@]}" >"${case_dir}/acl.json"
+  ip netns exec "${controller}" "${work_dir}/laneway" controller node capabilities \
+    --node-id "${node_b_id}" --exit-node "${admin_connection[@]}" >"${case_dir}/exit-capability.json"
 
   cat >"${case_dir}/relay.toml" <<EOF
 mode = "relay"
@@ -826,6 +830,10 @@ private_key = "${case_dir}/a.wireguard.key"
 interface = "lane0"
 listen_port = 51821
 mtu = 1280
+[exit]
+failure_mode = "closed"
+dns_servers = ["1.1.1.1"]
+local_lan_bypasses = ["10.254.0.0/24"]
 EOF
   cat >"${case_dir}/b.toml" <<EOF
 mode = "node"
@@ -870,7 +878,42 @@ private_key = "${case_dir}/b.wireguard.key"
 interface = "lane0"
 listen_port = 51822
 mtu = 1280
+[routing]
+output_interface = "wan0"
+[exit]
+serve = true
 EOF
+
+  # A namespace-local resolvectl shim exercises the real exit DNS transaction
+  # without depending on a host systemd-resolved instance.
+  mkdir -p "${case_dir}/resolver-state"
+  cat >"${case_dir}/resolvectl" <<'EOF'
+#!/bin/sh
+set -eu
+property="${1:-}"
+interface="${2:-}"
+if [ -z "${property}" ] || [ -z "${interface}" ] || [ -z "${LANEWAY_RESOLVE_STATE:-}" ]; then
+  exit 2
+fi
+index="$(cat "/sys/class/net/${interface}/ifindex")"
+state="${LANEWAY_RESOLVE_STATE}/${index}.${property}"
+if [ "${property}" = "revert" ]; then
+  rm -f "${LANEWAY_RESOLVE_STATE}/${index}.dns" "${LANEWAY_RESOLVE_STATE}/${index}.domain" \
+    "${LANEWAY_RESOLVE_STATE}/${index}.default-route"
+  exit 0
+fi
+shift 2
+if [ "$#" -eq 0 ]; then
+  value=""
+  if [ -f "${state}" ]; then
+    value="$(sed -n '1p' "${state}")"
+  fi
+  printf 'Link %s (%s): %s\n' "${index}" "${interface}" "${value}"
+  exit 0
+fi
+printf '%s\n' "$*" >"${state}"
+EOF
+  chmod 700 "${case_dir}/resolvectl"
 
   # Keep direct candidates unreachable while leaving controller and relay UDP
   # untouched. Each table belongs solely to this disposable namespace.
@@ -888,7 +931,8 @@ EOF
     "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
   wait_log "${relay_pid}" "${case_dir}/relay.log" "laneway-relay QUIC="
-  start_process "${node_a}" "${case_dir}/a.log" \
+  start_process "${node_a}" "${case_dir}/a.log" env \
+    PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
     "${work_dir}/lanewayd" -config "${case_dir}/a.toml" -diagnostics 127.0.0.1:6061
   local node_a_pid="${last_pid}"
   start_process "${node_b}" "${case_dir}/b.log" \
@@ -974,9 +1018,9 @@ EOF
       '{ type filter hook output priority -20; policy accept; }'
   done
   ip netns exec "${node_a}" nft add rule inet laneway_wg_direct_reject output \
-    ip daddr 10.254.0.4 udp dport 41002 reject with icmp type port-unreachable
+    ip daddr 10.254.0.4 udp dport 41002 drop
   ip netns exec "${node_b}" nft add rule inet laneway_wg_direct_reject output \
-    ip daddr 10.254.0.3 udp dport 41001 reject with icmp type port-unreachable
+    ip daddr 10.254.0.3 udp dport 41001 drop
   wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-quic "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-quic "${node_b_pid}" "${case_dir}/b.log"
   if [[ "$(ip netns exec "${node_a}" cat /sys/class/net/lane0/ifindex)" != "${lane_a_ifindex}" || \
@@ -991,6 +1035,57 @@ EOF
   wait_log "${server_pid}" "${case_dir}/demoted4.log" "ready=udp-server"
   ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9607" -message demoted-relay-quic
   wait "${server_pid}"
+
+  echo "==> controller-approved WireGuard exit carries Internet traffic over relay QUIC"
+  local exit_json exit_route_id
+  exit_json="$(ip netns exec "${node_b}" "${work_dir}/laneway" exit enable \
+    --family ipv4 --config "${case_dir}/b.toml")"
+  exit_route_id="$(printf '%s\n' "${exit_json}" | json_string_field route_id | head -n 1)"
+  if [[ ! "${exit_route_id}" =~ ^[0-9a-f]{32}$ ]]; then
+    echo "ERROR: failed to parse WireGuard exit advertisement" >&2
+    printf '%s\n' "${exit_json}" >&2
+    return 1
+  fi
+  ip netns exec "${controller}" "${work_dir}/laneway" controller route approve \
+    --route-id "${exit_route_id}" "${admin_connection[@]}" >"${case_dir}/exit-route-approval.json"
+  local gateway_ready=0
+  for _ in $(seq 1 200); do
+    if ip netns exec "${node_b}" nft list table inet laneway_exit >/dev/null 2>&1; then
+      gateway_ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${gateway_ready}" != "1" ]]; then
+    echo "ERROR: approved WireGuard exit did not activate gateway policy" >&2
+    sed -n '1,260p' "${case_dir}/b.log" >&2
+    return 1
+  fi
+  ip netns exec "${node_a}" "${work_dir}/laneway" exit use wireguard-b \
+    --config "${case_dir}/a.toml" >"${case_dir}/exit-use.txt"
+  local exit_selected=0
+  for _ in $(seq 1 200); do
+    if ip -n "${node_a}" -4 rule show priority 11000 | grep -q 'lookup 51820' && \
+       ip -n "${node_a}" route show table 51820 exact 0.0.0.0/1 | grep -q 'dev lane0'; then
+      exit_selected=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${exit_selected}" != "1" ]]; then
+    echo "ERROR: WireGuard exit selection did not install native defaults" >&2
+    sed -n '1,300p' "${case_dir}/a.log" >&2
+    return 1
+  fi
+  ip -n "${node_a}" route show table 51820 exact 10.254.0.0/24 | grep -q 'dev eth0'
+  start_process "${internet}" "${case_dir}/exit-relay-quic.log" "${work_dir}/netprobe" \
+    udp-server -listen 198.51.100.2:9701
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/exit-relay-quic.log" "ready=udp-server"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client \
+    -target 198.51.100.2:9701 -message wireguard-exit-relay-quic
+  wait "${server_pid}"
+  grep -q 'remote=198.51.100.1:' "${case_dir}/exit-relay-quic.log"
 
   stop_process "${node_a_pid}"
   stop_process "${node_b_pid}"

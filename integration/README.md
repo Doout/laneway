@@ -39,7 +39,10 @@ namespace, and runs the following checks inside it:
 - one stable dual-stack kernel WireGuard interface carrying encrypted packets
   over relay QUIC, forced relay TCP when external UDP is blocked, automatic
   QUIC recovery, direct WireGuard promotion, and direct-failure demotion without
-  recreating the interface or changing its controller-assigned addresses; and
+  recreating the interface or changing its controller-assigned addresses. The
+  same gate selects a controller-approved WireGuard exit, verifies protected
+  underlay bypasses, and carries a real Internet-side packet through gateway
+  NAT while the encrypted tunnel uses relay QUIC; and
 - a controller-backed product lifecycle using the real HTTPS/mTLS controller,
   admin and node CLIs, single-use enrollment, relay registration, capabilities,
   ACLs, route advertisement/approval/withdrawal, and node revocation. The live
