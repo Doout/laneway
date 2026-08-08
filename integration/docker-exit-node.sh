@@ -317,7 +317,7 @@ docker run -d --name "${relay_name}" --hostname "${relay_name}" --label "${owner
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
   -v "${work_dir}/relay:/secrets:ro" "${relay_image}" -config /secrets/relay.toml -diagnostics 127.0.0.1:6060 >/dev/null
-wait_log "${relay_name}" "listening"
+wait_log "${relay_name}" "laneway-relay QUIC="
 
 node_create() {
   local name="$1" directory="$2" volume="$3"

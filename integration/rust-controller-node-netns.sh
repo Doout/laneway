@@ -64,7 +64,11 @@ stop_process() {
   local pid="$1"
   kill -TERM "${pid}" >/dev/null 2>&1 || true
   for _ in $(seq 1 240); do
-    if ! kill -0 "${pid}" >/dev/null 2>&1; then
+    local process_state=""
+    if [[ -r "/proc/${pid}/stat" ]]; then
+      process_state="$(sed -n 's/^.*) \([A-Z]\) .*/\1/p' "/proc/${pid}/stat" 2>/dev/null || true)"
+    fi
+    if ! kill -0 "${pid}" >/dev/null 2>&1 || [[ "${process_state}" == "Z" ]]; then
       wait "${pid}" >/dev/null 2>&1 || true
       unset "active_processes[${pid}]"
       return 0
