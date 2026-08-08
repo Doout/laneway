@@ -17,13 +17,17 @@ import (
 )
 
 type fakeCommandRunner struct {
-	calls  [][]string
-	failAt int
+	calls     [][]string
+	failAt    int
+	responses map[int][]byte
 }
 
 func (r *fakeCommandRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	call := append([]string{name}, args...)
 	r.calls = append(r.calls, call)
+	if output, ok := r.responses[len(r.calls)]; ok {
+		return output, nil
+	}
 	if r.failAt != 0 && len(r.calls) == r.failAt {
 		return []byte("injected command failure"), errors.New("injected")
 	}
@@ -34,6 +38,7 @@ type fakeControlClient struct {
 	configs []wgtypes.Config
 	failAt  int
 	closed  bool
+	device  *wgtypes.Device
 }
 
 func (c *fakeControlClient) ConfigureDevice(_ string, config wgtypes.Config) error {
@@ -45,6 +50,15 @@ func (c *fakeControlClient) ConfigureDevice(_ string, config wgtypes.Config) err
 }
 
 func (c *fakeControlClient) Close() error { c.closed = true; return nil }
+
+func (c *fakeControlClient) Device(name string) (*wgtypes.Device, error) {
+	if c.device == nil {
+		return nil, errors.New("device not found")
+	}
+	copy := *c.device
+	copy.Name = name
+	return &copy, nil
+}
 
 func validLinuxDeviceConfig(t *testing.T) DeviceConfig {
 	t.Helper()
@@ -122,8 +136,90 @@ func TestOpenLinuxDeviceRollsBackOnlyOwnedInterface(t *testing.T) {
 	if _, err := openLinuxDevice(context.Background(), validLinuxDeviceConfig(t), runner, control); err == nil {
 		t.Fatal("pre-existing interface collision accepted")
 	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("creation failure attempted destructive cleanup: %v", runner.calls)
+	for _, call := range runner.calls {
+		if strings.Join(call, " ") == "ip link delete dev lane0" {
+			t.Fatalf("unverified interface collision attempted destructive cleanup: %v", runner.calls)
+		}
+	}
+}
+
+func TestOpenLinuxDeviceAdoptsOnlyExactCrashResidue(t *testing.T) {
+	config := validLinuxDeviceConfig(t)
+	_, publicKey, err := ParsePrivateKey(config.PrivateKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeCommandRunner{
+		failAt: 1,
+		responses: map[int][]byte{
+			2: []byte(`[{"ifname":"lane0","mtu":1280,"linkinfo":{"info_kind":"wireguard"}}]`),
+			3: []byte(`[{"ifname":"lane0","addr_info":[{"family":"inet","local":"100.96.0.1","prefixlen":32},{"family":"inet6","local":"2001:db8::1","prefixlen":128}]}]`),
+		},
+	}
+	control := &fakeControlClient{device: &wgtypes.Device{
+		Name:       config.Name,
+		PublicKey:  wgtypes.Key(publicKey),
+		ListenPort: int(config.ListenPort),
+	}}
+	device, err := openLinuxDevice(context.Background(), config, runner, control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(control.configs) != 1 || !control.configs[0].ReplacePeers {
+		t.Fatalf("adopted state was not reconciled: %+v", control.configs)
+	}
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, " address add ") {
+			t.Fatalf("adoption tried to duplicate an address: %v", runner.calls)
+		}
+	}
+	if err := device.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenLinuxDeviceRefusesForeignCrashResidueWithoutMutation(t *testing.T) {
+	config := validLinuxDeviceConfig(t)
+	_, publicKey, err := ParsePrivateKey(config.PrivateKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPrivate, _ := deviceKey(t)
+	_, otherPublic, err := ParsePrivateKey(otherPrivate[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name      string
+		link      string
+		addresses string
+		key       PublicKey
+	}{
+		{name: "wrong type", link: `[{"ifname":"lane0","mtu":1280,"linkinfo":{"info_kind":"dummy"}}]`, key: publicKey},
+		{name: "wrong identity", link: `[{"ifname":"lane0","mtu":1280,"linkinfo":{"info_kind":"wireguard"}}]`, key: otherPublic},
+		{name: "extra address", link: `[{"ifname":"lane0","mtu":1280,"linkinfo":{"info_kind":"wireguard"}}]`, addresses: `[{"ifname":"lane0","addr_info":[{"family":"inet","local":"100.96.0.1","prefixlen":32},{"family":"inet6","local":"2001:db8::1","prefixlen":128},{"family":"inet","local":"192.0.2.1","prefixlen":32}]}]`, key: publicKey},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			responses := map[int][]byte{2: []byte(test.link)}
+			if test.addresses != "" {
+				responses[3] = []byte(test.addresses)
+			}
+			runner := &fakeCommandRunner{failAt: 1, responses: responses}
+			control := &fakeControlClient{device: &wgtypes.Device{Name: config.Name, PublicKey: wgtypes.Key(test.key), ListenPort: int(config.ListenPort)}}
+			if device, err := openLinuxDevice(context.Background(), config, runner, control); device != nil || err == nil {
+				t.Fatalf("device=%v error=%v", device, err)
+			}
+			if len(control.configs) != 0 {
+				t.Fatalf("foreign interface was mutated: %+v", control.configs)
+			}
+			for _, call := range runner.calls {
+				if strings.Join(call, " ") == "ip link delete dev lane0" {
+					t.Fatalf("foreign interface was deleted: %v", runner.calls)
+				}
+			}
+		})
 	}
 }
 
@@ -214,5 +310,31 @@ func TestPrivilegedKernelWireGuardLifecycle(t *testing.T) {
 	}
 	if output, err := exec.Command("ip", "link", "show", "dev", config.Name).CombinedOutput(); err == nil {
 		t.Fatalf("owned interface survived close: %s", output)
+	}
+}
+
+func TestPrivilegedKernelWireGuardCrashRecovery(t *testing.T) {
+	if os.Getenv("LANEWAY_WIREGUARD_PRIVILEGED") != "1" {
+		t.Skip("set LANEWAY_WIREGUARD_PRIVILEGED=1 in a disposable privileged host namespace")
+	}
+	config := validLinuxDeviceConfig(t)
+	config.Name = "lane-wgcrash0"
+	firstRaw, err := OpenDevice(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstRaw.(*linuxDevice)
+	// Closing only the userspace control socket models an ungraceful process
+	// exit: the kernel interface, key, addresses, and peers remain intact.
+	if err := first.control.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenDevice(context.Background(), config)
+	if err != nil {
+		_ = exec.Command("ip", "link", "delete", "dev", config.Name).Run()
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

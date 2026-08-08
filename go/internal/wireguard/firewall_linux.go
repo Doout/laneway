@@ -31,6 +31,7 @@ const (
 var (
 	firewallNamePattern    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,31}$`)
 	firewallSessionPattern = regexp.MustCompile(`^` + firewallSessionPrefix + `[0-9a-f]{32}$`)
+	firewallRulePattern    = regexp.MustCompile(`^laneway-wg-rule-[0-9a-f]{32}-[0-9]+$`)
 )
 
 type linuxFirewallManager struct {
@@ -129,7 +130,7 @@ func (m *linuxFirewallManager) Apply(ctx context.Context, plan FirewallPlan) err
 			return err
 		}
 		if exists {
-			if err := m.recoverStaleTable(ctx, statements); err != nil {
+			if err := m.recoverStaleTable(ctx); err != nil {
 				return err
 			}
 		}
@@ -159,12 +160,16 @@ func (m *linuxFirewallManager) Apply(ctx context.Context, plan FirewallPlan) err
 	return nil
 }
 
-func (m *linuxFirewallManager) recoverStaleTable(ctx context.Context, statements []firewallStatement) error {
+func (m *linuxFirewallManager) recoverStaleTable(ctx context.Context) error {
 	output, err := m.config.Runner.Run(ctx, m.config.NFTCommand, "-j", "list", "table", firewallFamily, m.config.Table)
 	if err != nil {
 		return fmt.Errorf("%w: inspect stale nftables table: %v", ErrFirewallOwnership, err)
 	}
-	session, err := nftstate.Validate(output, m.tableShape(statements))
+	staticOutput, err := m.validateAndStripStaleDynamicRules(output)
+	if err != nil {
+		return fmt.Errorf("%w: stale nftables table differs from exact Laneway policy: %v", ErrFirewallOwnership, err)
+	}
+	session, err := nftstate.Validate(staticOutput, m.tableShape(nil))
 	if err != nil || !firewallSessionPattern.MatchString(session) {
 		return fmt.Errorf("%w: stale nftables table differs from exact Laneway policy: %v", ErrFirewallOwnership, err)
 	}
@@ -172,6 +177,104 @@ func (m *linuxFirewallManager) recoverStaleTable(ctx context.Context, statements
 		return firewallCommandError("remove validated stale ruleset", output, err)
 	}
 	return nil
+}
+
+// validateAndStripStaleDynamicRules accepts controller-generated ACL rules
+// from the prior process without trusting their policy as the new desired
+// state. Their grammar, placement, count, and comments remain constrained;
+// nftstate.Validate then checks every immutable ownership and hook rule exactly.
+// The complete stale table is deleted before the new snapshot is installed.
+func (m *linuxFirewallManager) validateAndStripStaleDynamicRules(raw []byte) ([]byte, error) {
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	var document struct {
+		NFTables []map[string]any `json:"nftables"`
+	}
+	if err := decoder.Decode(&document); err != nil {
+		return nil, fmt.Errorf("decode nftables JSON: %w", err)
+	}
+	filtered := make([]map[string]any, 0, len(document.NFTables))
+	seenComments := make(map[string]struct{})
+	seenDefaultDeny := make(map[string]bool)
+	dynamicCount := 0
+	for _, object := range document.NFTables {
+		rule, isRule := object["rule"].(map[string]any)
+		if !isRule {
+			filtered = append(filtered, object)
+			continue
+		}
+		comment, _ := rule["comment"].(string)
+		if !firewallRulePattern.MatchString(comment) {
+			chain, _ := rule["chain"].(string)
+			if (chain == m.config.InboundChain && comment == "laneway-wg-default-deny-in") ||
+				(chain == m.config.OutboundChain && comment == "laneway-wg-default-deny-out") {
+				seenDefaultDeny[chain] = true
+			}
+			filtered = append(filtered, object)
+			continue
+		}
+		if len(object) != 1 || !exactFirewallKeys(rule, "family", "table", "chain", "handle", "comment", "expr") ||
+			rule["family"] != firewallFamily || rule["table"] != m.config.Table {
+			return nil, errors.New("dynamic rule identity or shape differs")
+		}
+		chain, _ := rule["chain"].(string)
+		if chain != m.config.InboundChain && chain != m.config.OutboundChain {
+			return nil, fmt.Errorf("dynamic rule uses unexpected chain %q", chain)
+		}
+		if seenDefaultDeny[chain] {
+			return nil, fmt.Errorf("dynamic rule appears after default deny in chain %q", chain)
+		}
+		if _, duplicate := seenComments[comment]; duplicate {
+			return nil, fmt.Errorf("dynamic rule comment %q is duplicated", comment)
+		}
+		seenComments[comment] = struct{}{}
+		if !validStaleFirewallExpressions(rule["expr"]) {
+			return nil, fmt.Errorf("dynamic rule %q has invalid expressions", comment)
+		}
+		dynamicCount++
+		if dynamicCount > DefaultFirewallRuleLimit {
+			return nil, errors.New("stale dynamic rule count exceeds the safety limit")
+		}
+	}
+	document.NFTables = filtered
+	return json.Marshal(document)
+}
+
+func validStaleFirewallExpressions(value any) bool {
+	expressions, ok := value.([]any)
+	if !ok || len(expressions) == 0 {
+		return false
+	}
+	for index, expression := range expressions {
+		object, ok := expression.(map[string]any)
+		if !ok || len(object) != 1 {
+			return false
+		}
+		if index == len(expressions)-1 {
+			_, accept := object["accept"]
+			_, drop := object["drop"]
+			if accept == drop {
+				return false
+			}
+			continue
+		}
+		if _, match := object["match"]; !match {
+			return false
+		}
+	}
+	return true
+}
+
+func exactFirewallKeys(value map[string]any, keys ...string) bool {
+	if len(value) != len(keys) {
+		return false
+	}
+	for _, key := range keys {
+		if _, ok := value[key]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *linuxFirewallManager) Restore(ctx context.Context) error {

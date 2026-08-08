@@ -219,6 +219,58 @@ func TestLinuxFirewallRecoversOnlyExactCrashResidue(t *testing.T) {
 	}
 }
 
+func TestLinuxFirewallRecoversPriorControllerSnapshot(t *testing.T) {
+	runner := &fakeFirewallRunner{table: true}
+	manager := newTestFirewall(t, runner).(*linuxFirewallManager)
+	_, staleStatements, err := compileFirewallPlan(testFirewallPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.staleJSON = firewallShapeJSON(t, manager.tableShape(staleStatements), firewallSessionPrefix+strings.Repeat("b", 32))
+	current := testFirewallPlan()
+	current.Epoch++
+	current.Rules[0].DestinationPorts[0] = FirewallPortRange{First: 8443, Last: 8443}
+	if err := manager.Apply(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputs) != 2 || !strings.Contains(runner.inputs[1], "dport 8443") {
+		t.Fatalf("prior snapshot was not replaced authoritatively: %v", runner.inputs)
+	}
+}
+
+func TestLinuxFirewallRejectsMalformedStaleDynamicRule(t *testing.T) {
+	runner := &fakeFirewallRunner{table: true}
+	manager := newTestFirewall(t, runner).(*linuxFirewallManager)
+	_, statements, err := compileFirewallPlan(testFirewallPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := firewallShapeJSON(t, manager.tableShape(statements), firewallSessionPrefix+strings.Repeat("c", 32))
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, object := range document["nftables"].([]any) {
+		entry := object.(map[string]any)
+		rule, ok := entry["rule"].(map[string]any)
+		if !ok || !strings.HasPrefix(rule["comment"].(string), "laneway-wg-rule-") {
+			continue
+		}
+		rule["expr"] = []any{map[string]any{"jump": map[string]any{"target": manager.config.InboundChain}}}
+		break
+	}
+	runner.staleJSON, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Apply(context.Background(), testFirewallPlan()); !errors.Is(err, ErrFirewallOwnership) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(runner.inputs) != 0 || !runner.table {
+		t.Fatal("malformed stale policy was mutated")
+	}
+}
+
 func TestLinuxFirewallFailedAtomicReplacementKeepsPreviousState(t *testing.T) {
 	runner := new(fakeFirewallRunner)
 	manager := newTestFirewall(t, runner)

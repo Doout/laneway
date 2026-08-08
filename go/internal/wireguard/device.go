@@ -50,7 +50,8 @@ type DeviceConfig struct {
 
 // Device owns one stable WireGuard interface. ApplyPeers replaces all peers as
 // one controller snapshot and restores the previous snapshot if the platform
-// rejects the update. Close removes only the interface created by OpenDevice.
+// rejects the update. Close removes only the interface created by OpenDevice,
+// or exact owned state safely recovered after a process crash.
 type Device interface {
 	Name() string
 	MTU() int
