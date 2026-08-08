@@ -31,7 +31,9 @@ compose() {
 read_setting() {
   key=$1
   value=$(sed -n "s/^${key}=//p" "$env_file")
-  [ -n "$value" ] && [ "$(printf '%s\n' "$value" | wc -l)" -eq 1 ] || die "missing or duplicate $key in .env"
+  if [ -z "$value" ] || [ "$(printf '%s\n' "$value" | wc -l)" -ne 1 ]; then
+    die "missing or duplicate $key in .env"
+  fi
   printf '%s' "$value"
 }
 validate_name() {
@@ -39,7 +41,9 @@ validate_name() {
   case "$1" in *.age) ;; *) die "bundle name must end in .age" ;; esac
 }
 require_regular() {
-  [ -f "$1" ] && [ ! -L "$1" ] || die "required regular file is missing or unsafe: $1"
+  if [ ! -f "$1" ] || [ -L "$1" ]; then
+    die "required regular file is missing or unsafe: $1"
+  fi
 }
 
 [ "$(id -u)" -eq 0 ] || die "run as root to read and restore fixed-UID secrets safely"
@@ -54,12 +58,16 @@ case "${1:-}" in
     require_regular "$env_file"
     recipient=$(read_setting LANEWAY_BACKUP_RECIPIENT)
     printf '%s\n' "$recipient" | grep -Eq '^age1[0-9a-z]{58}$' || die "LANEWAY_BACKUP_RECIPIENT must be an age X25519 recipient"
-    [ ! -e "$recovery_dir/$name" ] && [ ! -L "$recovery_dir/$name" ] || die "recovery bundle already exists: $name"
+    if [ -e "$recovery_dir/$name" ] || [ -L "$recovery_dir/$name" ]; then
+      die "recovery bundle already exists: $name"
+    fi
     "$base_dir/validate.sh"
     install -d -m 0700 "$backup_dir"
     chown 65532:65532 "$backup_dir"
     if [ -e "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
-      [ -d "$recovery_dir" ] && [ ! -L "$recovery_dir" ] || die "generated/recovery must be a real directory"
+      if [ ! -d "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
+        die "generated/recovery must be a real directory"
+      fi
     fi
     install -d -m 0700 -o 0 -g 0 "$recovery_dir"
     work=$(mktemp -d "$base_dir/generated/.recovery-backup.XXXXXX")
@@ -184,11 +192,15 @@ generated/config/exit-node.toml
 generated/pki/exit-node.crt
 generated/pki/exit-node.key"
     for relative in $targets; do
-      [ ! -e "$base_dir/$relative" ] && [ ! -L "$base_dir/$relative" ] || die "refusing to overwrite existing deployment state: $relative"
+      if [ -e "$base_dir/$relative" ] || [ -L "$base_dir/$relative" ]; then
+        die "refusing to overwrite existing deployment state: $relative"
+      fi
     done
     for directory in generated generated/config generated/pki generated/secrets generated/backups; do
       if [ -e "$base_dir/$directory" ] || [ -L "$base_dir/$directory" ]; then
-        [ -d "$base_dir/$directory" ] && [ ! -L "$base_dir/$directory" ] || die "restore target is not a real directory: $directory"
+        if [ ! -d "$base_dir/$directory" ] || [ -L "$base_dir/$directory" ]; then
+          die "restore target is not a real directory: $directory"
+        fi
       fi
     done
     install -d -m 0700 "$base_dir/generated" "$base_dir/generated/config" "$base_dir/generated/pki" "$base_dir/generated/secrets"

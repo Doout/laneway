@@ -111,7 +111,10 @@ for path in \
   generated/pki/controller.crt generated/pki/controller.key generated/pki/relay.crt generated/pki/relay.key \
   generated/secrets/admin.token
 do
-  [ -f "$compose_dir/$path" ] && [ ! -L "$compose_dir/$path" ] || { echo "missing prepared $path" >&2; exit 1; }
+  if [ ! -f "$compose_dir/$path" ] || [ -L "$compose_dir/$path" ]; then
+    echo "missing prepared $path" >&2
+    exit 1
+  fi
 done
 for path in generated/pki/intermediate.key generated/pki/controller.key generated/pki/relay.key generated/secrets/admin.token; do
   [ "$(stat -c '%a:%u:%g' "$compose_dir/$path")" = 400:65532:65532 ] || { echo "unsafe ownership for $path" >&2; exit 1; }

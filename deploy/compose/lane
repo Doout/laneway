@@ -24,7 +24,9 @@ release_lock() {
 }
 acquire_lock() {
   if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
-    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || die "generated/lifecycle must be a real directory"
+    if [ ! -d "$state_dir" ] || [ -L "$state_dir" ]; then
+      die "generated/lifecycle must be a real directory"
+    fi
   fi
   install -d -m 0700 "$state_dir"
   mkdir "$lock_dir" 2>/dev/null || die "another lifecycle operation is active (inspect generated/lifecycle/operator.lock if it is stale)"
@@ -54,7 +56,9 @@ read_setting() {
 
 validate_release_env() {
   file=$1
-  [ -f "$file" ] && [ ! -L "$file" ] || die "release environment must be a regular, non-symlink file: $file"
+  if [ ! -f "$file" ] || [ -L "$file" ]; then
+    die "release environment must be a regular, non-symlink file: $file"
+  fi
   version=$(read_setting "$file" LANEWAY_VERSION)
   printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || die "LANEWAY_VERSION must be semantic"
   for key in LANEWAY_CONTROLLER_IMAGE_DIGEST LANEWAY_RELAY_IMAGE_DIGEST LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_EXIT_NODE_IMAGE_DIGEST; do
@@ -188,7 +192,9 @@ run_invite() {
 atomic_copy() {
   source=$1; destination=$2; directory=$(dirname "$destination")
   if [ -e "$destination" ] || [ -L "$destination" ]; then
-    [ -f "$destination" ] && [ ! -L "$destination" ] || die "refusing to replace non-regular state: $destination"
+    if [ ! -f "$destination" ] || [ -L "$destination" ]; then
+      die "refusing to replace non-regular state: $destination"
+    fi
   fi
   temporary=$(mktemp "$directory/.lane-env.XXXXXX")
   if ! cp "$source" "$temporary" || ! chmod 0600 "$temporary" || ! mv "$temporary" "$destination"; then
@@ -202,11 +208,15 @@ activate_release() {
   validate_release_env "$candidate"; verify_release_images "$candidate"; compose_with_env "$candidate" pull
   backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).age"; backup_recovery "$backup_name"
   if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
-    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || die "generated/lifecycle must be a real directory"
+    if [ ! -d "$state_dir" ] || [ -L "$state_dir" ]; then
+      die "generated/lifecycle must be a real directory"
+    fi
   fi
   install -d -m 0700 "$state_dir"
   if [ -e "$state_dir/previous.env" ] || [ -L "$state_dir/previous.env" ]; then
-    [ -f "$state_dir/previous.env" ] && [ ! -L "$state_dir/previous.env" ] || die "previous release state is not a regular file"
+    if [ ! -f "$state_dir/previous.env" ] || [ -L "$state_dir/previous.env" ]; then
+      die "previous release state is not a regular file"
+    fi
   fi
   current_copy=$state_dir/current-before-$operation.env; atomic_copy "$env_file" "$current_copy"
   exit_was_running=false
@@ -260,14 +270,18 @@ case "$command" in
   backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
   restore)
     acquire_lock
-    [ "$#" -eq 3 ] && [ "$2" = --identity ] || die "restore requires BUNDLE.age --identity AGE_IDENTITY_FILE"
+    if [ "$#" -ne 3 ] || [ "$2" != --identity ]; then
+      die "restore requires BUNDLE.age --identity AGE_IDENTITY_FILE"
+    fi
     "$base_dir/recovery.sh" restore "$1" "$3"
     ;;
   upgrade) acquire_lock; [ "$#" -eq 1 ] || die "upgrade requires CANDIDATE.env"; activate_release "$1" upgrade ;;
   rollback)
     acquire_lock
     [ "$#" -eq 0 ] || die "rollback accepts no arguments"
-    [ -f "$state_dir/previous.env" ] && [ ! -L "$state_dir/previous.env" ] || die "no previous release is available"
+    if [ ! -f "$state_dir/previous.env" ] || [ -L "$state_dir/previous.env" ]; then
+      die "no previous release is available"
+    fi
     candidate=$state_dir/rollback-candidate.env; atomic_copy "$state_dir/previous.env" "$candidate"; activate_release "$candidate" rollback
     ;;
   help|-h|--help) usage ;;
