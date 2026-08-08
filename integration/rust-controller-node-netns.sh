@@ -279,11 +279,13 @@ fi
 rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join "${rust_token}" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-  --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key")"
+  --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key" \
+  --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
 gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join "${gateway_token}" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-  --name go-gateway --out-cert "${work_dir}/pki/gateway.crt" --out-key "${work_dir}/pki/gateway.key")"
+  --name go-gateway --out-cert "${work_dir}/pki/gateway.crt" --out-key "${work_dir}/pki/gateway.key" \
+  --out-wireguard-key "${work_dir}/pki/gateway.wireguard.key")"
 rust_id="$(printf '%s\n' "${rust_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
 gateway_id="$(printf '%s\n' "${gateway_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
 rust_overlay="$(printf '%s\n' "${rust_join}" | sed -n 's/.* overlay=\([^, ]*\).*/\1/p')"

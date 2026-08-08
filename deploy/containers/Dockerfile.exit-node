@@ -20,13 +20,12 @@ RUN apk add --no-cache \
       iproute2-minimal=6.17.0-r0 \
       nftables=1.1.5-r2 \
       procps-ng=4.0.5-r0 \
-      setpriv=2.41.4-r0 \
       tini=0.19.0-r3 \
     && addgroup -g 65532 laneway \
     && adduser -D -H -u 65532 -G laneway laneway \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway
 COPY --from=build /out/laneway /usr/local/bin/laneway
 COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
-USER 0:0
-ENTRYPOINT ["/bin/setpriv", "--reuid=65532", "--regid=65532", "--clear-groups", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--bounding-set=-all,+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
+USER 65532:65532
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]

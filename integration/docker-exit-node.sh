@@ -229,7 +229,8 @@ join_node() {
     --token-file /node/enrollment.token --controller "https://${controller_name}:8443" --ca /ca.crt \
     --server-name "${controller_name}" --controller-network-id "${network_id}" \
     --controller-service-id "${controller_service}" --name "${name}" \
-    --out-cert /node/node.crt --out-key /node/node.key >/dev/null
+    --out-cert /node/node.crt --out-key /node/node.key \
+    --out-wireguard-key /node/wireguard.key >/dev/null
   rm -f -- "${directory}/enrollment.token"
 }
 join_node docker-client "${work_dir}/client"
@@ -321,7 +322,7 @@ wait_log "${relay_name}" "listening"
 node_create() {
   local name="$1" directory="$2" volume="$3"
   docker create --name "${name}" --hostname "${name}" --label "${owner}" --network "${control_network}" \
-    --user 0:0 --read-only --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP \
+    --user 65532:65532 --read-only --cap-drop ALL --cap-add NET_ADMIN \
     --security-opt no-new-privileges --device /dev/net/tun:/dev/net/tun \
     --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv6.conf.all.forwarding=1 \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
