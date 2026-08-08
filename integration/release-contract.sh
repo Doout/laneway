@@ -91,12 +91,12 @@ for path in "$dockerfile" "$exit_dockerfile"; do
   require "laneway.dev/laneway/internal/buildinfo.Version=\${VERSION}" "$path"
 done
 require 'FROM alpine:3.23@sha256:' "$exit_dockerfile"
-for package in ca-certificates iproute2-minimal libcap-setcap nftables procps-ng tini; do
+for package in ca-certificates iproute2-minimal nftables procps-ng setpriv tini; do
   if ! grep -E "^[[:space:]]+${package}=[0-9]" "$exit_dockerfile" >/dev/null; then
     echo "Exit Node runtime package is not version-pinned: $package" >&2
     exit 1
   fi
 done
-require 'setcap cap_net_admin=ep /usr/local/bin/laneway' "$exit_dockerfile"
+require '"--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--bounding-set=-all,+net_admin", "--no-new-privs"' "$exit_dockerfile"
 
 echo "Release signing, provenance, SBOM, scan, and multi-architecture contract is valid"

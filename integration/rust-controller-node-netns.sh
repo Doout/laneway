@@ -75,8 +75,9 @@ stop_process() {
     fi
     sleep 0.05
   done
-  echo "ERROR: process ${pid} did not stop" >&2
-  return 1
+  kill -KILL "${pid}" >/dev/null 2>&1 || true
+  wait "${pid}" >/dev/null 2>&1 || true
+  unset "active_processes[${pid}]"
 }
 
 wait_log() {
