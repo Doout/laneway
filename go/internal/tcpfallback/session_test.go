@@ -215,6 +215,34 @@ func TestPacketReceiveReusesBoundedOwnedBuffer(t *testing.T) {
 	}
 }
 
+func TestSessionCarriesStructurallyValidOpaqueWireGuardFrame(t *testing.T) {
+	pair := openPair(t, &Config{QueueDepth: 4, MaxPacketPayload: 1205})
+	ciphertext := make([]byte, 148)
+	binary.LittleEndian.PutUint32(ciphertext, 1)
+	frame, err := protocol.EncodeWireGuardPacket(nil, 7, ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := pair.client.WritePacket(ctx, frame); err != nil {
+		t.Fatal(err)
+	}
+	got, err := pair.server.ReadPacket(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(frame) {
+		t.Fatalf("opaque frame differs: got=%x want=%x", got, frame)
+	}
+	// The TCP record layer validates public framing only. A plaintext consumer
+	// must still reject the encrypted flag unless its authenticated session
+	// negotiated e2e-packet-v1.
+	if _, _, err := protocol.DecodePacket(got); !errors.Is(err, protocol.ErrInvalidPacketFlags) {
+		t.Fatalf("plaintext decoder accepted opaque frame: %v", err)
+	}
+}
+
 func TestLoopbackControlAndPacketPathExchange(t *testing.T) {
 	pair := openPair(t, nil)
 	if pair.client.PeerIdentity().Role != identity.IdentityRoleRelay || pair.server.PeerIdentity().Role != identity.IdentityRoleNode {

@@ -224,10 +224,13 @@ func (s *Session) ReadControl(ctx context.Context) ([]byte, error) {
 	return s.receive(ctx, s.control)
 }
 
-// WritePacket sends one complete Laneway packet frame (the route header plus
-// an IP packet). Callers that have only an IP packet should use PacketPath.
+// WritePacket sends one complete Laneway packet frame. The authenticated
+// session owner remains responsible for enforcing negotiated capabilities;
+// this carrier boundary accepts either a plaintext IP frame or a structurally
+// valid opaque WireGuard frame. Callers that have only an IP packet should use
+// PacketPath.
 func (s *Session) WritePacket(ctx context.Context, frame []byte) error {
-	if _, _, err := protocol.DecodePacket(frame); err != nil {
+	if _, _, err := protocol.DecodeFrame(frame); err != nil {
 		return fmt.Errorf("%w: invalid packet: %w", ErrProtocol, err)
 	}
 	return s.writeFrame(ctx, framePacket, frame)
@@ -315,7 +318,7 @@ func (s *Session) readLoop() {
 				return
 			}
 		case framePacket:
-			if _, _, err := protocol.DecodePacket(payload); err != nil {
+			if _, _, err := protocol.DecodeFrame(payload); err != nil {
 				owner.Release()
 				s.terminate(fmt.Errorf("%w: invalid packet: %w", ErrProtocol, err))
 				return

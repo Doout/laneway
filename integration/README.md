@@ -36,6 +36,10 @@ namespace, and runs the following checks inside it:
 - direct-path promotion between nodes behind two deterministic nftables NATs,
   with the relay packet counter checked to prove the application packet did
   not take the relay path; and
+- one stable dual-stack kernel WireGuard interface carrying encrypted packets
+  over relay QUIC, forced relay TCP when external UDP is blocked, automatic
+  QUIC recovery, direct WireGuard promotion, and direct-failure demotion without
+  recreating the interface or changing its controller-assigned addresses; and
 - a controller-backed product lifecycle using the real HTTPS/mTLS controller,
   admin and node CLIs, single-use enrollment, relay registration, capabilities,
   ACLs, route advertisement/approval/withdrawal, and node revocation. The live

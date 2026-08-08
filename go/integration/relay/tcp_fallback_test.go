@@ -3,6 +3,7 @@ package relay_test
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/nodeservice"
+	"laneway.dev/laneway/internal/pathmanager"
 	"laneway.dev/laneway/internal/platform"
 	"laneway.dev/laneway/internal/protocol"
 	"laneway.dev/laneway/internal/relay"
@@ -18,7 +20,36 @@ import (
 	"laneway.dev/laneway/internal/routing"
 	"laneway.dev/laneway/internal/tcpfallback"
 	"laneway.dev/laneway/internal/transport"
+	"laneway.dev/laneway/internal/wireguard"
 )
+
+type capturedWireGuardRelay struct {
+	ready chan *wireguard.RelayMux
+}
+
+func newCapturedWireGuardRelay() *capturedWireGuardRelay {
+	return &capturedWireGuardRelay{ready: make(chan *wireguard.RelayMux, 1)}
+}
+
+func (h *capturedWireGuardRelay) RunRelay(ctx context.Context, mux *wireguard.RelayMux, kind pathmanager.PathKind, _ string) error {
+	if kind != pathmanager.PathTCPFallback {
+		return errors.New("unexpected WireGuard carrier")
+	}
+	for len(mux.Peers()) == 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-mux.Changes():
+		}
+	}
+	select {
+	case h.ready <- mux:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
 
 type failFirstRelayDialer struct {
 	failures int32
@@ -123,6 +154,96 @@ func TestNodesFallBackToTCPWhenQUICUnavailable(t *testing.T) {
 			t.Fatal("timed out waiting for TCP fallback packet")
 		}
 	}
+}
+
+func TestWireGuardCiphertextCrossesTCPFallback(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	network := identity.NetworkID(fixedID(61))
+	nodeA := identity.NodeIdentity{NetworkID: network, NodeID: identity.NodeID(fixedID(62))}
+	nodeB := identity.NodeIdentity{NetworkID: network, NodeID: identity.NodeID(fixedID(63))}
+	addressA, addressB := netip.MustParseAddr("100.101.0.1"), netip.MustParseAddr("100.101.0.2")
+	serverTLS, clientATLS, clientBTLS := testTLS(t, network, nodeA, nodeB)
+	tcpConfig := &tcpfallback.Config{
+		HandshakeTimeout: time.Second, WriteTimeout: time.Second,
+		IdleTimeout: 3 * time.Second, KeepAlivePeriod: time.Second,
+		QueueDepth: 16, MaxPacketPayload: 1200 + protocol.PacketHeaderSize,
+	}
+	listener, err := tcpfallback.Listen("127.0.0.1:0", serverTLS, tcpConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server, err := relayservice.New(relayservice.Config{
+		Authorizer: relayservice.StaticAuthorizer{
+			nodeA: {OverlayAddresses: []netip.Addr{addressA}, AuthorizedPrefixes: []netip.Prefix{netip.PrefixFrom(addressA, 32)}},
+			nodeB: {OverlayAddresses: []netip.Addr{addressB}, AuthorizedPrefixes: []netip.Prefix{netip.PrefixFrom(addressB, 32)}},
+		},
+		Registry: relay.Config{
+			MaxSessions: 8, MaxHandlesPerSession: 8, OutboundQueueCapacity: 8,
+			MaxPacketPayload: 1200, DuplicatePolicy: relay.RejectDuplicate, QueuePolicy: relay.DropNewest,
+		},
+		TCPFallback: tcpConfig, MaxPacketPayload: 1200,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.ServeTCP(ctx, listener) }()
+
+	handlerA, handlerB := newCapturedWireGuardRelay(), newCapturedWireGuardRelay()
+	unavailableQUIC := listener.Addr().String()
+	newNode := func(local identity.NodeIdentity, tlsConfig *tls.Config, peer identity.NodeID, handler *capturedWireGuardRelay) *nodeservice.Service {
+		routes := routing.NewTable(routing.MustSnapshot([]routing.Route{{Prefix: netip.PrefixFrom(addressB, 32), NextHop: peer}}))
+		if local == nodeB {
+			routes = routing.NewTable(routing.MustSnapshot([]routing.Route{{Prefix: netip.PrefixFrom(addressA, 32), NextHop: peer}}))
+		}
+		service, serviceErr := nodeservice.New(nodeservice.Config{
+			Identity: local, BootID: randomID(t), RelayAddress: unavailableQUIC, TLSConfig: tlsConfig,
+			Transport:          &transport.Config{HandshakeIdleTimeout: 100 * time.Millisecond, MaxIdleTimeout: 2 * time.Second, KeepAlivePeriod: 500 * time.Millisecond},
+			TCPFallbackAddress: listener.Addr().String(), TCPFallback: tcpConfig, Routes: routes,
+			WireGuardRelay: handler, MaxControlPayload: protocol.DefaultMaxControlFrame, MaxRoutes: 8,
+		})
+		if serviceErr != nil {
+			t.Fatal(serviceErr)
+		}
+		return service
+	}
+	serviceA := newNode(nodeA, clientATLS, nodeB.NodeID, handlerA)
+	serviceB := newNode(nodeB, clientBTLS, nodeA.NodeID, handlerB)
+	nodeDone := make(chan error, 2)
+	go func() { nodeDone <- serviceA.RunSession(ctx) }()
+	go func() { nodeDone <- serviceB.RunSession(ctx) }()
+	var muxA, muxB *wireguard.RelayMux
+	select {
+	case muxA = <-handlerA.ready:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for node A WireGuard TCP binding")
+	}
+	select {
+	case muxB = <-handlerB.ready:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for node B WireGuard TCP binding")
+	}
+	// A structurally valid WireGuard handshake initiation remains opaque to the
+	// relay. Its exact bytes must arrive bound to the authenticated sender.
+	ciphertext := make([]byte, 148)
+	binary.LittleEndian.PutUint32(ciphertext, 1)
+	if err := muxA.Send(ctx, nodeB.NodeID, ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	received, err := muxB.Receive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer received.Release()
+	if received.Peer != nodeA.NodeID || string(received.Packet) != string(ciphertext) {
+		t.Fatalf("WireGuard TCP packet peer=%s size=%d", received.Peer, len(received.Packet))
+	}
+	cancel()
+	waitDone(t, serverDone)
+	waitDone(t, nodeDone)
+	waitDone(t, nodeDone)
 }
 
 func TestQUICAndTCPShareRelayRegistry(t *testing.T) {
