@@ -9,10 +9,43 @@ Published releases use the pinned images in `compose.yaml`. Until those images
 are published, developers can add `-f compose.dev.yaml` to build equivalent
 images from this checkout.
 
+## Quick production install
+
+Prepare public DNS, the offline issuer export, and an off-host age recovery
+recipient as described below. Then run the interactive installer from the
+signed Laneway package:
+
+```sh
+sudo /usr/local/share/laneway/deploy/compose/install-control-plane.sh
+```
+
+On a fresh host, the top-level installer installs the selected signed package
+and launches the same wizard in one flow:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/Doout/laneway/main/install.sh
+less install.sh
+sudo sh install.sh --control-plane
+```
+
+The wizard asks for one stable release tag rather than four image hashes. It
+downloads the release's image manifest, verifies every immutable image against
+the tagged GitHub Actions signing identity, generates independent service IDs,
+writes the protected `.env`, and runs `lane init`. The hashes remain in the
+generated file so later starts cannot silently follow a moved registry tag;
+operators do not need to find or copy them.
+
+Defaults cover the usual production ports, public binding, network name, and
+overlay pool. Before confirmation, the wizard shows every listener it will
+publish. It does not configure or modify the host firewall, routes, interfaces,
+DNS, or sysctls.
+
 ## Prerequisites
 
 - Docker Engine 26 or newer with Compose v2
 - `age` and `age-keygen` for encrypted recovery bundles
+- Cosign 3.1.3 or newer for release and image signature verification
+- `curl`, `getent`, and `ss` for downloads and read-only preflight checks
 - public DNS for the control host
 - inbound TCP+UDP 8443, UDP 4433, and TCP 443
 - an offline root and an exported online-intermediate bundle created as
@@ -54,9 +87,10 @@ age-keygen -y laneway-recovery.identity
 chmod 0400 laneway-recovery.identity
 ```
 
-Copy `.env.example` to `.env` and pin a release. Download that release's
-`image-digests.txt`, verify the release as described below, and copy each
-service's immutable `sha256:` manifest digest into `.env`. Compose retains the
+For manual installation, copy `.env.example` to `.env` and pin a release.
+Download that release's `image-digests.txt`, verify the release as described
+below, and copy each service's immutable `sha256:` manifest digest into `.env`.
+The quick installer performs these steps automatically. Compose retains the
 semantic version for readability but pulls and runs only the exact signed
 multi-architecture manifest named by the digest. Set `LANEWAY_BIND_ADDRESS` to
 the public service address; use `127.0.0.1` for local-only validation. The published-port defaults are

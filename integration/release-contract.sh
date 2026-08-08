@@ -9,6 +9,8 @@ compose_file=$repo_dir/deploy/compose/compose.yaml
 lane_workflow=$repo_dir/deploy/compose/lane
 prepare_workflow=$repo_dir/deploy/compose/prepare.sh
 recovery_workflow=$repo_dir/deploy/compose/recovery.sh
+installer=$repo_dir/deploy/compose/install-control-plane.sh
+package_workflow=$repo_dir/scripts/package.sh
 
 require() {
   pattern=$1
@@ -45,6 +47,16 @@ done
 for value in 'age --encrypt' 'age --decrypt' 'unexpected recovery archive entry' 'generated/recovery' 'chown 0:0'; do
   require "$value" "$recovery_workflow"
 done
+for value in 'Release tag' 'image-digests.txt' 'cosign verify' 'does not edit the host' 'lane init --issuer'; do
+  require "$value" "$installer"
+done
+for value in '.env.example' 'install-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
+  require "$value" "$package_workflow"
+done
+if grep -F "cp -R \"\$project_dir/deploy/.\"" "$package_workflow" >/dev/null; then
+  echo "package workflow recursively copies private deployment runtime state" >&2
+  exit 1
+fi
 
 for value in \
   'platforms: linux/amd64,linux/arm64' \
