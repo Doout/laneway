@@ -94,6 +94,22 @@ func TestPKICommands(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := run([]string{
+		"pki", "verify-authority", "--root", filepath.Join(dir, "ca.crt"),
+		"--issuer", intermediateCert, "--key", intermediateKey,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	otherRoot := filepath.Join(dir, "other-root")
+	if err := run([]string{"pki", "init", "--out-dir", otherRoot, "--validity", "48h"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"pki", "verify-authority", "--root", filepath.Join(otherRoot, "ca.crt"),
+		"--issuer", intermediateCert, "--key", intermediateKey,
+	}); err == nil || !strings.Contains(err.Error(), "not anchored") {
+		t.Fatalf("mismatched offline root verification error = %v", err)
+	}
 	certPath := filepath.Join(dir, "node.crt")
 	keyPath := filepath.Join(dir, "node.key")
 	if err := run([]string{

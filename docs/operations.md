@@ -626,6 +626,16 @@ commands and offline key/configuration backup boundary are documented in
 the previous binaries and configuration available for rollback; never roll
 back the database independently of migrations without a tested backup.
 
+For a new Compose control plane, create the root and intermediate on an offline
+workstation. Transfer only `ca.crt`, the issuer-first
+`intermediate-chain.crt`, and `intermediate.key`; never transfer the root key.
+`sudo ./lane init --issuer DIR` verifies that boundary and generates the service
+identities, admin secret, and strict configuration without overwriting existing
+or partial state. Its preflight checks Docker version/Compose, public DNS, and
+foreign TCP/UDP listeners read-only. If an existing Laneway Compose stack owns
+containers, port collision checks are skipped so repeated init remains
+idempotent. The optional Exit profile additionally requires `/dev/net/tun`.
+
 Tagged releases publish Linux AMD64/ARM64 archives and controller, relay,
 administrative, and isolated Exit Node images. Every release includes signed
 checksums, GitHub build provenance, immutable image digest records, and SPDX

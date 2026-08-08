@@ -7,6 +7,7 @@ dockerfile=$repo_dir/deploy/containers/Dockerfile
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 compose_file=$repo_dir/deploy/compose/compose.yaml
 lane_workflow=$repo_dir/deploy/compose/lane
+prepare_workflow=$repo_dir/deploy/compose/prepare.sh
 
 require() {
   pattern=$1
@@ -36,6 +37,9 @@ done
 
 for value in 'cosign verify' 'compose_with_env' 'backup_database' 'database was not rolled back'; do
   require "$value" "$lane_workflow"
+done
+for value in 'pki verify-authority' 'offline root private key ca.key must never' 'chown 65532:65532'; do
+  require "$value" "$prepare_workflow"
 done
 
 for value in \

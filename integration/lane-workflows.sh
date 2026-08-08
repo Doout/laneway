@@ -8,8 +8,9 @@ compose_dir=$test_dir/compose
 fake_bin=$test_dir/bin
 log=$test_dir/calls.log
 mkdir -p "$compose_dir/generated/backups" "$fake_bin"
-cp "$repo_dir/deploy/compose/lane" "$compose_dir/lane"
+cp "$repo_dir/deploy/compose/lane" "$repo_dir/deploy/compose/preflight.sh" "$compose_dir/"
 chmod 0755 "$compose_dir/lane"
+chmod 0755 "$compose_dir/preflight.sh"
 : > "$compose_dir/compose.yaml"
 : > "$log"
 
@@ -29,11 +30,26 @@ set -eu
 printf 'docker' >> "$LANE_TEST_LOG"
 printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
+if [ "${1:-} ${2:-}" = "version --format" ]; then printf '26.1.0\n'; exit 0; fi
 case " $* " in
+  *" ps --all --quiet "*) [ "${LANE_TEST_OWNED_STACK:-0}" = 0 ] || printf 'owned-id\n' ;;
   *" ps --status running -q controller "*) [ "${LANE_TEST_CONTROLLER_RUNNING:-0}" = 0 ] || printf 'controller-id\n' ;;
   *" ps --status running -q exit-node "*) [ "${LANE_TEST_EXIT_RUNNING:-0}" = 0 ] || printf 'exit-id\n' ;;
+  *" ps -q controller "*) printf 'controller-id\n' ;;
+  *" ps -q relay "*) printf 'relay-id\n' ;;
+  *" ps -q exit-node "*) [ "${LANE_TEST_EXIT_RUNNING:-0}" = 0 ] || printf 'exit-id\n' ;;
+  *" inspect --format "*) printf '%s\n' "${LANE_TEST_HEALTH:-healthy}" ;;
+  *" exec -T --user 65532:65532 exit-node "*) printf 'carrier=direct-wireguard limiter=healthy\n' ;;
   *" up -d --wait controller relay "*) [ "${LANE_TEST_FAIL_UP:-0}" = 0 ] || exit 1 ;;
 esac
+EOF
+cat > "$fake_bin/getent" <<'EOF'
+#!/bin/sh
+[ "${LANE_TEST_DNS_FAIL:-0}" = 0 ]
+EOF
+cat > "$fake_bin/ss" <<'EOF'
+#!/bin/sh
+[ "${LANE_TEST_PORT_BUSY:-0}" = 0 ] || printf 'foreign-listener\n'
 EOF
 cat > "$fake_bin/cosign" <<'EOF'
 #!/bin/sh
@@ -42,7 +58,7 @@ printf 'cosign' >> "$LANE_TEST_LOG"
 printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
 EOF
-chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$fake_bin/docker" "$fake_bin/cosign"
+chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$fake_bin/docker" "$fake_bin/cosign" "$fake_bin/getent" "$fake_bin/ss"
 
 write_env() {
   path=$1; version=$2; digit=$3
@@ -80,8 +96,30 @@ bootstrap_line=$(grep -n '^bootstrap$' "$log" | tail -1 | cut -d: -f1)
 [ "$pull_line" -lt "$bootstrap_line" ] || { echo "init bootstrapped before verified pull" >&2; exit 1; }
 : > "$log"
 
-"$compose_dir/lane" status
+LANE_TEST_DNS_FAIL=1; export LANE_TEST_DNS_FAIL
+if "$compose_dir/preflight.sh" >/dev/null 2>&1; then echo "preflight accepted failed DNS" >&2; exit 1; fi
+LANE_TEST_DNS_FAIL=0; export LANE_TEST_DNS_FAIL
+LANE_TEST_PORT_BUSY=1; export LANE_TEST_PORT_BUSY
+if "$compose_dir/preflight.sh" >/dev/null 2>&1; then echo "preflight accepted a foreign listener" >&2; exit 1; fi
+LANE_TEST_OWNED_STACK=1; export LANE_TEST_OWNED_STACK
+"$compose_dir/preflight.sh" >/dev/null
+LANE_TEST_PORT_BUSY=0 LANE_TEST_OWNED_STACK=0
+export LANE_TEST_PORT_BUSY LANE_TEST_OWNED_STACK
+
+mkdir -p "$compose_dir/generated/config"
+printf '%s\n' 'packet_rate_bits_per_second = 2000000' 'packet_burst_bytes = 65536' > "$compose_dir/generated/config/relay.toml"
+: > "$compose_dir/generated/config/exit-node.toml"
+LANE_TEST_EXIT_RUNNING=1; export LANE_TEST_EXIT_RUNNING
+
+status_output=$("$compose_dir/lane" status)
+printf '%s\n' "$status_output" | grep -F 'controller=healthy' >/dev/null
+printf '%s\n' "$status_output" | grep -F 'relay=healthy' >/dev/null
+printf '%s\n' "$status_output" | grep -F 'relay-limiter=configured rate_bits_per_second=2000000 burst_bytes=65536' >/dev/null
+printf '%s\n' "$status_output" | grep -F 'carrier=direct-wireguard limiter=healthy' >/dev/null
 grep -F '<ps>' "$log" >/dev/null
+LANE_TEST_HEALTH=unhealthy; export LANE_TEST_HEALTH
+if "$compose_dir/lane" status >/dev/null 2>&1; then echo "status accepted an unhealthy required service" >&2; exit 1; fi
+LANE_TEST_HEALTH=healthy; export LANE_TEST_HEALTH
 
 "$compose_dir/lane" backup manual.db
 grep -F '<-backup> </backups/manual.db>' "$log" >/dev/null

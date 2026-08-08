@@ -133,6 +133,7 @@ commands:
   id                generate a random Laneway 128-bit ID
   pki init          create a development CA
   pki intermediate  create an online issuer signed by an offline root
+  pki verify-authority validate an online issuer bundle against the offline root
   pki node          issue a node certificate
   pki relay         issue a relay service certificate
   pki controller    issue a controller service certificate`)
@@ -797,13 +798,15 @@ func runConfig(args []string) error {
 
 func runPKI(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: laneway pki <init|intermediate|node|relay|controller>")
+		return errors.New("usage: laneway pki <init|intermediate|verify-authority|node|relay|controller>")
 	}
 	switch args[0] {
 	case "init":
 		return pkiInit(args[1:])
 	case "intermediate":
 		return pkiIntermediate(args[1:])
+	case "verify-authority":
+		return pkiVerifyAuthority(args[1:])
 	case "node":
 		return pkiNode(args[1:])
 	case "relay":
@@ -813,6 +816,59 @@ func runPKI(args []string) error {
 	default:
 		return fmt.Errorf("unknown pki command %q", args[0])
 	}
+}
+
+func pkiVerifyAuthority(args []string) error {
+	fs := flag.NewFlagSet("pki verify-authority", flag.ContinueOnError)
+	rootPath := fs.String("root", "ca.crt", "offline root public certificate")
+	issuerPath := fs.String("issuer", "intermediate-chain.crt", "issuer-first intermediate chain")
+	keyPath := fs.String("key", "intermediate.key", "online intermediate private key")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: laneway pki verify-authority --root ca.crt --issuer intermediate-chain.crt --key intermediate.key")
+	}
+	rootPEM, err := os.ReadFile(*rootPath)
+	if err != nil {
+		return fmt.Errorf("read offline root certificate: %w", err)
+	}
+	roots, err := pki.ParseCertificatesPEM(rootPEM)
+	if err != nil || len(roots) != 1 {
+		return errors.New("offline root file must contain exactly one certificate")
+	}
+	root := roots[0]
+	if !root.IsCA || root.CheckSignatureFrom(root) != nil {
+		return errors.New("offline root certificate is not a self-signed CA")
+	}
+	issuerPEM, err := os.ReadFile(*issuerPath)
+	if err != nil {
+		return fmt.Errorf("read online issuer chain: %w", err)
+	}
+	keyPEM, err := os.ReadFile(*keyPath)
+	if err != nil {
+		return fmt.Errorf("read online issuer key: %w", err)
+	}
+	issuer, _, chain, err := pki.ParseAuthorityBundle(issuerPEM, keyPEM)
+	if err != nil {
+		return err
+	}
+	if len(chain) < 2 || !chain[len(chain)-1].Equal(root) {
+		return errors.New("online issuer chain is not anchored by the supplied offline root")
+	}
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(root)
+	intermediatePool := x509.NewCertPool()
+	for _, certificate := range chain[1 : len(chain)-1] {
+		intermediatePool.AddCert(certificate)
+	}
+	if _, err := issuer.Verify(x509.VerifyOptions{
+		Roots: rootPool, Intermediates: intermediatePool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		return fmt.Errorf("verify online issuer: %w", err)
+	}
+	fmt.Println("online issuer key and chain are valid for the offline root")
+	return nil
 }
 
 func pkiIntermediate(args []string) error {
