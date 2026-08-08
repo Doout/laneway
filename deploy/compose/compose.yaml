@@ -28,6 +28,7 @@ services:
       - ./generated/pki/controller.crt:/run/laneway-secrets/controller.crt:ro
       - ./generated/pki/controller.key:/run/laneway-secrets/controller.key:ro
       - ./generated/secrets/admin.token:/run/laneway-secrets/admin.token:ro
+      - ./generated/backups:/backups
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
     ports:

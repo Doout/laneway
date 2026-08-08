@@ -34,25 +34,93 @@ func main() {
 	fs := flag.NewFlagSet("laneway-controller", flag.ExitOnError)
 	configPath := fs.String("config", "/etc/laneway/controller.toml", "configuration file")
 	diagnostics := fs.String("diagnostics", "", "loopback metrics/pprof address (for example 127.0.0.1:6060)")
+	backup := fs.String("backup", "", "write a consistent database backup and exit (never overwrites)")
+	restore := fs.String("restore", "", "restore a backup into a missing database and exit")
 	version := fs.Bool("version", false, "print the Laneway build version")
 	_ = fs.Parse(os.Args[1:])
 	if *version {
 		fmt.Println(buildinfo.Version)
 		return
 	}
-	if err := run(*configPath, *diagnostics); err != nil && !errors.Is(err, context.Canceled) {
+	var err error
+	switch {
+	case fs.NArg() != 0:
+		err = fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
+	case *backup != "" && *restore != "":
+		err = errors.New("-backup and -restore are mutually exclusive")
+	case (*backup != "" || *restore != "") && *diagnostics != "":
+		err = errors.New("-diagnostics is not valid with a maintenance operation")
+	case *backup != "":
+		err = runBackup(*configPath, *backup)
+	case *restore != "":
+		err = runRestore(*configPath, *restore)
+	default:
+		err = run(*configPath, *diagnostics)
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "laneway-controller:", err)
 		os.Exit(1)
 	}
 }
 
-func run(path, diagnostics string) error {
+func loadControllerConfig(path string) (config.Config, error) {
 	cfg, err := config.Load(path)
+	if err != nil {
+		return config.Config{}, err
+	}
+	if cfg.Mode != config.ModeController {
+		return config.Config{}, fmt.Errorf("configuration mode is %q, want %q", cfg.Mode, config.ModeController)
+	}
+	return cfg, nil
+}
+
+func runBackup(configPath, destination string) error {
+	cfg, err := loadControllerConfig(configPath)
 	if err != nil {
 		return err
 	}
-	if cfg.Mode != config.ModeController {
-		return fmt.Errorf("configuration mode is %q, want %q", cfg.Mode, config.ModeController)
+	info, err := os.Lstat(cfg.Controller.DatabaseFile)
+	if err != nil {
+		return fmt.Errorf("inspect controller database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("controller database is not a regular file: %s", cfg.Controller.DatabaseFile)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := controller.BackupDatabase(ctx, cfg.Controller.DatabaseFile, destination); err != nil {
+		return err
+	}
+	fmt.Printf("controller database backup written to %s\n", destination)
+	return nil
+}
+
+func runRestore(configPath, source string) error {
+	cfg, err := loadControllerConfig(configPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.Controller.DatabaseFile), 0o700); err != nil {
+		return fmt.Errorf("create controller database directory: %w", err)
+	}
+	lock, err := acquireControllerRestoreLock(cfg.Controller.DatabaseFile)
+	if err != nil {
+		return fmt.Errorf("restore requires a stopped controller: %w", err)
+	}
+	defer lock.Close()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := controller.RestoreDatabase(ctx, source, cfg.Controller.DatabaseFile); err != nil {
+		return err
+	}
+	fmt.Printf("controller database restored from %s; start the controller to apply compatible migrations\n", source)
+	return nil
+}
+
+func run(path, diagnostics string) error {
+	cfg, err := loadControllerConfig(path)
+	if err != nil {
+		return err
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return fmt.Errorf("create controller state directory: %w", err)
@@ -60,6 +128,11 @@ func run(path, diagnostics string) error {
 	if err := os.MkdirAll(filepath.Dir(cfg.Controller.DatabaseFile), 0o700); err != nil {
 		return fmt.Errorf("create database directory: %w", err)
 	}
+	lock, err := acquireControllerDatabaseLock(cfg.Controller.DatabaseFile)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	caPEM, err := os.ReadFile(cfg.TLS.CAFile)
 	if err != nil {
 		return fmt.Errorf("read CA certificate: %w", err)

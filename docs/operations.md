@@ -615,9 +615,14 @@ and follow `deploy/nftables/README.md`; delete only residue whose provenance is
 confirmed. Restore DNS with `resolvectl revert lane0` if the interface still
 exists, and compare routes and forwarding with the site's documented baseline.
 
-For upgrades, retain the database and credentials, take a consistent
-controller database backup while the service is stopped (or with a SQLite
-online-backup procedure), deploy relay/controller first, then roll nodes. Keep
+For upgrades, retain the database and credentials and use the controller's
+`-backup` maintenance mode to take a SQLite online backup. It opens the source
+read-only, checks integrity, schema history, required tables, and foreign keys,
+then atomically publishes a mode-`0600` snapshot without overwriting. The
+`-restore` mode requires the controller lifecycle lock and creates only a
+missing database, so it cannot replace live or foreign state. The exact Compose
+commands and offline key/configuration backup boundary are documented in
+`deploy/compose/README.md`. Deploy relay/controller first, then roll nodes. Keep
 the previous binaries and configuration available for rollback; never roll
 back the database independently of migrations without a tested backup.
 

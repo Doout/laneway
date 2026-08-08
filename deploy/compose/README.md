@@ -44,15 +44,18 @@ the example TOML files without their `.example` suffix, replace every
 
 Public certificates and configurations are world-readable *inside the dedicated
 deployment directory* because the fixed container UID must read bind mounts;
-the directory itself MUST be root-owned mode `0700`. Private keys and the admin
-token MUST be owned by UID 65532 and mode `0400`. Do not grant another host
-account traversal permission. The validator rejects symlinks, incorrect modes,
-and incorrectly owned secrets.
+the deployment and generated configuration directories MUST be root-owned mode
+`0700`. The backup directory is the exception: it is UID 65532-owned mode
+`0700`, and each snapshot is UID 65532-owned mode `0600`. Private keys and the
+admin token MUST be owned by UID 65532 and mode `0400`. Do not grant another
+host account traversal permission. The validator rejects symlinks, incorrect
+modes, and incorrectly owned secrets or backups.
 
 ```sh
 cd deploy/compose
-sudo chown -R root:root .
-sudo chmod 0700 . generated generated/pki generated/secrets generated/config generated/backups
+sudo chown root:root . generated generated/pki generated/secrets generated/config
+sudo chmod 0700 . generated generated/pki generated/secrets generated/config
+sudo install -d -m 0700 -o 65532 -g 65532 generated/backups
 sudo ./bootstrap.sh
 ```
 
@@ -137,7 +140,35 @@ an abrupt stop Docker destroys the namespace, so no Laneway network state can
 remain on the host. The persistent volume contains only credentials-independent
 runtime state and may be retained across container recreation.
 
-Never expose diagnostics ports. Back up the controller database using a
-database-consistent procedure before upgrades; copying a live SQLite file is not
-a valid backup. Host firewall rules remain operator-owned and are intentionally
-not modified by Compose.
+Never expose diagnostics ports. Copying a live SQLite file is not a valid
+backup. Create a consistent, private snapshot while the controller is running:
+
+```sh
+backup="controller-$(date -u +%Y%m%dT%H%M%SZ).db"
+sudo docker compose run --rm --no-deps controller \
+  -config /etc/laneway/controller.toml -backup "/backups/$backup"
+sudo test "$(stat -c %a "generated/backups/$backup")" = 600
+```
+
+The command validates SQLite integrity, foreign keys, and schema before it
+atomically publishes the backup. It never overwrites an existing path. Preserve
+the matching `.env` and `generated/config`, `generated/pki`, and
+`generated/secrets` directories through an encrypted offline backup; they are
+not bundled with the database because that would place private keys beside an
+online snapshot.
+
+Restore is deliberately fresh-state only. On a replacement host, install the
+matching configuration and secrets, leave the controller volume empty, copy the
+database backup to `generated/backups`, then run:
+
+```sh
+backup=controller-YYYYmmddTHHMMSSZ.db
+sudo ./validate.sh
+sudo docker compose run --rm --no-deps controller \
+  -config /etc/laneway/controller.toml -restore "/backups/$backup"
+sudo docker compose up -d --wait controller relay
+```
+
+Restore validates the source and refuses to replace an existing database. This
+prevents an operator typo from mutating a running deployment. Host firewall
+rules remain operator-owned and are intentionally not modified by Compose.
