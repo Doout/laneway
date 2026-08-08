@@ -472,7 +472,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			return err
 		}
 		directController, err = dataplane.NewDirectController(dataplane.DirectConfig{
-			Local: local, Endpoint: directEndpoint, Engine: unifiedDataPlane, Authorizer: dataplane.RouteAuthorizer{Routes: routeTable},
+			Local: local, Endpoint: directEndpoint, Paths: unifiedDataPlane, Authorizer: dataplane.RouteAuthorizer{Routes: routeTable},
 			CandidateAuthority: controllerState,
 			CandidatePolicy:    directCandidatePolicy(cfg.Direct), CandidateTTL: cfg.Direct.CandidateTTL.Duration(),
 			ProbeInterval: cfg.Direct.ProbeInterval.Duration(), ProbeTimeout: cfg.Direct.ProbeTimeout.Duration(),

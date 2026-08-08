@@ -99,7 +99,7 @@ func TestDirectControllerCandidateValidationBoundsAndExpiry(t *testing.T) {
 	endpoint := directEndpoint(t, local, directCredentials(t, authority, local))
 	engine, _, _, routes := directEngine(t, local, netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("100.64.0.2"), peer)
 	controller, err := NewDirectController(DirectConfig{
-		Local: local, Endpoint: endpoint, Engine: engine, Authorizer: RouteAuthorizer{Routes: routes},
+		Local: local, Endpoint: endpoint, Paths: engine, Authorizer: RouteAuthorizer{Routes: routes},
 		CandidatePolicy: directpath.CandidatePolicy{MaxCandidates: 1, AllowLoopback: true}, CandidateTTL: time.Second, MaxCandidatePeers: 1,
 	})
 	if err != nil {
@@ -145,7 +145,7 @@ func TestDirectControllerAppliesDynamicCandidateAuthority(t *testing.T) {
 	engine, _, _, routes := directEngine(t, local, netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("100.64.0.2"), peer)
 	authority := &dynamicCandidateAuthority{enabled: true, maximum: 1, ttl: time.Second}
 	controller, err := NewDirectController(DirectConfig{
-		Local: local, Endpoint: endpoint, Engine: engine, Authorizer: RouteAuthorizer{Routes: routes},
+		Local: local, Endpoint: endpoint, Paths: engine, Authorizer: RouteAuthorizer{Routes: routes},
 		CandidateAuthority: authority, CandidatePolicy: directpath.CandidatePolicy{MaxCandidates: 2, AllowLoopback: true}, CandidateTTL: 10 * time.Second,
 	})
 	if err != nil {
@@ -178,7 +178,7 @@ func TestDirectControllerFreshRendezvousDetachesStalePath(t *testing.T) {
 	peerEndpoint := directEndpoint(t, peerIdentity, directCredentials(t, authority, peerIdentity))
 	engine, _, manager, routes := directEngine(t, local, netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("100.64.0.2"), peerIdentity.NodeID)
 	controller, err := NewDirectController(DirectConfig{
-		Local: local, Endpoint: localEndpoint, Engine: engine, Authorizer: RouteAuthorizer{Routes: routes},
+		Local: local, Endpoint: localEndpoint, Paths: engine, Authorizer: RouteAuthorizer{Routes: routes},
 		CandidatePolicy: directpath.CandidatePolicy{AllowLoopback: true},
 	})
 	if err != nil {
@@ -240,11 +240,11 @@ func TestUnifiedEngineRealDirectQUICEndToEnd(t *testing.T) {
 	endpointA := directEndpoint(t, nodeA, directCredentials(t, authority, nodeA))
 	endpointB := directEndpoint(t, nodeB, directCredentials(t, authority, nodeB))
 	policy := directpath.CandidatePolicy{AllowLoopback: true}
-	controllerA, err := NewDirectController(DirectConfig{Local: nodeA, Endpoint: endpointA, Engine: engineA, Authorizer: RouteAuthorizer{Routes: routesA}, CandidatePolicy: policy, ProbeInterval: 20 * time.Millisecond})
+	controllerA, err := NewDirectController(DirectConfig{Local: nodeA, Endpoint: endpointA, Paths: engineA, Authorizer: RouteAuthorizer{Routes: routesA}, CandidatePolicy: policy, ProbeInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
-	controllerB, err := NewDirectController(DirectConfig{Local: nodeB, Endpoint: endpointB, Engine: engineB, Authorizer: RouteAuthorizer{Routes: routesB}, CandidatePolicy: policy, ProbeInterval: 20 * time.Millisecond})
+	controllerB, err := NewDirectController(DirectConfig{Local: nodeB, Endpoint: endpointB, Paths: engineB, Authorizer: RouteAuthorizer{Routes: routesB}, CandidatePolicy: policy, ProbeInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

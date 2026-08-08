@@ -37,6 +37,14 @@ type CandidateAuthority interface {
 	CandidateExchangeTTL() time.Duration
 }
 
+// DirectPathAttacher is the authenticated path boundary used by the direct
+// rendezvous controller. Both the plaintext IP dataplane and the opaque
+// WireGuard carrier selector implement it.
+type DirectPathAttacher interface {
+	Attach(identity.NodeID, pathmanager.PathKind, pathmanager.PacketPath) error
+	Detach(identity.NodeID, string) bool
+}
+
 type PeerAuthorizerFunc func(identity.NodeID) bool
 
 func (f PeerAuthorizerFunc) AuthorizeDirectPeer(peer identity.NodeID) bool { return f(peer) }
@@ -44,7 +52,7 @@ func (f PeerAuthorizerFunc) AuthorizeDirectPeer(peer identity.NodeID) bool { ret
 type DirectConfig struct {
 	Local              identity.NodeIdentity
 	Endpoint           *directpath.Endpoint
-	Engine             *Engine
+	Paths              DirectPathAttacher
 	Authorizer         PeerAuthorizer
 	CandidateAuthority CandidateAuthority
 	CandidatePolicy    directpath.CandidatePolicy
@@ -79,7 +87,7 @@ type DirectController struct {
 }
 
 func NewDirectController(config DirectConfig) (*DirectController, error) {
-	if err := config.Local.Validate(); err != nil || config.Endpoint == nil || config.Engine == nil || config.Authorizer == nil {
+	if err := config.Local.Validate(); err != nil || config.Endpoint == nil || config.Paths == nil || config.Authorizer == nil {
 		return nil, ErrInvalidConfiguration
 	}
 	if config.Endpoint.LocalIdentity() != config.Local {
@@ -368,10 +376,10 @@ func (c *DirectController) replaceDirect(peer identity.NodeID, path *directpath.
 	c.pathMu.Lock()
 	defer c.pathMu.Unlock()
 	if previous := c.active[peer]; previous != nil && previous != path {
-		c.config.Engine.Detach(peer, previous.Name())
+		c.config.Paths.Detach(peer, previous.Name())
 		_ = previous.Close()
 	}
-	if err := c.config.Engine.Attach(peer, pathmanager.PathDirect, path); err != nil {
+	if err := c.config.Paths.Attach(peer, pathmanager.PathDirect, path); err != nil {
 		return err
 	}
 	c.active[peer] = path
@@ -386,7 +394,7 @@ func (c *DirectController) detachDirect(peer identity.NodeID) {
 		return
 	}
 	delete(c.active, peer)
-	c.config.Engine.Detach(peer, path.Name())
+	c.config.Paths.Detach(peer, path.Name())
 	_ = path.Close()
 }
 
