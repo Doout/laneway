@@ -63,6 +63,7 @@ for value in \
   'version: v0.73.0' \
   'syft-version: v1.50.0' \
   'cosign-release: v3.1.3' \
+  'sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6' \
   'docker.io/tonistiigi/binfmt@sha256:' \
   'image=moby/buildkit:buildx-stable-1@sha256:' \
   'image-digests.txt'
