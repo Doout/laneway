@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/pathmanager"
 )
 
 type SecureManagerConfig struct {
@@ -29,7 +30,11 @@ type managedWireGuard interface {
 	Peers() []ManagedPeer
 	ApplyPeers(context.Context, []ManagedPeer) error
 	RelayMetrics() RelayEndpointMetrics
-	RunRelay(context.Context, *RelayMux) error
+	Run(context.Context) error
+	PathAvailable(identity.NodeID) bool
+	RunRelay(context.Context, *RelayMux, pathmanager.PathKind, string) error
+	Attach(identity.NodeID, pathmanager.PathKind, pathmanager.PacketPath) error
+	Detach(identity.NodeID, string) bool
 	Close() error
 }
 
@@ -76,8 +81,18 @@ func (m *SecureManager) PublicKey() PublicKey               { return m.manager.P
 func (m *SecureManager) Addresses() []netip.Prefix          { return m.manager.Addresses() }
 func (m *SecureManager) Peers() []ManagedPeer               { return m.manager.Peers() }
 func (m *SecureManager) RelayMetrics() RelayEndpointMetrics { return m.manager.RelayMetrics() }
-func (m *SecureManager) RunRelay(ctx context.Context, mux *RelayMux) error {
-	return m.manager.RunRelay(ctx, mux)
+func (m *SecureManager) Run(ctx context.Context) error      { return m.manager.Run(ctx) }
+func (m *SecureManager) PathAvailable(peer identity.NodeID) bool {
+	return m.manager.PathAvailable(peer)
+}
+func (m *SecureManager) RunRelay(ctx context.Context, mux *RelayMux, kind pathmanager.PathKind, name string) error {
+	return m.manager.RunRelay(ctx, mux, kind, name)
+}
+func (m *SecureManager) Attach(peer identity.NodeID, kind pathmanager.PathKind, path pathmanager.PacketPath) error {
+	return m.manager.Attach(peer, kind, path)
+}
+func (m *SecureManager) Detach(peer identity.NodeID, name string) bool {
+	return m.manager.Detach(peer, name)
 }
 
 // ApplyGuard publishes an exact deny-only policy before a caller mutates

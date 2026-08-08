@@ -119,9 +119,6 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	if cfg.WireGuard.Enabled && cfg.Controller.Endpoint == "" {
 		return errors.New("WireGuard runtime requires controller authority")
 	}
-	if cfg.WireGuard.Enabled && cfg.Direct.Enabled {
-		return errors.New("WireGuard runtime requires encrypted direct transport or direct.enabled=false")
-	}
 	revokedCertificates := new(revocation.Set)
 	tlsConfig, err := transport.LoadClientTLSConfigWithRevocations(cfg.TLS.CAFile, cfg.TLS.CertificateFile, cfg.TLS.PrivateKeyFile, revokedCertificates)
 	if err != nil {
@@ -451,28 +448,38 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		if err != nil {
 			return fmt.Errorf("listen for direct peers: %w", err)
 		}
+		payloadMode, maxDirectPayload := directpath.PayloadIP, laneMTU
+		var directPaths dataplane.DirectPathAttacher
+		if secureWireGuard != nil {
+			payloadMode = directpath.PayloadWireGuard
+			maxDirectPayload = laneMTU + 128
+			directPaths = secureWireGuard
+		}
 		directEndpoint, err = directpath.NewEndpoint(packetConn, local, directpath.Credentials{
 			Roots: tlsConfig.RootCAs, Certificate: tlsConfig.Certificates[0], Revocations: revokedCertificates,
-		}, directpath.Config{MaxPacketPayload: laneMTU, CandidatePolicy: directCandidatePolicy(cfg.Direct)})
+		}, directpath.Config{MaxPacketPayload: maxDirectPayload, PayloadMode: payloadMode, CandidatePolicy: directCandidatePolicy(cfg.Direct)})
 		if err != nil {
 			_ = packetConn.Close()
 			return err
 		}
 		defer directEndpoint.Close()
-		pathManager = pathmanager.MustNew(pathmanager.Config{})
-		localAddresses := make([]netip.Addr, 0, len(addresses))
-		for _, prefix := range addresses {
-			localAddresses = append(localAddresses, prefix.Addr())
-		}
-		unifiedDataPlane, err = dataplane.New(dataplane.Config{
-			Identity: local, Routes: routeTable, Packets: packetIO, Paths: pathManager,
-			Policy: packetPolicy, LocalAddresses: localAddresses, ForwardPrefixes: forwardPrefixes, MaxPacketSize: laneMTU,
-		})
-		if err != nil {
-			return err
+		if directPaths == nil {
+			pathManager = pathmanager.MustNew(pathmanager.Config{})
+			localAddresses := make([]netip.Addr, 0, len(addresses))
+			for _, prefix := range addresses {
+				localAddresses = append(localAddresses, prefix.Addr())
+			}
+			unifiedDataPlane, err = dataplane.New(dataplane.Config{
+				Identity: local, Routes: routeTable, Packets: packetIO, Paths: pathManager,
+				Policy: packetPolicy, LocalAddresses: localAddresses, ForwardPrefixes: forwardPrefixes, MaxPacketSize: laneMTU,
+			})
+			if err != nil {
+				return err
+			}
+			directPaths = unifiedDataPlane
 		}
 		directController, err = dataplane.NewDirectController(dataplane.DirectConfig{
-			Local: local, Endpoint: directEndpoint, Paths: unifiedDataPlane, Authorizer: dataplane.RouteAuthorizer{Routes: routeTable},
+			Local: local, Endpoint: directEndpoint, Paths: directPaths, Authorizer: dataplane.RouteAuthorizer{Routes: routeTable},
 			CandidateAuthority: controllerState,
 			CandidatePolicy:    directCandidatePolicy(cfg.Direct), CandidateTTL: cfg.Direct.CandidateTTL.Duration(),
 			ProbeInterval: cfg.Direct.ProbeInterval.Duration(), ProbeTimeout: cfg.Direct.ProbeTimeout.Duration(),
@@ -530,6 +537,8 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	if exitManagers != nil {
 		if unifiedDataPlane != nil {
 			exitManagers.SetPathAvailable(unifiedDataPlane.PathAvailable)
+		} else if secureWireGuard != nil {
+			exitManagers.SetPathAvailable(secureWireGuard.PathAvailable)
 		} else {
 			exitManagers.SetPathAvailable(service.PathAvailable)
 		}
@@ -715,7 +724,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		name string
 		err  error
 	}
-	componentDone := make(chan componentResult, 6)
+	componentDone := make(chan componentResult, 8)
 	components := 2
 	if diagnosticsDone != nil {
 		components++
@@ -729,9 +738,16 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		}()
 	}
 	if unifiedDataPlane != nil {
-		components += 2
+		components++
 		go func() { componentDone <- componentResult{"dataplane", unifiedDataPlane.Run(runCtx)} }()
+	}
+	if directController != nil {
+		components++
 		go func() { componentDone <- componentResult{"direct", directController.Run(runCtx)} }()
+	}
+	if secureWireGuard != nil {
+		components++
+		go func() { componentDone <- componentResult{"WireGuard carriers", secureWireGuard.Run(runCtx)} }()
 	}
 	go func() { componentDone <- componentResult{"service", service.Run(runCtx)} }()
 	go func() { componentDone <- componentResult{"local API", api.Serve(runCtx)} }()

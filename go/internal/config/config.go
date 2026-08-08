@@ -338,8 +338,8 @@ func (c Config) Validate() error {
 		if c.Direct.Enabled && c.Direct.Listen == "" {
 			return errors.New("direct.listen is required when direct connectivity is enabled")
 		}
-		if c.WireGuard.Enabled && (c.WireGuard.PrivateKeyFile == "" || c.WireGuard.InterfaceName == "" || c.WireGuard.MTU < 1280 || c.WireGuard.MTU > 9000) {
-			return errors.New("wireguard.private_key, interface, and MTU in [1280,9000] are required when WireGuard is enabled")
+		if c.WireGuard.Enabled && (c.WireGuard.PrivateKeyFile == "" || c.WireGuard.InterfaceName == "" || c.WireGuard.MTU != 1280) {
+			return errors.New("wireguard.private_key, interface, and MTU 1280 are required when WireGuard is enabled")
 		}
 	case ModeRelay:
 		if c.Direct.Enabled || c.WireGuard.Enabled {

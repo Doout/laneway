@@ -16,7 +16,7 @@ use crate::Config;
 pub(crate) const ALPN: &[u8] = b"laneway-relay/1";
 pub(crate) const TCP_FALLBACK_ALPN: &[u8] = b"laneway-fallback/1";
 const MAX_CREDENTIAL_BYTES: usize = 1 << 20;
-const MAX_DATAGRAM_FRAME: usize = 5 + 1280;
+const MAX_DATAGRAM_FRAME: usize = 5 + 2048;
 
 pub(crate) fn server_config(config: &Config) -> Result<ServerConfig> {
     let certificates = load_certificates(&config.tls.certificate_file)?;

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/pathmanager"
 )
 
 type fakeSecureDevice struct {
@@ -34,10 +35,19 @@ func (d *fakeSecureDevice) ApplyPeers(_ context.Context, peers []ManagedPeer) er
 	return nil
 }
 func (d *fakeSecureDevice) RelayMetrics() RelayEndpointMetrics { return RelayEndpointMetrics{} }
-func (d *fakeSecureDevice) RunRelay(ctx context.Context, _ *RelayMux) error {
+func (d *fakeSecureDevice) Run(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
+func (d *fakeSecureDevice) PathAvailable(identity.NodeID) bool { return true }
+func (d *fakeSecureDevice) RunRelay(ctx context.Context, _ *RelayMux, _ pathmanager.PathKind, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (d *fakeSecureDevice) Attach(identity.NodeID, pathmanager.PathKind, pathmanager.PacketPath) error {
+	return nil
+}
+func (d *fakeSecureDevice) Detach(identity.NodeID, string) bool { return false }
 func (d *fakeSecureDevice) Close() error {
 	d.closed = true
 	*d.events = append(*d.events, "device-close")

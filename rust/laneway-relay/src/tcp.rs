@@ -31,7 +31,7 @@ const RECORD_PACKET: u8 = TcpRecordKind::Packet as u8;
 const RECORD_PING: u8 = TcpRecordKind::Ping as u8;
 const RECORD_PONG: u8 = TcpRecordKind::Pong as u8;
 const MAX_CONTROL_PAYLOAD: usize = 1 << 20;
-const MAX_PACKET_FRAME: usize = 5 + 1280;
+const MAX_PACKET_FRAME: usize = 5 + 2048;
 
 enum Record {
     Control(Vec<u8>),

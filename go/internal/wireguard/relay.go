@@ -64,6 +64,7 @@ type RelayMux struct {
 	frames   *packetbuffer.Pool
 	mu       sync.RWMutex
 	bindings relayBindingSnapshot
+	changed  chan struct{}
 }
 
 func NewRelayMux(carrier RelayCarrier, negotiated protocol.Capability) (*RelayMux, error) {
@@ -79,6 +80,7 @@ func NewRelayMux(carrier RelayCarrier, negotiated protocol.Capability) (*RelayMu
 		bindings: relayBindingSnapshot{
 			byPeer: make(map[identity.NodeID]RelayBinding), byHandle: make(map[uint32]identity.NodeID),
 		},
+		changed: make(chan struct{}),
 	}, nil
 }
 
@@ -106,6 +108,7 @@ func (m *RelayMux) ReplaceBindings(bindings []RelayBinding) error {
 	}
 	m.mu.Lock()
 	m.bindings = next
+	m.signalChangedLocked()
 	m.mu.Unlock()
 	return nil
 }
@@ -124,6 +127,7 @@ func (m *RelayMux) SetBinding(binding RelayBinding) error {
 	}
 	m.bindings.byPeer[binding.Peer] = binding
 	m.bindings.byHandle[binding.Handle] = binding.Peer
+	m.signalChangedLocked()
 	return nil
 }
 
@@ -136,7 +140,27 @@ func (m *RelayMux) ReleaseHandle(handle uint32) (identity.NodeID, bool) {
 	}
 	delete(m.bindings.byHandle, handle)
 	delete(m.bindings.byPeer, peer)
+	m.signalChangedLocked()
 	return peer, true
+}
+
+func (m *RelayMux) signalChangedLocked() {
+	close(m.changed)
+	m.changed = make(chan struct{})
+}
+
+// Changes is closed after any successful binding update. Callers must fetch a
+// fresh channel after waking and reconcile from the exact Peers snapshot.
+func (m *RelayMux) Changes() <-chan struct{} {
+	if m == nil {
+		closed := make(chan struct{})
+		close(closed)
+		return closed
+	}
+	m.mu.RLock()
+	changed := m.changed
+	m.mu.RUnlock()
+	return changed
 }
 
 func (m *RelayMux) Peers() []identity.NodeID {

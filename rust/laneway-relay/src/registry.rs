@@ -24,7 +24,8 @@ use crate::{
     packet_pool::{PacketBuffer, PacketPool},
 };
 
-const MAX_PACKET_PAYLOAD: usize = 1280;
+const MAX_PACKET_PAYLOAD: usize = 2048;
+const LEGACY_MAX_PACKET_PAYLOAD: usize = 1280;
 
 fn unix_millis() -> u64 {
     SystemTime::now()
@@ -659,7 +660,12 @@ impl Registry {
                     bail!("unknown route handle");
                 }
             };
-            if packet.len() > MAX_PACKET_PAYLOAD {
+            let payload_limit = if header.flags == PACKET_FLAG_E2E_ENCRYPTED {
+                MAX_PACKET_PAYLOAD
+            } else {
+                LEGACY_MAX_PACKET_PAYLOAD
+            };
+            if packet.len() > payload_limit {
                 self.metrics
                     .dropped_too_large
                     .fetch_add(1, Ordering::Relaxed);
@@ -898,6 +904,11 @@ fn bind_locked(
     let first_cancel = first_entry.session.cancel.clone();
     let second_control = second_entry.session.control.clone();
     let second_cancel = second_entry.session.cancel.clone();
+    let max_packet_payload = if first_entry.session.allow_e2e && second_entry.session.allow_e2e {
+        MAX_PACKET_PAYLOAD
+    } else {
+        LEGACY_MAX_PACKET_PAYLOAD
+    } as u32;
     let first_peer_id = second.subject_id.as_bytes().to_vec();
     let second_peer_id = first.subject_id.as_bytes().to_vec();
 
@@ -917,7 +928,7 @@ fn bind_locked(
             body: relay_envelope::Body::RouteHandleBinding(RouteHandleBinding {
                 route_handle: first_handle,
                 peer_node_id: first_peer_id,
-                max_packet_payload: MAX_PACKET_PAYLOAD as u32,
+                max_packet_payload,
             }),
         },
         Notification {
@@ -926,7 +937,7 @@ fn bind_locked(
             body: relay_envelope::Body::RouteHandleBinding(RouteHandleBinding {
                 route_handle: second_handle,
                 peer_node_id: second_peer_id,
-                max_packet_payload: MAX_PACKET_PAYLOAD as u32,
+                max_packet_payload,
             }),
         },
     ])

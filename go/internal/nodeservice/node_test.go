@@ -18,6 +18,7 @@ import (
 	"laneway.dev/laneway/internal/agent"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/packetbuffer"
+	"laneway.dev/laneway/internal/pathmanager"
 	"laneway.dev/laneway/internal/protocol"
 	"laneway.dev/laneway/internal/routing"
 	"laneway.dev/laneway/internal/transport"
@@ -31,9 +32,18 @@ func (fakePackets) WritePacket(context.Context, []byte) error       { return nil
 
 type fakeWireGuardRelayHandler struct{}
 
-func (fakeWireGuardRelayHandler) RunRelay(ctx context.Context, _ *wireguard.RelayMux) error {
+func (fakeWireGuardRelayHandler) RunRelay(ctx context.Context, _ *wireguard.RelayMux, _ pathmanager.PathKind, _ string) error {
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+type recordingCandidateSink struct {
+	messages []*lanewayv1.EndpointCandidate
+}
+
+func (s *recordingCandidateSink) HandleCandidate(_ context.Context, candidate *lanewayv1.EndpointCandidate) error {
+	s.messages = append(s.messages, candidate)
+	return nil
 }
 
 type inertEncryptedCarrier struct{ done chan struct{} }
@@ -179,12 +189,15 @@ func TestWireGuardRelayConfigurationIsExclusiveAndAdvertisesE2E(t *testing.T) {
 		t.Fatalf("mixed plaintext/encrypted config error = %v", err)
 	}
 	config.Packets = nil
+	sink := new(recordingCandidateSink)
+	config.CandidateSink = sink
+	config.LocalCandidate = &lanewayv1.EndpointCandidate{Transport: lanewayv1.EndpointTransport_ENDPOINT_TRANSPORT_QUIC_UDP}
 	service, err := New(config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	capabilities := service.AdvertisedCapabilities()
-	if !capabilities.Has(protocol.CapabilityE2EPacketV1) {
+	if !capabilities.Has(protocol.CapabilityE2EPacketV1) || !capabilities.Has(protocol.CapabilityDirectPeerV1) {
 		t.Fatalf("advertised capabilities = %s", capabilities)
 	}
 	service.metrics.carrier.Store(carrierQUIC)
@@ -203,7 +216,7 @@ func TestWireGuardRelayConfigurationIsExclusiveAndAdvertisesE2E(t *testing.T) {
 
 func TestWireGuardControlLoopPublishesAndReleasesSessionBindings(t *testing.T) {
 	service := testService(t)
-	params := agent.SessionParameters{EffectiveMaxControlPayload: protocol.DefaultMaxControlFrame}
+	params := agent.SessionParameters{EffectiveMaxControlPayload: protocol.DefaultMaxControlFrame, Capabilities: protocol.CapabilityDirectPeerV1}
 	peer := testNodeID(8)
 	newMux := func(t *testing.T) *wireguard.RelayMux {
 		t.Helper()
@@ -246,6 +259,24 @@ func TestWireGuardControlLoopPublishesAndReleasesSessionBindings(t *testing.T) {
 	}
 	if peers := mux.Peers(); len(peers) != 0 {
 		t.Fatalf("released peers = %v", peers)
+	}
+
+	sink := new(recordingCandidateSink)
+	service.config.CandidateSink = sink
+	stream.Reset()
+	candidate := &lanewayv1.EndpointCandidate{NodeId: peer[:], Transport: lanewayv1.EndpointTransport_ENDPOINT_TRANSPORT_QUIC_UDP}
+	if err := writeMessage(&stream, params.ControlFramer(), &lanewayv1.RelayEnvelope{SchemaVersion: 1, Sequence: 1,
+		Body: &lanewayv1.RelayEnvelope_EndpointCandidate{EndpointCandidate: candidate}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMessage(&stream, params.ControlFramer(), &lanewayv1.RelayEnvelope{SchemaVersion: 1, Sequence: 2, Body: remoteError}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.controlLoopWireGuard(context.Background(), &stream, params, mux); err == nil {
+		t.Fatal("remote stop was accepted")
+	}
+	if len(sink.messages) != 1 || !bytes.Equal(sink.messages[0].GetNodeId(), peer[:]) || sink.messages[0].GetTransport() != candidate.GetTransport() {
+		t.Fatalf("candidates=%v", sink.messages)
 	}
 }
 

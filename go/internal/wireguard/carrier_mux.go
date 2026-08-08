@@ -19,6 +19,7 @@ var (
 	ErrCarrierPathConflict     = errors.New("wireguard: carrier path name is already attached")
 	ErrCarrierMuxRunning       = errors.New("wireguard: carrier mux is already running")
 	ErrCarrierMuxClosed        = errors.New("wireguard: carrier mux is closed")
+	ErrCarrierUnauthorized     = errors.New("wireguard: carrier peer is not authorized")
 )
 
 // CarrierMuxMetrics count opaque WireGuard messages at the carrier selection
