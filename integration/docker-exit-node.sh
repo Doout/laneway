@@ -198,9 +198,9 @@ EOF
 docker build --quiet --label "${owner}" -t "${probe_image}" "${work_dir}/probe-context" >/dev/null
 
 echo "==> create uniquely owned Docker networks and state volumes"
-docker network create --label "${owner}" "${control_network}" >/dev/null
-docker network create --label "${owner}" "${egress_network}" >/dev/null
-docker network create --label "${owner}" "${internet_network}" >/dev/null
+docker network create --label "${owner}" --opt com.docker.network.container_iface_prefix=ctl "${control_network}" >/dev/null
+docker network create --label "${owner}" --opt com.docker.network.container_iface_prefix=wan "${egress_network}" >/dev/null
+docker network create --label "${owner}" --opt com.docker.network.container_iface_prefix=inet "${internet_network}" >/dev/null
 docker volume create --label "${owner}" "${client_volume}" >/dev/null
 docker volume create --label "${owner}" "${gateway_volume}" >/dev/null
 
@@ -365,7 +365,7 @@ dns_servers = ["1.1.1.1"]
 EOF
 }
 node_config "${work_dir}/client" docker-client 4435 false eth0
-node_config "${work_dir}/gateway" docker-gateway 4434 true eth1
+node_config "${work_dir}/gateway" docker-gateway 4434 true wan0
 cat >"${work_dir}/resolvectl" <<'EOF'
 #!/bin/sh
 set -eu
@@ -441,6 +441,7 @@ for node_name in "${client_name}" "${gateway_name}"; do
     exit 1
   fi
 done
+docker network connect "${egress_network}" "${gateway_name}"
 docker start "${client_name}" "${gateway_name}" >/dev/null
 wait_log "${client_name}" "interface=lane0"
 wait_log "${gateway_name}" "interface=lane0"
@@ -453,9 +454,8 @@ for node_name in "${client_name}" "${gateway_name}"; do
     test "$(printf "%s\n" "${status}" | grep -Ec "^Cap(Inh|Prm|Eff|Bnd|Amb):[[:space:]]+0000000000001000$")" -eq 5
   '
 done
-docker network connect "${egress_network}" "${gateway_name}"
 docker exec "${client_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200'
-docker exec "${gateway_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200 && ip link show eth1 >/dev/null'
+docker exec "${gateway_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200 && ip link show ctl0 >/dev/null && ip link show wan0 >/dev/null'
 echo "==> seed an authenticated relay binding, then promote the fixed-port direct path"
 gateway_overlay="$(docker exec "${gateway_name}" ip -o -4 address show dev lane0 | awk '{sub(/\/.*/, "", $4); print $4}')"
 [[ "${gateway_overlay}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "ERROR: gateway overlay address is unavailable" >&2; exit 1; }
@@ -476,9 +476,9 @@ echo "==> create a second, disposable cone-like NAT between the Exit bridge and 
 docker create --name "${nat_name}" --hostname "${nat_name}" --label "${owner}" --network "${egress_network}" \
   --user 0:0 --read-only --cap-drop ALL --cap-add NET_ADMIN --security-opt no-new-privileges \
   --sysctl net.ipv4.ip_forward=1 --entrypoint /bin/sh "${node_image}" -c \
-  'nft add table ip laneway_test_nat; nft add chain ip laneway_test_nat postrouting "{ type nat hook postrouting priority srcnat; policy accept; }"; nft add rule ip laneway_test_nat postrouting oifname eth1 masquerade; exec sleep infinity' >/dev/null
-docker start "${nat_name}" >/dev/null
+  'nft add table ip laneway_test_nat; nft add chain ip laneway_test_nat postrouting "{ type nat hook postrouting priority srcnat; policy accept; }"; nft add rule ip laneway_test_nat postrouting oifname inet0 masquerade; exec sleep infinity' >/dev/null
 docker network connect "${internet_network}" "${nat_name}"
+docker start "${nat_name}" >/dev/null
 nat_egress_ip="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${egress_network}\"}}{{.IPAddress}}{{end}}" "${nat_name}")"
 nat_internet_ip="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${internet_network}\"}}{{.IPAddress}}{{end}}" "${nat_name}")"
 [[ -n "${nat_egress_ip}" && -n "${nat_internet_ip}" ]] || { echo "ERROR: double-NAT fixture addresses are unavailable" >&2; exit 1; }
@@ -517,7 +517,7 @@ run_external_flow() {
   wait_log "${external_name}" "ready=udp-server"
   local target
   target="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${internet_network}\"}}{{.IPAddress}}{{end}}" "${external_name}")"
-  node_net_admin_exec "${gateway_name}" ip route replace "${target}/32" via "${nat_egress_ip}" dev eth1
+  node_net_admin_exec "${gateway_name}" ip route replace "${target}/32" via "${nat_egress_ip}" dev wan0
   docker exec "${client_name}" /test/netprobe udp-client -target "${target}:9201" -message "${label}" -timeout 15s >/dev/null
   for _ in $(seq 1 40); do
     docker logs "${external_name}" 2>&1 | grep -Fq "remote=${nat_internet_ip}:" && return 0
@@ -547,7 +547,7 @@ docker run -d --name "${external_name}" --label "${owner}" --network "${internet
   udp-echo-server -listen :9202 >/dev/null
 wait_log "${external_name}" "ready=udp-echo-server"
 saturation_target="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${internet_network}\"}}{{.IPAddress}}{{end}}" "${external_name}")"
-node_net_admin_exec "${gateway_name}" ip route replace "${saturation_target}/32" via "${nat_egress_ip}" dev eth1
+node_net_admin_exec "${gateway_name}" ip route replace "${saturation_target}/32" via "${nat_egress_ip}" dev wan0
 docker exec "${client_name}" /test/netprobe udp-bench-client -target "${saturation_target}:9202" \
   -scenario docker-exit-relay-saturation -scope controller-authorized-double-nat \
   -duration 750ms -size 1200 -pps 3000 -flows 1 >/dev/null
