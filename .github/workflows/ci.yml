@@ -58,7 +58,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate Compose security, storage, health, and port model
-        run: ./integration/compose-config.sh
+        run: |
+          ./integration/compose-config.sh
+          ./integration/release-contract.sh
+      - name: Build pinned release image families
+        run: |
+          docker build --file deploy/containers/Dockerfile \
+            --build-arg BINARY=laneway --build-arg VERSION=ci \
+            --tag laneway-admin:ci .
+          docker build --file deploy/containers/Dockerfile.exit-node \
+            --build-arg VERSION=ci --tag laneway-exit-node:ci .
+          test "$(docker run --rm --network none laneway-admin:ci version)" = ci
+          test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = ci
 
   rust:
     name: Rust workspace and Go interoperability

@@ -1,4 +1,4 @@
-name: Release packages
+name: Release packages and images
 
 on:
   push:
@@ -7,15 +7,18 @@ on:
 permissions:
   contents: read
 
+env:
+  COSIGN_YES: "true"
+
 jobs:
   verify:
     name: Verify release source
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.26.x"
           cache-dependency-path: go/go.sum
@@ -25,53 +28,208 @@ jobs:
           go test ./...
           go vet ./...
       - name: Check scripts
-        run: shellcheck install.sh scripts/*.sh
-      - name: Check release tag
+        run: shellcheck install.sh scripts/*.sh deploy/compose/*.sh integration/release-contract.sh
+      - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
           printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          test "$GITHUB_REF_TYPE" = tag
+          ./integration/release-contract.sh
 
   package:
-    name: Linux ${{ matrix.arch }}
+    name: Linux ${{ matrix.arch }} package
     needs: verify
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.26.x"
           cache-dependency-path: go/go.sum
-      - name: Build package
+      - name: Build reproducible package
         env:
           PACKAGE_GOOS: linux
           PACKAGE_GOARCH: ${{ matrix.arch }}
         run: make package VERSION="${GITHUB_REF_NAME#v}"
-      - uses: actions/upload-artifact@v4
+      - name: Generate package SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          file: dist/laneway_linux_${{ matrix.arch }}.tar.gz
+          format: spdx-json
+          output-file: dist/laneway_linux_${{ matrix.arch }}.spdx.json
+          artifact-name: laneway-linux-${{ matrix.arch }}-sbom
+          syft-version: v1.50.0
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: laneway-linux-${{ matrix.arch }}
-          path: dist/laneway_linux_${{ matrix.arch }}.tar.gz
+          path: |
+            dist/laneway_linux_${{ matrix.arch }}.tar.gz
+            dist/laneway_linux_${{ matrix.arch }}.spdx.json
+          if-no-files-found: error
+
+  image:
+    name: ${{ matrix.name }} multi-architecture image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: controller
+            image: ghcr.io/doout/laneway-controller
+            dockerfile: deploy/containers/Dockerfile
+            binary: laneway-controller
+          - name: relay
+            image: ghcr.io/doout/laneway-relay
+            dockerfile: deploy/containers/Dockerfile
+            binary: laneway-relay
+          - name: admin
+            image: ghcr.io/doout/laneway-admin
+            dockerfile: deploy/containers/Dockerfile
+            binary: laneway
+          - name: exit-node
+            image: ghcr.io/doout/laneway-exit-node
+            dockerfile: deploy/containers/Dockerfile.exit-node
+            binary: laneway
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - id: version
+        name: Resolve immutable release version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
+          platforms: arm64
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.36.1
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+      - name: Build unprivileged multi-architecture scan input
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: |
+            BINARY=${{ matrix.binary }}
+            VERSION=${{ steps.version.outputs.value }}
+          platforms: linux/amd64,linux/arm64
+          outputs: type=oci,dest=/tmp/${{ matrix.name }}.oci.tar
+          provenance: false
+          sbom: false
+      - name: Reject vulnerable image before registry publication
+        uses: aquasecurity/trivy-action@2736533278103862a861f4a35ebac3e97854d956
+        with:
+          input: /tmp/${{ matrix.name }}.oci.tar
+          format: table
+          ignore-unfixed: false
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          version: v0.73.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ matrix.image }}
+          tags: type=raw,value=${{ steps.version.outputs.value }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+      - id: build
+        name: Build and publish AMD64/ARM64 image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: |
+            BINARY=${{ matrix.binary }}
+            VERSION=${{ steps.version.outputs.value }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+      - name: Generate image SBOM release asset
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ matrix.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: ${{ matrix.name }}.spdx.json
+          artifact-name: laneway-${{ matrix.name }}-image-sbom
+          syft-version: v1.50.0
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v3.1.3
+      - name: Sign immutable image digest
+        run: cosign sign "${{ matrix.image }}@${{ steps.build.outputs.digest }}"
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Record immutable image reference
+        run: printf '%s@%s\n' '${{ matrix.image }}' '${{ steps.build.outputs.digest }}' > '${{ matrix.name }}.digest.txt'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: laneway-${{ matrix.name }}-image-metadata
+          path: |
+            ${{ matrix.name }}.digest.txt
+            ${{ matrix.name }}.spdx.json
           if-no-files-found: error
 
   release:
-    name: Publish GitHub release
-    needs: package
+    name: Publish signed GitHub release
+    needs: [package, image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: laneway-linux-*
+          pattern: laneway-*
           path: dist
           merge-multiple: true
-      - name: Create checksums
+      - name: Create deterministic checksums and image manifest
         working-directory: dist
-        run: sha256sum laneway_*.tar.gz > checksums.txt
+        run: |
+          LC_ALL=C sha256sum -- laneway_*.tar.gz *.spdx.json | sort -k2 > checksums.txt
+          LC_ALL=C sort -o image-digests.txt -- *.digest.txt
+          rm -- *.digest.txt
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v3.1.3
+      - name: Sign checksum manifest
+        working-directory: dist
+        run: cosign sign-blob --bundle checksums.sigstore.json checksums.txt
+      - name: Attest release artifact provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: dist/laneway_*.tar.gz
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

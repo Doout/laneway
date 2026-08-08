@@ -621,6 +621,15 @@ online-backup procedure), deploy relay/controller first, then roll nodes. Keep
 the previous binaries and configuration available for rollback; never roll
 back the database independently of migrations without a tested backup.
 
+Tagged releases publish Linux AMD64/ARM64 archives and controller, relay,
+administrative, and isolated Exit Node images. Every release includes signed
+checksums, GitHub build provenance, immutable image digest records, and SPDX
+JSON SBOMs. Images are keylessly signed by the tagged release workflow and
+carry registry SBOM/provenance attestations. Production Compose requires both
+the semantic version and each verified manifest digest; it never consumes a
+mutable `latest` tag. Follow the exact verification commands in
+`deploy/compose/README.md` before an initial deployment, upgrade, or rollback.
+
 ## Containers and rootless operation
 
 The supplied scratch image is intended for the relay or controller. It runs as

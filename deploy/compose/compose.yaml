@@ -17,7 +17,7 @@ x-security: &security
 services:
   controller:
     <<: *security
-    image: ghcr.io/doout/laneway-controller:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    image: ghcr.io/doout/laneway-controller:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_CONTROLLER_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
     command: ["-config", "/etc/laneway/controller.toml"]
     volumes:
       - controller-state:/var/lib/laneway-controller
@@ -43,7 +43,7 @@ services:
 
   relay:
     <<: *security
-    image: ghcr.io/doout/laneway-relay:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    image: ghcr.io/doout/laneway-relay:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_RELAY_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
     command: ["-config", "/etc/laneway/relay.toml"]
     depends_on:
       controller:
@@ -74,7 +74,7 @@ services:
     security_opt:
       - no-new-privileges:true
     init: true
-    image: ghcr.io/doout/laneway-admin:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    image: ghcr.io/doout/laneway-admin:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_ADMIN_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
     profiles: [tools]
     entrypoint: [/usr/local/bin/laneway]
     volumes:
@@ -86,7 +86,7 @@ services:
     networks: [control]
 
   exit-node:
-    image: ghcr.io/doout/laneway-exit-node:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}
+    image: ghcr.io/doout/laneway-exit-node:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_EXIT_NODE_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
     profiles: [exit-node]
     # setpriv drops these one-shot bootstrap privileges before tini starts;
     # the long-running UID 65532 process retains only NET_ADMIN.
