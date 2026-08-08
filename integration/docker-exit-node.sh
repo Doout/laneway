@@ -129,7 +129,12 @@ wait_peer_path() {
   local container="$1" config="$2" peer="$3" expected="$4"
   for _ in $(seq 1 240); do
     if docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway peers -config "${config}" -json 2>/dev/null |
-      jq -e --arg peer "${peer}" --arg path "${expected}" '.[] | select(.node_id == $peer and .path == $path)' >/dev/null; then
+      jq -e --arg peer "${peer}" --arg path "${expected}" '
+        .[] | select(
+          .node_id == $peer and
+          (if $path == "direct" then (.path == "direct" or .path == "direct-wireguard" or (.path | startswith("direct-quic/"))) else .path == $path end)
+        )
+      ' >/dev/null; then
       return 0
     fi
     sleep 0.25
