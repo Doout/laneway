@@ -150,6 +150,21 @@ func (m *RelayMux) Peers() []identity.NodeID {
 	return peers
 }
 
+// MaxPayload returns the controller-authorized ciphertext limit for peer in
+// this authenticated relay session. Zero means the peer is not bound.
+func (m *RelayMux) MaxPayload(peer identity.NodeID) int {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	binding, exists := m.bindings.byPeer[peer]
+	m.mu.RUnlock()
+	if !exists {
+		return 0
+	}
+	return binding.MaxPacketPayload
+}
+
 func (m *RelayMux) Send(ctx context.Context, peer identity.NodeID, packet []byte) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: missing context", ErrRelayBinding)

@@ -8,6 +8,7 @@ import (
 
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/packetbuffer"
+	"laneway.dev/laneway/internal/pathmanager"
 	"laneway.dev/laneway/internal/protocol"
 )
 
@@ -110,6 +111,38 @@ func TestRelayMuxFramesOpaqueWireGuardAndMapsAuthenticatedPeer(t *testing.T) {
 	}
 	carrier.received <- sent
 	received, err := mux.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer received.Release()
+	if received.Peer != peer || !bytes.Equal(received.Packet, packet) {
+		t.Fatalf("peer=%s payload_equal=%t", received.Peer, bytes.Equal(received.Packet, packet))
+	}
+}
+
+func TestRelayPathAdaptsAuthenticatedSession(t *testing.T) {
+	carrier := newFakeRelayCarrier()
+	mux, err := NewRelayMux(carrier, protocol.CapabilityE2EPacketV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := relayNode(31)
+	if err := mux.SetBinding(RelayBinding{Peer: peer, Handle: 43, MaxPacketPayload: 1200}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := NewRelayPath("relay-quic/session", mux)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path.MaxPayload(peer) != 1200 || path.Health(peer).State != pathmanager.HealthHealthy {
+		t.Fatalf("max=%d health=%+v", path.MaxPayload(peer), path.Health(peer))
+	}
+	packet := wireGuardInitiation()
+	if err := path.Send(context.Background(), peer, packet); err != nil {
+		t.Fatal(err)
+	}
+	carrier.received <- <-carrier.sent
+	received, err := path.Receive(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

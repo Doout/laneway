@@ -162,7 +162,7 @@ func newDirectUnifiedNode(t *testing.T, local identity.NodeIdentity, tlsConfig *
 	if err != nil {
 		t.Fatal(err)
 	}
-	controller, err := dataplane.NewDirectController(dataplane.DirectConfig{Local: local, Endpoint: endpoint, Engine: engine, Authorizer: dataplane.RouteAuthorizer{Routes: routes}, CandidatePolicy: directpath.CandidatePolicy{AllowLoopback: true}, ProbeInterval: 20 * time.Millisecond})
+	controller, err := dataplane.NewDirectController(dataplane.DirectConfig{Local: local, Endpoint: endpoint, Paths: engine, Authorizer: dataplane.RouteAuthorizer{Routes: routes}, CandidatePolicy: directpath.CandidatePolicy{AllowLoopback: true}, ProbeInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
