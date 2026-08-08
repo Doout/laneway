@@ -636,9 +636,24 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		}
 		values["controller_certificate_not_after_unix_seconds"] = controllerState.certificateNotAfter.Load()
 		values["controller_certificate_renew_after_unix_seconds"] = controllerState.certificateRenewAfter.Load()
+		controllerState.mu.Lock()
+		if controllerState.accepted != nil {
+			values["controller_identity_lease_expires_at_unix_seconds"] = controllerState.accepted.configuration.GetIdentityLeaseExpiresAtUnixSeconds()
+			values["controller_configuration_lease_valid_until_unix_seconds"] = controllerState.accepted.configuration.GetValidUntilUnixSeconds()
+		}
+		controllerState.mu.Unlock()
 		values["controller_candidate_exchange_enabled"] = 0
 		if controllerState.candidateEnabled.Load() {
 			values["controller_candidate_exchange_enabled"] = 1
+		}
+		if exitManagers != nil {
+			exitStatus := exitManagers.Status()
+			values["exit_forwarding_ready"] = boolMetric(exitStatus.ForwardingReady)
+			values["exit_nat_ready"] = boolMetric(exitStatus.NATReady)
+			values["exit_namespace_cleanup_failures_total"] = exitStatus.NamespaceCleanupFailures
+			if exitStatus.Serving {
+				values["exit_forwarded_packets_total"] = metrics.PacketsSent + metrics.PacketsReceived
+			}
 		}
 		return values
 	}})
@@ -660,8 +675,29 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		if secureWireGuard != nil {
 			selectedPath = secureWireGuard.CarrierSummary()
 		}
+		actor := "node"
+		if cfg.Exit.Serve {
+			actor = "exit-node"
+		}
+		overlayAddresses := make([]string, 0, len(addresses))
+		for _, prefix := range addresses {
+			overlayAddresses = append(overlayAddresses, prefix.String())
+		}
+		routeSnapshot := routeTable.Snapshot()
+		selectedRoutes := make([]string, 0, routeSnapshot.Len())
+		for _, route := range routeSnapshot.Routes() {
+			selectedRoutes = append(selectedRoutes, route.Prefix.String())
+		}
+		var identityLeaseExpiresAt, configurationLeaseValidUntil uint64
+		controllerState.mu.Lock()
+		if controllerState.accepted != nil {
+			identityLeaseExpiresAt = controllerState.accepted.configuration.GetIdentityLeaseExpiresAtUnixSeconds()
+			configurationLeaseValidUntil = controllerState.accepted.configuration.GetValidUntilUnixSeconds()
+		}
+		controllerState.mu.Unlock()
 		status := localapi.Status{
-			Running: true, NetworkID: local.NetworkID.String(), NodeID: local.NodeID.String(), Name: cfg.Node.Name,
+			Running: true, Actor: actor, NetworkID: local.NetworkID.String(), NodeID: local.NodeID.String(), Name: cfg.Node.Name,
+			OverlayAddresses: overlayAddresses, SelectedRoutes: selectedRoutes,
 			Interface: interfaceName, Relay: cfg.Node.RelayAddress, MTU: interfaceMTU,
 			ProductVersion: productVersion, ControlVersion: "1.0", PacketVersion: uint8(protocol.PacketVersion1),
 			Capabilities: service.AdvertisedCapabilities().String(), SelectedPath: selectedPath,
@@ -671,15 +707,21 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 				TCPConnections: metrics.TCPConnections, QUICFailures: metrics.QUICFailures, TCPFailures: metrics.TCPFailures,
 			},
 			Controller: localapi.ControllerStatus{
-				CandidateExchangeEnabled:         controllerState.candidateEnabled.Load(),
-				CertificatePresentedSerial:       fmt.Sprintf("%x", tlsConfig.Certificates[0].Leaf.SerialNumber.Bytes()),
-				CertificateRenewalNeeded:         controllerState.CertificateRenewalNeeded(time.Now()),
-				CertificateRenewAfterUnixSeconds: controllerState.certificateRenewAfter.Load(),
-				CertificateNotAfterUnixSeconds:   controllerState.certificateNotAfter.Load(),
+				CandidateExchangeEnabled:                controllerState.candidateEnabled.Load(),
+				CertificatePresentedSerial:              fmt.Sprintf("%x", tlsConfig.Certificates[0].Leaf.SerialNumber.Bytes()),
+				CertificateRenewalNeeded:                controllerState.CertificateRenewalNeeded(time.Now()),
+				CertificateRenewAfterUnixSeconds:        controllerState.certificateRenewAfter.Load(),
+				CertificateNotAfterUnixSeconds:          controllerState.certificateNotAfter.Load(),
+				IdentityLeaseExpiresAtUnixSeconds:       identityLeaseExpiresAt,
+				ConfigurationLeaseValidUntilUnixSeconds: configurationLeaseValidUntil,
+				ConfigurationLeaseExpired:               configurationLeaseValidUntil != 0 && uint64(time.Now().Unix()) >= configurationLeaseValidUntil,
 			},
 		}
 		if exitManagers != nil {
 			status.Exit = exitManagers.Status()
+			if status.Exit.Serving {
+				status.Exit.ForwardedPackets = packetSent + packetReceived
+			}
 		}
 		peers := make([]localapi.Peer, 0, len(cfg.Peers))
 		for _, peer := range cfg.Peers {
@@ -704,8 +746,8 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			}
 		}
 		controllerState.mu.Unlock()
-		routes := make([]localapi.Route, 0, routeTable.Snapshot().Len())
-		for _, route := range routeTable.Snapshot().Routes() {
+		routes := make([]localapi.Route, 0, routeSnapshot.Len())
+		for _, route := range routeSnapshot.Routes() {
 			routes = append(routes, localapi.Route{Prefix: route.Prefix.String(), ViaNode: route.NextHop.String(), Kind: "peer"})
 		}
 		return status, peers, routes
@@ -793,6 +835,13 @@ func addPathManagerDiagnostics(values map[string]uint64, manager *pathmanager.Ma
 	values["path_direct_failures_total"] = metrics.DirectFailures
 	values["path_switches_total"] = metrics.Switches
 	values["path_peers"] = uint64(metrics.Peers)
+}
+
+func boolMetric(value bool) uint64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func addWireGuardDiagnostics(values map[string]uint64, secure secureWireGuardRuntime) {
@@ -1306,6 +1355,9 @@ type daemonExitManagers struct {
 	pathHealthy           func(identity.NodeID) bool
 	intentStore           *exitIntentStore
 	intentPersisted       bool
+	serving               bool
+	gatewayReady          bool
+	cleanupFailures       uint64
 }
 
 func (m *daemonExitManagers) SelectedNode() identity.NodeID {
@@ -1325,7 +1377,7 @@ func newDaemonExitManagers(cfg config.Config, local identity.NodeIdentity, inter
 ) (*daemonExitManagers, error) {
 	managers := &daemonExitManagers{local: local, staticBypass: append([]netip.Addr(nil), bypass...), bypass: append([]netip.Addr(nil), bypass...), enabled: cfg.Exit.Enabled,
 		routeTable: routeTable, failureModeConfigured: cfg.Exit.FailureMode == "open" || cfg.Exit.FailureMode == "closed",
-		intentStore: intentStore, intentPersisted: intentPersisted}
+		intentStore: intentStore, intentPersisted: intentPersisted, serving: cfg.Exit.Serve}
 	var err error
 	if cfg.Exit.Enabled {
 		managers.selected, err = identity.ParseNodeID(cfg.Exit.SelectedNodeID)
@@ -1426,6 +1478,9 @@ func (m *daemonExitManagers) Restore(ctx context.Context) error {
 		if m.routeTable != nil {
 			m.routeTable.Replace(nil)
 		}
+		m.gatewayReady = false
+	} else {
+		m.cleanupFailures++
 	}
 	return result
 }
@@ -1539,6 +1594,7 @@ func (m *daemonExitManagers) applyLocked(ctx context.Context, configuration *lan
 	m.latest = configuration
 	m.baseRoutes = append(m.baseRoutes[:0], baseRoutes...)
 	m.authorized = next.authorized
+	m.gatewayReady = m.gateway != nil && next.gateway.Enabled && next.gateway.Authorized
 	return nil
 }
 
@@ -1715,7 +1771,11 @@ func (m *daemonExitManagers) MonitorPath(ctx context.Context, interval time.Dura
 func (m *daemonExitManagers) Status() localapi.ExitStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	status := localapi.ExitStatus{Enabled: m.enabled, Authorized: m.authorized}
+	status := localapi.ExitStatus{
+		Enabled: m.enabled, Authorized: m.authorized, Serving: m.serving,
+		ForwardingReady: m.gatewayReady, NATReady: m.gatewayReady,
+		NamespaceCleanupFailures: m.cleanupFailures,
+	}
 	if !m.selected.IsZero() {
 		status.SelectedNodeID = m.selected.String()
 	}
@@ -1731,6 +1791,11 @@ func (m *daemonExitManagers) Close() error {
 	}
 	if m.gateway != nil {
 		result = errors.Join(result, m.gateway.Close())
+	}
+	if result != nil {
+		m.cleanupFailures++
+	} else {
+		m.gatewayReady = false
 	}
 	return result
 }

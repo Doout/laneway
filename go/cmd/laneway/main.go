@@ -715,23 +715,33 @@ func runLocal(command string, args []string) error {
 		if *jsonOutput {
 			return printJSON(status)
 		}
-		fmt.Printf("node=%s name=%s network=%s interface=%s mtu=%d relay=%s running=%t\n",
-			status.NodeID, status.Name, status.NetworkID, status.Interface, status.MTU, status.Relay, status.Running)
+		actor := status.Actor
+		if actor == "" {
+			actor = "node"
+		}
+		fmt.Printf("actor=%s node=%s name=%s network=%s overlay=%s interface=%s mtu=%d relay=%s running=%t\n",
+			actor, status.NodeID, status.Name, status.NetworkID, strings.Join(status.OverlayAddresses, ","), status.Interface, status.MTU, status.Relay, status.Running)
 		fmt.Printf("version=%s control=%s packet=%d capabilities=%s path=%s\n",
 			status.ProductVersion, status.ControlVersion, status.PacketVersion, status.Capabilities, status.SelectedPath)
+		fmt.Printf("selected_routes=%s\n", strings.Join(status.SelectedRoutes, ","))
 		fmt.Printf("connections=%d reconnects=%d sent=%d received=%d dropped=%d\n",
 			status.Metrics.Connections, status.Metrics.Reconnects, status.Metrics.PacketsSent,
 			status.Metrics.PacketsReceived, status.Metrics.PacketsDropped)
 		fmt.Printf("tcp_connections=%d quic_failures=%d tcp_failures=%d\n",
 			status.Metrics.TCPConnections, status.Metrics.QUICFailures, status.Metrics.TCPFailures)
-		if status.Controller.CertificateNotAfterUnixSeconds != 0 {
-			fmt.Printf("controller_candidate_exchange=%t certificate_renewal_needed=%t certificate_renew_after=%d certificate_not_after=%d\n",
-				status.Controller.CandidateExchangeEnabled, status.Controller.CertificateRenewalNeeded,
+		if status.Controller.CertificateNotAfterUnixSeconds != 0 || status.Controller.IdentityLeaseExpiresAtUnixSeconds != 0 || status.Controller.ConfigurationLeaseValidUntilUnixSeconds != 0 {
+			fmt.Printf("controller_candidate_exchange=%t configuration_lease_valid_until=%d configuration_lease_expired=%t certificate_renewal_needed=%t certificate_renew_after=%d certificate_not_after=%d identity_lease_expires_at=%d\n",
+				status.Controller.CandidateExchangeEnabled, status.Controller.ConfigurationLeaseValidUntilUnixSeconds,
+				status.Controller.ConfigurationLeaseExpired, status.Controller.CertificateRenewalNeeded,
 				status.Controller.CertificateRenewAfterUnixSeconds,
-				status.Controller.CertificateNotAfterUnixSeconds)
+				status.Controller.CertificateNotAfterUnixSeconds,
+				status.Controller.IdentityLeaseExpiresAtUnixSeconds)
 		}
-		if status.Exit.Enabled {
-			fmt.Printf("exit=%s authorized=%t\n", status.Exit.SelectedNodeID, status.Exit.Authorized)
+		if status.Exit.Enabled || status.Exit.Serving {
+			fmt.Printf("exit=%s authorized=%t serving=%t forwarding_ready=%t nat_ready=%t forwarded_packets=%d namespace_cleanup_failures=%d\n",
+				status.Exit.SelectedNodeID, status.Exit.Authorized, status.Exit.Serving,
+				status.Exit.ForwardingReady, status.Exit.NATReady, status.Exit.ForwardedPackets,
+				status.Exit.NamespaceCleanupFailures)
 		}
 	case "peers":
 		peers, err := client.Peers(ctx)

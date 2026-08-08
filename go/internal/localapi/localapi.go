@@ -32,35 +32,46 @@ type Metrics struct {
 }
 
 type Status struct {
-	Running        bool             `json:"running"`
-	ProductVersion string           `json:"product_version"`
-	ControlVersion string           `json:"control_version"`
-	PacketVersion  uint8            `json:"packet_version"`
-	Capabilities   string           `json:"capabilities"`
-	SelectedPath   string           `json:"selected_path"`
-	NetworkID      string           `json:"network_id"`
-	NodeID         string           `json:"node_id"`
-	Name           string           `json:"name"`
-	Interface      string           `json:"interface"`
-	Relay          string           `json:"relay"`
-	MTU            int              `json:"mtu"`
-	Metrics        Metrics          `json:"metrics"`
-	Exit           ExitStatus       `json:"exit"`
-	Controller     ControllerStatus `json:"controller"`
+	Running          bool             `json:"running"`
+	Actor            string           `json:"actor"`
+	ProductVersion   string           `json:"product_version"`
+	ControlVersion   string           `json:"control_version"`
+	PacketVersion    uint8            `json:"packet_version"`
+	Capabilities     string           `json:"capabilities"`
+	SelectedPath     string           `json:"selected_path"`
+	NetworkID        string           `json:"network_id"`
+	NodeID           string           `json:"node_id"`
+	Name             string           `json:"name"`
+	OverlayAddresses []string         `json:"overlay_addresses"`
+	SelectedRoutes   []string         `json:"selected_routes"`
+	Interface        string           `json:"interface"`
+	Relay            string           `json:"relay"`
+	MTU              int              `json:"mtu"`
+	Metrics          Metrics          `json:"metrics"`
+	Exit             ExitStatus       `json:"exit"`
+	Controller       ControllerStatus `json:"controller"`
 }
 
 type ControllerStatus struct {
-	CandidateExchangeEnabled         bool   `json:"candidate_exchange_enabled"`
-	CertificatePresentedSerial       string `json:"certificate_presented_serial"`
-	CertificateRenewalNeeded         bool   `json:"certificate_renewal_needed"`
-	CertificateRenewAfterUnixSeconds uint64 `json:"certificate_renew_after_unix_seconds"`
-	CertificateNotAfterUnixSeconds   uint64 `json:"certificate_not_after_unix_seconds"`
+	CandidateExchangeEnabled                bool   `json:"candidate_exchange_enabled"`
+	CertificatePresentedSerial              string `json:"certificate_presented_serial"`
+	CertificateRenewalNeeded                bool   `json:"certificate_renewal_needed"`
+	CertificateRenewAfterUnixSeconds        uint64 `json:"certificate_renew_after_unix_seconds"`
+	CertificateNotAfterUnixSeconds          uint64 `json:"certificate_not_after_unix_seconds"`
+	IdentityLeaseExpiresAtUnixSeconds       uint64 `json:"identity_lease_expires_at_unix_seconds"`
+	ConfigurationLeaseValidUntilUnixSeconds uint64 `json:"configuration_lease_valid_until_unix_seconds"`
+	ConfigurationLeaseExpired               bool   `json:"configuration_lease_expired"`
 }
 
 type ExitStatus struct {
-	Enabled        bool   `json:"enabled"`
-	SelectedNodeID string `json:"selected_node_id,omitempty"`
-	Authorized     bool   `json:"authorized"`
+	Enabled                  bool   `json:"enabled"`
+	SelectedNodeID           string `json:"selected_node_id,omitempty"`
+	Authorized               bool   `json:"authorized"`
+	Serving                  bool   `json:"serving"`
+	ForwardingReady          bool   `json:"forwarding_ready"`
+	NATReady                 bool   `json:"nat_ready"`
+	ForwardedPackets         uint64 `json:"forwarded_packets"`
+	NamespaceCleanupFailures uint64 `json:"namespace_cleanup_failures"`
 }
 
 type ExitSelection struct {

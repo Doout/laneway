@@ -231,6 +231,12 @@ func runConnect(args []string) error {
 		selection = "exit=" + *exitSelector + " failure-mode=" + *failureMode
 	}
 	lastPath := ""
+	ownedRoutes := connectPrefixList(routes)
+	bypasses := connectPrefixList(localLAN)
+	dnsOwnership := "native"
+	if len(dns) != 0 {
+		dnsOwnership = "temporary-session"
+	}
 	status := func(value nodeapp.RuntimeStatus) {
 		if value.Path == lastPath {
 			return
@@ -240,8 +246,9 @@ func runConnect(args []string) error {
 		for _, prefix := range value.OverlayAddresses {
 			overlays = append(overlays, prefix.String())
 		}
-		fmt.Printf("laneway connected network=%s node=%s name=%s overlay=%s interface=%s selection=%s path=%s\n",
-			value.NetworkID, value.NodeID, name, strings.Join(overlays, ","), value.Interface, selection, value.Path)
+		fmt.Printf("laneway connected actor=user network=%s node=%s name=%s overlay=%s identity_lease_expires_at=%d interface=%s selection=%s owned_routes=%s bypasses=%s dns_owner=%s cleanup_journal=helper-active path=%s\n",
+			value.NetworkID, value.NodeID, name, strings.Join(overlays, ","), enrollment.leaseExpiresAt.Unix(), value.Interface,
+			selection, ownedRoutes, bypasses, dnsOwnership, value.Path)
 	}
 	err = nodeapp.RunForeground(ctx, cfg, nodeapp.ForegroundOptions{
 		NetworkOpener: helperNetworkOpener, Status: status, FilterConfiguration: filter,
@@ -250,6 +257,17 @@ func runConnect(args []string) error {
 		fmt.Println("laneway disconnected; temporary networking restored")
 	}
 	return err
+}
+
+func connectPrefixList(prefixes []netip.Prefix) string {
+	if len(prefixes) == 0 {
+		return "none"
+	}
+	values := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		values = append(values, prefix.String())
+	}
+	return strings.Join(values, ",")
 }
 
 func connectUsage() error {

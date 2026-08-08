@@ -206,6 +206,14 @@ impl Agent {
                 ]);
             }
         }
+        Metrics::set(
+            &self.metrics.exit_forwarding_ready,
+            self.config.forwarding.exit_gateway,
+        );
+        Metrics::set(
+            &self.metrics.exit_nat_ready,
+            self.config.forwarding.exit_gateway,
+        );
         let runtime_base = Arc::new(ArcSwap::from_pointee(authority_base.clone()));
         let control_lock = Arc::new(Mutex::new(()));
         let intent_persisted = Arc::new(StdMutex::new(intent_persisted));
@@ -378,6 +386,10 @@ impl Agent {
                     Metrics::increment(&metrics.tun_packets);
                     Metrics::increment(&metrics.packets_sent_total);
                     Metrics::add(&metrics.bytes_sent_total, packet.len());
+                    if exit_gateway {
+                        Metrics::increment(&metrics.exit_forwarded_packets_total);
+                        Metrics::add(&metrics.exit_forwarded_bytes_total, packet.len());
+                    }
                     if try_send_direct(&state, &metrics, local_node, peer, packet, &packet_pool) {
                         continue;
                     }
@@ -405,6 +417,7 @@ impl Agent {
         {
             let device = Arc::clone(&device);
             let metrics = Arc::clone(&self.metrics);
+            let exit_gateway = self.config.forwarding.exit_gateway;
             tasks.spawn(async move {
                 while let Some(packet) = inject_rx.recv().await {
                     metrics.set_inject_queue_depth(
@@ -419,6 +432,10 @@ impl Agent {
                     Metrics::increment(&metrics.injected_packets);
                     Metrics::increment(&metrics.packets_received_total);
                     Metrics::add(&metrics.bytes_received_total, packet.len());
+                    if exit_gateway {
+                        Metrics::increment(&metrics.exit_forwarded_packets_total);
+                        Metrics::add(&metrics.exit_forwarded_bytes_total, packet.len());
+                    }
                 }
                 anyhow::bail!("TUN injection queue closed")
             });
@@ -438,6 +455,16 @@ impl Agent {
         while tasks.join_next().await.is_some() {}
         let kernel_restore = restore_kernel(&kernel);
         let tun_restore = tun.lock().await.restore().await;
+        if self.config.forwarding.exit_gateway {
+            if kernel_restore.is_err() {
+                Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
+            }
+            if tun_restore.is_err() {
+                Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
+            }
+            Metrics::set(&self.metrics.exit_forwarding_ready, false);
+            Metrics::set(&self.metrics.exit_nat_ready, false);
+        }
         info!(metrics = ?self.metrics.snapshot(), "native Rust Laneway agent stopped");
         aggregate_results([
             ("node runtime", run_result),
@@ -637,8 +664,30 @@ impl RuntimeControl {
             .selected_node
             .clone()
             .unwrap_or_default();
+        let routes_snapshot = self.state.routes.load();
+        let mut selected_routes: Vec<_> = routes_snapshot
+            .routes()
+            .iter()
+            .map(|route| route.prefix.to_string())
+            .collect();
+        selected_routes.sort();
+        selected_routes.dedup();
+        let mut overlay_addresses: Vec<_> = authority
+            .as_ref()
+            .map(|snapshot| snapshot.overlays.iter().map(ToString::to_string).collect())
+            .unwrap_or_else(|| {
+                effective
+                    .tun
+                    .addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            });
+        overlay_addresses.sort();
+        let serving_exit = effective.forwarding.exit_gateway;
         let status = local_api::Status {
             running: true,
+            actor: if serving_exit { "exit-node" } else { "node" }.to_owned(),
             product_version: "1.0.0".to_owned(),
             control_version: "1.0".to_owned(),
             packet_version: 1,
@@ -647,6 +696,8 @@ impl RuntimeControl {
             network_id: self.network.to_string(),
             node_id: self.node.to_string(),
             name: local_name,
+            overlay_addresses,
+            selected_routes,
             interface: effective.tun.name.clone(),
             relay: effective
                 .relay
@@ -670,6 +721,11 @@ impl RuntimeControl {
                 enabled: effective.forwarding.exit_client.enabled,
                 selected_node_id,
                 authorized: authorized_exit,
+                serving: serving_exit,
+                forwarding_ready: values.exit_forwarding_ready != 0,
+                nat_ready: values.exit_nat_ready != 0,
+                forwarded_packets: values.exit_forwarded_packets_total,
+                namespace_cleanup_failures: values.exit_namespace_cleanup_failures_total,
             },
             controller: local_api::ControllerStatus {
                 candidate_exchange_enabled: values.controller_candidate_exchange_enabled != 0,
@@ -678,6 +734,15 @@ impl RuntimeControl {
                 certificate_renew_after_unix_seconds: values
                     .controller_certificate_renew_after_seconds,
                 certificate_not_after_unix_seconds: values.controller_certificate_not_after_seconds,
+                identity_lease_expires_at_unix_seconds: authority
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.identity_lease_expires_at),
+                configuration_lease_valid_until_unix_seconds: authority
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.valid_until),
+                configuration_lease_expired: authority
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.expired()),
             },
         };
 
@@ -725,7 +790,6 @@ impl RuntimeControl {
             peer.prefixes.sort();
         }
 
-        let routes_snapshot = self.state.routes.load();
         let mut routes: Vec<_> = routes_snapshot
             .routes()
             .iter()
@@ -992,11 +1056,16 @@ impl SnapshotApplier for RuntimeApplier {
                 self.state.fail_close();
                 Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
                 Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
-                reconcile_kernel(
+                Metrics::set(&self.metrics.exit_forwarding_ready, false);
+                Metrics::set(&self.metrics.exit_nat_ready, false);
+                if let Err(cleanup) = reconcile_kernel(
                     &self.kernel,
                     &self.dynamic_bypasses,
                     Arc::new(controller_disabled_config(&base)),
-                )?;
+                ) {
+                    Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
+                    return Err(cleanup.context("fail close withdrawn relay authority"));
+                }
                 if self.configure_tun {
                     self.tun.lock().await.apply_controller(&[], &[]).await?;
                 }
@@ -1027,6 +1096,14 @@ impl SnapshotApplier for RuntimeApplier {
                 });
             }
             self.state.routes.store(Arc::new(compiled));
+            Metrics::set(
+                &self.metrics.exit_forwarding_ready,
+                effective.forwarding.exit_gateway,
+            );
+            Metrics::set(
+                &self.metrics.exit_nat_ready,
+                effective.forwarding.exit_gateway,
+            );
             publish_controller_metrics(&self.metrics, &snapshot);
             self.state.publish_authority(snapshot);
             Ok(())
@@ -1039,12 +1116,17 @@ impl SnapshotApplier for RuntimeApplier {
             self.state.fail_close();
             Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
             Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
+            Metrics::set(&self.metrics.exit_forwarding_ready, false);
+            Metrics::set(&self.metrics.exit_nat_ready, false);
             let base = self.base_config.load_full();
-            reconcile_kernel(
+            if let Err(error) = reconcile_kernel(
                 &self.kernel,
                 &self.dynamic_bypasses,
                 Arc::new(controller_disabled_config(&base)),
-            )?;
+            ) {
+                Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
+                return Err(error.context("fail close controller-owned kernel state"));
+            }
             if self.configure_tun {
                 self.tun.lock().await.apply_controller(&[], &[]).await?;
             }
@@ -1421,6 +1503,7 @@ mod tests {
                 .unwrap()
                 .as_secs()
                 + 60,
+            identity_lease_expires_at: 0,
             overlays: vec!["100.96.0.1/32".parse().unwrap()],
             peers: HashMap::from([
                 (
