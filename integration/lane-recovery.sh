@@ -39,18 +39,20 @@ case " $* " in
   *" -backup /backups/"*)
     name=${*##* /backups/}; name=${name%% *}
     printf '%s\n' sqlite-backup > "$LANE_TEST_BASE/generated/backups/$name"
-    printf '%s\n' sqlite-wal > "$LANE_TEST_BASE/generated/backups/$name-wal"
-    printf '%s\n' sqlite-shm > "$LANE_TEST_BASE/generated/backups/$name-shm"
-    printf '%s\n' sqlite-journal > "$LANE_TEST_BASE/generated/backups/$name-journal"
+    printf '%s\n' sqlite-wal > "$LANE_TEST_BASE/generated/backups/.laneway-database-$$-wal"
+    printf '%s\n' sqlite-shm > "$LANE_TEST_BASE/generated/backups/.laneway-database-$$-shm"
+    printf '%s\n' sqlite-journal > "$LANE_TEST_BASE/generated/backups/.laneway-database-$$-journal"
     chmod 0600 "$LANE_TEST_BASE/generated/backups/$name"
     chown 65532:65532 "$LANE_TEST_BASE/generated/backups/$name"
-    [ "${LANE_TEST_BACKUP_FAIL:-0}" = 0 ] || exit 1
+    if [ "${LANE_TEST_BACKUP_FAIL:-0}" != 0 ]; then
+      printf '%s\n' sqlite-temporary > "$LANE_TEST_BASE/generated/backups/.laneway-database-$$"
+      exit 1
+    fi
     ;;
   *" -restore /backups/"*)
-    name=${*##* /backups/}; name=${name%% *}
-    printf '%s\n' sqlite-wal > "$LANE_TEST_BASE/generated/backups/$name-wal"
-    printf '%s\n' sqlite-shm > "$LANE_TEST_BASE/generated/backups/$name-shm"
-    printf '%s\n' sqlite-journal > "$LANE_TEST_BASE/generated/backups/$name-journal"
+    printf '%s\n' sqlite-wal > "$LANE_TEST_BASE/generated/backups/.laneway-database-$$-wal"
+    printf '%s\n' sqlite-shm > "$LANE_TEST_BASE/generated/backups/.laneway-database-$$-shm"
+    printf '%s\n' sqlite-journal > "$LANE_TEST_BASE/generated/backups/.laneway-database-$$-journal"
     printf '%s\n' restored > "$LANE_TEST_BASE/restored.db"
     ;;
 esac
