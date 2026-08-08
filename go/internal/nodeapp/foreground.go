@@ -8,7 +8,9 @@ import (
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/config"
 	"laneway.dev/laneway/internal/exitnode"
+	"laneway.dev/laneway/internal/nodeservice"
 	"laneway.dev/laneway/internal/platform"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 // HostNetwork is the complete native-networking boundary used by a node
@@ -83,4 +85,17 @@ type runtimeOptions struct {
 	status              func(RuntimeStatus)
 	filterConfiguration func(*lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error)
 	foreground          bool
+	wireGuardOpener     func(context.Context, wireguard.SecureManagerConfig) (secureWireGuardRuntime, error)
+}
+
+type secureWireGuardRuntime interface {
+	nodeservice.WireGuardRelayHandler
+	Name() string
+	MTU() int
+	PublicKey() wireguard.PublicKey
+	ApplyGuard(context.Context, wireguard.FirewallPlan) error
+	RestoreGuard(context.Context) error
+	ApplySnapshot(context.Context, wireguard.SecureSnapshot) error
+	RelayMetrics() wireguard.RelayEndpointMetrics
+	Close() error
 }

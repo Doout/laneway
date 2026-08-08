@@ -21,6 +21,7 @@ import (
 	"laneway.dev/laneway/internal/revocation"
 	"laneway.dev/laneway/internal/routing"
 	"laneway.dev/laneway/internal/subnet"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 type controllerApplyState struct {
@@ -37,6 +38,7 @@ type controllerApplyState struct {
 	relayTargetMu            sync.Mutex
 	relayTargets             []nodeservice.RelayTarget
 	relayChanges             chan struct{}
+	wireGuard                secureWireGuardRuntime
 }
 
 // CertificateRenewalNeeded derives the health bit from the current clock so a
@@ -103,6 +105,7 @@ type preparedControllerConfiguration struct {
 	failClosing     bool
 	revokedSerials  [][]byte
 	authorityStatus nodeAuthorityStatus
+	wireGuard       *wireguard.SecureSnapshot
 }
 
 func prepareControllerConfiguration(configuration *lanewayv1.NodeConfiguration, local identity.NodeIdentity, bypass []netip.Addr,

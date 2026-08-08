@@ -101,6 +101,29 @@ func TestSecureManagerCommitsGuardPeersThenPolicy(t *testing.T) {
 	}
 }
 
+func TestSecureManagerExternalGuardRestoresCommittedPolicy(t *testing.T) {
+	var events []string
+	_, localKey := deviceKey(t)
+	device := &fakeSecureDevice{public: localKey, events: &events}
+	firewall := &fakeSecureFirewall{events: &events}
+	manager, _ := newSecureManager(device, firewall)
+	peer := managedPeer(t, 44, "100.96.0.44/32")
+	snapshot := secureSnapshot(t, firewallNode(1), peer)
+	if err := manager.ApplySnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	events = nil
+	if err := manager.ApplyGuard(context.Background(), snapshot.Firewall); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RestoreGuard(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := stringsJoin(events); got != "guard,policy" {
+		t.Fatalf("events=%s", got)
+	}
+}
+
 func TestSecureManagerRollsBackWithoutPublishingBroaderState(t *testing.T) {
 	var events []string
 	_, localKey := deviceKey(t)
