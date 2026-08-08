@@ -49,6 +49,33 @@ snapshot_docker() {
   } | sort
 }
 
+# Starting Docker can populate docker0 routes and firewall plumbing shortly after
+# the daemon answers its first API request. Establish the disposable runner's
+# settled daemon-owned baseline before asserting that this test restores it.
+wait_host_network_stable() {
+  local stable=0
+  docker info >/dev/null
+  snapshot_routes >"${work_dir}/host-routes.stability.previous"
+  snapshot_rules >"${work_dir}/host-nft.stability.previous"
+  for _ in $(seq 1 40); do
+    sleep 0.25
+    snapshot_routes >"${work_dir}/host-routes.stability.current"
+    snapshot_rules >"${work_dir}/host-nft.stability.current"
+    if cmp -s "${work_dir}/host-routes.stability.previous" "${work_dir}/host-routes.stability.current" &&
+      cmp -s "${work_dir}/host-nft.stability.previous" "${work_dir}/host-nft.stability.current"; then
+      stable=$((stable + 1))
+      [[ ${stable} -ge 4 ]] && return 0
+    else
+      stable=0
+    fi
+    cp "${work_dir}/host-routes.stability.current" "${work_dir}/host-routes.stability.previous"
+    cp "${work_dir}/host-nft.stability.current" "${work_dir}/host-nft.stability.previous"
+  done
+  echo "ERROR: Docker host networking did not settle before the safety snapshot" >&2
+  return 1
+}
+
+wait_host_network_stable
 snapshot_routes >"${work_dir}/host-routes.before"
 snapshot_rules >"${work_dir}/host-nft.before"
 snapshot_docker >"${work_dir}/docker.before"
@@ -475,7 +502,7 @@ run_external_flow() {
   local label="$1"
   owned_container "${external_name}" && docker rm -f "${external_name}" >/dev/null
   docker run -d --name "${external_name}" --label "${owner}" --network "${internet_network}" "${probe_image}" \
-    udp-server -listen :9201 >/dev/null
+    udp-server -listen :9201 -max-packets 64 >/dev/null
   wait_log "${external_name}" "ready=udp-server"
   local target
   target="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${internet_network}\"}}{{.IPAddress}}{{end}}" "${external_name}")"
