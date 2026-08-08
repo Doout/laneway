@@ -66,7 +66,22 @@ cp "$project_dir/docs/benchmarks.md" "$package_dir/docs/benchmarks.md"
 cp "$project_dir/docs/rust-controller-node.md" "$package_dir/docs/rust-controller-node.md"
 cp "$project_dir/spec/threat-model.md" "$package_dir/docs/threat-model.md"
 cp "$project_dir"/spec/*.md "$package_dir/spec/"
-cp -R "$project_dir/deploy/." "$package_dir/deploy/"
+# Copy only reviewed deployment sources. Never traverse the ignored Compose
+# runtime tree: a package build on an operator host must not read or archive
+# .env, generated credentials, databases, or recovery bundles.
+for directory in containers examples nftables systemd; do
+	cp -R "$project_dir/deploy/$directory" "$package_dir/deploy/$directory"
+done
+install -m 0644 "$project_dir/deploy/README.md" "$package_dir/deploy/README.md"
+install -d -m 0755 "$package_dir/deploy/compose/generated/config"
+for name in .env.example README.md compose.dev.yaml compose.yaml; do
+	install -m 0644 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
+done
+for name in bootstrap.sh install-control-plane.sh preflight.sh prepare.sh recovery.sh validate.sh lane; do
+	install -m 0755 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
+done
+install -m 0644 "$project_dir"/deploy/compose/generated/config/*.example \
+	"$package_dir/deploy/compose/generated/config/"
 cp "$project_dir/integration/README.md" "$package_dir/integration/README.md"
 cp "$project_dir/SECURITY.md" "$package_dir/SECURITY.md"
 cp "$project_dir/scripts/install-package.sh" "$package_dir/install.sh"
