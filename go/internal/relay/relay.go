@@ -58,6 +58,10 @@ const (
 	DropNewest QueuePolicy = iota
 )
 
+// LegacyMaxPacketPayload preserves the stable-v1 raw IP carrier contract.
+// E2E WireGuard sessions may negotiate a larger opaque ciphertext limit.
+const LegacyMaxPacketPayload = 1280
+
 type Config struct {
 	MaxSessions           int
 	MaxHandlesPerSession  int
@@ -341,7 +345,7 @@ func (r *Registry) BindPeers(first, second *Session) (BindingPair, error) {
 		r.metrics.bindingsCreated.Add(1)
 	}
 	r.publishForwardingLocked()
-	limit := min(first.maxPayload, second.maxPayload)
+	limit := carrierPayloadLimit(first, second)
 	return BindingPair{
 		First:  Binding{Session: first, Handle: firstHandle, PeerNodeID: second.identity.NodeID, MaxPacketPayload: uint32(limit)},
 		Second: Binding{Session: second, Handle: secondHandle, PeerNodeID: first.identity.NodeID, MaxPacketPayload: uint32(limit)},
@@ -456,12 +460,20 @@ func (r *Registry) publishForwardingLocked() {
 			returnHandle, hasReturn := recipient.byPeer[session]
 			table.byHandle[handle] = forwardingRoute{
 				recipient: recipient, returnHandle: returnHandle, hasReturn: hasReturn,
-				maxPayload: min(session.maxPayload, recipient.maxPayload),
+				maxPayload: carrierPayloadLimit(session, recipient),
 			}
 		}
 		snapshot.bySession[session] = table
 	}
 	r.forwarding.Store(snapshot)
+}
+
+func carrierPayloadLimit(first, second *Session) int {
+	limit := min(first.maxPayload, second.maxPayload)
+	if !first.allowE2E || !second.allowE2E {
+		limit = min(limit, LegacyMaxPacketPayload)
+	}
+	return limit
 }
 
 func keyFor(id identity.NodeIdentity) sessionKey {

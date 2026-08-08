@@ -218,6 +218,168 @@ func (e *RelayEndpoint) Metrics() RelayEndpointMetrics {
 	}
 }
 
+// RunCarriers keeps the loopback kernel sockets active independently of relay
+// session reconnects. Carrier attachments may be added or removed while it is
+// running; neither operation changes the kernel WireGuard interface.
+func (e *RelayEndpoint) RunCarriers(ctx context.Context, carriers *CarrierMux) error {
+	if ctx == nil || carriers == nil {
+		return fmt.Errorf("%w: missing context or carrier mux", ErrInvalidRelayEndpoint)
+	}
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return ErrRelayEndpointClosed
+	}
+	if e.running {
+		e.mu.Unlock()
+		return ErrRelayEndpointRunning
+	}
+	e.running = true
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.running = false
+		e.mu.Unlock()
+	}()
+
+	carrierDone := make(chan error, 1)
+	go func() { carrierDone <- carriers.Run(ctx, e.deliverCarrier) }()
+	for {
+		peers, changed, closed := e.snapshot()
+		if closed {
+			carriers.Close()
+			<-carrierDone
+			return ErrRelayEndpointClosed
+		}
+		workerCtx, cancelWorkers := context.WithCancel(ctx)
+		outboundDone := e.startCarrierOutbound(workerCtx, carriers, peers)
+		select {
+		case <-ctx.Done():
+			cancelWorkers()
+			carriers.Close()
+			<-outboundDone
+			<-carrierDone
+			return ctx.Err()
+		case err := <-carrierDone:
+			cancelWorkers()
+			<-outboundDone
+			return err
+		case <-changed:
+			cancelWorkers()
+			<-outboundDone
+		case err := <-outboundDone:
+			cancelWorkers()
+			carriers.Close()
+			<-carrierDone
+			return err
+		}
+	}
+}
+
+func (e *RelayEndpoint) startCarrierOutbound(ctx context.Context, carriers *CarrierMux, peers []*relayEndpointPeer) <-chan error {
+	done := make(chan error, 1)
+	if len(peers) == 0 {
+		go func() { <-ctx.Done(); done <- ctx.Err() }()
+		return done
+	}
+	workerCtx, cancel := context.WithCancel(ctx)
+	errorsCh := make(chan error, len(peers))
+	var workers sync.WaitGroup
+	for _, peer := range peers {
+		workers.Add(1)
+		go func(peer *relayEndpointPeer) {
+			defer workers.Done()
+			if err := e.forwardKernelCarrier(workerCtx, carriers, peer); err != nil && !errors.Is(err, context.Canceled) {
+				select {
+				case errorsCh <- err:
+				default:
+				}
+			}
+		}(peer)
+	}
+	go func() {
+		workers.Wait()
+		close(errorsCh)
+	}()
+	go func() {
+		defer cancel()
+		select {
+		case <-ctx.Done():
+			cancel()
+			workers.Wait()
+			done <- ctx.Err()
+		case err, ok := <-errorsCh:
+			if !ok {
+				done <- ctx.Err()
+				return
+			}
+			cancel()
+			workers.Wait()
+			done <- err
+		}
+	}()
+	return done
+}
+
+func (e *RelayEndpoint) forwardKernelCarrier(ctx context.Context, carriers *CarrierMux, peer *relayEndpointPeer) error {
+	buffer := make([]byte, protocol.MaxPacketPayload+1)
+	for {
+		if err := peer.conn.SetReadDeadline(time.Now().Add(relayEndpointReadInterval)); err != nil {
+			return err
+		}
+		n, source, err := peer.conn.ReadFromUDPAddrPort(buffer)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if networkErr, ok := err.(net.Error); ok && networkErr.Timeout() {
+				continue
+			}
+			if !e.owns(peer) {
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return fmt.Errorf("wireguard: read kernel packet for peer %s: %w", peer.id, err)
+		}
+		if source != e.kernel {
+			e.unknownSources.Add(1)
+			e.packetsDropped.Add(1)
+			continue
+		}
+		if n > protocol.MaxPacketPayload {
+			e.packetsDropped.Add(1)
+			continue
+		}
+		if err := carriers.Send(ctx, peer.id, buffer[:n]); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			e.packetsDropped.Add(1)
+			continue
+		}
+		e.packetsSent.Add(1)
+	}
+}
+
+func (e *RelayEndpoint) deliverCarrier(_ context.Context, peerID identity.NodeID, packet []byte) error {
+	peer := e.peer(peerID)
+	if peer == nil {
+		e.unauthorizedPeers.Add(1)
+		e.packetsDropped.Add(1)
+		return ErrCarrierUnauthorized
+	}
+	if _, err := peer.conn.WriteToUDPAddrPort(packet, e.kernel); err != nil {
+		if !e.owns(peer) {
+			e.unauthorizedPeers.Add(1)
+			e.packetsDropped.Add(1)
+			return ErrCarrierUnauthorized
+		}
+		return fmt.Errorf("wireguard: deliver carrier packet for peer %s: %w", peer.id, err)
+	}
+	e.packetsReceived.Add(1)
+	return nil
+}
+
 // RunRelay attaches one authenticated relay session. Only one session may be
 // active; reconnects reuse the endpoint sockets and therefore do not recreate
 // the kernel WireGuard interface or change peer endpoints.

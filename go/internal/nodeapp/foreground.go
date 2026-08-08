@@ -7,7 +7,9 @@ import (
 
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/config"
+	"laneway.dev/laneway/internal/dataplane"
 	"laneway.dev/laneway/internal/exitnode"
+	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/nodeservice"
 	"laneway.dev/laneway/internal/platform"
 	"laneway.dev/laneway/internal/wireguard"
@@ -90,6 +92,8 @@ type runtimeOptions struct {
 
 type secureWireGuardRuntime interface {
 	nodeservice.WireGuardRelayHandler
+	dataplane.DirectPathAttacher
+	Run(context.Context) error
 	Name() string
 	MTU() int
 	PublicKey() wireguard.PublicKey
@@ -97,5 +101,6 @@ type secureWireGuardRuntime interface {
 	RestoreGuard(context.Context) error
 	ApplySnapshot(context.Context, wireguard.SecureSnapshot) error
 	RelayMetrics() wireguard.RelayEndpointMetrics
+	PathAvailable(identity.NodeID) bool
 	Close() error
 }

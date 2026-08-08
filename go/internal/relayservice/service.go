@@ -26,7 +26,7 @@ const (
 	defaultControlWriteTimeout = 5 * time.Second
 	// Stay below the common QUIC DATAGRAM path-MTU budget. Deployments with a
 	// measured larger budget may opt in explicitly.
-	defaultMaxPacketPayload = 1280
+	defaultMaxPacketPayload = 2048
 )
 
 var (

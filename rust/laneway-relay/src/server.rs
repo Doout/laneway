@@ -30,7 +30,7 @@ use crate::{
 
 const CONTROL_PREFACE: &[u8] = b"LWC1";
 const MAX_CONTROL_PAYLOAD: usize = 1 << 20;
-const MAX_PACKET_PAYLOAD: u32 = 1280;
+const MAX_PACKET_PAYLOAD: u32 = 2048;
 const REQUIRED_RELAY_CAPABILITIES: u64 =
     Capability::LanewayRelayV1 as u64 | Capability::LanewayQuicDatagramV1 as u64;
 const REQUIRED_TCP_CAPABILITIES: u64 =

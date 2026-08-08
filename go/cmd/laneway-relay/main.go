@@ -24,7 +24,7 @@ import (
 	"laneway.dev/laneway/internal/transport"
 )
 
-const relayMaxPacketPayload = 1280
+const relayMaxPacketPayload = 2048
 
 func main() {
 	fs := flag.NewFlagSet("laneway-relay", flag.ExitOnError)

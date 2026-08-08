@@ -71,7 +71,7 @@ type RelayAuthority interface {
 // one authenticated relay session. RunRelay must stop when ctx is canceled and
 // must release every received datagram after delivering it locally.
 type WireGuardRelayHandler interface {
-	RunRelay(context.Context, *wireguard.RelayMux) error
+	RunRelay(context.Context, *wireguard.RelayMux, pathmanager.PathKind, string) error
 }
 
 type Config struct {
@@ -222,7 +222,8 @@ func New(config Config) (*Service, error) {
 	if config.WireGuardRelay != nil && (config.Packets != nil || config.DataPlane != nil) {
 		return nil, ErrInvalidConfig
 	}
-	if (config.CandidateSink == nil) != (config.LocalCandidate == nil) || (config.CandidateSink != nil && config.DataPlane == nil) {
+	if (config.CandidateSink == nil) != (config.LocalCandidate == nil) ||
+		(config.CandidateSink != nil && config.DataPlane == nil && config.WireGuardRelay == nil) {
 		return nil, ErrInvalidConfig
 	}
 	if config.RelayAuthority != nil && config.RelayServiceID.IsZero() {
@@ -558,7 +559,7 @@ func (s *Service) runConnectedGated(ctx context.Context, conn nodeConnection, ca
 	s.bindings.reset()
 	defer s.bindings.reset()
 	if s.config.WireGuardRelay != nil {
-		return s.runWireGuardConnected(ctx, conn, params)
+		return s.runWireGuardConnected(ctx, conn, params, carrier)
 	}
 	if s.config.DataPlane != nil {
 		return s.runUnifiedConnected(ctx, conn, params, capabilities)
@@ -587,16 +588,37 @@ func (s *Service) runConnectedGated(ctx context.Context, conn nodeConnection, ca
 	return err
 }
 
-func (s *Service) runWireGuardConnected(ctx context.Context, conn nodeConnection, params agent.SessionParameters) error {
+func (s *Service) runWireGuardConnected(ctx context.Context, conn nodeConnection, params agent.SessionParameters, carrier uint32) error {
 	mux, err := wireguard.NewRelayMux(nodeRelayCarrier{conn}, params.Capabilities)
 	if err != nil {
 		return err
 	}
+	kind, name := pathmanager.PathRelayQUIC, "wireguard-relay-quic"
+	if carrier == carrierTCP {
+		kind, name = pathmanager.PathTCPFallback, "wireguard-tcp-fallback"
+	}
+	candidateConfigured := s.config.LocalCandidate != nil && params.Capabilities.Has(protocol.CapabilityDirectPeerV1) && kind == pathmanager.PathRelayQUIC
+	candidateSequence := uint64(2)
+	if candidateConfigured && s.candidateExchangeEnabled() {
+		envelope := &lanewayv1.RelayEnvelope{
+			SchemaVersion: 1, Sequence: 2,
+			Body: &lanewayv1.RelayEnvelope_EndpointCandidate{EndpointCandidate: proto.Clone(s.config.LocalCandidate).(*lanewayv1.EndpointCandidate)},
+		}
+		if err := writeMessage(conn.controlStream(), params.ControlFramer(), envelope); err != nil {
+			return err
+		}
+		candidateSequence++
+	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	done := make(chan error, 2)
+	workers := 2
+	done := make(chan error, 3)
 	go func() { done <- s.controlLoopWireGuard(sessionCtx, conn.controlStream(), params, mux) }()
-	go func() { done <- s.config.WireGuardRelay.RunRelay(sessionCtx, mux) }()
+	go func() { done <- s.config.WireGuardRelay.RunRelay(sessionCtx, mux, kind, name) }()
+	if candidateConfigured {
+		workers++
+		go func() { done <- s.candidatePublishLoop(sessionCtx, conn.controlStream(), params, candidateSequence) }()
+	}
 	select {
 	case err = <-done:
 	case <-sessionCtx.Done():
@@ -606,7 +628,9 @@ func (s *Service) runWireGuardConnected(ctx context.Context, conn nodeConnection
 	}
 	cancel()
 	_ = conn.close()
-	<-done
+	for range workers - 1 {
+		<-done
+	}
 	return err
 }
 
@@ -642,6 +666,16 @@ func (s *Service) controlLoopWireGuard(ctx context.Context, stream io.Reader, pa
 			if _, ok := mux.ReleaseHandle(body.RouteHandleRelease.GetRouteHandle()); !ok {
 				return ErrControlBody
 			}
+		case *lanewayv1.RelayEnvelope_EndpointCandidate:
+			if s.config.CandidateSink == nil || !params.Capabilities.Has(protocol.CapabilityDirectPeerV1) || body.EndpointCandidate == nil {
+				return ErrControlBody
+			}
+			if !s.candidateExchangeEnabled() {
+				continue
+			}
+			if err := s.config.CandidateSink.HandleCandidate(ctx, body.EndpointCandidate); err != nil {
+				return err
+			}
 		case *lanewayv1.RelayEnvelope_Error:
 			return agent.RemoteError(body.Error)
 		default:
@@ -666,6 +700,7 @@ func (s *Service) runUnifiedConnected(ctx context.Context, conn nodeConnection, 
 	}()
 	candidateConfigured := s.config.LocalCandidate != nil &&
 		params.Capabilities.Has(protocol.CapabilityDirectPeerV1) && kind == pathmanager.PathRelayQUIC
+	candidateSequence := uint64(2)
 	if candidateConfigured && s.candidateExchangeEnabled() {
 		envelope := &lanewayv1.RelayEnvelope{
 			SchemaVersion: 1, Sequence: 2,
@@ -674,6 +709,7 @@ func (s *Service) runUnifiedConnected(ctx context.Context, conn nodeConnection, 
 		if err := writeMessage(conn.controlStream(), params.ControlFramer(), envelope); err != nil {
 			return err
 		}
+		candidateSequence++
 	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -683,7 +719,7 @@ func (s *Service) runUnifiedConnected(ctx context.Context, conn nodeConnection, 
 	if candidateConfigured {
 		result := make(chan error, 1)
 		candidateDone = result
-		go func() { result <- s.candidatePublishLoop(sessionCtx, conn.controlStream(), params, 3) }()
+		go func() { result <- s.candidatePublishLoop(sessionCtx, conn.controlStream(), params, candidateSequence) }()
 	}
 	receivedControl := false
 	select {

@@ -319,6 +319,33 @@ func TestForwardOpaqueWireGuardPreservesCiphertextAndRequiresCapability(t *testi
 	}
 }
 
+func TestBindingPayloadLimitExpandsOnlyForBilateralE2E(t *testing.T) {
+	registry := testRegistry(t, func(config *Config) { config.MaxPacketPayload = 2048 })
+	first := register(t, registry, 1, 81, "100.96.0.81/32")
+	second := register(t, registry, 1, 82, "100.96.0.82/32")
+	pair, err := registry.BindPeers(first, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pair.First.MaxPacketPayload != 2048 || pair.Second.MaxPacketPayload != 2048 {
+		t.Fatalf("encrypted limits=%d/%d", pair.First.MaxPacketPayload, pair.Second.MaxPacketPayload)
+	}
+	legacy, err := registry.Register(SessionConfig{
+		Identity:           identity.NodeIdentity{NetworkID: networkID(1), NodeID: nodeID(83)},
+		AuthorizedPrefixes: []netip.Prefix{netip.MustParsePrefix("100.96.0.83/32")}, AllowIPv6: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err = registry.BindPeers(first, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pair.First.MaxPacketPayload != LegacyMaxPacketPayload || pair.Second.MaxPacketPayload != LegacyMaxPacketPayload {
+		t.Fatalf("legacy limits=%d/%d", pair.First.MaxPacketPayload, pair.Second.MaxPacketPayload)
+	}
+}
+
 func TestCrossNetworkIsolation(t *testing.T) {
 	r := testRegistry(t, nil)
 	n1a := register(t, r, 1, 1, "10.1.0.1/32")

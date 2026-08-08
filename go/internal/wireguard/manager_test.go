@@ -1,12 +1,17 @@
 package wireguard
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
 	"net/netip"
 	"reflect"
 	"testing"
+	"time"
+
+	"laneway.dev/laneway/internal/pathmanager"
+	"laneway.dev/laneway/internal/protocol"
 )
 
 type fakeManagedDevice struct {
@@ -36,7 +41,7 @@ func (d *fakeManagedDevice) ApplyPeers(_ context.Context, peers []Peer) error {
 }
 func (d *fakeManagedDevice) Close() error { d.closed = true; return nil }
 
-func testManager(t *testing.T) (*Manager, *fakeManagedDevice, PublicKey) {
+func testManager(t *testing.T) (*Manager, *fakeManagedDevice, PublicKey, *net.UDPConn) {
 	t.Helper()
 	kernel := openRelayKernelSocket(t)
 	device := &fakeManagedDevice{name: "lane0", mtu: 1280, listenPort: kernel.LocalAddr().(*net.UDPAddr).AddrPort().Port()}
@@ -47,7 +52,7 @@ func testManager(t *testing.T) (*Manager, *fakeManagedDevice, PublicKey) {
 	_, local := deviceKey(t)
 	manager := newManager(device, endpoint, local)
 	t.Cleanup(func() { _ = manager.Close() })
-	return manager, device, local
+	return manager, device, local, kernel
 }
 
 func managedPeer(t *testing.T, node byte, address string) ManagedPeer {
@@ -57,7 +62,7 @@ func managedPeer(t *testing.T, node byte, address string) ManagedPeer {
 }
 
 func TestManagerCommitsDeviceAndStableRelayEndpoints(t *testing.T) {
-	manager, device, _ := testManager(t)
+	manager, device, _, _ := testManager(t)
 	first := managedPeer(t, 31, "100.96.0.31/32")
 	if err := manager.ApplyPeers(context.Background(), []ManagedPeer{first}); err != nil {
 		t.Fatal(err)
@@ -77,7 +82,7 @@ func TestManagerCommitsDeviceAndStableRelayEndpoints(t *testing.T) {
 }
 
 func TestManagerKernelFailurePreservesExactOldSnapshot(t *testing.T) {
-	manager, device, _ := testManager(t)
+	manager, device, _, _ := testManager(t)
 	first := managedPeer(t, 33, "100.96.0.33/32")
 	if err := manager.ApplyPeers(context.Background(), []ManagedPeer{first}); err != nil {
 		t.Fatal(err)
@@ -97,7 +102,7 @@ func TestManagerKernelFailurePreservesExactOldSnapshot(t *testing.T) {
 }
 
 func TestManagerRejectsIdentityAndRouteConflictsBeforeMutation(t *testing.T) {
-	manager, device, local := testManager(t)
+	manager, device, local, _ := testManager(t)
 	peer := managedPeer(t, 35, "10.0.0.0/24")
 	localPeer := peer
 	localPeer.PublicKey = local
@@ -112,5 +117,79 @@ func TestManagerRejectsIdentityAndRouteConflictsBeforeMutation(t *testing.T) {
 		if len(device.peers) != 0 || len(manager.endpoint.Endpoints()) != 0 {
 			t.Fatal("invalid snapshot mutated manager")
 		}
+	}
+}
+
+func TestManagerRuntimePrefersDirectAndKeepsRelayFallback(t *testing.T) {
+	manager, _, _, kernel := testManager(t)
+	peer := managedPeer(t, 37, "100.96.0.37/32")
+	if err := manager.ApplyPeers(context.Background(), []ManagedPeer{peer}); err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- manager.Run(runCtx) }()
+	carrier := newFakeRelayCarrier()
+	relayMux, err := NewRelayMux(carrier, protocol.CapabilityE2EPacketV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := relayMux.SetBinding(RelayBinding{Peer: peer.NodeID, Handle: 81, MaxPacketPayload: 2048}); err != nil {
+		t.Fatal(err)
+	}
+	relayCtx, cancelRelay := context.WithCancel(context.Background())
+	relayDone := make(chan error, 1)
+	go func() { relayDone <- manager.RunRelay(relayCtx, relayMux, pathmanager.PathRelayQUIC, "relay-test") }()
+	deadline := time.Now().Add(2 * time.Second)
+	for !manager.PathAvailable(peer.NodeID) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	packet := wireGuardInitiation()
+	peerEndpoint := manager.endpoint.Endpoints()[peer.NodeID]
+	if _, err := kernel.WriteToUDPAddrPort(packet, peerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-carrier.sent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay fallback did not receive kernel packet")
+	}
+
+	direct := newTestCarrierPath("direct-test", peer.NodeID)
+	if err := manager.Attach(peer.NodeID, pathmanager.PathDirect, direct); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kernel.WriteToUDPAddrPort(packet, peerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for direct.sentCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if direct.sentCount() != 1 {
+		t.Fatalf("direct sends=%d", direct.sentCount())
+	}
+	select {
+	case <-carrier.sent:
+		t.Fatal("relay used while direct path was healthy")
+	case <-time.After(100 * time.Millisecond):
+	}
+	direct.recv <- pathmanager.ReceivedPacket{Peer: peer.NodeID, Packet: packet}
+	buffer := make([]byte, 256)
+	if err := kernel.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, source, err := kernel.ReadFromUDPAddrPort(buffer)
+	if err != nil || source != peerEndpoint || !bytes.Equal(buffer[:n], packet) {
+		t.Fatalf("inbound source=%s equal=%t error=%v", source, bytes.Equal(buffer[:n], packet), err)
+	}
+
+	cancelRelay()
+	if err := <-relayDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("relay error=%v", err)
+	}
+	cancelRun()
+	if err := <-runDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("run error=%v", err)
 	}
 }

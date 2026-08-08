@@ -129,6 +129,10 @@ mtu = 1280
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("unsafe WireGuard MTU accepted")
 	}
+	cfg.WireGuard.MTU = 9000
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("unsupported jumbo WireGuard MTU accepted")
+	}
 }
 
 func TestDecodeRejectsUnknownAndOversize(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/pathmanager"
 	"laneway.dev/laneway/internal/platform"
 	"laneway.dev/laneway/internal/policy"
 	"laneway.dev/laneway/internal/routing"
@@ -25,10 +26,19 @@ type fakeNodeWireGuard struct {
 func (f *fakeNodeWireGuard) Name() string                   { return "lane0" }
 func (f *fakeNodeWireGuard) MTU() int                       { return 1280 }
 func (f *fakeNodeWireGuard) PublicKey() wireguard.PublicKey { return f.public }
-func (f *fakeNodeWireGuard) RunRelay(ctx context.Context, _ *wireguard.RelayMux) error {
+func (f *fakeNodeWireGuard) Run(ctx context.Context) error {
 	<-ctx.Done()
 	return ctx.Err()
 }
+func (f *fakeNodeWireGuard) RunRelay(ctx context.Context, _ *wireguard.RelayMux, _ pathmanager.PathKind, _ string) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (f *fakeNodeWireGuard) Attach(identity.NodeID, pathmanager.PathKind, pathmanager.PacketPath) error {
+	return nil
+}
+func (f *fakeNodeWireGuard) Detach(identity.NodeID, string) bool { return false }
+func (f *fakeNodeWireGuard) PathAvailable(identity.NodeID) bool  { return true }
 func (f *fakeNodeWireGuard) RelayMetrics() wireguard.RelayEndpointMetrics {
 	return wireguard.RelayEndpointMetrics{}
 }

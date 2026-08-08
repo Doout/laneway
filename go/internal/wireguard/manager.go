@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/pathmanager"
 )
 
 const managerRollbackTimeout = 5 * time.Second
@@ -41,6 +42,9 @@ type Manager struct {
 	endpoint  *RelayEndpoint
 	publicKey PublicKey
 	peers     []ManagedPeer
+	carriers  *CarrierMux
+	direct    map[identity.NodeID]string
+	changed   chan struct{}
 	closed    bool
 }
 
@@ -68,7 +72,12 @@ func OpenManager(ctx context.Context, config ManagerConfig) (*Manager, error) {
 }
 
 func newManager(device Device, endpoint *RelayEndpoint, publicKey PublicKey) *Manager {
-	return &Manager{device: device, endpoint: endpoint, publicKey: publicKey}
+	carriers, err := NewCarrierMux(pathmanager.Config{})
+	if err != nil {
+		panic(err)
+	}
+	return &Manager{device: device, endpoint: endpoint, publicKey: publicKey, carriers: carriers,
+		direct: make(map[identity.NodeID]string), changed: make(chan struct{})}
 }
 
 func (m *Manager) Name() string         { return m.device.Name() }
@@ -127,7 +136,20 @@ func (m *Manager) ApplyPeers(ctx context.Context, peers []ManagedPeer) error {
 		return errors.Join(err, rollbackDeviceErr, rollbackEndpointErr)
 	}
 	m.peers = cloneManagedPeers(normalized)
+	for peer, name := range m.direct {
+		if !managedPeerPresent(normalized, peer) {
+			m.carriers.Detach(peer, name)
+			delete(m.direct, peer)
+		}
+	}
+	close(m.changed)
+	m.changed = make(chan struct{})
 	return nil
+}
+
+func managedPeerPresent(peers []ManagedPeer, node identity.NodeID) bool {
+	index := sort.Search(len(peers), func(index int) bool { return peers[index].NodeID.String() >= node.String() })
+	return index < len(peers) && peers[index].NodeID == node
 }
 
 func normalizeManagedPeers(peers []ManagedPeer, local PublicKey) ([]ManagedPeer, error) {
@@ -209,8 +231,93 @@ func cloneManagedPeers(peers []ManagedPeer) []ManagedPeer {
 	return result
 }
 
-func (m *Manager) RunRelay(ctx context.Context, mux *RelayMux) error {
-	return m.endpoint.RunRelay(ctx, mux)
+func (m *Manager) Run(ctx context.Context) error {
+	return m.endpoint.RunCarriers(ctx, m.carriers)
+}
+
+func (m *Manager) PathAvailable(peer identity.NodeID) bool { return m.carriers.PathAvailable(peer) }
+
+func (m *Manager) Attach(peer identity.NodeID, kind pathmanager.PathKind, path pathmanager.PacketPath) error {
+	if kind != pathmanager.PathDirect || path == nil {
+		return ErrCarrierMuxConfiguration
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	if !managedPeerPresent(m.peers, peer) {
+		return fmt.Errorf("%w: direct peer %s is not in the managed snapshot", ErrCarrierMuxConfiguration, peer)
+	}
+	if err := m.carriers.Attach(peer, kind, path); err != nil {
+		return err
+	}
+	m.direct[peer] = path.Name()
+	return nil
+}
+
+func (m *Manager) Detach(peer identity.NodeID, name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.direct[peer] == name {
+		delete(m.direct, peer)
+	}
+	return m.carriers.Detach(peer, name)
+}
+
+func (m *Manager) RunRelay(ctx context.Context, mux *RelayMux, kind pathmanager.PathKind, name string) error {
+	if ctx == nil || mux == nil || (kind != pathmanager.PathRelayQUIC && kind != pathmanager.PathTCPFallback) {
+		return ErrCarrierMuxConfiguration
+	}
+	path, err := NewRelayPath(name, mux)
+	if err != nil {
+		return err
+	}
+	attached := make(map[identity.NodeID]struct{})
+	defer func() {
+		for peer := range attached {
+			m.carriers.Detach(peer, path.Name())
+		}
+	}()
+	for {
+		bindingChanged := mux.Changes()
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return ErrClosed
+		}
+		managed := cloneManagedPeers(m.peers)
+		peerChanged := m.changed
+		m.mu.Unlock()
+		bound := mux.Peers()
+		next := make(map[identity.NodeID]struct{}, len(bound))
+		for _, peer := range bound {
+			if !managedPeerPresent(managed, peer) {
+				continue
+			}
+			next[peer] = struct{}{}
+			if _, exists := attached[peer]; !exists {
+				if err := m.carriers.Attach(peer, kind, path); err != nil {
+					return err
+				}
+				attached[peer] = struct{}{}
+			}
+		}
+		for peer := range attached {
+			if _, retained := next[peer]; !retained {
+				m.carriers.Detach(peer, path.Name())
+				delete(attached, peer)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-mux.Done():
+			return errors.New("wireguard: relay carrier closed")
+		case <-bindingChanged:
+		case <-peerChanged:
+		}
+	}
 }
 
 func (m *Manager) Close() error {
@@ -221,8 +328,10 @@ func (m *Manager) Close() error {
 	}
 	m.closed = true
 	m.peers = nil
+	close(m.changed)
 	m.mu.Unlock()
 	// Stop userspace forwarding before clearing the kernel key and deleting the
 	// interface, preventing new ciphertext from entering during teardown.
+	m.carriers.Close()
 	return errors.Join(m.endpoint.Close(), m.device.Close())
 }
