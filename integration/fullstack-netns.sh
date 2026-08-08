@@ -19,6 +19,7 @@ prefix="lw$$_"
 declare -a namespaces=()
 declare -a processes=()
 declare -a netns_etc_dirs=()
+declare -a temporary_dirs=()
 netns_etc_parent_created=0
 link_index=0
 last_pid=""
@@ -44,6 +45,9 @@ cleanup() {
   for directory in "${netns_etc_dirs[@]:-}"; do
     rm -f -- "${directory}/hosts"
     rmdir -- "${directory}" >/dev/null 2>&1 || true
+  done
+  for directory in "${temporary_dirs[@]:-}"; do
+    rm -rf -- "${directory}"
   done
   if [[ "${netns_etc_parent_created}" == "1" ]]; then
     rmdir -- /etc/netns >/dev/null 2>&1 || true
@@ -159,6 +163,24 @@ wait_log() {
   done
   echo "ERROR: timed out waiting for ${pattern}" >&2
   sed -n '1,240p' "${log}" >&2 || true
+  return 1
+}
+
+wait_log_long() {
+  local pid="$1" log="$2" pattern="$3"
+  for _ in $(seq 1 600); do
+    if grep -q -- "${pattern}" "${log}" 2>/dev/null; then
+      return 0
+    fi
+    if ! kill -0 "${pid}" >/dev/null 2>&1; then
+      echo "ERROR: process ${pid} stopped before ${pattern}" >&2
+      sed -n '1,260p' "${log}" >&2 || true
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "ERROR: timed out waiting for ${pattern}" >&2
+  sed -n '1,260p' "${log}" >&2 || true
   return 1
 }
 
@@ -867,7 +889,7 @@ listen = "10.254.0.3:41001"
 candidate_ttl = "30s"
 probe_interval = "100ms"
 probe_timeout = "2s"
-rendezvous_interval = "1s"
+rendezvous_interval = "10s"
 max_candidates = 8
 [wireguard]
 enabled = true
@@ -915,7 +937,7 @@ listen = "10.254.0.4:41002"
 candidate_ttl = "30s"
 probe_interval = "100ms"
 probe_timeout = "2s"
-rendezvous_interval = "1s"
+rendezvous_interval = "10s"
 max_candidates = 8
 [wireguard]
 enabled = true
@@ -959,7 +981,6 @@ fi
 printf '%s\n' "$*" >"${state}"
 EOF
   chmod 700 "${case_dir}/resolvectl"
-
   # Keep direct candidates unreachable while leaving controller and relay UDP
   # untouched. Each table belongs solely to this disposable namespace.
   for namespace in "${node_a}" "${node_b}"; do
@@ -1141,7 +1162,8 @@ EOF
 run_controller_connect_flow() {
   local case_dir="${work_dir}/controller-connect"
   local switch="${prefix}us" controller="${prefix}uc" relay="${prefix}ur"
-  local user="${prefix}uu" node="${prefix}un"
+  local user="${prefix}uu" direct_user="${prefix}ud" exit_user="${prefix}ue"
+  local node="${prefix}un" internet="${prefix}ui"
   local network_id="30000000000000000000000000000001"
   local controller_service="30000000000000000000000000000002"
   local relay_service="30000000000000000000000000000003"
@@ -1149,8 +1171,11 @@ run_controller_connect_flow() {
   local controller_quic_endpoint="10.252.0.1:8443"
   local bootstrap_authority="lane.example.test:9443"
   local admin_token="laneway-connect-fullstack-admin-token-000000000000000001"
+  local resolver_state_dir
 
   mkdir -p "${case_dir}"
+  resolver_state_dir="$(mktemp -d -p /tmp "${prefix}resolver-state.XXXXXX")"
+  temporary_dirs+=("${resolver_state_dir}")
   printf '%s\n' "${admin_token}" >"${case_dir}/admin.token"
   chmod 600 "${case_dir}/admin.token"
   "${work_dir}/laneway" pki init -out-dir "${case_dir}" >/dev/null
@@ -1166,12 +1191,21 @@ run_controller_connect_flow() {
   add_namespace "${controller}"
   add_namespace "${relay}"
   add_namespace "${user}"
+  add_namespace "${direct_user}"
+  add_namespace "${exit_user}"
   add_namespace "${node}"
+  add_namespace "${internet}"
   attach_switch "${switch}" "${controller}" eth0 10.252.0.1/24
   attach_switch "${switch}" "${relay}" eth0 10.252.0.2/24
   attach_switch "${switch}" "${user}" eth0 10.252.0.3/24
   attach_switch "${switch}" "${node}" eth0 10.252.0.4/24
+  attach_switch "${switch}" "${direct_user}" eth0 10.252.0.5/24
+  attach_switch "${switch}" "${exit_user}" eth0 10.252.0.6/24
+  connect_namespaces "${node}" wan0 198.51.101.1/24 "${internet}" eth0 198.51.101.2/24
+  ip netns exec "${node}" sysctl -qw net.ipv4.ip_forward=0
   set_namespace_host "${user}" 10.252.0.1 lane.example.test
+  set_namespace_host "${direct_user}" 10.252.0.1 lane.example.test
+  set_namespace_host "${exit_user}" 10.252.0.1 lane.example.test
 
   cat >"${case_dir}/controller.toml" <<EOF
 mode = "controller"
@@ -1262,6 +1296,8 @@ EOF
     --network-id "${network_id}" --priority 100 --action accept \
     --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description connect-fullstack-allow \
     "${admin_connection[@]}" >"${case_dir}/acl.json"
+  ip netns exec "${controller}" "${work_dir}/laneway" controller node capabilities \
+    --node-id "${node_id}" --exit-node "${admin_connection[@]}" >"${case_dir}/exit-capability.json"
 
   cat >"${case_dir}/relay.toml" <<EOF
 mode = "relay"
@@ -1309,9 +1345,55 @@ listen = "10.252.0.4:41004"
 candidate_ttl = "30s"
 probe_interval = "100ms"
 probe_timeout = "2s"
-rendezvous_interval = "1s"
+rendezvous_interval = "10s"
 max_candidates = 8
+[routing]
+output_interface = "wan0"
+[exit]
+serve = true
 EOF
+
+  # The namespace-local shim exercises the real temporary DNS transaction
+  # without relying on a host systemd-resolved instance.
+  cat >"${case_dir}/resolvectl" <<'EOF'
+#!/bin/sh
+set -eu
+property="${1:-}"
+interface="${2:-}"
+if [ -z "${property}" ] || [ -z "${interface}" ] || [ -z "${LANEWAY_RESOLVE_STATE:-}" ]; then
+  exit 2
+fi
+index="$(cat "/sys/class/net/${interface}/ifindex")"
+state="${LANEWAY_RESOLVE_STATE}/${index}.${property}"
+if [ "${property}" = "revert" ]; then
+  rm -f "${LANEWAY_RESOLVE_STATE}/${index}.dns" "${LANEWAY_RESOLVE_STATE}/${index}.domain" \
+    "${LANEWAY_RESOLVE_STATE}/${index}.default-route"
+  exit 0
+fi
+shift 2
+if [ "$#" -eq 0 ]; then
+  value=""
+  if [ -f "${state}" ]; then
+    value="$(sed -n '1p' "${state}")"
+  fi
+  printf 'Link %s (%s): %s\n' "${index}" "${interface}" "${value}"
+  exit 0
+fi
+printf '%s\n' "$*" >"${state}"
+EOF
+  chmod 700 "${case_dir}/resolvectl"
+  cat >"${case_dir}/connect-resolver-wrapper" <<'EOF'
+#!/bin/sh
+set -eu
+if [ -z "${LANEWAY_TEST_RESOLVECTL:-}" ]; then
+  exit 2
+fi
+# ip netns exec creates a private mount namespace before this wrapper runs.
+# The bind is therefore inherited by the helper but never reaches the host.
+mount --bind "${LANEWAY_TEST_RESOLVECTL}" /usr/bin/resolvectl
+exec "$@"
+EOF
+  chmod 700 "${case_dir}/connect-resolver-wrapper"
   start_process "${relay}" "${case_dir}/relay.log" \
     "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
@@ -1321,7 +1403,31 @@ EOF
   local node_pid="${last_pid}"
   wait_log "${node_pid}" "${case_dir}/node.log" "interface=lane0"
 
-  local iteration invite_file connect_log connect_pid server_pid
+  local exit_json exit_route_id exit_ready=0
+  exit_json="$(ip netns exec "${node}" "${work_dir}/laneway" exit enable \
+    --family ipv4 --config "${case_dir}/node.toml")"
+  exit_route_id="$(printf '%s\n' "${exit_json}" | json_string_field route_id | head -n 1)"
+  if [[ ! "${exit_route_id}" =~ ^[0-9a-f]{32}$ ]]; then
+    echo "ERROR: failed to parse foreground exit route advertisement" >&2
+    printf '%s\n' "${exit_json}" >&2
+    return 1
+  fi
+  ip netns exec "${controller}" "${work_dir}/laneway" controller route approve \
+    --route-id "${exit_route_id}" "${admin_connection[@]}" >"${case_dir}/exit-route-approval.json"
+  for _ in $(seq 1 200); do
+    if ip netns exec "${node}" nft list table inet laneway_exit >/dev/null 2>&1; then
+      exit_ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${exit_ready}" != "1" ]]; then
+    echo "ERROR: controller-approved foreground exit did not activate" >&2
+    sed -n '1,260p' "${case_dir}/node.log" >&2
+    return 1
+  fi
+
+  local iteration invite_file connect_log connect_pid server_pid session_user
   for iteration in 1 2; do
     if [[ "${iteration}" == "1" ]]; then
       # Block only direct peer UDP in this disposable namespace. Controller and
@@ -1339,29 +1445,34 @@ EOF
 
     invite_file="${case_dir}/user-${iteration}.token"
     connect_log="${case_dir}/connect-${iteration}.log"
+    session_user="${user}"
+    if [[ "${iteration}" == "2" ]]; then
+      session_user="${direct_user}"
+    fi
     (
       umask 077
       ip netns exec "${controller}" "${work_dir}/laneway" invite \
         --config "${case_dir}/controller.toml" --name "temporary-user-${iteration}" \
         --ephemeral --session-lifetime 5m >"${invite_file}" 2>"${case_dir}/invite-${iteration}.log"
     )
-    start_process "${user}" "${connect_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+    start_process "${session_user}" "${connect_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
       "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${invite_file}"
     connect_pid="${last_pid}"
     if [[ "${iteration}" == "1" ]]; then
       wait_log "${connect_pid}" "${connect_log}" "path=relay-quic"
     else
-      wait_log "${connect_pid}" "${connect_log}" "path=direct"
+      wait_log "${connect_pid}" "${connect_log}" "path=relay-quic"
+      wait_log_long "${connect_pid}" "${connect_log}" "path=direct"
     fi
     rm -f -- "${invite_file}"
-    ip -n "${user}" link show lane0 >/dev/null
+    ip -n "${session_user}" link show lane0 >/dev/null
     if [[ "${iteration}" == "1" ]]; then
       start_process "${node}" "${case_dir}/relay-traffic.log" \
         "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9801"
       server_pid="${last_pid}"
       wait_log "${server_pid}" "${case_dir}/relay-traffic.log" "ready=udp-server"
-      ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
-        -target "${node_overlay}:9801" -message connect-relay -once -timeout 3s
+      ip netns exec "${session_user}" "${work_dir}/netprobe" udp-client \
+        -target "${node_overlay}:9801" -message connect-relay -timeout 12s
       wait "${server_pid}"
       ip netns exec "${user}" nft delete table inet laneway_connect_direct_block
     else
@@ -1369,14 +1480,14 @@ EOF
         "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9811"
       server_pid="${last_pid}"
       wait_log "${server_pid}" "${case_dir}/direct-traffic.log" "ready=udp-server"
-      ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
-        -target "${node_overlay}:9811" -message connect-direct -once -timeout 3s
+      ip netns exec "${session_user}" "${work_dir}/netprobe" udp-client \
+        -target "${node_overlay}:9811" -message connect-direct -timeout 12s
       wait "${server_pid}"
     fi
 
     stop_process "${connect_pid}"
     grep -q 'laneway disconnected; temporary networking restored' "${connect_log}"
-    assert_foreground_network_clean "${user}" "${connect_log}" "${iteration}"
+    assert_foreground_network_clean "${session_user}" "${connect_log}" "${iteration}"
   done
 
   echo "==> foreground requester death cleans networking and the next run reconciles"
@@ -1413,13 +1524,105 @@ EOF
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/recovery-traffic.log" "ready=udp-server"
   ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
-    -target "${node_overlay}:9821" -message connect-recovery -once -timeout 3s
+    -target "${node_overlay}:9821" -message connect-recovery -timeout 12s
   wait "${server_pid}"
   stop_process "${connect_pid}"
   grep -q 'laneway disconnected; temporary networking restored' "${recovery_log}"
   assert_foreground_network_clean "${user}" "${recovery_log}" "post-SIGKILL recovery"
 
+  echo "==> foreground User reaches the approved Exit Node over relay and direct paths"
+  local exit_iteration exit_token exit_log exit_pid external_pid exit_port expected_path
+  for exit_iteration in relay direct; do
+    session_user="${user}"
+    if [[ "${exit_iteration}" == "relay" ]]; then
+      expected_path="relay-quic"
+      exit_port=9831
+      ip netns exec "${user}" nft add table inet laneway_connect_exit_direct_block
+      ip netns exec "${user}" nft add chain inet laneway_connect_exit_direct_block output \
+        '{ type filter hook output priority -20; policy accept; }'
+      ip netns exec "${user}" nft add chain inet laneway_connect_exit_direct_block input \
+        '{ type filter hook input priority -20; policy accept; }'
+      ip netns exec "${user}" nft add rule inet laneway_connect_exit_direct_block output \
+        ip daddr 10.252.0.4 meta l4proto udp drop
+      ip netns exec "${user}" nft add rule inet laneway_connect_exit_direct_block input \
+        ip saddr 10.252.0.4 meta l4proto udp drop
+    else
+      expected_path="direct"
+      exit_port=9832
+      session_user="${exit_user}"
+    fi
+    exit_token="${case_dir}/user-exit-${exit_iteration}.token"
+    exit_log="${case_dir}/connect-exit-${exit_iteration}.log"
+    (
+      umask 077
+      ip netns exec "${controller}" "${work_dir}/laneway" invite \
+        --config "${case_dir}/controller.toml" --name "temporary-user-exit-${exit_iteration}" \
+        --ephemeral --session-lifetime 5m >"${exit_token}" 2>"${case_dir}/invite-exit-${exit_iteration}.log"
+    )
+    start_process "${session_user}" "${exit_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+      PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${resolver_state_dir}" \
+      LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
+      "${case_dir}/connect-resolver-wrapper" "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${exit_token}" \
+      --exit connect-node --failure-mode closed --dns 1.1.1.1 --local-lan 10.252.0.0/24
+    exit_pid="${last_pid}"
+    if [[ "${expected_path}" == "direct" ]]; then
+      wait_log "${exit_pid}" "${exit_log}" "path=relay-quic"
+      wait_log_long "${exit_pid}" "${exit_log}" "path=${expected_path}"
+    else
+      wait_log "${exit_pid}" "${exit_log}" "path=${expected_path}"
+    fi
+    rm -f -- "${exit_token}"
+    grep -q 'selection=exit=connect-node failure-mode=closed' "${exit_log}"
+    ip -n "${session_user}" -4 rule show priority 11000 | grep -q 'lookup 51820'
+    ip -n "${session_user}" route show table 51820 exact 0.0.0.0/1 | grep -q 'dev lane0'
+    ip -n "${session_user}" route show table 51820 exact 128.0.0.0/1 | grep -q 'dev lane0'
+    ip -n "${session_user}" route show table 51820 exact 10.252.0.0/24 | grep -q 'dev eth0'
+    if [[ "$(find "${resolver_state_dir}" -maxdepth 1 -type f | wc -l)" != "3" ]]; then
+      echo "ERROR: foreground exit DNS transaction is incomplete" >&2
+      find "${resolver_state_dir}" -maxdepth 1 -type f -print >&2
+      return 1
+    fi
+
+    start_process "${internet}" "${case_dir}/exit-${exit_iteration}-traffic.log" \
+      "${work_dir}/netprobe" udp-server -listen "198.51.101.2:${exit_port}"
+    external_pid="${last_pid}"
+    wait_log "${external_pid}" "${case_dir}/exit-${exit_iteration}-traffic.log" "ready=udp-server"
+    if ! ip netns exec "${session_user}" "${work_dir}/netprobe" udp-client \
+        -target "198.51.101.2:${exit_port}" -message "connect-exit-${exit_iteration}" -timeout 12s; then
+      echo "ERROR: foreground ${exit_iteration} Exit Node packet failed" >&2
+      ip -n "${session_user}" rule show >&2 || true
+      ip -n "${session_user}" route get 198.51.101.2 >&2 || true
+      ip -n "${session_user}" -s link show lane0 >&2 || true
+      ip -n "${session_user}" route show table all >&2 || true
+      ip netns exec "${session_user}" nft list ruleset >&2 || true
+      ip netns exec "${node}" sysctl net.ipv4.ip_forward >&2 || true
+      ip netns exec "${node}" nft list ruleset >&2 || true
+      ip -n "${node}" route show table all >&2 || true
+      sed -n '1,260p' "${exit_log}" >&2 || true
+      return 1
+    fi
+    wait "${external_pid}"
+    grep -q 'remote=198.51.101.1:' "${case_dir}/exit-${exit_iteration}-traffic.log"
+
+    stop_process "${exit_pid}"
+    grep -q 'laneway disconnected; temporary networking restored' "${exit_log}"
+    assert_foreground_network_clean "${session_user}" "${exit_log}" "exit-${exit_iteration}"
+    if find "${resolver_state_dir}" -maxdepth 1 -type f | grep -q .; then
+      echo "ERROR: foreground exit ${exit_iteration} left DNS state" >&2
+      find "${resolver_state_dir}" -maxdepth 1 -type f -print >&2
+      return 1
+    fi
+    if [[ "${exit_iteration}" == "relay" ]]; then
+      ip netns exec "${user}" nft delete table inet laneway_connect_exit_direct_block
+    fi
+  done
+
   stop_process "${node_pid}"
+  if ip netns exec "${node}" nft list table inet laneway_exit >/dev/null 2>&1 || \
+     [[ "$(ip netns exec "${node}" sysctl -n net.ipv4.ip_forward)" != "0" ]]; then
+    echo "ERROR: stopped Exit Node left NAT or forwarding state" >&2
+    return 1
+  fi
   stop_process "${relay_pid}"
   stop_process "${controller_pid}"
 }

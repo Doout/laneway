@@ -76,12 +76,14 @@ type DNSManagerConfig struct {
 	Runner          CommandRunner
 }
 
+const DefaultResolveCommand = "/usr/bin/resolvectl"
+
 func normalizeDNSConfig(config DNSManagerConfig) (DNSManagerConfig, error) {
 	if config.InterfaceName == "" || len(config.InterfaceName) > 15 || !interfacePattern.MatchString(config.InterfaceName) {
 		return DNSManagerConfig{}, fmt.Errorf("%w: invalid DNS interface %q", ErrInvalid, config.InterfaceName)
 	}
 	if config.ResolveCommand == "" {
-		config.ResolveCommand = "resolvectl"
+		config.ResolveCommand = DefaultResolveCommand
 	}
 	if config.ShutdownTimeout == 0 {
 		config.ShutdownTimeout = DefaultShutdownTimeout
