@@ -26,6 +26,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Build while the disposable runner still has its ordinary network. The test
+# namespace intentionally has only dummy LAN/WAN links, so execution inside it
+# must never depend on registry or source-network availability.
+env CARGO_TARGET_DIR="${repo_root}/rust/target" \
+  cargo test --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+    -p lanewayd-rs --no-run
+
 ip netns add "${namespace}"
 ip -n "${namespace}" link set lo up
 for interface in lane0 lan0 wan0; do
@@ -43,12 +50,12 @@ ip netns exec "${namespace}" \
   LANEWAY_TEST_RESOLVECTL="${repo_root}/integration/resolvectl-shim.sh" \
   LANEWAY_TEST_DNS_JOURNAL="${dns_journal}" \
   LANEWAY_RESOLVECTL_STATE_DIR="${resolver_state}" \
-  cargo test --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+  cargo test --offline --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
     -p lanewayd-rs kernel::tests::privileged_nft_crash_reconciliation_and_restore \
     -- --ignored --exact --nocapture
 ip netns exec "${namespace}" \
   env CARGO_TARGET_DIR="${repo_root}/rust/target" \
-  cargo test --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+  cargo test --offline --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
     -p lanewayd-rs kernel::tests::privileged_sigterm_drives_owned_cleanup \
     -- --ignored --exact --nocapture
 

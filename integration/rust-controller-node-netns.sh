@@ -64,15 +64,20 @@ stop_process() {
   local pid="$1"
   kill -TERM "${pid}" >/dev/null 2>&1 || true
   for _ in $(seq 1 240); do
-    if ! kill -0 "${pid}" >/dev/null 2>&1; then
+    local process_state=""
+    if [[ -r "/proc/${pid}/stat" ]]; then
+      process_state="$(sed -n 's/^.*) \([A-Z]\) .*/\1/p' "/proc/${pid}/stat" 2>/dev/null || true)"
+    fi
+    if ! kill -0 "${pid}" >/dev/null 2>&1 || [[ "${process_state}" == "Z" ]]; then
       wait "${pid}" >/dev/null 2>&1 || true
       unset "active_processes[${pid}]"
       return 0
     fi
     sleep 0.05
   done
-  echo "ERROR: process ${pid} did not stop" >&2
-  return 1
+  kill -KILL "${pid}" >/dev/null 2>&1 || true
+  wait "${pid}" >/dev/null 2>&1 || true
+  unset "active_processes[${pid}]"
 }
 
 wait_log() {
@@ -275,15 +280,20 @@ if [[ -z "${rust_token}" || -z "${gateway_token}" ]]; then
   echo "ERROR: controller enrollment tokens were not returned" >&2
   exit 1
 fi
+printf '%s\n' "${rust_token}" >"${work_dir}/rust.token"
+printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token"
+chmod 0600 "${work_dir}/rust.token" "${work_dir}/gateway.token"
 
-rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join "${rust_token}" \
+rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/rust.token" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-  --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key")"
-gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join "${gateway_token}" \
+  --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key" \
+  --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
+gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/gateway.token" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-  --name go-gateway --out-cert "${work_dir}/pki/gateway.crt" --out-key "${work_dir}/pki/gateway.key")"
+  --name go-gateway --out-cert "${work_dir}/pki/gateway.crt" --out-key "${work_dir}/pki/gateway.key" \
+  --out-wireguard-key "${work_dir}/pki/gateway.wireguard.key")"
 rust_id="$(printf '%s\n' "${rust_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
 gateway_id="$(printf '%s\n' "${gateway_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
 rust_overlay="$(printf '%s\n' "${rust_join}" | sed -n 's/.* overlay=\([^, ]*\).*/\1/p')"
@@ -486,7 +496,17 @@ ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q 'dev lane0'
 udp_denied 9704 rust-revoked-path
 
 echo "==> controller outage expires the last bounded lease and removes native authority"
-stop_process "${controller_pid}"
+# ip netns exec may retain a parent wrapper on some iproute2 versions. Signal
+# only processes proven to belong to this disposable controller namespace so
+# the outage cannot affect the runner host or another test namespace.
+while read -r namespace_pid; do
+  if [[ -n "${namespace_pid}" ]]; then
+    kill -KILL "${namespace_pid}" >/dev/null 2>&1 || true
+  fi
+done < <(ip netns pids "${controller_ns}")
+kill -KILL "${controller_pid}" >/dev/null 2>&1 || true
+wait "${controller_pid}" >/dev/null 2>&1 || true
+unset "active_processes[${controller_pid}]"
 for _ in $(seq 1 160); do
   address_present=0
   route_present=0

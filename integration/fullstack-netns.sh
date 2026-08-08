@@ -798,12 +798,15 @@ EOF
   token_b="$(ip netns exec "${controller}" "${work_dir}/laneway" controller enrollment-token issue \
     --network-id "${network_id}" --label wireguard-b --expires-in 10m "${admin_connection[@]}" | \
     json_string_field enrollment_token)"
-  join_a="$(ip netns exec "${node_a}" "${work_dir}/laneway" join "${token_a}" \
+  printf '%s\n' "${token_a}" >"${case_dir}/a.token"
+  printf '%s\n' "${token_b}" >"${case_dir}/b.token"
+  chmod 0600 "${case_dir}/a.token" "${case_dir}/b.token"
+  join_a="$(ip netns exec "${node_a}" "${work_dir}/laneway" join --token-file "${case_dir}/a.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name wireguard-a --out-cert "${case_dir}/a.crt" --out-key "${case_dir}/a.key" \
     --out-wireguard-key "${case_dir}/a.wireguard.key")"
-  join_b="$(ip netns exec "${node_b}" "${work_dir}/laneway" join "${token_b}" \
+  join_b="$(ip netns exec "${node_b}" "${work_dir}/laneway" join --token-file "${case_dir}/b.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name wireguard-b --out-cert "${case_dir}/b.crt" --out-key "${case_dir}/b.key" \
@@ -1127,8 +1130,20 @@ EOF
     sed -n '1,260p' "${case_dir}/b.log" >&2
     return 1
   fi
-  ip netns exec "${node_a}" "${work_dir}/laneway" exit use wireguard-b \
-    --config "${case_dir}/a.toml" >"${case_dir}/exit-use.txt"
+  local exit_use_ready=0
+  for _ in $(seq 1 200); do
+    if ip netns exec "${node_a}" "${work_dir}/laneway" exit use wireguard-b \
+      --config "${case_dir}/a.toml" >"${case_dir}/exit-use.txt" 2>"${case_dir}/exit-use.err"; then
+      exit_use_ready=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${exit_use_ready}" != "1" ]]; then
+    echo "ERROR: client did not observe the approved WireGuard exit route" >&2
+    cat "${case_dir}/exit-use.err" >&2
+    return 1
+  fi
   local exit_selected=0
   for _ in $(seq 1 200); do
     if ip -n "${node_a}" -4 rule show priority 11000 | grep -q 'lookup 51820' && \
@@ -1724,14 +1739,17 @@ EOF
     echo "ERROR: controller did not return enrollment tokens" >&2
     return 1
   fi
+  printf '%s\n' "${client_token}" >"${case_dir}/client.token"
+  printf '%s\n' "${gateway_token}" >"${case_dir}/gateway.token"
+  chmod 0600 "${case_dir}/client.token" "${case_dir}/gateway.token"
 
   local client_join gateway_join client_id gateway_id client_overlays gateway_overlays client_overlay gateway_overlay
-  client_join="$(ip netns exec "${client}" "${work_dir}/laneway" join "${client_token}" \
+  client_join="$(ip netns exec "${client}" "${work_dir}/laneway" join --token-file "${case_dir}/client.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name controller-client --out-cert "${case_dir}/client.crt" --out-key "${case_dir}/client.key" \
     --out-wireguard-key "${case_dir}/client.wireguard.key")"
-  gateway_join="$(ip netns exec "${gateway}" "${work_dir}/laneway" join "${gateway_token}" \
+  gateway_join="$(ip netns exec "${gateway}" "${work_dir}/laneway" join --token-file "${case_dir}/gateway.token" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --name controller-gateway --out-cert "${case_dir}/gateway.crt" --out-key "${case_dir}/gateway.key" \
@@ -1866,13 +1884,26 @@ fi
 printf '%s\n' "$*" >"${state}"
 EOF
   chmod 700 "${case_dir}/resolvectl"
+  cat >"${case_dir}/resolver-wrapper" <<'EOF'
+#!/bin/sh
+set -eu
+if [ -z "${LANEWAY_TEST_RESOLVECTL:-}" ]; then
+  exit 2
+fi
+# ip netns exec creates a private mount namespace before this wrapper runs.
+# The bind is inherited by lanewayd but can never alter the host mount.
+mount --bind "${LANEWAY_TEST_RESOLVECTL}" /usr/bin/resolvectl
+exec "$@"
+EOF
+  chmod 700 "${case_dir}/resolver-wrapper"
 
   start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" \
     -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
   wait_log "${relay_pid}" "${case_dir}/relay.log" "listening"
   start_process "${client}" "${case_dir}/client.log" env \
-    PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
+    LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
+    LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" "${case_dir}/resolver-wrapper" \
     "${work_dir}/lanewayd" -config "${case_dir}/client.toml" -diagnostics 127.0.0.1:6061
   local client_pid="${last_pid}"
   start_process "${gateway}" "${case_dir}/gateway.log" "${work_dir}/lanewayd" \
@@ -1971,7 +2002,8 @@ EOF
   chmod 644 "${case_dir}/client.crt"
   chmod 600 "${case_dir}/client.key"
   start_process "${client}" "${case_dir}/client-renewed.log" env \
-    PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
+    LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
+    LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" "${case_dir}/resolver-wrapper" \
     "${work_dir}/lanewayd" -config "${case_dir}/client.toml" -diagnostics 127.0.0.1:6061
   client_pid="${last_pid}"
   wait_log "${client_pid}" "${case_dir}/client-renewed.log" "interface=lane0"
@@ -2190,7 +2222,8 @@ EOF
   fi
   ip -n "${client}" -4 rule show priority 11000 | grep -q 'lookup 51820'
   start_process "${client}" "${case_dir}/client-restart-closed.log" env \
-    PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
+    LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
+    LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" "${case_dir}/resolver-wrapper" \
     "${work_dir}/lanewayd" -config "${case_dir}/client.toml" -diagnostics 127.0.0.1:6061
   client_pid="${last_pid}"
   wait_log "${client_pid}" "${case_dir}/client-restart-closed.log" "interface=lane0"
@@ -2260,7 +2293,8 @@ EOF
   stop_process "${client_pid}"
   sed -i 's/failure_mode = "closed"/failure_mode = "open"/' "${case_dir}/client.toml"
   start_process "${client}" "${case_dir}/client-open.log" env \
-    PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
+    LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
+    LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" "${case_dir}/resolver-wrapper" \
     "${work_dir}/lanewayd" -config "${case_dir}/client.toml" -diagnostics 127.0.0.1:6061
   client_pid="${last_pid}"
   wait_log "${client_pid}" "${case_dir}/client-open.log" "interface=lane0"
@@ -2358,8 +2392,8 @@ EOF
   printf '%s\n' '{"version":1,"enabled":false,"unexpected":true}' \
     >"${case_dir}/client-state/exit-intent-v1.json"
   chmod 600 "${case_dir}/client-state/exit-intent-v1.json"
-  if ip netns exec "${client}" env PATH="${case_dir}:${PATH}" \
-      LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
+  if ip netns exec "${client}" env LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
+      LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" "${case_dir}/resolver-wrapper" \
       "${work_dir}/lanewayd" -config "${case_dir}/client.toml" \
       >"${case_dir}/client-malformed-intent.log" 2>&1; then
     echo "ERROR: daemon accepted malformed persisted exit intent" >&2

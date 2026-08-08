@@ -1,4 +1,4 @@
-.PHONY: build package test race vet benchmark benchmark-matrix benchmark-relay-comparison benchmark-full-matrix benchmark-quic benchmark-unit benchmark-arch-smoke integration privileged-integration rust-test rust-interop rust-node-interop fmt-check proto proto-lint proto-check
+.PHONY: build package test race vet benchmark benchmark-matrix benchmark-relay-comparison benchmark-full-matrix benchmark-quic benchmark-unit benchmark-arch-smoke integration privileged-integration docker-exit-integration rust-test rust-interop rust-node-interop fmt-check proto proto-lint proto-check
 
 VERSION ?= dev
 PACKAGE_GOOS ?= $(shell cd go && go env GOOS)
@@ -73,6 +73,9 @@ integration:
 
 privileged-integration:
 	LANEWAY_RUN_PRIVILEGED=1 ./integration/linux-netns.sh
+
+docker-exit-integration:
+	LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-exit-node.sh
 
 rust-test:
 	cargo test --manifest-path rust/Cargo.toml --locked
