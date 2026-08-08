@@ -31,7 +31,8 @@ jq -e '
   ([.services[] | .user == "65532:65532"] | all) and
   ([.services[] | .read_only == true] | all) and
   ([.services[] | .cap_drop == ["ALL"]] | all) and
-  ([.services[] | .security_opt == ["no-new-privileges:true"]] | all) and
+  ([.services | to_entries[] | select(.key != "exit-node") | .value.security_opt == ["no-new-privileges:true"]] | all) and
+  ((.services["exit-node"].security_opt // []) == []) and
   ([.services[] | (.privileged // false) == false] | all) and
   ([.services[] | (.network_mode // "") != "host"] | all) and
   (.services.controller.image == "ghcr.io/doout/laneway-controller:1.2.3@sha256:1111111111111111111111111111111111111111111111111111111111111111") and

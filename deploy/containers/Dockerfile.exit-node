@@ -28,5 +28,5 @@ RUN apk add --no-cache \
 COPY --from=build /out/laneway /usr/local/bin/laneway
 COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 USER 65532:65532
-ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--bounding-set=-all,+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
+ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]

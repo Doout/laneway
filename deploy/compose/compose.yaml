@@ -93,8 +93,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     cap_add: [NET_ADMIN]
-    security_opt:
-      - no-new-privileges:true
+    # The image raises only the already-bounded NET_ADMIN capability into the
+    # ambient set, then enables no-new-privileges before starting tini.
     restart: unless-stopped
     stop_grace_period: 20s
     depends_on:

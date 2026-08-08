@@ -325,7 +325,7 @@ node_create() {
   local name="$1" directory="$2" volume="$3"
   docker create --name "${name}" --hostname "${name}" --label "${owner}" --network "${control_network}" \
     --user 65532:65532 --read-only --cap-drop ALL --cap-add NET_ADMIN \
-    --security-opt no-new-privileges --device /dev/net/tun:/dev/net/tun \
+    --device /dev/net/tun:/dev/net/tun \
     --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv6.conf.all.forwarding=1 \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
     --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,uid=65532,gid=65532 \
@@ -339,6 +339,7 @@ for node_name in "${client_name}" "${gateway_name}"; do
   security_contract="$(docker inspect "${node_name}" | jq '
     .[0] | {
       user: .Config.User,
+      entrypoint: .Config.Entrypoint,
       privileged: .HostConfig.Privileged,
       network_mode: .HostConfig.NetworkMode,
       cap_add: .HostConfig.CapAdd,
@@ -351,8 +352,8 @@ for node_name in "${client_name}" "${gateway_name}"; do
     .[0].HostConfig.Privileged == false and
     .[0].HostConfig.NetworkMode != "host" and
     (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
-    (.[0].HostConfig.SecurityOpt | length == 1) and
-    (.[0].HostConfig.SecurityOpt[0] | startswith("no-new-privileges")) and
+    ((.[0].HostConfig.SecurityOpt // []) == []) and
+    (.[0].Config.Entrypoint | index("--no-new-privs") != null) and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and
     .[0].HostConfig.Devices[0].PathInContainer == "/dev/net/tun"

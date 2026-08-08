@@ -97,6 +97,6 @@ for package in ca-certificates iproute2-minimal nftables procps-ng setpriv tini;
     exit 1
   fi
 done
-require '"--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--bounding-set=-all,+net_admin", "--no-new-privs"' "$exit_dockerfile"
+require '"--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs"' "$exit_dockerfile"
 
 echo "Release signing, provenance, SBOM, scan, and multi-architecture contract is valid"
