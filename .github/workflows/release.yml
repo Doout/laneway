@@ -134,10 +134,16 @@ jobs:
           outputs: type=oci,dest=/tmp/${{ matrix.name }}.oci.tar
           provenance: false
           sbom: false
+      - name: Extract OCI layout for vulnerability scanning
+        run: |
+          mkdir -p "/tmp/${{ matrix.name }}.oci"
+          tar -xf "/tmp/${{ matrix.name }}.oci.tar" -C "/tmp/${{ matrix.name }}.oci"
+          test -f "/tmp/${{ matrix.name }}.oci/index.json"
+          test -f "/tmp/${{ matrix.name }}.oci/oci-layout"
       - name: Reject vulnerable image before registry publication
         uses: aquasecurity/trivy-action@2736533278103862a861f4a35ebac3e97854d956
         with:
-          input: /tmp/${{ matrix.name }}.oci.tar
+          input: /tmp/${{ matrix.name }}.oci
           format: table
           ignore-unfixed: false
           severity: HIGH,CRITICAL
