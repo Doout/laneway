@@ -321,6 +321,30 @@ EOF
 }
 node_config "${work_dir}/client" docker-client 4435 false eth0
 node_config "${work_dir}/gateway" docker-gateway 4434 true eth1
+cat >"${work_dir}/resolvectl" <<'EOF'
+#!/bin/sh
+set -eu
+property="${1:-}"
+interface="${2:-}"
+test -n "${property}" && test -n "${interface}" && test -n "${LANEWAY_RESOLVE_STATE:-}"
+mkdir -p "${LANEWAY_RESOLVE_STATE}"
+index="$(cat "/sys/class/net/${interface}/ifindex")"
+state="${LANEWAY_RESOLVE_STATE}/${index}.${property}"
+if [ "${property}" = revert ]; then
+  rm -f "${LANEWAY_RESOLVE_STATE}/${index}.dns" "${LANEWAY_RESOLVE_STATE}/${index}.domain" \
+    "${LANEWAY_RESOLVE_STATE}/${index}.default-route"
+  exit 0
+fi
+shift 2
+if [ "$#" -eq 0 ]; then
+  value=""
+  test ! -f "${state}" || value="$(sed -n '1p' "${state}")"
+  printf 'Link %s (%s): %s\n' "${index}" "${interface}" "${value}"
+  exit 0
+fi
+printf '%s\n' "$*" >"${state}"
+EOF
+chmod 0555 "${work_dir}/resolvectl"
 chown -R 65532:65532 "${work_dir}"/{relay,client,gateway}
 
 docker run -d --name "${relay_name}" --hostname "${relay_name}" --label "${owner}" --network "${control_network}" \
@@ -337,7 +361,9 @@ node_create() {
     --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv6.conf.all.forwarding=1 \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
     --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,uid=65532,gid=65532 \
+    --env LANEWAY_RESOLVE_STATE=/tmp/resolver-state \
     -v "${volume}:/var/lib/laneway" -v "${directory}:/secrets:ro" \
+    -v "${work_dir}/resolvectl:/usr/bin/resolvectl:ro" \
     -v "${work_dir}/probe-context/netprobe:/test/netprobe:ro" \
     "${node_image}" -config /secrets/node.toml >/dev/null
 }
