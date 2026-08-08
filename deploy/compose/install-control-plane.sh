@@ -29,7 +29,8 @@ valid_dns_name() {
 
 valid_port() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+  [ "$1" -ge 1 ] || return 1
+  [ "$1" -le 65535 ]
 }
 
 valid_ipv4() {
@@ -51,7 +52,8 @@ valid_ipv4_pool() {
   candidate=$1
   address=${candidate%/*}
   prefix=${candidate#*/}
-  [ "$address" != "$candidate" ] && [ "$prefix" != "$candidate" ] || return 1
+  [ "$address" != "$candidate" ] || return 1
+  [ "$prefix" != "$candidate" ] || return 1
   valid_ipv4 "$address" || return 1
   case "$prefix" in ''|*[!0-9]*) return 1 ;; esac
   [ "$prefix" -le 32 ]
@@ -141,10 +143,16 @@ printf '%s\n' "$backup_recipient" | grep -Eq '^age1[0-9a-z]{58}$' || \
 ask "Online issuer export directory" "${LANEWAY_ISSUER_DIR:-}"
 issuer_dir=$REPLY
 case "$issuer_dir" in /*) ;; *) die "issuer export directory must be an absolute path" ;; esac
-[ -d "$issuer_dir" ] && [ ! -L "$issuer_dir" ] || die "issuer export directory is missing or unsafe"
-[ ! -e "$issuer_dir/ca.key" ] && [ ! -L "$issuer_dir/ca.key" ] || die "offline root ca.key must not be present on this host"
+if [ ! -d "$issuer_dir" ] || [ -L "$issuer_dir" ]; then
+  die "issuer export directory is missing or unsafe"
+fi
+if [ -e "$issuer_dir/ca.key" ] || [ -L "$issuer_dir/ca.key" ]; then
+  die "offline root ca.key must not be present on this host"
+fi
 for name in ca.crt intermediate-chain.crt intermediate.key; do
-  [ -f "$issuer_dir/$name" ] && [ ! -L "$issuer_dir/$name" ] || die "issuer export is missing a regular $name"
+  if [ ! -f "$issuer_dir/$name" ] || [ -L "$issuer_dir/$name" ]; then
+    die "issuer export is missing a regular $name"
+  fi
 done
 
 metadata_dir=$(mktemp -d)
@@ -181,8 +189,9 @@ relay_id=$(laneway id)
 for value in "$network_id" "$controller_id" "$relay_id"; do
   printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{32}$' || die "laneway generated an invalid identity"
 done
-[ "$network_id" != "$controller_id" ] && [ "$network_id" != "$relay_id" ] && [ "$controller_id" != "$relay_id" ] || \
+if [ "$network_id" = "$controller_id" ] || [ "$network_id" = "$relay_id" ] || [ "$controller_id" = "$relay_id" ]; then
   die "laneway generated duplicate identities"
+fi
 
 cat >&2 <<EOF
 
@@ -207,7 +216,9 @@ fi
 
 install -d -m 0700 -o 0 -g 0 "$destination"
 for name in compose.yaml lane bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh install-control-plane.sh README.md; do
-  [ -f "$source_dir/$name" ] && [ ! -L "$source_dir/$name" ] || die "packaged deployment file is missing or unsafe: $name"
+  if [ ! -f "$source_dir/$name" ] || [ -L "$source_dir/$name" ]; then
+    die "packaged deployment file is missing or unsafe: $name"
+  fi
   mode=0644
   case "$name" in lane|*.sh) mode=0755 ;; esac
   install -m "$mode" -o 0 -g 0 "$source_dir/$name" "$destination/$name"
