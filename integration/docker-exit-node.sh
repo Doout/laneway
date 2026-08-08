@@ -282,7 +282,6 @@ name = "${name}"
 relay_address = "${relay_name}:4433"
 relay_network_id = "${network_id}"
 relay_service_id = "${relay_service}"
-mtu = 1200
 reconnect_min = "100ms"
 reconnect_max = "1s"
 [controller]
@@ -301,6 +300,9 @@ listen = "0.0.0.0:${listen_port}"
 probe_interval = "100ms"
 probe_timeout = "2s"
 rendezvous_interval = "2s"
+[wireguard]
+private_key = "/secrets/wireguard.key"
+mtu = 1200
 [routing]
 output_interface = "${output}"
 nat = true

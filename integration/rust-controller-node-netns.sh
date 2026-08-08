@@ -492,6 +492,14 @@ ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q 'dev lane0'
 udp_denied 9704 rust-revoked-path
 
 echo "==> controller outage expires the last bounded lease and removes native authority"
+# ip netns exec may retain a parent wrapper on some iproute2 versions. Signal
+# only processes proven to belong to this disposable controller namespace so
+# the outage cannot affect the runner host or another test namespace.
+while read -r namespace_pid; do
+  if [[ -n "${namespace_pid}" ]]; then
+    kill -TERM "${namespace_pid}" >/dev/null 2>&1 || true
+  fi
+done < <(ip netns pids "${controller_ns}")
 stop_process "${controller_pid}"
 for _ in $(seq 1 160); do
   address_present=0
