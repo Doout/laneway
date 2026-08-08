@@ -660,8 +660,11 @@ func writeFull(writer io.Writer, payload []byte) error {
 	return nil
 }
 
-// ReadProbe reads one non-QUIC probe from the shared socket and validates both
-// rendezvous token and source endpoint before optionally sending the response.
+// ReadProbe reads non-QUIC packets from the shared socket until it finds a
+// probe matching both the current rendezvous token and an advertised source.
+// Packets from stale or concurrent rendezvous epochs are ignored: treating the
+// first unrelated datagram as fatal lets one peer's old probe abort another
+// authenticated rendezvous on this shared socket.
 func (e *Endpoint) ReadProbe(ctx context.Context, peer identity.NodeID, token ProbeToken, candidates []Candidate) (netip.AddrPort, error) {
 	validated, err := ValidateCandidates(candidates, peer, e.config.CandidatePolicy)
 	if err != nil {
@@ -672,33 +675,35 @@ func (e *Endpoint) ReadProbe(ctx context.Context, peer identity.NodeID, token Pr
 		allowed[candidate.Address] = struct{}{}
 	}
 	buffer := make([]byte, probePacketSize+1)
-	n, source, err := e.transport.ReadNonQUICPacket(ctx, buffer)
-	if err != nil {
-		return netip.AddrPort{}, err
-	}
-	sourceAddress, ok := addrPort(source)
-	if !ok {
-		return netip.AddrPort{}, ErrInvalidProbe
-	}
-	// quic-go may report IPv4 sources from a shared UDP socket as IPv4-mapped
-	// IPv6 addresses. Candidate validation intentionally accepts only canonical
-	// addresses, so canonicalize the observed source before the fail-closed
-	// endpoint membership check.
-	sourceAddress = unmapAddrPort(sourceAddress)
-	if _, ok := allowed[sourceAddress]; !ok {
-		return netip.AddrPort{}, ErrInvalidProbe
-	}
-	packet, err := ParseProbePacket(buffer[:n], e.local.NodeID, peer, token)
-	if err != nil {
-		return netip.AddrPort{}, err
-	}
-	if !packet.Response {
-		response, _ := (ProbePacket{Response: true, Token: token, Sender: e.local.NodeID, Recipient: peer}).MarshalBinary()
-		if _, err := e.transport.WriteTo(response, source); err != nil {
+	for {
+		n, source, err := e.transport.ReadNonQUICPacket(ctx, buffer)
+		if err != nil {
 			return netip.AddrPort{}, err
 		}
+		sourceAddress, ok := addrPort(source)
+		if !ok {
+			continue
+		}
+		// quic-go may report IPv4 sources from a shared UDP socket as IPv4-mapped
+		// IPv6 addresses. Candidate validation intentionally accepts only canonical
+		// addresses, so canonicalize the observed source before the fail-closed
+		// endpoint membership check.
+		sourceAddress = unmapAddrPort(sourceAddress)
+		if _, ok := allowed[sourceAddress]; !ok {
+			continue
+		}
+		packet, err := ParseProbePacket(buffer[:n], e.local.NodeID, peer, token)
+		if err != nil {
+			continue
+		}
+		if !packet.Response {
+			response, _ := (ProbePacket{Response: true, Token: token, Sender: e.local.NodeID, Recipient: peer}).MarshalBinary()
+			if _, err := e.transport.WriteTo(response, source); err != nil {
+				return netip.AddrPort{}, err
+			}
+		}
+		return sourceAddress, nil
 	}
-	return sourceAddress, nil
 }
 
 func unmapAddrPort(address netip.AddrPort) netip.AddrPort {

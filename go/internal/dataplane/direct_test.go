@@ -228,6 +228,43 @@ func TestDirectControllerFreshRendezvousDetachesStalePath(t *testing.T) {
 	}
 }
 
+func TestDirectControllerReportsRendezvousFailure(t *testing.T) {
+	authority := newDirectTestAuthority(t)
+	network := networkID(1)
+	local := identity.NodeIdentity{NetworkID: network, NodeID: nodeID(1)}
+	peer := nodeID(2)
+	endpoint := directEndpoint(t, local, directCredentials(t, authority, local))
+	engine, _, _, routes := directEngine(t, local, netip.MustParseAddr("100.64.0.1"), netip.MustParseAddr("100.64.0.2"), peer)
+	failures := make(chan error, 1)
+	controller, err := NewDirectController(DirectConfig{
+		Local: local, Endpoint: endpoint, Paths: engine, Authorizer: RouteAuthorizer{Routes: routes},
+		CandidatePolicy: directpath.CandidatePolicy{AllowLoopback: true},
+		ReportFailure:   func(err error) { failures <- err },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- controller.Run(ctx) }()
+	var token directpath.ProbeToken
+	token[0] = 1
+	controller.requests <- probeRequest{peer: peer, token: token, start: time.Now()}
+	select {
+	case failure := <-failures:
+		if !errors.Is(failure, directpath.ErrInvalidCandidate) {
+			t.Fatalf("reported failure = %v", failure)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("direct rendezvous failure was not reported")
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("controller error = %v", err)
+	}
+}
+
 func TestUnifiedEngineRealDirectQUICEndToEnd(t *testing.T) {
 	authority := newDirectTestAuthority(t)
 	network := networkID(1)

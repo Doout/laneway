@@ -483,6 +483,13 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			CandidateAuthority: controllerState,
 			CandidatePolicy:    directCandidatePolicy(cfg.Direct), CandidateTTL: cfg.Direct.CandidateTTL.Duration(),
 			ProbeInterval: cfg.Direct.ProbeInterval.Duration(), ProbeTimeout: cfg.Direct.ProbeTimeout.Duration(),
+			ReportFailure: func(err error) {
+				prefix := "lanewayd"
+				if options.foreground {
+					prefix = "laneway"
+				}
+				fmt.Fprintf(os.Stderr, "%s: direct path attempt failed: %v\n", prefix, err)
+			},
 		})
 		if err != nil {
 			return err
