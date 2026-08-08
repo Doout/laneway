@@ -46,7 +46,8 @@ namespace, and runs the following checks inside it:
 - the foreground `laneway connect` User workflow using authenticated public
   bootstrap discovery, mode-0600 single-use ephemeral invites, the privileged
   network-helper protocol, forced relay QUIC traffic, direct-path promotion,
-  SIGTERM restoration, and a second clean connect/disconnect cycle; and
+  SIGTERM restoration, requester `SIGKILL` cleanup, and a successful next-run
+  reconciliation; and
 - a controller-backed product lifecycle using the real HTTPS/mTLS controller,
   admin and node CLIs, single-use enrollment, relay registration, capabilities,
   ACLs, route advertisement/approval/withdrawal, and node revocation. The live

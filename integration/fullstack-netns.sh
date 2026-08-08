@@ -162,6 +162,25 @@ wait_log() {
   return 1
 }
 
+assert_foreground_network_clean() {
+  local namespace="$1" log="$2" label="$3"
+  for _ in $(seq 1 200); do
+    if ! ip -n "${namespace}" link show lane0 >/dev/null 2>&1 && \
+       ! ip -n "${namespace}" rule show | grep -q 'lookup 51820' && \
+       ! ip -n "${namespace}" route show table 51820 2>/dev/null | grep -q . && \
+       ! ip netns exec "${namespace}" pgrep -f '[l]aneway.*_network-helper' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "ERROR: foreground connect ${label} left temporary networking or helper state" >&2
+  ip -n "${namespace}" link show >&2
+  ip -n "${namespace}" rule show >&2
+  ip -n "${namespace}" route show table 51820 >&2 2>/dev/null || true
+  sed -n '1,260p' "${log}" >&2 || true
+  return 1
+}
+
 wait_selected_path() {
   local namespace="$1" config="$2" expected="$3" pid="$4" log="$5"
   local selected=""
@@ -1357,18 +1376,48 @@ EOF
 
     stop_process "${connect_pid}"
     grep -q 'laneway disconnected; temporary networking restored' "${connect_log}"
-    if ip -n "${user}" link show lane0 >/dev/null 2>&1 || \
-       ip -n "${user}" rule show | grep -q 'lookup 51820' || \
-       ip -n "${user}" route show table 51820 2>/dev/null | grep -q . || \
-       ip netns exec "${user}" pgrep -f '[l]aneway.*_network-helper' >/dev/null 2>&1; then
-      echo "ERROR: foreground connect ${iteration} left temporary networking or helper state" >&2
-      ip -n "${user}" link show >&2
-      ip -n "${user}" rule show >&2
-      ip -n "${user}" route show table 51820 >&2 2>/dev/null || true
-      sed -n '1,260p' "${connect_log}" >&2
-      return 1
-    fi
+    assert_foreground_network_clean "${user}" "${connect_log}" "${iteration}"
   done
+
+  echo "==> foreground requester death cleans networking and the next run reconciles"
+  local crash_token="${case_dir}/user-crash.token" crash_log="${case_dir}/connect-crash.log"
+  (
+    umask 077
+    ip netns exec "${controller}" "${work_dir}/laneway" invite \
+      --config "${case_dir}/controller.toml" --name temporary-user-crash \
+      --ephemeral --session-lifetime 5m >"${crash_token}" 2>"${case_dir}/invite-crash.log"
+  )
+  start_process "${user}" "${crash_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+    "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${crash_token}"
+  connect_pid="${last_pid}"
+  wait_log "${connect_pid}" "${crash_log}" "path=relay-quic"
+  rm -f -- "${crash_token}"
+  kill -KILL "${connect_pid}"
+  wait "${connect_pid}" >/dev/null 2>&1 || true
+  assert_foreground_network_clean "${user}" "${crash_log}" "SIGKILL"
+
+  local recovery_token="${case_dir}/user-recovery.token" recovery_log="${case_dir}/connect-recovery.log"
+  (
+    umask 077
+    ip netns exec "${controller}" "${work_dir}/laneway" invite \
+      --config "${case_dir}/controller.toml" --name temporary-user-recovery \
+      --ephemeral --session-lifetime 5m >"${recovery_token}" 2>"${case_dir}/invite-recovery.log"
+  )
+  start_process "${user}" "${recovery_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+    "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${recovery_token}"
+  connect_pid="${last_pid}"
+  wait_log "${connect_pid}" "${recovery_log}" "path=relay-quic"
+  rm -f -- "${recovery_token}"
+  start_process "${node}" "${case_dir}/recovery-traffic.log" \
+    "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9821"
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/recovery-traffic.log" "ready=udp-server"
+  ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+    -target "${node_overlay}:9821" -message connect-recovery -once -timeout 3s
+  wait "${server_pid}"
+  stop_process "${connect_pid}"
+  grep -q 'laneway disconnected; temporary networking restored' "${recovery_log}"
+  assert_foreground_network_clean "${user}" "${recovery_log}" "post-SIGKILL recovery"
 
   stop_process "${node_pid}"
   stop_process "${relay_pid}"
