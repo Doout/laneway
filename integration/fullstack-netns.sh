@@ -136,6 +136,28 @@ wait_log() {
   return 1
 }
 
+wait_selected_path() {
+  local namespace="$1" config="$2" expected="$3" pid="$4" log="$5"
+  local selected=""
+  for _ in $(seq 1 600); do
+    selected="$(ip netns exec "${namespace}" "${work_dir}/laneway" status \
+      --config "${config}" --json 2>/dev/null | json_string_field selected_path || true)"
+    if [[ "${selected}" == "${expected}" ]]; then
+      return 0
+    fi
+    if ! kill -0 "${pid}" >/dev/null 2>&1; then
+      echo "ERROR: process ${pid} stopped while waiting for path ${expected}" >&2
+      sed -n '1,260p' "${log}" >&2 || true
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "ERROR: timed out waiting for path ${expected}; selected=${selected:-unknown}" >&2
+  ip netns exec "${namespace}" "${work_dir}/laneway" status --config "${config}" --json >&2 || true
+  sed -n '1,260p' "${log}" >&2 || true
+  return 1
+}
+
 run_kernel_udp_benchmark() {
   local server_namespace="$1" client_namespace="$2" listen="$3" target="$4" scenario="$5" log="$6"
   if [[ -z "${LANEWAY_KERNEL_BENCHMARK_OUTPUT:-}" ]]; then
@@ -631,6 +653,349 @@ EOF
 json_string_field() {
   local field="$1"
   sed -n 's/^[[:space:]]*"'"${field}"'": "\([^"]*\)"[,]*$/\1/p'
+}
+
+run_controller_wireguard_carriers() {
+  local case_dir="${work_dir}/controller-wireguard"
+  local switch="${prefix}ws" controller="${prefix}wc" relay="${prefix}wr"
+  local node_a="${prefix}wa" node_b="${prefix}wb"
+  local network_id="20000000000000000000000000000001"
+  local controller_service="20000000000000000000000000000002"
+  local relay_service="20000000000000000000000000000003"
+  local controller_endpoint="https://10.254.0.1:8443"
+  local controller_quic_endpoint="10.254.0.1:8443"
+  local admin_token="laneway-wireguard-fullstack-admin-token-000000000000001"
+
+  mkdir -p "${case_dir}"
+  printf '%s\n' "${admin_token}" >"${case_dir}/admin.token"
+  chmod 600 "${case_dir}/admin.token"
+  "${work_dir}/laneway" pki init -out-dir "${case_dir}" >/dev/null
+  "${work_dir}/laneway" pki controller -ca-cert "${case_dir}/ca.crt" -ca-key "${case_dir}/ca.key" \
+    -network-id "${network_id}" -service-id "${controller_service}" -ip 10.254.0.1 \
+    -out-cert "${case_dir}/controller.crt" -out-key "${case_dir}/controller.key"
+  "${work_dir}/laneway" pki relay -ca-cert "${case_dir}/ca.crt" -ca-key "${case_dir}/ca.key" \
+    -network-id "${network_id}" -service-id "${relay_service}" -ip 10.254.0.2 \
+    -out-cert "${case_dir}/relay.crt" -out-key "${case_dir}/relay.key"
+
+  add_switch "${switch}"
+  add_namespace "${controller}"
+  add_namespace "${relay}"
+  add_namespace "${node_a}"
+  add_namespace "${node_b}"
+  attach_switch "${switch}" "${controller}" eth0 10.254.0.1/24
+  attach_switch "${switch}" "${relay}" eth0 10.254.0.2/24
+  attach_switch "${switch}" "${node_a}" eth0 10.254.0.3/24
+  attach_switch "${switch}" "${node_b}" eth0 10.254.0.4/24
+
+  cat >"${case_dir}/controller.toml" <<EOF
+mode = "controller"
+state_dir = "${case_dir}/controller-state"
+socket_path = "${case_dir}/controller.sock"
+[tls]
+certificate = "${case_dir}/controller.crt"
+private_key = "${case_dir}/controller.key"
+ca = "${case_dir}/ca.crt"
+[controller]
+listen = "10.254.0.1:8443"
+quic_listen = "10.254.0.1:8443"
+database = "${case_dir}/controller.db"
+ca_private_key = "${case_dir}/ca.key"
+admin_token_file = "${case_dir}/admin.token"
+leaf_validity = "24h"
+EOF
+  start_process "${controller}" "${case_dir}/controller.log" \
+    "${work_dir}/laneway-controller" -config "${case_dir}/controller.toml" -diagnostics 127.0.0.1:6063
+  local controller_pid="${last_pid}"
+  wait_log "${controller_pid}" "${case_dir}/controller.log" "laneway-controller HTTPS="
+
+  local -a admin_connection=(
+    --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt"
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
+    --admin-token-file "${case_dir}/admin.token"
+  )
+  ip netns exec "${controller}" "${work_dir}/laneway" controller network create \
+    --network-id "${network_id}" --name wireguard-fullstack \
+    --ipv4-pool 100.100.0.0/24 --ipv6-pool fd00:100::/120 \
+    "${admin_connection[@]}" >"${case_dir}/network.json"
+  ip netns exec "${controller}" "${work_dir}/laneway" controller relay register \
+    --network-id "${network_id}" --service-id "${relay_service}" \
+    --name wireguard-relay --endpoint 10.254.0.2:4433 \
+    "${admin_connection[@]}" >"${case_dir}/relay-registration.json"
+
+  local token_a token_b join_a join_b node_a_id node_b_id overlays_a overlays_b overlay_a4 overlay_a6 overlay_b4 overlay_b6
+  token_a="$(ip netns exec "${controller}" "${work_dir}/laneway" controller enrollment-token issue \
+    --network-id "${network_id}" --label wireguard-a --expires-in 10m "${admin_connection[@]}" | \
+    json_string_field enrollment_token)"
+  token_b="$(ip netns exec "${controller}" "${work_dir}/laneway" controller enrollment-token issue \
+    --network-id "${network_id}" --label wireguard-b --expires-in 10m "${admin_connection[@]}" | \
+    json_string_field enrollment_token)"
+  join_a="$(ip netns exec "${node_a}" "${work_dir}/laneway" join "${token_a}" \
+    --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+    --name wireguard-a --out-cert "${case_dir}/a.crt" --out-key "${case_dir}/a.key" \
+    --out-wireguard-key "${case_dir}/a.wireguard.key")"
+  join_b="$(ip netns exec "${node_b}" "${work_dir}/laneway" join "${token_b}" \
+    --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+    --name wireguard-b --out-cert "${case_dir}/b.crt" --out-key "${case_dir}/b.key" \
+    --out-wireguard-key "${case_dir}/b.wireguard.key")"
+  node_a_id="$(printf '%s\n' "${join_a}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
+  node_b_id="$(printf '%s\n' "${join_b}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
+  overlays_a="$(printf '%s\n' "${join_a}" | sed -n 's/.* overlay=\([^ ]*\) certificate=.*/\1/p')"
+  overlays_b="$(printf '%s\n' "${join_b}" | sed -n 's/.* overlay=\([^ ]*\) certificate=.*/\1/p')"
+  overlay_a4="${overlays_a%%,*}"
+  overlay_a6="${overlays_a#*,}"
+  overlay_b4="${overlays_b%%,*}"
+  overlay_b6="${overlays_b#*,}"
+  if [[ ! "${node_a_id}" =~ ^[0-9a-f]{32}$ || ! "${node_b_id}" =~ ^[0-9a-f]{32}$ || \
+        "${overlay_a4}" == "${overlay_a6}" || "${overlay_b4}" == "${overlay_b6}" ]]; then
+    echo "ERROR: failed to parse dual-stack WireGuard enrollments" >&2
+    printf '%s\n%s\n' "${join_a}" "${join_b}" >&2
+    return 1
+  fi
+  ip netns exec "${controller}" "${work_dir}/laneway" controller acl add \
+    --network-id "${network_id}" --priority 100 --action accept \
+    --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description wireguard-fullstack-allow \
+    "${admin_connection[@]}" >"${case_dir}/acl.json"
+
+  cat >"${case_dir}/relay.toml" <<EOF
+mode = "relay"
+state_dir = "${case_dir}/relay-state"
+socket_path = "${case_dir}/relay.sock"
+[tls]
+certificate = "${case_dir}/relay.crt"
+private_key = "${case_dir}/relay.key"
+ca = "${case_dir}/ca.crt"
+[relay]
+listen = "10.254.0.2:4433"
+idle_timeout = "20s"
+[tcp_fallback]
+listen = "10.254.0.2:443"
+handshake_timeout = "2s"
+write_timeout = "2s"
+idle_timeout = "10s"
+keepalive_period = "2s"
+queue_depth = 128
+[controller]
+endpoint = "${controller_endpoint}"
+quic_endpoint = "${controller_quic_endpoint}"
+network_id = "${network_id}"
+service_id = "${controller_service}"
+poll_interval = "100ms"
+EOF
+  cat >"${case_dir}/a.toml" <<EOF
+mode = "node"
+state_dir = "${case_dir}/a-state"
+socket_path = "${case_dir}/a.sock"
+[tls]
+certificate = "${case_dir}/a.crt"
+private_key = "${case_dir}/a.key"
+ca = "${case_dir}/ca.crt"
+[node]
+name = "wireguard-a"
+relay_address = "10.254.0.2:4433"
+relay_network_id = "${network_id}"
+relay_service_id = "${relay_service}"
+reconnect_min = "50ms"
+reconnect_max = "500ms"
+[controller]
+endpoint = "${controller_endpoint}"
+quic_endpoint = "${controller_quic_endpoint}"
+network_id = "${network_id}"
+service_id = "${controller_service}"
+poll_interval = "100ms"
+[tcp_fallback]
+address = "10.254.0.2:443"
+handshake_timeout = "2s"
+write_timeout = "2s"
+idle_timeout = "10s"
+keepalive_period = "2s"
+quic_probe_interval = "1s"
+queue_depth = 128
+[direct]
+enabled = true
+listen = "10.254.0.3:41001"
+candidate_ttl = "30s"
+probe_interval = "100ms"
+probe_timeout = "2s"
+rendezvous_interval = "1s"
+max_candidates = 8
+[wireguard]
+enabled = true
+private_key = "${case_dir}/a.wireguard.key"
+interface = "lane0"
+listen_port = 51821
+mtu = 1280
+EOF
+  cat >"${case_dir}/b.toml" <<EOF
+mode = "node"
+state_dir = "${case_dir}/b-state"
+socket_path = "${case_dir}/b.sock"
+[tls]
+certificate = "${case_dir}/b.crt"
+private_key = "${case_dir}/b.key"
+ca = "${case_dir}/ca.crt"
+[node]
+name = "wireguard-b"
+relay_address = "10.254.0.2:4433"
+relay_network_id = "${network_id}"
+relay_service_id = "${relay_service}"
+reconnect_min = "50ms"
+reconnect_max = "500ms"
+[controller]
+endpoint = "${controller_endpoint}"
+quic_endpoint = "${controller_quic_endpoint}"
+network_id = "${network_id}"
+service_id = "${controller_service}"
+poll_interval = "100ms"
+[tcp_fallback]
+address = "10.254.0.2:443"
+handshake_timeout = "2s"
+write_timeout = "2s"
+idle_timeout = "10s"
+keepalive_period = "2s"
+quic_probe_interval = "1s"
+queue_depth = 128
+[direct]
+enabled = true
+listen = "10.254.0.4:41002"
+candidate_ttl = "30s"
+probe_interval = "100ms"
+probe_timeout = "2s"
+rendezvous_interval = "1s"
+max_candidates = 8
+[wireguard]
+enabled = true
+private_key = "${case_dir}/b.wireguard.key"
+interface = "lane0"
+listen_port = 51822
+mtu = 1280
+EOF
+
+  # Keep direct candidates unreachable while leaving controller and relay UDP
+  # untouched. Each table belongs solely to this disposable namespace.
+  for namespace in "${node_a}" "${node_b}"; do
+    ip netns exec "${namespace}" nft add table inet laneway_wg_direct_block
+    ip netns exec "${namespace}" nft add chain inet laneway_wg_direct_block output \
+      '{ type filter hook output priority -20; policy accept; }'
+  done
+  ip netns exec "${node_a}" nft add rule inet laneway_wg_direct_block output \
+    ip daddr 10.254.0.4 udp dport 41002 drop
+  ip netns exec "${node_b}" nft add rule inet laneway_wg_direct_block output \
+    ip daddr 10.254.0.3 udp dport 41001 drop
+
+  start_process "${relay}" "${case_dir}/relay.log" \
+    "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+  local relay_pid="${last_pid}"
+  wait_log "${relay_pid}" "${case_dir}/relay.log" "laneway-relay QUIC="
+  start_process "${node_a}" "${case_dir}/a.log" \
+    "${work_dir}/lanewayd" -config "${case_dir}/a.toml" -diagnostics 127.0.0.1:6061
+  local node_a_pid="${last_pid}"
+  start_process "${node_b}" "${case_dir}/b.log" \
+    "${work_dir}/lanewayd" -config "${case_dir}/b.toml" -diagnostics 127.0.0.1:6062
+  local node_b_pid="${last_pid}"
+  wait_log "${node_a_pid}" "${case_dir}/a.log" "interface=lane0"
+  wait_log "${node_b_pid}" "${case_dir}/b.log" "interface=lane0"
+  local lane_a_ifindex lane_b_ifindex
+  lane_a_ifindex="$(ip netns exec "${node_a}" cat /sys/class/net/lane0/ifindex)"
+  lane_b_ifindex="$(ip netns exec "${node_b}" cat /sys/class/net/lane0/ifindex)"
+
+  echo "==> encrypted WireGuard packets carry dual-stack traffic over relay QUIC"
+  wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-quic "${node_a_pid}" "${case_dir}/a.log"
+  wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-quic "${node_b_pid}" "${case_dir}/b.log"
+  start_process "${node_b}" "${case_dir}/relay-quic4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9601"
+  local server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/relay-quic4.log" "ready=udp-server"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9601" -message wireguard-relay-quic4
+  wait "${server_pid}"
+  start_process "${node_a}" "${case_dir}/relay-quic6.log" "${work_dir}/netprobe" udp-server -listen "[${overlay_a6%/*}]:9602"
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/relay-quic6.log" "ready=udp-server"
+  ip netns exec "${node_b}" "${work_dir}/netprobe" udp-client -target "[${overlay_a6%/*}]:9602" -message wireguard-relay-quic6
+  wait "${server_pid}"
+
+  echo "==> blocking external UDP demotes the same WireGuard tunnel to relay TCP"
+  for namespace in "${node_a}" "${node_b}"; do
+    ip netns exec "${namespace}" nft add table inet laneway_wg_udp_block
+    ip netns exec "${namespace}" nft add chain inet laneway_wg_udp_block output \
+      '{ type filter hook output priority -10; policy accept; }'
+    ip netns exec "${namespace}" nft add rule inet laneway_wg_udp_block output \
+      oifname eth0 meta l4proto udp drop
+  done
+  wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-tcp "${node_a_pid}" "${case_dir}/a.log"
+  wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-tcp "${node_b_pid}" "${case_dir}/b.log"
+  start_process "${node_b}" "${case_dir}/relay-tcp4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9603"
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/relay-tcp4.log" "ready=udp-server"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9603" -message wireguard-relay-tcp4
+  wait "${server_pid}"
+  start_process "${node_b}" "${case_dir}/relay-tcp6.log" "${work_dir}/netprobe" udp-server -listen "[${overlay_b6%/*}]:9604"
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/relay-tcp6.log" "ready=udp-server"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "[${overlay_b6%/*}]:9604" -message wireguard-relay-tcp6
+  wait "${server_pid}"
+
+  echo "==> restoring UDP promotes TCP fallback back to WireGuard relay QUIC"
+  ip netns exec "${node_a}" nft delete table inet laneway_wg_udp_block
+  ip netns exec "${node_b}" nft delete table inet laneway_wg_udp_block
+  wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-quic "${node_a_pid}" "${case_dir}/a.log"
+  wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-quic "${node_b_pid}" "${case_dir}/b.log"
+
+  echo "==> restoring peer UDP promotes the unchanged tunnel to direct WireGuard"
+  ip netns exec "${node_a}" nft delete table inet laneway_wg_direct_block
+  ip netns exec "${node_b}" nft delete table inet laneway_wg_direct_block
+  wait_selected_path "${node_a}" "${case_dir}/a.toml" direct-wireguard "${node_a_pid}" "${case_dir}/a.log"
+  wait_selected_path "${node_b}" "${case_dir}/b.toml" direct-wireguard "${node_b_pid}" "${case_dir}/b.log"
+  start_process "${node_b}" "${case_dir}/direct4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9605"
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/direct4.log" "ready=udp-server"
+  local relay_before relay_after
+  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9605" -message direct-wireguard4
+  wait "${server_pid}"
+  sleep 0.1
+  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  if [[ "${relay_after}" != "${relay_before}" ]]; then
+    echo "ERROR: direct WireGuard application packet traversed the relay" >&2
+    return 1
+  fi
+  start_process "${node_a}" "${case_dir}/direct6.log" "${work_dir}/netprobe" udp-server -listen "[${overlay_a6%/*}]:9606"
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/direct6.log" "ready=udp-server"
+  ip netns exec "${node_b}" "${work_dir}/netprobe" udp-client -target "[${overlay_a6%/*}]:9606" -message direct-wireguard6
+  wait "${server_pid}"
+
+  echo "==> direct failure demotes without recreating lane0 or changing overlay identity"
+  for namespace in "${node_a}" "${node_b}"; do
+    ip netns exec "${namespace}" nft add table inet laneway_wg_direct_reject
+    ip netns exec "${namespace}" nft add chain inet laneway_wg_direct_reject output \
+      '{ type filter hook output priority -20; policy accept; }'
+  done
+  ip netns exec "${node_a}" nft add rule inet laneway_wg_direct_reject output \
+    ip daddr 10.254.0.4 udp dport 41002 reject with icmp type port-unreachable
+  ip netns exec "${node_b}" nft add rule inet laneway_wg_direct_reject output \
+    ip daddr 10.254.0.3 udp dport 41001 reject with icmp type port-unreachable
+  wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-quic "${node_a_pid}" "${case_dir}/a.log"
+  wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-quic "${node_b_pid}" "${case_dir}/b.log"
+  if [[ "$(ip netns exec "${node_a}" cat /sys/class/net/lane0/ifindex)" != "${lane_a_ifindex}" || \
+        "$(ip netns exec "${node_b}" cat /sys/class/net/lane0/ifindex)" != "${lane_b_ifindex}" ]]; then
+    echo "ERROR: carrier switching recreated the stable WireGuard interface" >&2
+    return 1
+  fi
+  ip -n "${node_a}" address show dev lane0 | grep -Fq "${overlay_a4}"
+  ip -n "${node_a}" address show dev lane0 | grep -Fq "${overlay_a6}"
+  start_process "${node_b}" "${case_dir}/demoted4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9607"
+  server_pid="${last_pid}"
+  wait_log "${server_pid}" "${case_dir}/demoted4.log" "ready=udp-server"
+  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9607" -message demoted-relay-quic
+  wait "${server_pid}"
+
+  stop_process "${node_a_pid}"
+  stop_process "${node_b_pid}"
+  stop_process "${relay_pid}"
+  stop_process "${controller_pid}"
 }
 
 run_controller_subnet_flow() {
@@ -1380,11 +1745,13 @@ case "${LANEWAY_INTEGRATION_CASE:-all}" in
     run_overlay_and_subnet
     run_exit_flow
     run_direct_nat_flow
+    run_controller_wireguard_carriers
     run_controller_subnet_flow
     ;;
   overlay-subnet) run_overlay_and_subnet ;;
   exit) run_exit_flow ;;
   direct-nat) run_direct_nat_flow ;;
+  controller-wireguard) run_controller_wireguard_carriers ;;
   controller-subnet) run_controller_subnet_flow ;;
   *)
     echo "ERROR: unknown LANEWAY_INTEGRATION_CASE=${LANEWAY_INTEGRATION_CASE}" >&2
