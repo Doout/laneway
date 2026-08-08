@@ -497,10 +497,12 @@ echo "==> controller outage expires the last bounded lease and removes native au
 # the outage cannot affect the runner host or another test namespace.
 while read -r namespace_pid; do
   if [[ -n "${namespace_pid}" ]]; then
-    kill -TERM "${namespace_pid}" >/dev/null 2>&1 || true
+    kill -KILL "${namespace_pid}" >/dev/null 2>&1 || true
   fi
 done < <(ip netns pids "${controller_ns}")
-stop_process "${controller_pid}"
+kill -KILL "${controller_pid}" >/dev/null 2>&1 || true
+wait "${controller_pid}" >/dev/null 2>&1 || true
+unset "active_processes[${controller_pid}]"
 for _ in $(seq 1 160); do
   address_present=0
   route_present=0

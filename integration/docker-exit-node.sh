@@ -336,16 +336,30 @@ node_create() {
 node_create "${client_name}" "${work_dir}/client" "${client_volume}"
 node_create "${gateway_name}" "${work_dir}/gateway" "${gateway_volume}"
 for node_name in "${client_name}" "${gateway_name}"; do
-  docker inspect "${node_name}" | jq -e '
+  security_contract="$(docker inspect "${node_name}" | jq '
+    .[0] | {
+      user: .Config.User,
+      privileged: .HostConfig.Privileged,
+      network_mode: .HostConfig.NetworkMode,
+      cap_add: .HostConfig.CapAdd,
+      security_opt: .HostConfig.SecurityOpt,
+      devices: .HostConfig.Devices
+    }
+  ')"
+  if ! jq -e '
     .[0].Config.User == "65532:65532" and
     .[0].HostConfig.Privileged == false and
     .[0].HostConfig.NetworkMode != "host" and
-    .[0].HostConfig.CapAdd == ["NET_ADMIN"] and
-    .[0].HostConfig.SecurityOpt == ["no-new-privileges"] and
+    (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
+    (.[0].HostConfig.SecurityOpt | length == 1) and
+    (.[0].HostConfig.SecurityOpt[0] | startswith("no-new-privileges")) and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and
     .[0].HostConfig.Devices[0].PathInContainer == "/dev/net/tun"
-  ' >/dev/null
+  ' >/dev/null < <(docker inspect "${node_name}"); then
+    echo "ERROR: ${node_name} violates the minimal Docker security contract: ${security_contract}" >&2
+    exit 1
+  fi
 done
 docker network connect "${egress_network}" "${gateway_name}"
 docker start "${client_name}" "${gateway_name}" >/dev/null
