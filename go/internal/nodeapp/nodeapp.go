@@ -91,9 +91,6 @@ func run(path, diagnostics string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if err := lockProcessPrivileges(); err != nil {
-		return fmt.Errorf("lock process privileges: %w", err)
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return runConfig(ctx, cfg, diagnostics, runtimeOptions{})

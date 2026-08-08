@@ -93,8 +93,8 @@ services:
     read_only: true
     cap_drop: [ALL]
     cap_add: [NET_ADMIN]
-    # The image grants NET_ADMIN only to the node binary. The node locks
-    # no-new-privileges immediately after loading its configuration.
+    # The non-root launcher raises only the already-bounded NET_ADMIN into the
+    # ambient set, then locks no-new-privileges before starting Go or tini.
     restart: unless-stopped
     stop_grace_period: 20s
     depends_on:
