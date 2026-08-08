@@ -24,6 +24,13 @@ cat > "$compose_dir/bootstrap.sh" <<'EOF'
 set -eu
 printf '%s\n' bootstrap >> "$LANE_TEST_LOG"
 EOF
+cat > "$compose_dir/recovery.sh" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'recovery' >> "$LANE_TEST_LOG"
+printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
+printf '\n' >> "$LANE_TEST_LOG"
+EOF
 cat > "$fake_bin/docker" <<'EOF'
 #!/bin/sh
 set -eu
@@ -58,7 +65,11 @@ printf 'cosign' >> "$LANE_TEST_LOG"
 printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
 EOF
-chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$fake_bin/docker" "$fake_bin/cosign" "$fake_bin/getent" "$fake_bin/ss"
+cat > "$fake_bin/age" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$compose_dir/recovery.sh" "$fake_bin/docker" "$fake_bin/cosign" "$fake_bin/getent" "$fake_bin/ss" "$fake_bin/age"
 
 write_env() {
   path=$1; version=$2; digit=$3
@@ -80,6 +91,7 @@ LANEWAY_RELAY_SERVICE_ID=33333333333333333333333333333333
 LANEWAY_NETWORK_NAME=production
 LANEWAY_IPV4_POOL=100.96.0.0/16
 LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433
+LANEWAY_BACKUP_RECIPIENT=age1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   chmod 0600 "$path"
 }
@@ -121,26 +133,24 @@ LANE_TEST_HEALTH=unhealthy; export LANE_TEST_HEALTH
 if "$compose_dir/lane" status >/dev/null 2>&1; then echo "status accepted an unhealthy required service" >&2; exit 1; fi
 LANE_TEST_HEALTH=healthy; export LANE_TEST_HEALTH
 
-"$compose_dir/lane" backup manual.db
-grep -F '<-backup> </backups/manual.db>' "$log" >/dev/null
-if "$compose_dir/lane" backup ../escape.db >/dev/null 2>&1; then
-  echo "lane backup accepted a path traversal" >&2
+"$compose_dir/lane" backup manual.age
+grep -F 'recovery <backup> <manual.age>' "$log" >/dev/null
+mkdir "$compose_dir/generated/lifecycle/operator.lock"
+if "$compose_dir/lane" backup locked.age >/dev/null 2>&1; then
+  echo "lane accepted a concurrent lifecycle operation" >&2
   exit 1
 fi
+rmdir "$compose_dir/generated/lifecycle/operator.lock"
 
 "$compose_dir/lane" invite --name laptop --ephemeral --session-lifetime 2h
 grep -F '<--class> <ephemeral>' "$log" >/dev/null
 grep -F '<--admin-token-file> </run/laneway-secrets/admin.token>' "$log" >/dev/null
 
-LANE_TEST_CONTROLLER_RUNNING=1
-export LANE_TEST_CONTROLLER_RUNNING
-: > "$compose_dir/generated/backups/restore.db"
-if "$compose_dir/lane" restore restore.db >/dev/null 2>&1; then
-  echo "lane restore accepted an active controller" >&2
-  exit 1
-fi
-LANE_TEST_CONTROLLER_RUNNING=0
-export LANE_TEST_CONTROLLER_RUNNING
+identity=$test_dir/identity.txt
+bundle=$test_dir/recovery.age
+: > "$identity"; : > "$bundle"
+"$compose_dir/lane" restore "$bundle" --identity "$identity"
+grep -F "recovery <restore> <$bundle> <$identity>" "$log" >/dev/null
 
 "$compose_dir/lane" upgrade "$candidate"
 grep -F 'LANEWAY_VERSION=1.1.0' "$compose_dir/.env" >/dev/null
