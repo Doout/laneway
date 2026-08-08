@@ -106,6 +106,13 @@ wait_log() {
   return 1
 }
 
+node_net_admin_exec() {
+  local container="$1"
+  shift
+  docker exec "${container}" /bin/setpriv \
+    --inh-caps=+net_admin --ambient-caps=+net_admin --no-new-privs "$@"
+}
+
 wait_status() {
   local container="$1" config="$2" pattern="$3"
   for _ in $(seq 1 240); do
@@ -395,10 +402,10 @@ exit_route_id="$(jq -r '.advertisements[0].route_id' <<<"${exit_json}")"
 [[ "${exit_route_id}" =~ ^[0-9a-f]{32}$ ]] || { echo "ERROR: Exit route advertisement failed" >&2; exit 1; }
 admin controller route approve --route-id "${exit_route_id}" "${admin_connection[@]}" >/dev/null
 for _ in $(seq 1 120); do
-  docker exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break
+  node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break
   sleep 0.25
 done
-docker exec "${gateway_name}" nft list table inet laneway_exit >/dev/null
+node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null
 docker exec --user 65532:65532 "${client_name}" /usr/local/bin/laneway exit use docker-gateway -config /secrets/node.toml >/dev/null
 wait_status "${client_name}" /secrets/node.toml "exit=${gateway_id} authorized=true"
 
@@ -410,7 +417,7 @@ run_external_flow() {
   wait_log "${external_name}" "ready=udp-server"
   local target
   target="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${internet_network}\"}}{{.IPAddress}}{{end}}" "${external_name}")"
-  docker exec "${gateway_name}" ip route replace "${target}/32" via "${nat_egress_ip}" dev eth1
+  node_net_admin_exec "${gateway_name}" ip route replace "${target}/32" via "${nat_egress_ip}" dev eth1
   docker exec "${client_name}" /test/netprobe udp-client -target "${target}:9201" -message "${label}" -timeout 15s >/dev/null
   for _ in $(seq 1 40); do
     docker logs "${external_name}" 2>&1 | grep -Fq "remote=${nat_internet_ip}:" && return 0
@@ -425,12 +432,12 @@ wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" direct
 run_external_flow docker-exit-direct
 
 echo "==> restrictive peer UDP forces capped relay fallback while controller remains healthy"
-docker exec "${client_name}" nft add table inet laneway_test_direct_block
-docker exec "${client_name}" nft add chain inet laneway_test_direct_block output '{ type filter hook output priority filter; policy accept; }'
-docker exec "${client_name}" nft add rule inet laneway_test_direct_block output udp dport 4434 drop
-docker exec "${gateway_name}" nft add table inet laneway_test_direct_block
-docker exec "${gateway_name}" nft add chain inet laneway_test_direct_block output '{ type filter hook output priority filter; policy accept; }'
-docker exec "${gateway_name}" nft add rule inet laneway_test_direct_block output udp dport 4435 drop
+node_net_admin_exec "${client_name}" nft add table inet laneway_test_direct_block
+node_net_admin_exec "${client_name}" nft add chain inet laneway_test_direct_block output '{ type filter hook output priority filter; policy accept; }'
+node_net_admin_exec "${client_name}" nft add rule inet laneway_test_direct_block output udp dport 4434 drop
+node_net_admin_exec "${gateway_name}" nft add table inet laneway_test_direct_block
+node_net_admin_exec "${gateway_name}" nft add chain inet laneway_test_direct_block output '{ type filter hook output priority filter; policy accept; }'
+node_net_admin_exec "${gateway_name}" nft add rule inet laneway_test_direct_block output udp dport 4435 drop
 wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" relay-quic
 run_external_flow docker-exit-relay
 
@@ -440,7 +447,7 @@ docker run -d --name "${external_name}" --label "${owner}" --network "${internet
   udp-echo-server -listen :9202 >/dev/null
 wait_log "${external_name}" "ready=udp-echo-server"
 saturation_target="$(docker inspect -f "{{with index .NetworkSettings.Networks \"${internet_network}\"}}{{.IPAddress}}{{end}}" "${external_name}")"
-docker exec "${gateway_name}" ip route replace "${saturation_target}/32" via "${nat_egress_ip}" dev eth1
+node_net_admin_exec "${gateway_name}" ip route replace "${saturation_target}/32" via "${nat_egress_ip}" dev eth1
 docker exec "${client_name}" /test/netprobe udp-bench-client -target "${saturation_target}:9202" \
   -scenario docker-exit-relay-saturation -scope controller-authorized-double-nat \
   -duration 750ms -size 1200 -pps 3000 -flows 1 >/dev/null
@@ -448,20 +455,20 @@ throttled="$(docker run --rm --label "${owner}" --network "container:${relay_nam
   metric -url http://127.0.0.1:6060/metrics -name laneway_throttled_packets_total)"
 [[ "${throttled}" =~ ^[0-9]+$ && "${throttled}" -gt 0 ]] || { echo "ERROR: relay did not expose saturation drops" >&2; exit 1; }
 admin controller audit --network-id "${network_id}" --limit 1 "${admin_connection[@]}" >/dev/null
-docker exec "${client_name}" nft delete table inet laneway_test_direct_block
-docker exec "${gateway_name}" nft delete table inet laneway_test_direct_block
+node_net_admin_exec "${client_name}" nft delete table inet laneway_test_direct_block
+node_net_admin_exec "${gateway_name}" nft delete table inet laneway_test_direct_block
 wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" direct
 
 echo "==> graceful restart and SIGKILL restart recreate only container-owned state"
 docker stop --time 20 "${gateway_name}" >/dev/null
 docker start "${gateway_name}" >/dev/null
 wait_log "${gateway_name}" "interface=lane0"
-for _ in $(seq 1 120); do docker exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break; sleep 0.25; done
+for _ in $(seq 1 120); do node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break; sleep 0.25; done
 run_external_flow docker-exit-graceful-restart
 docker kill --signal KILL "${gateway_name}" >/dev/null
 docker start "${gateway_name}" >/dev/null
 wait_log "${gateway_name}" "interface=lane0"
-for _ in $(seq 1 120); do docker exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break; sleep 0.25; done
+for _ in $(seq 1 120); do node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break; sleep 0.25; done
 run_external_flow docker-exit-crash-restart
 
 echo "==> remove owned Docker resources and prove foreign host/container state is unchanged"
