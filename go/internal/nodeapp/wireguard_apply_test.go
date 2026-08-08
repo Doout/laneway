@@ -20,6 +20,7 @@ type fakeNodeWireGuard struct {
 	events             []string
 	snapshots          []wireguard.SecureSnapshot
 	failSnapshot       bool
+	failSnapshots      int
 	closed             bool
 	carrier            string
 	summary            string
@@ -73,8 +74,11 @@ func (f *fakeNodeWireGuard) RestoreGuard(context.Context) error {
 }
 func (f *fakeNodeWireGuard) ApplySnapshot(_ context.Context, snapshot wireguard.SecureSnapshot) error {
 	f.events = append(f.events, "snapshot")
-	if f.failSnapshot {
+	if f.failSnapshot || f.failSnapshots > 0 {
 		f.failSnapshot = false
+		if f.failSnapshots > 0 {
+			f.failSnapshots--
+		}
 		return errors.New("injected WireGuard snapshot failure")
 	}
 	f.snapshots = append(f.snapshots, snapshot)

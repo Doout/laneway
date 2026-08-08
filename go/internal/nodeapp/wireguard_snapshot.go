@@ -3,11 +3,14 @@ package nodeapp
 import (
 	"fmt"
 	"net/netip"
+	"sort"
 
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/wireguard"
 )
+
+const maxWireGuardExitPrefixes = 8192
 
 type preparedWireGuardSnapshot struct {
 	peers    []wireguard.ManagedPeer
@@ -54,13 +57,7 @@ func prepareWireGuardSnapshot(configuration *lanewayv1.NodeConfiguration, local 
 	if !localPresent {
 		return preparedWireGuardSnapshot{}, fmt.Errorf("wireguard peer snapshot omits the local node")
 	}
-	if !selectedExit.IsZero() {
-		// A default AllowedIP overlaps every other peer and would let the exit
-		// peer pass WireGuard's source check while spoofing their overlay or
-		// subnet addresses. Exit routing therefore needs an isolated
-		// cryptokey-routing boundary; never weaken peer ownership here.
-		return preparedWireGuardSnapshot{}, fmt.Errorf("selected WireGuard exit requires an isolated cryptokey-routing boundary")
-	}
+	exitFamilies := make(map[int]struct{}, 2)
 	for index, route := range configuration.GetRoutes().GetRoutes() {
 		if len(route.GetViaNodeId()) != identity.IDSize {
 			return preparedWireGuardSnapshot{}, fmt.Errorf("wireguard route %d has invalid owner", index)
@@ -76,15 +73,34 @@ func prepareWireGuardSnapshot(configuration *lanewayv1.NodeConfiguration, local 
 		}
 		switch route.GetKind() {
 		case lanewayv1.RouteKind_ROUTE_KIND_OVERLAY, lanewayv1.RouteKind_ROUTE_KIND_SUBNET:
-			if owner != local.NodeID {
-				owners[owner] = appendUniquePrefix(owners[owner], prefix)
-			}
+			owners[owner] = appendUniquePrefix(owners[owner], prefix)
 		case lanewayv1.RouteKind_ROUTE_KIND_EXIT:
-			// Exit defaults are intentionally not WireGuard AllowedIPs on the
-			// shared device; see the selected-exit rejection above.
+			if owner == selectedExit {
+				if prefix.Bits() != 0 {
+					return preparedWireGuardSnapshot{}, fmt.Errorf("wireguard exit route %d is not a default", index)
+				}
+				exitFamilies[prefix.Addr().BitLen()] = struct{}{}
+			}
 		default:
 			return preparedWireGuardSnapshot{}, fmt.Errorf("wireguard route %d has unknown kind", index)
 		}
+	}
+	if !selectedExit.IsZero() {
+		if _, present := keys[selectedExit]; !present {
+			return preparedWireGuardSnapshot{}, fmt.Errorf("selected wireguard exit is absent")
+		}
+		if len(exitFamilies) == 0 {
+			return preparedWireGuardSnapshot{}, fmt.Errorf("selected wireguard exit has no authorized default route")
+		}
+		var protected []netip.Prefix
+		for _, prefixes := range owners {
+			protected = append(protected, prefixes...)
+		}
+		exitPrefixes, err := partitionedExitPrefixes(exitFamilies, protected, maxWireGuardExitPrefixes)
+		if err != nil {
+			return preparedWireGuardSnapshot{}, err
+		}
+		owners[selectedExit] = append(owners[selectedExit], exitPrefixes...)
 	}
 	peers := make([]wireguard.ManagedPeer, 0, len(keys)-1)
 	peerPrefixes := make(map[identity.NodeID][]netip.Prefix, len(keys)-1)
@@ -148,6 +164,84 @@ func prepareWireGuardSnapshot(configuration *lanewayv1.NodeConfiguration, local 
 		firewall.Rules = append(firewall.Rules, rule)
 	}
 	return preparedWireGuardSnapshot{peers: peers, firewall: firewall}, nil
+}
+
+// partitionedExitPrefixes returns the exact complement of protected identity
+// and subnet ownership for each controller-authorized default family. This
+// gives the exit peer default-route behavior without overlapping another
+// peer's WireGuard AllowedIPs. Incoming packets therefore retain an
+// unambiguous cryptographic owner, including packets with spoofed overlay or
+// protected subnet source addresses.
+func partitionedExitPrefixes(families map[int]struct{}, protected []netip.Prefix, limit int) ([]netip.Prefix, error) {
+	if limit < 1 {
+		return nil, fmt.Errorf("wireguard exit prefix limit is invalid")
+	}
+	var result []netip.Prefix
+	for _, bits := range []int{32, 128} {
+		if _, enabled := families[bits]; !enabled {
+			continue
+		}
+		root := netip.PrefixFrom(netip.IPv4Unspecified(), 0)
+		if bits == 128 {
+			root = netip.PrefixFrom(netip.IPv6Unspecified(), 0)
+		}
+		available := []netip.Prefix{root}
+		reservedPrefixes := protected
+		if bits == 32 {
+			reservedPrefixes = append(append([]netip.Prefix(nil), protected...),
+				netip.MustParsePrefix("0.0.0.0/32"), netip.MustParsePrefix("224.0.0.0/4"))
+		} else {
+			reservedPrefixes = append(append([]netip.Prefix(nil), protected...),
+				netip.MustParsePrefix("::/128"), netip.MustParsePrefix("ff00::/8"))
+		}
+		for _, reserved := range reservedPrefixes {
+			if !reserved.IsValid() || reserved.Addr().BitLen() != bits {
+				continue
+			}
+			var next []netip.Prefix
+			for _, prefix := range available {
+				next = append(next, subtractPrefix(prefix, reserved.Masked())...)
+				if len(result)+len(next) > limit {
+					return nil, fmt.Errorf("wireguard exit cryptokey-routing partition exceeds %d prefixes", limit)
+				}
+			}
+			available = next
+		}
+		result = append(result, available...)
+		if len(result) > limit {
+			return nil, fmt.Errorf("wireguard exit cryptokey-routing partition exceeds %d prefixes", limit)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].String() < result[j].String() })
+	return result, nil
+}
+
+func subtractPrefix(base, reserved netip.Prefix) []netip.Prefix {
+	if base.Addr().BitLen() != reserved.Addr().BitLen() || !base.Contains(reserved.Addr()) {
+		return []netip.Prefix{base}
+	}
+	if reserved.Bits() <= base.Bits() {
+		return nil
+	}
+	left, right := splitPrefix(base)
+	return append(subtractPrefix(left, reserved), subtractPrefix(right, reserved)...)
+}
+
+func splitPrefix(prefix netip.Prefix) (netip.Prefix, netip.Prefix) {
+	nextBits := prefix.Bits() + 1
+	address := prefix.Addr()
+	if address.Is4() {
+		left := address.As4()
+		right := left
+		bit := nextBits - 1
+		right[bit/8] |= byte(1 << (7 - bit%8))
+		return netip.PrefixFrom(netip.AddrFrom4(left), nextBits), netip.PrefixFrom(netip.AddrFrom4(right), nextBits)
+	}
+	left := address.As16()
+	right := left
+	bit := nextBits - 1
+	right[bit/8] |= byte(1 << (7 - bit%8))
+	return netip.PrefixFrom(netip.AddrFrom16(left), nextBits), netip.PrefixFrom(netip.AddrFrom16(right), nextBits)
 }
 
 func wireGuardNodeIDs(values [][]byte) ([]identity.NodeID, error) {

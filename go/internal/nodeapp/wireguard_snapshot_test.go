@@ -1,6 +1,7 @@
 package nodeapp
 
 import (
+	"fmt"
 	"net/netip"
 	"testing"
 
@@ -60,8 +61,21 @@ func TestPrepareWireGuardSnapshotBindsKeysRoutesExitAndPolicy(t *testing.T) {
 		prepared.firewall.Rules[0].DestinationPorts[0].First != 443 {
 		t.Fatalf("firewall=%+v", prepared.firewall)
 	}
-	if _, err := prepareWireGuardSnapshot(configuration, local, localKey, exit); err == nil {
-		t.Fatal("shared WireGuard device accepted overlapping exit default")
+	prepared, err = prepareWireGuardSnapshot(configuration, local, localKey, exit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exitPrefixes := prepared.firewall.PeerPrefixes[exit]
+	if prefixSetContainsAddress(exitPrefixes, netip.MustParseAddr("100.96.0.1")) ||
+		prefixSetContainsAddress(exitPrefixes, netip.MustParseAddr("100.96.0.2")) ||
+		prefixSetContainsAddress(exitPrefixes, netip.MustParseAddr("192.168.50.10")) ||
+		prefixSetContainsAddress(exitPrefixes, netip.IPv4Unspecified()) ||
+		prefixSetContainsAddress(exitPrefixes, netip.MustParseAddr("224.0.0.1")) ||
+		!prefixSetContainsAddress(exitPrefixes, netip.MustParseAddr("1.1.1.1")) {
+		t.Fatalf("partitioned exit ownership=%v", exitPrefixes)
+	}
+	if err := requireDisjointPeerPrefixes(prepared.peers); err != nil {
+		t.Fatalf("partitioned peers overlap: %v", err)
 	}
 }
 
@@ -100,4 +114,29 @@ func containsPrefix(prefixes []netip.Prefix, value string) bool {
 		}
 	}
 	return false
+}
+
+func prefixSetContainsAddress(prefixes []netip.Prefix, address netip.Addr) bool {
+	for _, prefix := range prefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func requireDisjointPeerPrefixes(peers []wireguard.ManagedPeer) error {
+	for left, peer := range peers {
+		for _, prefix := range peer.AllowedIPs {
+			for right := left + 1; right < len(peers); right++ {
+				for _, other := range peers[right].AllowedIPs {
+					if prefix.Addr().BitLen() == other.Addr().BitLen() &&
+						(prefix.Contains(other.Addr()) || other.Contains(prefix.Addr())) {
+						return fmt.Errorf("%s and %s", prefix, other)
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
