@@ -39,6 +39,7 @@ import (
 	"laneway.dev/laneway/internal/subnet"
 	"laneway.dev/laneway/internal/tcpfallback"
 	"laneway.dev/laneway/internal/transport"
+	"laneway.dev/laneway/internal/wireguard"
 )
 
 const (
@@ -114,6 +115,12 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	}
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("validate configuration with persisted exit intent: %w", err)
+	}
+	if cfg.WireGuard.Enabled && cfg.Controller.Endpoint == "" {
+		return errors.New("WireGuard runtime requires controller authority")
+	}
+	if cfg.WireGuard.Enabled && cfg.Direct.Enabled {
+		return errors.New("WireGuard runtime requires encrypted direct transport or direct.enabled=false")
 	}
 	revokedCertificates := new(revocation.Set)
 	tlsConfig, err := transport.LoadClientTLSConfigWithRevocations(cfg.TLS.CAFile, cfg.TLS.CertificateFile, cfg.TLS.PrivateKeyFile, revokedCertificates)
@@ -244,6 +251,9 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			break
 		}
 	}
+	if cfg.WireGuard.Enabled {
+		laneMTU = cfg.WireGuard.MTU
+	}
 	routeTable, osRoutes, err := buildRoutes(local, cfg.Peers)
 	if err != nil {
 		return err
@@ -275,23 +285,77 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	staticBypass := append([]netip.Addr(nil), bypass...)
 	bypass = append(bypass, controllerRelayBypass...)
 
-	tunConfig := platform.TUNConfig{Name: platform.DefaultTUNName, MTU: laneMTU, Addresses: addresses}
 	initialRoutePlan := platform.RoutePlan{Routes: osRoutes, TransportBypass: bypass}
-	networkOpener := options.networkOpener
-	if networkOpener == nil {
-		networkOpener = openDirectHostNetwork
+	var secureWireGuard secureWireGuardRuntime
+	var hostNetwork HostNetwork
+	if cfg.WireGuard.Enabled {
+		if options.networkOpener != nil {
+			return errors.New("foreground network helpers do not yet support the WireGuard device")
+		}
+		privateKey, _, keyErr := wireguard.LoadPrivateKeyFile(cfg.WireGuard.PrivateKeyFile)
+		if keyErr != nil {
+			return keyErr
+		}
+		wireGuardOpener := options.wireGuardOpener
+		if wireGuardOpener == nil {
+			wireGuardOpener = func(ctx context.Context, config wireguard.SecureManagerConfig) (secureWireGuardRuntime, error) {
+				return wireguard.OpenSecureManager(ctx, config)
+			}
+		}
+		secureWireGuard, err = wireGuardOpener(ctx, wireguard.SecureManagerConfig{
+			Manager: wireguard.ManagerConfig{Device: wireguard.DeviceConfig{
+				Name: cfg.WireGuard.InterfaceName, MTU: cfg.WireGuard.MTU, Addresses: addresses,
+				PrivateKey: privateKey, ListenPort: cfg.WireGuard.ListenPort,
+			}},
+			Firewall: wireguard.FirewallConfig{Interface: cfg.WireGuard.InterfaceName},
+		})
+		if err != nil {
+			return err
+		}
+		routes, routeErr := platform.NewRouteManager(platform.RouteManagerConfig{InterfaceName: secureWireGuard.Name()})
+		if routeErr != nil {
+			return errors.Join(routeErr, secureWireGuard.Close())
+		}
+		if routeErr = routes.Apply(ctx, initialRoutePlan); routeErr != nil {
+			return errors.Join(routeErr, routes.Close(), secureWireGuard.Close())
+		}
+		hostNetwork = HostNetwork{Routes: routes, Close: routes.Close}
+	} else {
+		tunConfig := platform.TUNConfig{Name: platform.DefaultTUNName, MTU: laneMTU, Addresses: addresses}
+		networkOpener := options.networkOpener
+		if networkOpener == nil {
+			networkOpener = openDirectHostNetwork
+		}
+		hostNetwork, err = networkOpener(ctx, tunConfig, initialRoutePlan)
+		if err != nil {
+			return err
+		}
 	}
-	hostNetwork, err := networkOpener(ctx, tunConfig, initialRoutePlan)
-	if err != nil {
-		return err
-	}
-	if hostNetwork.TUN == nil || hostNetwork.Routes == nil || hostNetwork.Close == nil {
+	if (hostNetwork.TUN == nil && secureWireGuard == nil) || hostNetwork.Routes == nil || hostNetwork.Close == nil {
 		if hostNetwork.Close != nil {
 			_ = hostNetwork.Close()
+		}
+		if secureWireGuard != nil {
+			_ = secureWireGuard.Close()
 		}
 		return errors.New("network opener returned an incomplete host network")
 	}
 	tun, routeManager := hostNetwork.TUN, hostNetwork.Routes
+	var interfaceName string
+	var interfaceMTU int
+	if secureWireGuard != nil {
+		interfaceName, interfaceMTU = secureWireGuard.Name(), secureWireGuard.MTU()
+	} else {
+		interfaceName, interfaceMTU = tun.Name(), tun.MTU()
+	}
+	if secureWireGuard != nil {
+		defer func() {
+			if closeErr := secureWireGuard.Close(); closeErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("restore WireGuard device: %w", closeErr))
+			}
+		}()
+		controllerState.wireGuard = secureWireGuard
+	}
 	defer func() {
 		if closeErr := hostNetwork.Close(); closeErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("restore host networking: %w", closeErr))
@@ -310,7 +374,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	if (cfg.Controller.Endpoint != "" && cfg.Routing.OutputInterface != "") ||
 		(cfg.Controller.Endpoint == "" && len(advertisedPrefixes) != 0) {
 		subnetForwarding, err = subnet.NewForwardingManager(subnet.ForwardingManagerConfig{
-			InputInterface: tun.Name(), OutputInterface: cfg.Routing.OutputInterface,
+			InputInterface: interfaceName, OutputInterface: cfg.Routing.OutputInterface,
 		})
 		if err != nil {
 			return err
@@ -333,7 +397,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 
 	var exitManagers *daemonExitManagers
 	if cfg.Controller.Endpoint != "" || cfg.Exit.Serve {
-		exitManagers, err = newDaemonExitManagers(cfg, local, tun.Name(), staticBypass, routeTable, exitIntentStore, exitIntentPersisted,
+		exitManagers, err = newDaemonExitManagers(cfg, local, interfaceName, staticBypass, routeTable, exitIntentStore, exitIntentPersisted,
 			hostNetwork.ExitRoutes, hostNetwork.DNS)
 		if err != nil {
 			return err
@@ -349,6 +413,10 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		return err
 	}
 	var packetPolicy nodeservice.PacketPolicy
+	var packetIO nodeservice.PacketIO
+	if tun != nil {
+		packetIO = tunPacketIO{tun}
+	}
 	var policyTable *policy.Table
 	if cfg.Controller.Endpoint != "" {
 		policyTable = new(policy.Table)
@@ -397,7 +465,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			localAddresses = append(localAddresses, prefix.Addr())
 		}
 		unifiedDataPlane, err = dataplane.New(dataplane.Config{
-			Identity: local, Routes: routeTable, Packets: tunPacketIO{tun}, Paths: pathManager,
+			Identity: local, Routes: routeTable, Packets: packetIO, Paths: pathManager,
 			Policy: packetPolicy, LocalAddresses: localAddresses, ForwardPrefixes: forwardPrefixes, MaxPacketSize: laneMTU,
 		})
 		if err != nil {
@@ -433,7 +501,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		QUICRecoveryInterval:     cfg.TCPFallback.QUICProbeInterval.Duration(),
 		DirectRendezvousInterval: cfg.Direct.RendezvousInterval.Duration(),
 		Routes:                   routeTable,
-		Packets:                  tunPacketIO{tun},
+		Packets:                  packetIO,
 		PacketPolicy:             packetPolicy,
 		DataPlane:                unifiedDataPlane,
 		CandidateSink:            candidateSink,
@@ -441,6 +509,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		LocalCandidate:           localCandidate,
 		RelayDialer:              relayDialer,
 		RelayAuthority:           relayAuthority,
+		WireGuardRelay:           secureWireGuard,
 		ReconnectInitial:         cfg.Node.ReconnectMin.Duration(),
 		ReconnectMaximum:         cfg.Node.ReconnectMax.Duration(),
 		ForwardPrefixes:          forwardPrefixes,
@@ -481,13 +550,13 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		}
 	}
 	if !options.foreground {
-		fmt.Printf("lanewayd node=%s interface=%s mtu=%d relay=%s\n", local.NodeID, tun.Name(), tun.MTU(), cfg.Node.RelayAddress)
+		fmt.Printf("lanewayd node=%s interface=%s mtu=%d relay=%s\n", local.NodeID, interfaceName, interfaceMTU, cfg.Node.RelayAddress)
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	if options.status != nil {
 		baseStatus := RuntimeStatus{
-			NetworkID: local.NetworkID.String(), NodeID: local.NodeID.String(), Interface: tun.Name(),
+			NetworkID: local.NetworkID.String(), NodeID: local.NodeID.String(), Interface: interfaceName,
 			OverlayAddresses: append([]netip.Prefix(nil), addresses...),
 		}
 		emitStatus := func(path string) {
@@ -541,6 +610,14 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			values["dataplane_path_failures_total"] = dataMetrics.PathFailures
 			values["dataplane_path_switch_retries_total"] = dataMetrics.PathSwitchRetries
 		}
+		if secureWireGuard != nil {
+			wireGuardMetrics := secureWireGuard.RelayMetrics()
+			values["wireguard_packets_sent_total"] = wireGuardMetrics.PacketsSent
+			values["wireguard_packets_received_total"] = wireGuardMetrics.PacketsReceived
+			values["wireguard_packets_dropped_total"] = wireGuardMetrics.PacketsDropped
+			values["wireguard_unknown_sources_total"] = wireGuardMetrics.UnknownSources
+			values["wireguard_unauthorized_peers_total"] = wireGuardMetrics.UnauthorizedPeers
+		}
 		addPathManagerDiagnostics(values, pathManager)
 		values["controller_certificate_renewal_needed"] = 0
 		if controllerState.CertificateRenewalNeeded(time.Now()) {
@@ -564,9 +641,13 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			dataMetrics := unifiedDataPlane.Metrics()
 			packetSent, packetReceived, packetDropped = dataMetrics.PacketsSent, dataMetrics.PacketsReceived, dataMetrics.PacketsDropped
 		}
+		if secureWireGuard != nil {
+			wireGuardMetrics := secureWireGuard.RelayMetrics()
+			packetSent, packetReceived, packetDropped = wireGuardMetrics.PacketsSent, wireGuardMetrics.PacketsReceived, wireGuardMetrics.PacketsDropped
+		}
 		status := localapi.Status{
 			Running: true, NetworkID: local.NetworkID.String(), NodeID: local.NodeID.String(), Name: cfg.Node.Name,
-			Interface: tun.Name(), Relay: cfg.Node.RelayAddress, MTU: tun.MTU(),
+			Interface: interfaceName, Relay: cfg.Node.RelayAddress, MTU: interfaceMTU,
 			ProductVersion: productVersion, ControlVersion: "1.0", PacketVersion: uint8(protocol.PacketVersion1),
 			Capabilities: service.AdvertisedCapabilities().String(), SelectedPath: service.SelectedCarrier(),
 			Metrics: localapi.Metrics{
@@ -616,6 +697,9 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	}}
 	if exitManagers != nil && exitManagers.client != nil {
 		api.SetExit = func(ctx context.Context, selection localapi.ExitSelection) error {
+			if secureWireGuard != nil && selection.Enabled {
+				return errors.New("WireGuard exit selection requires an isolated cryptokey-routing boundary")
+			}
 			var selected identity.NodeID
 			if selection.Enabled {
 				var err error
@@ -665,6 +749,10 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	if unifiedDataPlane != nil {
 		dataMetrics := unifiedDataPlane.Metrics()
 		sent, received, dropped = dataMetrics.PacketsSent, dataMetrics.PacketsReceived, dataMetrics.PacketsDropped
+	}
+	if secureWireGuard != nil {
+		wireGuardMetrics := secureWireGuard.RelayMetrics()
+		sent, received, dropped = wireGuardMetrics.PacketsSent, wireGuardMetrics.PacketsReceived, wireGuardMetrics.PacketsDropped
 	}
 	if !options.foreground {
 		fmt.Printf("lanewayd stopped connections=%d sent=%d received=%d dropped=%d\n",
@@ -1000,6 +1088,24 @@ func applyControllerConfiguration(ctx context.Context, configuration *lanewayv1.
 			next.authorityStatus.relayBypass = append([]netip.Addr(nil), relayBypass...)
 		}
 	}
+	if state.wireGuard != nil {
+		if next.failClosing {
+			next.wireGuard = &wireguard.SecureSnapshot{Firewall: wireguard.FirewallPlan{
+				Epoch: configuration.GetConfigurationEpoch(), LocalNode: local.NodeID,
+				PeerPrefixes: map[identity.NodeID][]netip.Prefix{}, DefaultAction: wireguard.FirewallDeny,
+			}}
+		} else {
+			var selectedExit identity.NodeID
+			if exitManagers != nil {
+				selectedExit = exitManagers.SelectedNode()
+			}
+			preparedWireGuard, prepareErr := prepareWireGuardSnapshot(configuration, local, state.wireGuard.PublicKey(), selectedExit)
+			if prepareErr != nil {
+				return prepareErr
+			}
+			next.wireGuard = &wireguard.SecureSnapshot{Peers: preparedWireGuard.peers, Firewall: preparedWireGuard.firewall}
+		}
+	}
 	if state.accepted != nil && !state.accepted.failClosing && !next.failClosing &&
 		next.configuration.GetConfigurationEpoch() <= state.accepted.configuration.GetConfigurationEpoch() {
 		return fmt.Errorf("controller configuration epoch %d did not advance from %d",
@@ -1011,6 +1117,10 @@ func applyControllerConfiguration(ctx context.Context, configuration *lanewayv1.
 		}
 	}
 	if next.failClosing {
+		var wireGuardErr error
+		if state.wireGuard != nil {
+			wireGuardErr = state.wireGuard.ApplySnapshot(ctx, *next.wireGuard)
+		}
 		state.publishRelayTargets(nil)
 		state.candidateEnabled.Store(false)
 		state.candidateMax.Store(0)
@@ -1020,7 +1130,7 @@ func applyControllerConfiguration(ctx context.Context, configuration *lanewayv1.
 		// cleanup. A stuck route, nftables, DNS, or sysctl owner must never keep
 		// the expired dataplane and policy authorized.
 		routeTable.Replace(next.snapshot)
-		result := policyTable.Replace(next.policy)
+		result := errors.Join(wireGuardErr, policyTable.Replace(next.policy))
 		result = errors.Join(result, subnetManager.DenyForwardPrefixes())
 		result = errors.Join(result, routeManager.Apply(ctx, next.osPlan))
 		result = errors.Join(result, subnetManager.ApplyPlan(ctx, next.subnetPlan))
@@ -1052,9 +1162,25 @@ func applyControllerConfiguration(ctx context.Context, configuration *lanewayv1.
 		}
 		return policyTable.Replace(previousPolicy)
 	}
+	if state.wireGuard != nil {
+		if err := state.wireGuard.ApplyGuard(ctx, next.wireGuard.Firewall); err != nil {
+			return errors.Join(err, restorePreviousPolicy())
+		}
+	}
 	rollback := func(cause error) error {
+		var wireGuardErr error
+		if state.wireGuard != nil {
+			rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if state.accepted != nil && state.accepted.wireGuard != nil {
+				wireGuardErr = state.wireGuard.ApplySnapshot(rollbackCtx, *state.accepted.wireGuard)
+			} else {
+				wireGuardErr = state.wireGuard.RestoreGuard(rollbackCtx)
+			}
+		}
 		return errors.Join(cause,
 			rollbackControllerConfiguration(ctx, state.accepted, bypass, routeManager, subnetManager, ipForwardManager, exitManagers),
+			wireGuardErr,
 			restorePreviousPolicy())
 	}
 	if ipForwardManager != nil {
@@ -1076,6 +1202,11 @@ func applyControllerConfiguration(ctx context.Context, configuration *lanewayv1.
 	if err := subnetManager.PublishPrefixes(next.forwardPrefix); err != nil {
 		return rollback(err)
 	}
+	if state.wireGuard != nil {
+		if err := state.wireGuard.ApplySnapshot(ctx, *next.wireGuard); err != nil {
+			return rollback(err)
+		}
+	}
 	if exitManagers == nil {
 		routeTable.Replace(next.snapshot)
 	}
@@ -1084,9 +1215,7 @@ func applyControllerConfiguration(ctx context.Context, configuration *lanewayv1.
 		if state.accepted != nil {
 			previousPrefixes = state.accepted.forwardPrefix
 		}
-		return errors.Join(err, subnetManager.PublishPrefixes(previousPrefixes),
-			rollbackControllerConfiguration(ctx, state.accepted, bypass, routeManager, subnetManager, ipForwardManager, exitManagers),
-			restorePreviousPolicy())
+		return errors.Join(subnetManager.PublishPrefixes(previousPrefixes), rollback(err))
 	}
 	if exitManagers != nil {
 		if err := exitManagers.SetControllerRelayEndpoints(ctx, next.authorityStatus.relayBypass); err != nil {
@@ -1126,6 +1255,18 @@ type daemonExitManagers struct {
 	pathHealthy           func(identity.NodeID) bool
 	intentStore           *exitIntentStore
 	intentPersisted       bool
+}
+
+func (m *daemonExitManagers) SelectedNode() identity.NodeID {
+	if m == nil {
+		return identity.NodeID{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.enabled {
+		return identity.NodeID{}
+	}
+	return m.selected
 }
 
 func newDaemonExitManagers(cfg config.Config, local identity.NodeIdentity, interfaceName string, bypass []netip.Addr, routeTable *routing.Table,

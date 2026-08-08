@@ -80,6 +80,40 @@ func (m *SecureManager) RunRelay(ctx context.Context, mux *RelayMux) error {
 	return m.manager.RunRelay(ctx, mux)
 }
 
+// ApplyGuard publishes an exact deny-only policy before a caller mutates
+// routes, forwarding, or other native state for the same controller epoch.
+func (m *SecureManager) ApplyGuard(ctx context.Context, plan FirewallPlan) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: missing context", ErrInvalidFirewall)
+	}
+	validated, _, err := compileFirewallPlan(plan)
+	if err != nil {
+		return err
+	}
+	guard := FirewallPlan{Epoch: validated.Epoch, LocalNode: validated.LocalNode, PeerPrefixes: validated.PeerPrefixes,
+		DefaultAction: FirewallDeny, MaxExpandedRules: validated.MaxExpandedRules}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	return m.firewall.Apply(ctx, guard)
+}
+
+// RestoreGuard restores the last committed allow policy, or removes the
+// initial guard when no snapshot has ever committed.
+func (m *SecureManager) RestoreGuard(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("%w: missing context", ErrInvalidFirewall)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	return m.restoreFirewall(ctx)
+}
+
 func (m *SecureManager) ApplySnapshot(ctx context.Context, snapshot SecureSnapshot) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: missing context", ErrInvalidFirewall)
