@@ -59,6 +59,25 @@ sudo install -d -m 0700 -o 65532 -g 65532 generated/backups
 sudo ./bootstrap.sh
 ```
 
+The packaged `./lane` wrapper is the normal operator entry point. `lane init`
+performs the same idempotent validation/bootstrap, `lane status` reports the
+Compose health state, and `lane invite --name DEVICE` issues a single-use token
+through the isolated admin container. `lane backup [NAME.db]` and
+`lane restore NAME.db` use the guarded database maintenance modes documented
+below.
+
+For an upgrade, prepare a complete candidate environment file with the new
+semantic version and four signed manifest digests, leaving deployment identity
+and endpoint values unchanged, then run `sudo ./lane upgrade CANDIDATE.env`.
+The wrapper validates Compose, verifies every image with Cosign against the
+tagged release workflow identity, pulls all images, takes a database backup,
+and only then gracefully stops and recreates the stack. If readiness fails, it
+restores the prior image/config selection and restarts it; database state is
+never independently rolled back. `sudo ./lane rollback` applies the same
+verification and backup sequence to the previously successful selection.
+Runtime rollback metadata is private under `generated/lifecycle` and never
+contains PKI keys or the admin token.
+
 Before the first pull or an upgrade, verify the checksum signature, artifact
 provenance, and image signatures. Replace `VERSION` and each digest with the
 values from the release; do not verify a mutable tag:

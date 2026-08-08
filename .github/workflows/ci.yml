@@ -61,6 +61,7 @@ jobs:
         run: |
           ./integration/compose-config.sh
           ./integration/release-contract.sh
+          ./integration/lane-workflows.sh
       - name: Build pinned release image families
         run: |
           docker build --file deploy/containers/Dockerfile \
