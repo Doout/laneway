@@ -71,6 +71,11 @@ read_setting LANEWAY_CONTROLLER_SERVER_NAME >/dev/null
 read_setting LANEWAY_NETWORK_NAME >/dev/null
 read_setting LANEWAY_IPV4_POOL >/dev/null
 read_setting LANEWAY_RELAY_PUBLIC_ENDPOINT >/dev/null
+backup_recipient=$(read_setting LANEWAY_BACKUP_RECIPIENT)
+if ! printf '%s\n' "$backup_recipient" | grep -Eq '^age1[0-9a-z]{58}$'; then
+  echo "LANEWAY_BACKUP_RECIPIENT must be an age X25519 recipient" >&2
+  exit 1
+fi
 
 for path in \
   generated/config/controller.toml \
@@ -156,7 +161,8 @@ if [ -e "$backup_dir" ] && { [ ! -d "$backup_dir" ] || [ -L "$backup_dir" ]; }; 
   echo "generated/backups must be a real directory" >&2
   exit 1
 fi
-install -d -m 0700 -o 65532 -g 65532 "$backup_dir"
+install -d -m 0700 "$backup_dir"
+chown 65532:65532 "$backup_dir"
 for path in "$backup_dir"/*; do
   [ -e "$path" ] || continue
   if [ ! -f "$path" ] || [ -L "$path" ]; then
@@ -170,6 +176,25 @@ for path in "$backup_dir"/*; do
     exit 1
   fi
 done
+
+recovery_dir=$base_dir/generated/recovery
+if [ -e "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
+  if [ ! -d "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
+    echo "generated/recovery must be a real directory" >&2
+    exit 1
+  fi
+  if [ "$(stat -c '%a:%u:%g' "$recovery_dir")" != 700:0:0 ]; then
+    echo "generated/recovery must be root-owned with mode 0700" >&2
+    exit 1
+  fi
+  for path in "$recovery_dir"/*; do
+    [ -e "$path" ] || continue
+    if [ ! -f "$path" ] || [ -L "$path" ] || [ "$(stat -c '%a:%u:%g' "$path")" != 600:0:0 ]; then
+      echo "recovery bundles must be root-owned regular files with mode 0600: $path" >&2
+      exit 1
+    fi
+  done
+fi
 
 docker compose --project-directory "$base_dir" \
   --env-file "$base_dir/.env" \

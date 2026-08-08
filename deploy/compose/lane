@@ -4,15 +4,36 @@ set -eu
 base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 env_file=$base_dir/.env
 state_dir=$base_dir/generated/lifecycle
+lock_dir=$state_dir/operator.lock
+lock_held=false
 
 usage() {
   cat >&2 <<'EOF'
 usage: ./lane <init|invite|status|backup|restore|upgrade|rollback> [options]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
+  backup [NAME.age]
+  restore BUNDLE.age --identity AGE_IDENTITY_FILE
 EOF
 }
 die() { echo "lane: $*" >&2; exit 1; }
+
+release_lock() {
+  [ "$lock_held" = false ] || [ ! -d "$lock_dir" ] || find "$lock_dir" -maxdepth 0 -delete 2>/dev/null || true
+  lock_held=false
+}
+acquire_lock() {
+  if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || die "generated/lifecycle must be a real directory"
+  fi
+  install -d -m 0700 "$state_dir"
+  mkdir "$lock_dir" 2>/dev/null || die "another lifecycle operation is active (inspect generated/lifecycle/operator.lock if it is stale)"
+  lock_held=true
+  trap release_lock EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
 
 compose() {
   docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
@@ -44,6 +65,8 @@ validate_release_env() {
   for key in LANEWAY_NETWORK_ID LANEWAY_CONTROLLER_SERVICE_ID LANEWAY_RELAY_SERVICE_ID LANEWAY_CONTROLLER_SERVER_NAME LANEWAY_NETWORK_NAME LANEWAY_IPV4_POOL LANEWAY_RELAY_PUBLIC_ENDPOINT; do
     read_setting "$file" "$key" >/dev/null
   done
+  recipient=$(read_setting "$file" LANEWAY_BACKUP_RECIPIENT)
+  printf '%s\n' "$recipient" | grep -Eq '^age1[0-9a-z]{58}$' || die "LANEWAY_BACKUP_RECIPIENT must be an age X25519 recipient"
   if [ "$file" != "$env_file" ] && [ -f "$env_file" ]; then
     for key in \
       LANEWAY_BIND_ADDRESS LANEWAY_CONTROLLER_PORT LANEWAY_RELAY_QUIC_PORT \
@@ -76,15 +99,7 @@ verify_release_images() {
   done
 }
 
-validate_backup_name() {
-  name=$1
-  case "$name" in ''|.*|*/*|*[!A-Za-z0-9._-]*|*.db.*) die "backup name must be a simple NAME.db" ;; esac
-  case "$name" in *.db) ;; *) die "backup name must end in .db" ;; esac
-}
-backup_database() {
-  name=$1; validate_backup_name "$name"; "$base_dir/validate.sh"
-  compose run --rm --no-deps controller -config /etc/laneway/controller.toml -backup "/backups/$name"
-}
+backup_recovery() { "$base_dir/recovery.sh" backup "$1"; }
 admin() { compose --profile tools run --rm --no-deps admin "$@"; }
 
 service_health() {
@@ -176,15 +191,16 @@ atomic_copy() {
     [ -f "$destination" ] && [ ! -L "$destination" ] || die "refusing to replace non-regular state: $destination"
   fi
   temporary=$(mktemp "$directory/.lane-env.XXXXXX")
-  trap 'find "$temporary" -maxdepth 0 -delete 2>/dev/null || true' EXIT HUP INT TERM
-  cp "$source" "$temporary"; chmod 0600 "$temporary"; mv "$temporary" "$destination"
-  trap - EXIT HUP INT TERM
+  if ! cp "$source" "$temporary" || ! chmod 0600 "$temporary" || ! mv "$temporary" "$destination"; then
+    find "$temporary" -maxdepth 0 -delete 2>/dev/null || true
+    die "cannot publish release environment: $destination"
+  fi
 }
 
 activate_release() {
   candidate=$1; operation=$2
   validate_release_env "$candidate"; verify_release_images "$candidate"; compose_with_env "$candidate" pull
-  backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).db"; backup_database "$backup_name"
+  backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).age"; backup_recovery "$backup_name"
   if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
     [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || die "generated/lifecycle must be a real directory"
   fi
@@ -204,14 +220,14 @@ activate_release() {
   if "$base_dir/validate.sh" && compose up -d --wait controller relay; then
     [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node
     atomic_copy "$current_copy" "$state_dir/previous.env"
-    echo "lane: $operation complete; backup: generated/backups/$backup_name"
+    echo "lane: $operation complete; backup: generated/recovery/$backup_name"
     return
   fi
   echo "lane: $operation failed; restoring previous images/config" >&2
   atomic_copy "$current_copy" "$env_file"
   compose up -d --wait controller relay || true
   [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node || true
-  die "$operation failed; database was not rolled back; backup: generated/backups/$backup_name"
+  die "$operation failed; database was not rolled back; backup: generated/recovery/$backup_name"
 }
 
 run_init() {
@@ -219,7 +235,8 @@ run_init() {
     --dev)
       [ "$#" -eq 1 ] || die "init accepts only --dev"
       "$base_dir/preflight.sh" --dev
-      exec "$base_dir/bootstrap.sh" --dev
+      "$base_dir/bootstrap.sh" --dev
+      return
       ;;
     --issuer)
       [ "$#" -eq 2 ] || die "init --issuer requires one offline issuer directory"
@@ -232,24 +249,23 @@ run_init() {
   validate_release_env "$env_file"
   verify_release_images "$env_file"
   compose pull
-  exec "$base_dir/bootstrap.sh"
+  "$base_dir/bootstrap.sh"
 }
 
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 case "$command" in
-  init) run_init "$@" ;;
+  init) acquire_lock; run_init "$@" ;;
   invite) run_invite "$@" ;;
   status) run_status "$@" ;;
-  backup) [ "$#" -le 1 ] || die "backup accepts one name"; backup_database "${1:-controller-$(date -u +%Y%m%dT%H%M%SZ).db}" ;;
+  backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
   restore)
-    [ "$#" -eq 1 ] || die "restore requires one backup name"; validate_backup_name "$1"
-    [ -f "$base_dir/generated/backups/$1" ] && [ ! -L "$base_dir/generated/backups/$1" ] || die "backup does not exist"
-    [ -z "$(compose ps --status running -q controller)" ] || die "restore requires a stopped controller"
-    "$base_dir/validate.sh"
-    compose run --rm --no-deps controller -config /etc/laneway/controller.toml -restore "/backups/$1"
+    acquire_lock
+    [ "$#" -eq 3 ] && [ "$2" = --identity ] || die "restore requires BUNDLE.age --identity AGE_IDENTITY_FILE"
+    "$base_dir/recovery.sh" restore "$1" "$3"
     ;;
-  upgrade) [ "$#" -eq 1 ] || die "upgrade requires CANDIDATE.env"; activate_release "$1" upgrade ;;
+  upgrade) acquire_lock; [ "$#" -eq 1 ] || die "upgrade requires CANDIDATE.env"; activate_release "$1" upgrade ;;
   rollback)
+    acquire_lock
     [ "$#" -eq 0 ] || die "rollback accepts no arguments"
     [ -f "$state_dir/previous.env" ] && [ ! -L "$state_dir/previous.env" ] || die "no previous release is available"
     candidate=$state_dir/rollback-candidate.env; atomic_copy "$state_dir/previous.env" "$candidate"; activate_release "$candidate" rollback

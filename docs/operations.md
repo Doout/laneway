@@ -615,16 +615,19 @@ and follow `deploy/nftables/README.md`; delete only residue whose provenance is
 confirmed. Restore DNS with `resolvectl revert lane0` if the interface still
 exists, and compare routes and forwarding with the site's documented baseline.
 
-For upgrades, retain the database and credentials and use the controller's
-`-backup` maintenance mode to take a SQLite online backup. It opens the source
-read-only, checks integrity, schema history, required tables, and foreign keys,
-then atomically publishes a mode-`0600` snapshot without overwriting. The
-`-restore` mode requires the controller lifecycle lock and creates only a
-missing database, so it cannot replace live or foreign state. The exact Compose
-commands and offline key/configuration backup boundary are documented in
-`deploy/compose/README.md`. Deploy relay/controller first, then roll nodes. Keep
-the previous binaries and configuration available for rollback; never roll
-back the database independently of migrations without a tested backup.
+For Compose upgrades and disaster recovery, configure an off-host age X25519
+recipient and use `sudo ./lane backup`. It takes a validated SQLite online
+snapshot and encrypts it together with the exact pinned release environment,
+configuration, online intermediate, service identities, and admin token. The
+root-owned final bundle is isolated from the controller-writable staging
+directory and must be copied to separately controlled storage. `lane restore
+BUNDLE.age --identity FILE` is fresh-state only: it rejects unexpected archive
+types/paths, checksum failures, existing files, a running controller, and an
+existing database. The private age identity and offline root key remain
+off-host except for the short, operator-controlled restore window. The exact
+procedure is documented in `deploy/compose/README.md`. Deploy relay/controller
+first, then roll nodes. Never roll back the database independently of migrations
+without a tested matching bundle.
 
 For a new Compose control plane, create the root and intermediate on an offline
 workstation. Transfer only `ca.crt`, the issuer-first

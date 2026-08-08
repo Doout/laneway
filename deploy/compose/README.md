@@ -12,6 +12,7 @@ images from this checkout.
 ## Prerequisites
 
 - Docker Engine 26 or newer with Compose v2
+- `age` and `age-keygen` for encrypted recovery bundles
 - public DNS for the control host
 - inbound TCP+UDP 8443, UDP 4433, and TCP 443
 - an offline root and an exported online-intermediate bundle created as
@@ -43,6 +44,16 @@ key or unexpected private key in the export is rejected. Repeating the command
 with the same completed material is idempotent; partial generated state is
 rejected for manual inspection.
 
+Create the recovery identity on a separate trusted workstation and keep its
+private file off the control host. Put the printed public recipient in `.env`
+as `LANEWAY_BACKUP_RECIPIENT`:
+
+```sh
+age-keygen -o laneway-recovery.identity
+age-keygen -y laneway-recovery.identity
+chmod 0400 laneway-recovery.identity
+```
+
 Copy `.env.example` to `.env` and pin a release. Download that release's
 `image-digests.txt`, verify the release as described below, and copy each
 service's immutable `sha256:` manifest digest into `.env`. Compose retains the
@@ -71,8 +82,9 @@ the example TOML files without their `.example` suffix, replace every
 Public certificates and configurations are world-readable *inside the dedicated
 deployment directory* because the fixed container UID must read bind mounts;
 the deployment and generated configuration directories MUST be root-owned mode
-`0700`. The backup directory is the exception: it is UID 65532-owned mode
-`0700`, and each snapshot is UID 65532-owned mode `0600`. Private keys and the
+`0700`. The database staging directory is the exception: it is UID 65532-owned
+mode `0700`. Encrypted long-term bundles are written to root-owned mode-`0700`
+`generated/recovery`, outside the controller's writable mount. Private keys and the
 admin token MUST be owned by UID 65532 and mode `0400`. Do not grant another
 host account traversal permission. The validator rejects symlinks, incorrect
 modes, and incorrectly owned secrets or backups.
@@ -81,7 +93,8 @@ modes, and incorrectly owned secrets or backups.
 cd deploy/compose
 sudo chown root:root . generated generated/pki generated/secrets generated/config
 sudo chmod 0700 . generated generated/pki generated/secrets generated/config
-sudo install -d -m 0700 -o 65532 -g 65532 generated/backups
+sudo install -d -m 0700 generated/backups
+sudo chown 65532:65532 generated/backups
 sudo ./bootstrap.sh
 ```
 
@@ -89,9 +102,9 @@ The packaged `./lane` wrapper is the normal operator entry point. `lane init`
 performs idempotent validation/bootstrap. `lane status` reports controller,
 relay, limiter, optional Exit Node, and live Exit direct-path health, and exits
 nonzero for an unhealthy required service. `lane invite --name DEVICE` issues a single-use token
-through the isolated admin container. `lane backup [NAME.db]` and
-`lane restore NAME.db` use the guarded database maintenance modes documented
-below.
+through the isolated admin container. `sudo lane backup [NAME.age]` creates a
+complete encrypted recovery bundle, and `sudo lane restore BUNDLE.age
+--identity FILE` performs a guarded fresh-state restore as documented below.
 
 For an upgrade, prepare a complete candidate environment file with the new
 semantic version and four signed manifest digests, leaving deployment identity
@@ -186,35 +199,39 @@ an abrupt stop Docker destroys the namespace, so no Laneway network state can
 remain on the host. The persistent volume contains only credentials-independent
 runtime state and may be retained across container recreation.
 
-Never expose diagnostics ports. Copying a live SQLite file is not a valid
-backup. Create a consistent, private snapshot while the controller is running:
+Never expose diagnostics ports. Copying a live SQLite file or separately
+copying credentials is not a valid recovery procedure. Create a consistent,
+encrypted bundle while the controller is running:
 
 ```sh
-backup="controller-$(date -u +%Y%m%dT%H%M%SZ).db"
-sudo docker compose run --rm --no-deps controller \
-  -config /etc/laneway/controller.toml -backup "/backups/$backup"
-sudo test "$(stat -c %a "generated/backups/$backup")" = 600
+sudo ./lane backup
+sudo ls -l generated/recovery/recovery-*.age
 ```
 
-The command validates SQLite integrity, foreign keys, and schema before it
-atomically publishes the backup. It never overwrites an existing path. Preserve
-the matching `.env` and `generated/config`, `generated/pki`, and
-`generated/secrets` directories through an encrypted offline backup; they are
-not bundled with the database because that would place private keys beside an
-online snapshot.
+The command takes an online SQLite snapshot, validates the deployment, bundles
+the matching `.env`, strict configuration, online intermediate, service
+identities, admin token, and optional Exit identity, hashes every entry, and
+encrypts the result to the off-host age recipient. The temporary database
+staging area is controller-writable, but the final bundle is a root-owned
+mode-`0600` file in `generated/recovery`. It never includes the offline root key
+and never overwrites an existing path. Copy completed bundles to separately
+controlled storage; do not treat the VPS copy as a backup.
 
 Restore is deliberately fresh-state only. On a replacement host, install the
-matching configuration and secrets, leave the controller volume empty, copy the
-database backup to `generated/backups`, then run:
+same signed Laneway release into a deployment directory with no `.env`, no
+generated credentials, and an empty controller volume. Transfer one encrypted
+bundle plus the age identity through separate trusted channels, then run:
 
 ```sh
-backup=controller-YYYYmmddTHHMMSSZ.db
-sudo ./validate.sh
-sudo docker compose run --rm --no-deps controller \
-  -config /etc/laneway/controller.toml -restore "/backups/$backup"
-sudo docker compose up -d --wait controller relay
+sudo ./lane restore /trusted/control-recovery.age \
+  --identity /trusted/laneway-recovery.identity
+sudo ./lane init
 ```
 
-Restore validates the source and refuses to replace an existing database. This
-prevents an operator typo from mutating a running deployment. Host firewall
-rules remain operator-owned and are intentionally not modified by Compose.
+Restore accepts only the fixed versioned file set, rejects duplicate,
+unexpected, non-regular, partial, or checksum-invalid archive entries, restores
+the fixed UID/modes, and refuses a running controller, existing deployment
+file, symlink, or existing database. On failure, newly published files are
+removed. `lane init` then re-verifies immutable image digests and signatures
+before starting the ready stack. Neither command changes host firewall rules,
+routes, interfaces, or DNS configuration.

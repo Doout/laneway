@@ -27,6 +27,7 @@ case "$server_major" in ''|*[!0-9]*) die "cannot parse Docker Engine version: $s
 [ "$server_major" -ge 26 ] || die "Docker Engine 26 or newer is required (found $server_version)"
 
 if [ "$dev" = false ]; then
+  command -v age >/dev/null 2>&1 || die "age is required for encrypted recovery bundles"
   command -v getent >/dev/null 2>&1 || die "getent is required for DNS validation"
   for hostname in "$(read_setting LANEWAY_CONTROLLER_SERVER_NAME)" "$(read_setting LANEWAY_RELAY_PUBLIC_ENDPOINT)"; do
     hostname=${hostname%:*}

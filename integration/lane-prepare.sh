@@ -48,6 +48,10 @@ cat > "$fake_bin/cosign" <<'EOF'
 set -eu
 printf 'cosign <%s>\n' "$*" >> "$LANE_TEST_LOG"
 EOF
+cat > "$fake_bin/age" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
 cat > "$fake_bin/laneway" <<'EOF'
 #!/bin/sh
 set -eu
@@ -75,7 +79,7 @@ case "${1:-} ${2:-}" in
   *) exit 1 ;;
 esac
 EOF
-chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$fake_bin/docker" "$fake_bin/cosign" "$fake_bin/laneway" "$fake_bin/getent" "$fake_bin/ss"
+chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$fake_bin/docker" "$fake_bin/cosign" "$fake_bin/laneway" "$fake_bin/getent" "$fake_bin/ss" "$fake_bin/age"
 
 cat > "$compose_dir/.env" <<'EOF'
 LANEWAY_VERSION=1.0.0
@@ -95,6 +99,7 @@ LANEWAY_RELAY_SERVICE_ID=33333333333333333333333333333333
 LANEWAY_NETWORK_NAME=production
 LANEWAY_IPV4_POOL=100.96.0.0/16
 LANEWAY_RELAY_PUBLIC_ENDPOINT=relay.example.test:4433
+LANEWAY_BACKUP_RECIPIENT=age1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
 chmod 0600 "$compose_dir/.env"
 export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log"

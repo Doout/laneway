@@ -14,7 +14,10 @@ cleanup() {
   fi
   [ -z "$staging" ] || [ ! -e "$staging" ] || find "$staging" -depth -delete
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 die() { echo "lane prepare: $*" >&2; exit 1; }
 
