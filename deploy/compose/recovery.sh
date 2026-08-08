@@ -17,7 +17,9 @@ cleanup_database_snapshot() {
   # after the encrypted bundle is published or an operation fails.
   for suffix in '' -wal -shm -journal; do
     path=$database_snapshot$suffix
-    [ ! -e "$path" ] && [ ! -L "$path" ] || find "$path" -maxdepth 0 -delete
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      find "$path" -maxdepth 0 -delete
+    fi
   done
   database_snapshot=
 }
