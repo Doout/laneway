@@ -152,7 +152,7 @@ func compileFirewallPlan(input FirewallPlan) (FirewallPlan, []firewallStatement,
 		if rule.Action != FirewallAccept && rule.Action != FirewallDeny {
 			return FirewallPlan{}, nil, fmt.Errorf("%w: invalid action", ErrInvalidFirewall)
 		}
-		if rule.Protocol != 256 && (rule.Protocol < 1 || rule.Protocol > 255) {
+		if rule.Protocol != 1 && rule.Protocol != 6 && rule.Protocol != 17 && rule.Protocol != 58 && rule.Protocol != 256 {
 			return FirewallPlan{}, nil, fmt.Errorf("%w: invalid protocol", ErrInvalidFirewall)
 		}
 		if len(rule.DestinationPorts) != 0 && rule.Protocol != 6 && rule.Protocol != 17 && rule.Protocol != 256 {
