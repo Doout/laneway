@@ -116,3 +116,40 @@ capabilities first and archives its complete log plus runner/tool versions.
 The Go job additionally archives the kernel-datapath benchmark JSONL.
 These suites are not required on pull requests because hosted-runner kernel
 capabilities are outside the unit-test contract.
+
+## Isolated Docker Exit lifecycle
+
+`docker-exit-node.sh` is the clean-host Docker gate for the default Exit image.
+It builds the pinned controller, relay, administrative, and Exit images; creates
+uniquely labelled Docker networks and state volumes; enrolls a client and Exit
+with the real controller; grants and approves the Exit capability/default
+route; and verifies fixed-port direct traffic plus capped-relay fallback. A
+second disposable NAT container proves the documented bridge/double-NAT source
+translation at an Internet-side application. The gate also checks the 1200-byte
+TUN MTU, graceful restart, `SIGKILL` restart, controller health during direct
+failure, and exact restoration of the host routes, stateless nftables rules,
+and all pre-existing Docker containers/networks/volumes.
+
+Every resource deletion is preceded by a matching, unguessable ownership-label
+check. Temporary enrollment/admin secrets live only in a mode-0600 temporary
+directory that is deleted rather than archived. Failure logs are bounded and
+redact token-shaped fields. Do not run this gate on a shared Docker host:
+
+```sh
+sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-exit-node.sh
+```
+
+The scheduled workflow executes it independently on native Linux AMD64 and
+ARM64 runners. The matrix as a whole covers:
+
+| Requirement | Executable gate |
+| --- | --- |
+| Node↔Node, User→Node, User→Exit, Node→Exit; direct and relay | `fullstack-netns.sh` WireGuard and foreground cases |
+| QUIC failure → TCP fallback → QUIC recovery | `fullstack-netns.sh` stable WireGuard carrier case |
+| Relay saturation with healthy control/rendezvous | Docker Exit saturation/re-promotion case and relay limiter unit tests |
+| Open/cone-like, restrictive, UDP-blocked, and double NAT | direct same-switch; `direct-nat`; peer-UDP filter; TCP fallback; Docker Exit double-NAT gate |
+| Exit bridge forwarding, NAT, MTU, graceful/crash restart | `docker-exit-node.sh` |
+| User Ctrl-C/SIGTERM/SIGKILL and reconciliation | foreground connect case and helper namespace tests |
+| Upgrade, backup, restore, rollback, removal | `lane-workflows.sh`, `lane-recovery.sh`, node lifecycle tests |
+| AMD64/ARM64 and Go/Rust interoperability | Docker Exit native-arch jobs, release/architecture workflows, `rust-node-interop.sh` |
+| Foreign-state preservation and secret-safe diagnostics | exact namespace/Docker ownership assertions and bounded workflow artifacts |
