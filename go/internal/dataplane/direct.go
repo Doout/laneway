@@ -62,6 +62,7 @@ type DirectConfig struct {
 	ProbeInterval      time.Duration
 	ProbeTimeout       time.Duration
 	DialOptions        directpath.DialOptions
+	ReportFailure      func(error)
 }
 
 type storedCandidates struct {
@@ -336,7 +337,9 @@ func (c *DirectController) Run(ctx context.Context) error {
 			}
 			return err
 		case request := <-c.requests:
-			_ = c.ProbeAndConnect(ctx, request.peer, request.token, request.start)
+			if err := c.ProbeAndConnect(ctx, request.peer, request.token, request.start); err != nil && c.config.ReportFailure != nil {
+				c.config.ReportFailure(err)
+			}
 		}
 	}
 }

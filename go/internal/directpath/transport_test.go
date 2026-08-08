@@ -329,6 +329,39 @@ func TestCandidateEndpointReservationPrecedesDirectHandshake(t *testing.T) {
 	}
 }
 
+func TestReadProbeSkipsStaleRendezvousPacket(t *testing.T) {
+	authority := newTestAuthority(t)
+	network := testNetwork(t, "000102030405060708090a0b0c0d0e0f")
+	a := identity.NodeIdentity{NetworkID: network, NodeID: testNode(t, "101112131415161718191a1b1c1d1e1f")}
+	b := identity.NodeIdentity{NetworkID: network, NodeID: testNode(t, "202122232425262728292a2b2c2d2e2f")}
+	endpointA := newTestEndpoint(t, a, credentialsForNode(t, authority, a))
+	endpointB := newTestEndpoint(t, b, credentialsForNode(t, authority, b))
+	candidateA := endpointCandidate(t, endpointA, a.NodeID)
+	candidateB := endpointCandidate(t, endpointB, b.NodeID)
+
+	var stale, current ProbeToken
+	stale[0], current[0] = 1, 2
+	for _, token := range []ProbeToken{stale, current} {
+		request, err := (ProbePacket{Token: token, Sender: a.NodeID, Recipient: b.NodeID}).MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := endpointA.ProbeWriter().WriteTo(request, net.UDPAddrFromAddrPort(candidateB.Address)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	source, err := endpointB.ReadProbe(ctx, a.NodeID, current, []Candidate{candidateA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source != candidateA.Address {
+		t.Fatalf("probe source = %s, want %s", source, candidateA.Address)
+	}
+}
+
 func TestDirectTransportRejectsCrossNetworkAndExactNodeMismatch(t *testing.T) {
 	authority := newTestAuthority(t)
 	networkA := testNetwork(t, "000102030405060708090a0b0c0d0e0f")
