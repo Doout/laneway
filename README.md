@@ -55,6 +55,19 @@ The native Rust implementations remain available as
 
 ## Quick start: join a managed network
 
+For a temporary foreground User session, ask an administrator for an
+ephemeral invite and run one command. The enrollment code is prompted for on
+the terminal with echo disabled, so it does not enter shell history or argv:
+
+```bash
+laneway connect lane.example.com
+```
+
+The session authenticates public bootstrap metadata, pins the private network
+and service identities, uses only controller-authorized routes, and restores
+its temporary networking when it exits. Administrators create the bounded,
+single-use code on the controller with `lane invite --name laptop --ephemeral`.
+
 Get the public Laneway domain and a durable Node invite from your administrator.
 Save the one-time code in a protected file. One command authenticates discovery,
 binds enrollment to the discovered network and durable-node class, discovers

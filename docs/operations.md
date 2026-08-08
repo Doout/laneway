@@ -69,7 +69,7 @@ the enrollment endpoint applies a bounded per-source token bucket.
 On a clean Linux AMD64 or ARM64 client:
 
 ```sh
-laneway join lane.example.com
+laneway connect lane.example.com
 ```
 
 The client obtains metadata using TLS 1.3 and the host system's public roots,
@@ -80,8 +80,10 @@ does not repeat it and a substitution attempt leaves the code unused. For
 non-interactive provisioning, pass a mode-0600 `--token-file`;
 the bootstrap flow rejects codes in argv. It also refuses endpoint/pin
 overrides and sends the authenticated expected NetworkID so a wrong-network
-code is rejected before consumption. The older many-flag `join` form remains
-the explicit migration/debug path.
+code is rejected before consumption. `connect` runs the User session in the
+foreground and transactionally restores its temporary interface, routes, and
+DNS state when it exits. The older many-flag `join` form remains the advanced
+explicit enrollment path for migration, debugging, and automation.
 
 Artifact downloaders must stream into an unprivileged temporary file, enforce
 the authenticated `size_bytes`, and call the same SHA-256 verification logic
