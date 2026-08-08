@@ -24,23 +24,31 @@ die() { echo "lane prepare: $*" >&2; exit 1; }
 read_setting() {
   key=$1
   value=$(sed -n "s/^${key}=//p" "$env_file")
-  [ -n "$value" ] && [ "$(printf '%s\n' "$value" | wc -l)" -eq 1 ] || die "missing or duplicate $key in .env"
+  if [ -z "$value" ] || [ "$(printf '%s\n' "$value" | wc -l)" -ne 1 ]; then
+    die "missing or duplicate $key in .env"
+  fi
   case "$value" in *[!A-Za-z0-9._:/-]*) die "$key contains an unsafe character" ;; esac
   printf '%s' "$value"
 }
 
 require_regular() {
-  [ -f "$1" ] && [ ! -L "$1" ] || die "required issuer file is missing or unsafe: $1"
+  if [ ! -f "$1" ] || [ -L "$1" ]; then
+    die "required issuer file is missing or unsafe: $1"
+  fi
 }
 
 [ "$#" -eq 1 ] || die "usage: prepare.sh ISSUER_DIRECTORY"
 [ "$(id -u)" -eq 0 ] || die "run as root so fixed container ownership can be installed safely"
 command -v laneway >/dev/null 2>&1 || die "the signed laneway binary must be installed"
-[ -f "$env_file" ] && [ ! -L "$env_file" ] || die ".env must be a regular, non-symlink file"
+if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then
+  die ".env must be a regular, non-symlink file"
+fi
 
 issuer_dir=$(CDPATH='' cd -- "$1" && pwd)
 case "$issuer_dir" in "$base_dir"|"$base_dir"/*) die "issuer material must be staged outside the deployment directory" ;; esac
-[ ! -e "$issuer_dir/ca.key" ] && [ ! -L "$issuer_dir/ca.key" ] || die "offline root private key ca.key must never be copied to the control host"
+if [ -e "$issuer_dir/ca.key" ] || [ -L "$issuer_dir/ca.key" ]; then
+  die "offline root private key ca.key must never be copied to the control host"
+fi
 for name in ca.crt intermediate-chain.crt intermediate.key; do require_regular "$issuer_dir/$name"; done
 for path in "$issuer_dir"/*.key; do
   [ -e "$path" ] || continue
@@ -64,7 +72,9 @@ present=0
 missing=0
 for path in $targets; do
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -f "$path" ] && [ ! -L "$path" ] || die "refusing unsafe existing state: $path"
+    if [ ! -f "$path" ] || [ -L "$path" ]; then
+      die "refusing unsafe existing state: $path"
+    fi
     present=$((present + 1))
   else
     missing=$((missing + 1))
@@ -92,7 +102,9 @@ case "$relay_name" in ''|*:*|*[!A-Za-z0-9.-]*) die "relay endpoint must use a DN
 
 for directory in "$base_dir/generated" "$base_dir/generated/config" "$base_dir/generated/pki" "$base_dir/generated/secrets"; do
   if [ -e "$directory" ] || [ -L "$directory" ]; then
-    [ -d "$directory" ] && [ ! -L "$directory" ] || die "generated path must be a real directory: $directory"
+    if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+      die "generated path must be a real directory: $directory"
+    fi
   fi
 done
 install -d -m 0700 -o 0 -g 0 "$base_dir/generated" "$base_dir/generated/config" \

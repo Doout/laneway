@@ -120,9 +120,10 @@ for relative in \
   generated/pki/ca.crt generated/pki/intermediate-chain.crt generated/pki/intermediate.key \
   generated/pki/controller.crt generated/pki/controller.key generated/pki/relay.crt generated/pki/relay.key \
   generated/pki/exit-node.crt generated/pki/exit-node.key generated/secrets/admin.token; do
-  [ -f "$fresh_dir/$relative" ] && [ ! -L "$fresh_dir/$relative" ] || {
-    echo "fresh restore omitted $relative" >&2; exit 1;
-  }
+  if [ ! -f "$fresh_dir/$relative" ] || [ -L "$fresh_dir/$relative" ]; then
+    echo "fresh restore omitted $relative" >&2
+    exit 1
+  fi
 done
 [ "$(stat -c '%a:%u:%g' "$fresh_dir/generated/pki/intermediate.key")" = 400:65532:65532 ]
 [ "$(stat -c '%a:%u:%g' "$fresh_dir/generated/config/controller.toml")" = 444:0:0 ]

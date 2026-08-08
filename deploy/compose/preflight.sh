@@ -11,7 +11,9 @@ die() { echo "Laneway preflight: $*" >&2; exit 1; }
 read_setting() {
   key=$1
   value=$(sed -n "s/^${key}=//p" "$env_file")
-  [ -n "$value" ] && [ "$(printf '%s\n' "$value" | wc -l)" -eq 1 ] || die "missing or duplicate $key in .env"
+  if [ -z "$value" ] || [ "$(printf '%s\n' "$value" | wc -l)" -ne 1 ]; then
+    die "missing or duplicate $key in .env"
+  fi
   case "$value" in *[!A-Za-z0-9._:/-]*) die "$key contains an unsafe character" ;; esac
   printf '%s' "$value"
 }
@@ -41,7 +43,9 @@ if [ -z "$owned" ]; then
   check_port() {
     protocol=$1; port=$2
     case "$port" in ''|*[!0-9]*) die "invalid $protocol port: $port" ;; esac
-    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "invalid $protocol port: $port"
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      die "invalid $protocol port: $port"
+    fi
     case "$protocol" in tcp) flag=-ltn ;; udp) flag=-lun ;; esac
     listeners=$(ss -H "$flag" "sport = :$port") || die "cannot inspect $protocol port $port"
     if [ -n "$listeners" ]; then
