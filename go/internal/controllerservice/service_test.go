@@ -479,6 +479,43 @@ func TestEphemeralEnrollmentCertificateAndResponseAreLeaseBound(t *testing.T) {
 	}
 }
 
+func TestEphemeralCertificateAllowsBoundedClockSkewWithoutExtendingLease(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	now := time.Now().UTC().Truncate(time.Second)
+	lease := now.Add(controller.MinEphemeralLifetime)
+	f.service.now = func() time.Time { return now }
+	csr, err := x509.ParseCertificateRequest(csrDER(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := controller.Node{
+		ID: identity.NodeID{1}, NetworkID: f.network.ID, Name: "clock-skew-user",
+		EnrollmentClass: controller.EnrollmentClassEphemeral, LeaseExpiresAt: &lease,
+	}
+	certificate, err := f.service.issueCertificate(node, csr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := now.Add(-time.Minute); !certificate.NotBefore.Equal(want) {
+		t.Fatalf("certificate NotBefore=%s want bounded skew start %s", certificate.NotBefore, want)
+	}
+	if !certificate.NotAfter.Equal(lease) {
+		t.Fatalf("certificate NotAfter=%s want immutable lease %s", certificate.NotAfter, lease)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(f.service.ca)
+	if _, err := certificate.Verify(x509.VerifyOptions{
+		Roots: roots, CurrentTime: now.Add(-30 * time.Second), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		t.Fatalf("certificate rejected bounded 30-second clock skew: %v", err)
+	}
+	if _, err := certificate.Verify(x509.VerifyOptions{
+		Roots: roots, CurrentTime: now.Add(-61 * time.Second), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err == nil {
+		t.Fatal("certificate accepted clock skew beyond the one-minute bound")
+	}
+}
+
 func TestEnrollmentSigningFailureRollsBackTokenNodeAndAddress(t *testing.T) {
 	f := newFixture(t, DefaultMaxBodyBytes, nil)
 	token := issueToken(t, f, time.Now().Add(time.Hour))
