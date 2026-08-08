@@ -28,13 +28,14 @@ jobs:
           go test ./...
           go vet ./...
       - name: Check scripts
-        run: shellcheck install.sh scripts/*.sh deploy/compose/*.sh integration/release-contract.sh
+        run: shellcheck install.sh scripts/*.sh deploy/compose/*.sh deploy/compose/lane integration/release-contract.sh integration/lane-workflows.sh
       - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
           printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           test "$GITHUB_REF_TYPE" = tag
           ./integration/release-contract.sh
+          ./integration/lane-workflows.sh
 
   package:
     name: Linux ${{ matrix.arch }} package

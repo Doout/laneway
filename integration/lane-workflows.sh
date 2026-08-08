@@ -1,0 +1,135 @@
+#!/bin/sh
+set -eu
+
+repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+test_dir=$(mktemp -d)
+trap 'find "$test_dir" -depth -delete' EXIT HUP INT TERM
+compose_dir=$test_dir/compose
+fake_bin=$test_dir/bin
+log=$test_dir/calls.log
+mkdir -p "$compose_dir/generated/backups" "$fake_bin"
+cp "$repo_dir/deploy/compose/lane" "$compose_dir/lane"
+chmod 0755 "$compose_dir/lane"
+: > "$compose_dir/compose.yaml"
+: > "$log"
+
+cat > "$compose_dir/validate.sh" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' validate >> "$LANE_TEST_LOG"
+EOF
+cat > "$compose_dir/bootstrap.sh" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s\n' bootstrap >> "$LANE_TEST_LOG"
+EOF
+cat > "$fake_bin/docker" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'docker' >> "$LANE_TEST_LOG"
+printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
+printf '\n' >> "$LANE_TEST_LOG"
+case " $* " in
+  *" ps --status running -q controller "*) [ "${LANE_TEST_CONTROLLER_RUNNING:-0}" = 0 ] || printf 'controller-id\n' ;;
+  *" ps --status running -q exit-node "*) [ "${LANE_TEST_EXIT_RUNNING:-0}" = 0 ] || printf 'exit-id\n' ;;
+  *" up -d --wait controller relay "*) [ "${LANE_TEST_FAIL_UP:-0}" = 0 ] || exit 1 ;;
+esac
+EOF
+cat > "$fake_bin/cosign" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'cosign' >> "$LANE_TEST_LOG"
+printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
+printf '\n' >> "$LANE_TEST_LOG"
+EOF
+chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$fake_bin/docker" "$fake_bin/cosign"
+
+write_env() {
+  path=$1; version=$2; digit=$3
+  cat > "$path" <<EOF
+LANEWAY_VERSION=$version
+LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
+LANEWAY_RELAY_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
+LANEWAY_ADMIN_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
+LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
+LANEWAY_BIND_ADDRESS=127.0.0.1
+LANEWAY_CONTROLLER_PORT=8443
+LANEWAY_RELAY_QUIC_PORT=4433
+LANEWAY_RELAY_TCP_PORT=443
+LANEWAY_EXIT_DIRECT_PORT=4434
+LANEWAY_CONTROLLER_SERVER_NAME=lane.example.test
+LANEWAY_NETWORK_ID=11111111111111111111111111111111
+LANEWAY_CONTROLLER_SERVICE_ID=22222222222222222222222222222222
+LANEWAY_RELAY_SERVICE_ID=33333333333333333333333333333333
+LANEWAY_NETWORK_NAME=production
+LANEWAY_IPV4_POOL=100.96.0.0/16
+LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433
+EOF
+  chmod 0600 "$path"
+}
+
+write_env "$compose_dir/.env" 1.0.0 1
+candidate=$test_dir/candidate.env
+write_env "$candidate" 1.1.0 2
+export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log"
+
+"$compose_dir/lane" init
+[ "$(grep -c '^cosign ' "$log")" -eq 4 ]
+pull_line=$(grep -n '<pull>' "$log" | tail -1 | cut -d: -f1)
+bootstrap_line=$(grep -n '^bootstrap$' "$log" | tail -1 | cut -d: -f1)
+[ "$pull_line" -lt "$bootstrap_line" ] || { echo "init bootstrapped before verified pull" >&2; exit 1; }
+: > "$log"
+
+"$compose_dir/lane" status
+grep -F '<ps>' "$log" >/dev/null
+
+"$compose_dir/lane" backup manual.db
+grep -F '<-backup> </backups/manual.db>' "$log" >/dev/null
+if "$compose_dir/lane" backup ../escape.db >/dev/null 2>&1; then
+  echo "lane backup accepted a path traversal" >&2
+  exit 1
+fi
+
+"$compose_dir/lane" invite --name laptop --ephemeral --session-lifetime 2h
+grep -F '<--class> <ephemeral>' "$log" >/dev/null
+grep -F '<--admin-token-file> </run/laneway-secrets/admin.token>' "$log" >/dev/null
+
+LANE_TEST_CONTROLLER_RUNNING=1
+export LANE_TEST_CONTROLLER_RUNNING
+: > "$compose_dir/generated/backups/restore.db"
+if "$compose_dir/lane" restore restore.db >/dev/null 2>&1; then
+  echo "lane restore accepted an active controller" >&2
+  exit 1
+fi
+LANE_TEST_CONTROLLER_RUNNING=0
+export LANE_TEST_CONTROLLER_RUNNING
+
+"$compose_dir/lane" upgrade "$candidate"
+grep -F 'LANEWAY_VERSION=1.1.0' "$compose_dir/.env" >/dev/null
+grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/generated/lifecycle/previous.env" >/dev/null
+[ "$(grep -c '^cosign ' "$log")" -eq 4 ]
+pull_line=$(grep -n '<pull>' "$log" | tail -1 | cut -d: -f1)
+stop_line=$(grep -n '<stop>' "$log" | tail -1 | cut -d: -f1)
+[ "$pull_line" -lt "$stop_line" ] || { echo "upgrade stopped services before pull" >&2; exit 1; }
+
+identity_change=$test_dir/identity-change.env
+write_env "$identity_change" 1.2.0 3
+sed -i 's/^LANEWAY_NETWORK_ID=.*/LANEWAY_NETWORK_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$identity_change"
+if "$compose_dir/lane" upgrade "$identity_change" >/dev/null 2>&1; then
+  echo "upgrade accepted a changed network identity" >&2
+  exit 1
+fi
+
+"$compose_dir/lane" rollback
+grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
+
+write_env "$candidate" 1.2.0 3
+LANE_TEST_FAIL_UP=1
+export LANE_TEST_FAIL_UP
+if "$compose_dir/lane" upgrade "$candidate" >/dev/null 2>&1; then
+  echo "failed readiness was reported as success" >&2
+  exit 1
+fi
+grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
+
+echo "Lane lifecycle workflows are fail-closed and recoverable"

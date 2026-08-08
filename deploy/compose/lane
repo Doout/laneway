@@ -1,0 +1,194 @@
+#!/bin/sh
+set -eu
+
+base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+env_file=$base_dir/.env
+state_dir=$base_dir/generated/lifecycle
+
+usage() {
+  cat >&2 <<'EOF'
+usage: ./lane <init|invite|status|backup|restore|upgrade|rollback> [options]
+EOF
+}
+die() { echo "lane: $*" >&2; exit 1; }
+
+compose() {
+  docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
+}
+compose_with_env() {
+  candidate=$1; shift
+  docker compose --project-directory "$base_dir" --env-file "$candidate" -f "$base_dir/compose.yaml" "$@"
+}
+
+read_setting() {
+  file=$1; key=$2
+  value=$(sed -n "s/^${key}=//p" "$file")
+  [ -n "$value" ] || die "missing $key in $file"
+  [ "$(printf '%s\n' "$value" | wc -l)" -eq 1 ] || die "duplicate $key in $file"
+  case "$value" in *[!A-Za-z0-9._:/+-]*) die "$key contains an unsafe character" ;; esac
+  printf '%s' "$value"
+}
+
+validate_release_env() {
+  file=$1
+  [ -f "$file" ] && [ ! -L "$file" ] || die "release environment must be a regular, non-symlink file: $file"
+  version=$(read_setting "$file" LANEWAY_VERSION)
+  printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || die "LANEWAY_VERSION must be semantic"
+  for key in LANEWAY_CONTROLLER_IMAGE_DIGEST LANEWAY_RELAY_IMAGE_DIGEST LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_EXIT_NODE_IMAGE_DIGEST; do
+    digest=$(read_setting "$file" "$key")
+    printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$key is not an immutable digest"
+    [ "$digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || die "$key is a placeholder"
+  done
+  for key in LANEWAY_NETWORK_ID LANEWAY_CONTROLLER_SERVICE_ID LANEWAY_RELAY_SERVICE_ID LANEWAY_CONTROLLER_SERVER_NAME LANEWAY_NETWORK_NAME LANEWAY_IPV4_POOL LANEWAY_RELAY_PUBLIC_ENDPOINT; do
+    read_setting "$file" "$key" >/dev/null
+  done
+  if [ "$file" != "$env_file" ] && [ -f "$env_file" ]; then
+    for key in \
+      LANEWAY_BIND_ADDRESS LANEWAY_CONTROLLER_PORT LANEWAY_RELAY_QUIC_PORT \
+      LANEWAY_RELAY_TCP_PORT LANEWAY_EXIT_DIRECT_PORT LANEWAY_CONTROLLER_SERVER_NAME \
+      LANEWAY_NETWORK_ID LANEWAY_CONTROLLER_SERVICE_ID LANEWAY_RELAY_SERVICE_ID \
+      LANEWAY_NETWORK_NAME LANEWAY_IPV4_POOL LANEWAY_RELAY_PUBLIC_ENDPOINT
+    do
+      current=$(read_setting "$env_file" "$key")
+      candidate_value=$(read_setting "$file" "$key")
+      [ "$candidate_value" = "$current" ] || die "$key cannot change during upgrade/rollback"
+    done
+  fi
+  compose_with_env "$file" config --quiet
+}
+
+verify_release_images() {
+  file=$1
+  command -v cosign >/dev/null 2>&1 || die "cosign is required"
+  version=$(read_setting "$file" LANEWAY_VERSION)
+  identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v$version"
+  for item in \
+    "ghcr.io/doout/laneway-controller:LANEWAY_CONTROLLER_IMAGE_DIGEST" \
+    "ghcr.io/doout/laneway-relay:LANEWAY_RELAY_IMAGE_DIGEST" \
+    "ghcr.io/doout/laneway-admin:LANEWAY_ADMIN_IMAGE_DIGEST" \
+    "ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+  do
+    image=${item%%:*}; key=${item#*:}; digest=$(read_setting "$file" "$key")
+    cosign verify --certificate-identity "$identity" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image@$digest" >/dev/null
+  done
+}
+
+validate_backup_name() {
+  name=$1
+  case "$name" in ''|.*|*/*|*[!A-Za-z0-9._-]*|*.db.*) die "backup name must be a simple NAME.db" ;; esac
+  case "$name" in *.db) ;; *) die "backup name must end in .db" ;; esac
+}
+backup_database() {
+  name=$1; validate_backup_name "$name"; "$base_dir/validate.sh"
+  compose run --rm --no-deps controller -config /etc/laneway/controller.toml -backup "/backups/$name"
+}
+admin() { compose --profile tools run --rm --no-deps admin "$@"; }
+
+run_invite() {
+  name=; class=durable; expires=10m; session=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --name) [ "$#" -ge 2 ] || die "--name requires a value"; name=$2; shift 2 ;;
+      --ephemeral) [ "$class" = durable ] || die "choose one class"; class=ephemeral; session=8h; shift ;;
+      --remembered) [ "$class" = durable ] || die "choose one class"; class=remembered; shift ;;
+      --expires-in) [ "$#" -ge 2 ] || die "--expires-in requires a value"; expires=$2; shift 2 ;;
+      --session-lifetime) [ "$#" -ge 2 ] || die "--session-lifetime requires a value"; session=$2; shift 2 ;;
+      *) die "unknown invite option: $1" ;;
+    esac
+  done
+  case "$name" in ''|*[!A-Za-z0-9._-]*) die "invite requires a safe --name NAME" ;; esac
+  [ "$class" = ephemeral ] || [ -z "$session" ] || die "--session-lifetime requires --ephemeral"
+  network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+  controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
+  server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
+  set -- --controller https://controller:8443 --ca /run/laneway-secrets/ca.crt \
+    --server-name "$server_name" --controller-network-id "$network_id" \
+    --controller-service-id "$controller_id" --admin-token-file /run/laneway-secrets/admin.token
+  if [ "$class" = ephemeral ]; then
+    admin controller enrollment-token issue --network-id "$network_id" --label "$name" --class "$class" \
+      --expires-in "$expires" --session-lifetime "$session" "$@"
+  else
+    admin controller enrollment-token issue --network-id "$network_id" --label "$name" --class "$class" \
+      --expires-in "$expires" "$@"
+  fi
+}
+
+atomic_copy() {
+  source=$1; destination=$2; directory=$(dirname "$destination")
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    [ -f "$destination" ] && [ ! -L "$destination" ] || die "refusing to replace non-regular state: $destination"
+  fi
+  temporary=$(mktemp "$directory/.lane-env.XXXXXX")
+  trap 'find "$temporary" -maxdepth 0 -delete 2>/dev/null || true' EXIT HUP INT TERM
+  cp "$source" "$temporary"; chmod 0600 "$temporary"; mv "$temporary" "$destination"
+  trap - EXIT HUP INT TERM
+}
+
+activate_release() {
+  candidate=$1; operation=$2
+  validate_release_env "$candidate"; verify_release_images "$candidate"; compose_with_env "$candidate" pull
+  backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).db"; backup_database "$backup_name"
+  if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
+    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || die "generated/lifecycle must be a real directory"
+  fi
+  install -d -m 0700 "$state_dir"
+  if [ -e "$state_dir/previous.env" ] || [ -L "$state_dir/previous.env" ]; then
+    [ -f "$state_dir/previous.env" ] && [ ! -L "$state_dir/previous.env" ] || die "previous release state is not a regular file"
+  fi
+  current_copy=$state_dir/current-before-$operation.env; atomic_copy "$env_file" "$current_copy"
+  exit_was_running=false
+  [ -z "$(compose --profile exit-node ps --status running -q exit-node)" ] || exit_was_running=true
+  if ! compose --profile exit-node stop exit-node relay controller; then
+    compose up -d --wait controller relay || true
+    [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node || true
+    die "$operation could not stop the current stack; release selection is unchanged"
+  fi
+  atomic_copy "$candidate" "$env_file"
+  if "$base_dir/validate.sh" && compose up -d --wait controller relay; then
+    [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node
+    atomic_copy "$current_copy" "$state_dir/previous.env"
+    echo "lane: $operation complete; backup: generated/backups/$backup_name"
+    return
+  fi
+  echo "lane: $operation failed; restoring previous images/config" >&2
+  atomic_copy "$current_copy" "$env_file"
+  compose up -d --wait controller relay || true
+  [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node || true
+  die "$operation failed; database was not rolled back; backup: generated/backups/$backup_name"
+}
+
+run_init() {
+  case "${1:-}" in
+    --dev) [ "$#" -eq 1 ] || die "init accepts only --dev"; exec "$base_dir/bootstrap.sh" --dev ;;
+    '') [ "$#" -eq 0 ] || die "init accepts only --dev" ;;
+    *) die "init accepts only --dev" ;;
+  esac
+  validate_release_env "$env_file"
+  verify_release_images "$env_file"
+  compose pull
+  exec "$base_dir/bootstrap.sh"
+}
+
+command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
+case "$command" in
+  init) run_init "$@" ;;
+  invite) run_invite "$@" ;;
+  status) [ "$#" -eq 0 ] || die "status accepts no arguments"; compose --profile exit-node ps ;;
+  backup) [ "$#" -le 1 ] || die "backup accepts one name"; backup_database "${1:-controller-$(date -u +%Y%m%dT%H%M%SZ).db}" ;;
+  restore)
+    [ "$#" -eq 1 ] || die "restore requires one backup name"; validate_backup_name "$1"
+    [ -f "$base_dir/generated/backups/$1" ] && [ ! -L "$base_dir/generated/backups/$1" ] || die "backup does not exist"
+    [ -z "$(compose ps --status running -q controller)" ] || die "restore requires a stopped controller"
+    "$base_dir/validate.sh"
+    compose run --rm --no-deps controller -config /etc/laneway/controller.toml -restore "/backups/$1"
+    ;;
+  upgrade) [ "$#" -eq 1 ] || die "upgrade requires CANDIDATE.env"; activate_release "$1" upgrade ;;
+  rollback)
+    [ "$#" -eq 0 ] || die "rollback accepts no arguments"
+    [ -f "$state_dir/previous.env" ] && [ ! -L "$state_dir/previous.env" ] || die "no previous release is available"
+    candidate=$state_dir/rollback-candidate.env; atomic_copy "$state_dir/previous.env" "$candidate"; activate_release "$candidate" rollback
+    ;;
+  help|-h|--help) usage ;;
+  *) usage; die "unknown command: $command" ;;
+esac

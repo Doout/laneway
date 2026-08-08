@@ -6,6 +6,7 @@ workflow=$repo_dir/.github/workflows/release.yml
 dockerfile=$repo_dir/deploy/containers/Dockerfile
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 compose_file=$repo_dir/deploy/compose/compose.yaml
+lane_workflow=$repo_dir/deploy/compose/lane
 
 require() {
   pattern=$1
@@ -31,6 +32,10 @@ for image in \
   ghcr.io/doout/laneway-exit-node
 do
   require "image: $image" "$workflow"
+done
+
+for value in 'cosign verify' 'compose_with_env' 'backup_database' 'database was not rolled back'; do
+  require "$value" "$lane_workflow"
 done
 
 for value in \

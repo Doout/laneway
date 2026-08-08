@@ -74,7 +74,8 @@ cp "$project_dir/scripts/setup-node.sh" "$package_dir/sbin/laneway-setup-node"
 printf '%s\n' "$version" > "$package_dir/VERSION"
 find "$package_dir" -type f -exec chmod 0644 {} +
 find "$package_dir" -type d -exec chmod 0755 {} +
-chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway" "$package_dir"/sbin/*
+chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway" "$package_dir"/sbin/* \
+	"$package_dir"/deploy/compose/*.sh "$package_dir"/deploy/compose/lane
 
 tmp_archive="$staging_dir/$archive"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \

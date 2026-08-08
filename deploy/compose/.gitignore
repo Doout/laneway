@@ -3,6 +3,7 @@ generated/backups/
 generated/config/*.toml
 generated/pki/
 generated/secrets/
+generated/lifecycle/
 
 # Keep reviewed templates in version control.
 !generated/config/*.example
