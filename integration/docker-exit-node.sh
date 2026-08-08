@@ -306,7 +306,7 @@ enabled = true
 listen = "0.0.0.0:${listen_port}"
 probe_interval = "100ms"
 probe_timeout = "2s"
-rendezvous_interval = "2s"
+rendezvous_interval = "10s"
 [wireguard]
 private_key = "/secrets/wireguard.key"
 mtu = 1200
