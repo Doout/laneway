@@ -76,6 +76,9 @@ func TestOpenLinuxDeviceOwnsCreationConfigurationAndCleanup(t *testing.T) {
 	if len(control.configs) != 1 || control.configs[0].PrivateKey == nil || !control.configs[0].ReplacePeers || len(control.configs[0].Peers) != 1 {
 		t.Fatalf("initial kernel config = %+v", control.configs)
 	}
+	if device.ListenPort() != config.ListenPort || control.configs[0].ListenPort == nil || *control.configs[0].ListenPort != int(config.ListenPort) {
+		t.Fatalf("listen port device=%d kernel=%v", device.ListenPort(), control.configs[0].ListenPort)
+	}
 	if err := device.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -84,6 +87,21 @@ func TestOpenLinuxDeviceOwnsCreationConfigurationAndCleanup(t *testing.T) {
 	}
 	if err := device.Close(); err != nil || len(runner.calls) != 5 {
 		t.Fatalf("idempotent close error=%v calls=%v", err, runner.calls)
+	}
+}
+
+func TestOpenLinuxDeviceSelectsBoundedEphemeralPort(t *testing.T) {
+	runner, control := new(fakeCommandRunner), new(fakeControlClient)
+	config := validLinuxDeviceConfig(t)
+	config.ListenPort = 0
+	device, err := openLinuxDevice(context.Background(), config, runner, control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+	if device.ListenPort() < MinEphemeralPort || device.ListenPort() > MaxEphemeralPort ||
+		control.configs[0].ListenPort == nil || *control.configs[0].ListenPort != int(device.ListenPort()) {
+		t.Fatalf("ephemeral listen port device=%d kernel=%v", device.ListenPort(), control.configs[0].ListenPort)
 	}
 }
 
@@ -137,6 +155,27 @@ func TestApplyPeersRestoresPriorKernelSnapshot(t *testing.T) {
 		t.Fatalf("committed peer snapshot = %+v want %+v", got, replacement)
 	}
 	_ = device.Close()
+}
+
+func TestApplyPeersRejectsLocalKeyWithoutTouchingKernel(t *testing.T) {
+	runner, control := new(fakeCommandRunner), new(fakeControlClient)
+	config := validLinuxDeviceConfig(t)
+	device, err := openLinuxDevice(context.Background(), config, runner, control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+	_, localPublicKey, err := ParsePrivateKey(config.PrivateKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(control.configs)
+	if err := device.ApplyPeers(context.Background(), []Peer{{PublicKey: localPublicKey}}); !errors.Is(err, ErrInvalidPeer) {
+		t.Fatalf("local peer error = %v", err)
+	}
+	if len(control.configs) != before {
+		t.Fatal("local peer rejection touched kernel state")
+	}
 }
 
 func TestPrivilegedKernelWireGuardLifecycle(t *testing.T) {
