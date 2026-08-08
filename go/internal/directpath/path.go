@@ -21,6 +21,7 @@ type Path struct {
 	conn           *quic.Conn
 	peer           pathmanager.PeerID
 	maxPayload     int
+	payloadMode    PayloadMode
 	name           string
 	initialLatency time.Duration
 	remote         netip.AddrPort
@@ -29,8 +30,9 @@ type Path struct {
 	onClose        func() error
 }
 
-func newAuthenticatedPath(conn *quic.Conn, peer pathmanager.PeerID, maxPayload int, remote netip.AddrPort, latency time.Duration) *Path {
-	return &Path{conn: conn, peer: peer, maxPayload: maxPayload, name: "direct-quic/" + peer.String() + "/" + remote.String(), initialLatency: latency, remote: remote}
+func newAuthenticatedPath(conn *quic.Conn, peer pathmanager.PeerID, maxPayload int, mode PayloadMode, remote netip.AddrPort, latency time.Duration) *Path {
+	return &Path{conn: conn, peer: peer, maxPayload: maxPayload, payloadMode: mode,
+		name: "direct-quic/" + peer.String() + "/" + remote.String(), initialLatency: latency, remote: remote}
 }
 
 func (p *Path) Name() string { return p.name }
@@ -59,8 +61,8 @@ func (p *Path) Send(ctx context.Context, peer pathmanager.PeerID, packet pathman
 	if len(packet) > p.maxPayload {
 		return ErrPacketTooLarge
 	}
-	if err := protocol.ValidateIPPayload(packet); err != nil {
-		return fmt.Errorf("directpath: send invalid IP packet: %w", err)
+	if err := p.validatePayload(packet); err != nil {
+		return fmt.Errorf("directpath: send invalid packet: %w", err)
 	}
 	if err := p.conn.SendDatagram(packet); err != nil {
 		return fmt.Errorf("directpath: send datagram: %w", err)
@@ -79,13 +81,20 @@ func (p *Path) Receive(ctx context.Context) (pathmanager.ReceivedPacket, error) 
 	if len(packet) > p.maxPayload {
 		return pathmanager.ReceivedPacket{}, ErrPacketTooLarge
 	}
-	if err := protocol.ValidateIPPayload(packet); err != nil {
-		return pathmanager.ReceivedPacket{}, fmt.Errorf("directpath: receive invalid IP packet: %w", err)
+	if err := p.validatePayload(packet); err != nil {
+		return pathmanager.ReceivedPacket{}, fmt.Errorf("directpath: receive invalid packet: %w", err)
 	}
 	// quic-go transfers ownership of the received datagram slice to the caller;
 	// no defensive hot-path copy is needed before the synchronous dataplane
 	// handoff.
 	return pathmanager.ReceivedPacket{Peer: p.peer, Packet: packet}, nil
+}
+
+func (p *Path) validatePayload(packet []byte) error {
+	if p.payloadMode == PayloadWireGuard {
+		return protocol.ValidateWireGuardPayload(packet)
+	}
+	return protocol.ValidateIPPayload(packet)
 }
 
 func (p *Path) Health(peer pathmanager.PeerID) pathmanager.PathHealth {

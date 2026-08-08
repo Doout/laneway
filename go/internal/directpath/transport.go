@@ -21,6 +21,7 @@ import (
 
 const (
 	ALPN                                              = "laneway-peer/1"
+	WireGuardALPN                                     = "laneway-peer-wg/1"
 	DefaultMaxPacketPayload                           = 1280
 	identityPrefaceSize                               = 37
 	DefaultDialAttempts                               = 2
@@ -48,7 +49,15 @@ type Config struct {
 	KeepAlive        time.Duration
 	MaxPacketPayload int
 	CandidatePolicy  CandidatePolicy
+	PayloadMode      PayloadMode
 }
+
+type PayloadMode uint8
+
+const (
+	PayloadIP PayloadMode = iota
+	PayloadWireGuard
+)
 
 // DialOptions bounds a direct-path attempt. Exhaustion is a normal outcome:
 // callers retain their relay path and may retry after fresh rendezvous data.
@@ -92,10 +101,18 @@ func (c Config) normalized() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if c.HandshakeTimeout <= 0 || c.IdleTimeout <= 0 || c.KeepAlive <= 0 || c.KeepAlive >= c.IdleTimeout || c.MaxPacketPayload < 576 || c.MaxPacketPayload > 65535 {
+	if c.HandshakeTimeout <= 0 || c.IdleTimeout <= 0 || c.KeepAlive <= 0 || c.KeepAlive >= c.IdleTimeout || c.MaxPacketPayload < 576 || c.MaxPacketPayload > 65535 ||
+		(c.PayloadMode != PayloadIP && c.PayloadMode != PayloadWireGuard) {
 		return Config{}, ErrInvalidConfiguration
 	}
 	return c, nil
+}
+
+func (c Config) alpn() string {
+	if c.PayloadMode == PayloadWireGuard {
+		return WireGuardALPN
+	}
+	return ALPN
 }
 
 func (c Config) quicConfig() *quic.Config {
@@ -333,10 +350,10 @@ func (e *Endpoint) serverTLSConfig() *tls.Config {
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		MinVersion:   tls.VersionTLS13,
 		MaxVersion:   tls.VersionTLS13,
-		NextProtos:   []string{ALPN},
+		NextProtos:   []string{e.config.alpn()},
 	}
 	config.VerifyConnection = func(state tls.ConnectionState) error {
-		_, err := verifyPeer(state, e.credentials.Roots, e.local.NetworkID, identity.NodeID{}, x509.ExtKeyUsageClientAuth)
+		_, err := verifyPeer(state, e.credentials.Roots, e.local.NetworkID, identity.NodeID{}, x509.ExtKeyUsageClientAuth, e.config.alpn())
 		if err == nil && e.credentials.Revocations != nil {
 			err = e.credentials.Revocations.CheckCertificate(state.PeerCertificates[0])
 		}
@@ -351,11 +368,11 @@ func (e *Endpoint) clientTLSConfig(expected identity.NodeIdentity) *tls.Config {
 		RootCAs:            e.credentials.Roots,
 		MinVersion:         tls.VersionTLS13,
 		MaxVersion:         tls.VersionTLS13,
-		NextProtos:         []string{ALPN},
+		NextProtos:         []string{e.config.alpn()},
 		InsecureSkipVerify: true, // Verified against the CA and exact node identity below.
 	}
 	config.VerifyConnection = func(state tls.ConnectionState) error {
-		_, err := verifyPeer(state, e.credentials.Roots, expected.NetworkID, expected.NodeID, x509.ExtKeyUsageServerAuth)
+		_, err := verifyPeer(state, e.credentials.Roots, expected.NetworkID, expected.NodeID, x509.ExtKeyUsageServerAuth, e.config.alpn())
 		if err == nil && e.credentials.Revocations != nil {
 			err = e.credentials.Revocations.CheckCertificate(state.PeerCertificates[0])
 		}
@@ -364,8 +381,8 @@ func (e *Endpoint) clientTLSConfig(expected identity.NodeIdentity) *tls.Config {
 	return config
 }
 
-func verifyPeer(state tls.ConnectionState, roots *x509.CertPool, network identity.NetworkID, expectedNode identity.NodeID, usage x509.ExtKeyUsage) (identity.NodeIdentity, error) {
-	if state.Version != tls.VersionTLS13 || state.NegotiatedProtocol != ALPN || len(state.PeerCertificates) == 0 {
+func verifyPeer(state tls.ConnectionState, roots *x509.CertPool, network identity.NetworkID, expectedNode identity.NodeID, usage x509.ExtKeyUsage, alpn string) (identity.NodeIdentity, error) {
+	if state.Version != tls.VersionTLS13 || state.NegotiatedProtocol != alpn || len(state.PeerCertificates) == 0 {
 		return identity.NodeIdentity{}, fmt.Errorf("%w: TLS version, ALPN, or certificate", ErrPeerIdentity)
 	}
 	intermediates := x509.NewCertPool()
@@ -386,12 +403,12 @@ func verifyPeer(state tls.ConnectionState, roots *x509.CertPool, network identit
 	return peer, nil
 }
 
-func validateQUIC(conn *quic.Conn, roots *x509.CertPool, network identity.NetworkID, expected identity.NodeID, usage x509.ExtKeyUsage) (identity.NodeIdentity, error) {
+func validateQUIC(conn *quic.Conn, roots *x509.CertPool, network identity.NetworkID, expected identity.NodeID, usage x509.ExtKeyUsage, alpn string) (identity.NodeIdentity, error) {
 	state := conn.ConnectionState()
 	if state.Used0RTT || !state.SupportsDatagrams.Local || !state.SupportsDatagrams.Remote {
 		return identity.NodeIdentity{}, fmt.Errorf("%w: 0-RTT or missing datagram negotiation", ErrPeerIdentity)
 	}
-	return verifyPeer(state.TLS, roots, network, expected, usage)
+	return verifyPeer(state.TLS, roots, network, expected, usage, alpn)
 }
 
 func (e *Endpoint) Dial(ctx context.Context, candidate Candidate, expected identity.NodeIdentity) (*Path, error) {
@@ -407,7 +424,7 @@ func (e *Endpoint) Dial(ctx context.Context, candidate Candidate, expected ident
 	if err != nil {
 		return nil, fmt.Errorf("directpath: dial %s: %w", candidate.Address, err)
 	}
-	peer, err := validateQUIC(conn, e.credentials.Roots, expected.NetworkID, expected.NodeID, x509.ExtKeyUsageServerAuth)
+	peer, err := validateQUIC(conn, e.credentials.Roots, expected.NetworkID, expected.NodeID, x509.ExtKeyUsageServerAuth, e.config.alpn())
 	if err != nil {
 		_ = conn.CloseWithError(peerProtocolCode, "peer identity rejected")
 		return nil, err
@@ -416,7 +433,7 @@ func (e *Endpoint) Dial(ctx context.Context, candidate Candidate, expected ident
 		_ = conn.CloseWithError(peerProtocolCode, "identity binding rejected")
 		return nil, err
 	}
-	path := newAuthenticatedPath(conn, peer.NodeID, e.config.MaxPacketPayload, candidate.Address, time.Since(started))
+	path := newAuthenticatedPath(conn, peer.NodeID, e.config.MaxPacketPayload, e.config.PayloadMode, candidate.Address, time.Since(started))
 	if err := e.trackPath(path, conn.ConnectionState().TLS.PeerCertificates[0]); err != nil {
 		_ = path.Close()
 		return nil, err
@@ -469,7 +486,7 @@ func (e *Endpoint) Accept(ctx context.Context) (*Path, error) {
 	if err != nil {
 		return nil, err
 	}
-	peer, err := validateQUIC(conn, e.credentials.Roots, e.local.NetworkID, identity.NodeID{}, x509.ExtKeyUsageClientAuth)
+	peer, err := validateQUIC(conn, e.credentials.Roots, e.local.NetworkID, identity.NodeID{}, x509.ExtKeyUsageClientAuth, e.config.alpn())
 	if err != nil {
 		_ = conn.CloseWithError(peerProtocolCode, "peer identity rejected")
 		return nil, err
@@ -479,7 +496,7 @@ func (e *Endpoint) Accept(ctx context.Context) (*Path, error) {
 		return nil, err
 	}
 	remote, _ := addrPort(conn.RemoteAddr())
-	path := newAuthenticatedPath(conn, peer.NodeID, e.config.MaxPacketPayload, remote, 0)
+	path := newAuthenticatedPath(conn, peer.NodeID, e.config.MaxPacketPayload, e.config.PayloadMode, remote, 0)
 	if err := e.trackPath(path, conn.ConnectionState().TLS.PeerCertificates[0]); err != nil {
 		_ = path.Close()
 		return nil, err
