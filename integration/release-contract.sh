@@ -98,6 +98,6 @@ for package in ca-certificates iproute2-minimal nftables procps-ng tini; do
   fi
 done
 require 'libcap-setcap=2.78-r0' "$exit_dockerfile"
-require 'setcap cap_net_admin=ep /usr/local/bin/laneway' "$exit_dockerfile"
+require 'setcap cap_net_admin=p /usr/local/bin/laneway' "$exit_dockerfile"
 
 echo "Release signing, provenance, SBOM, scan, and multi-architecture contract is valid"

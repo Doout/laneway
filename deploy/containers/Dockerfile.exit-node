@@ -27,7 +27,7 @@ RUN apk add --no-cache \
 COPY --from=build /out/laneway /usr/local/bin/laneway
 COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 RUN apk add --no-cache --virtual .cap-tools libcap-setcap=2.78-r0 \
-    && setcap cap_net_admin=ep /usr/local/bin/laneway \
+    && setcap cap_net_admin=p /usr/local/bin/laneway \
     && apk del .cap-tools
 USER 65532:65532
 ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
