@@ -338,7 +338,12 @@ The Rust daemon implements the same protected endpoints at its configured
 mode-0600 `exit_intent_path` journal.
 
 `status` reports connection/reconnect and sent/received/dropped packet counts,
-plus QUIC failure, TCP connection/failure, and selected-exit state. A rising
+plus QUIC failure, TCP connection/failure, the active carrier, and selected-exit
+state. `peers` reports the carrier independently for every authorized peer.
+Hybrid WireGuard nodes use the stable names `direct-wireguard`,
+`wireguard-relay-quic`, and
+`wireguard-relay-tcp`; `negotiating`, `degraded`, `disconnected`, and `mixed`
+describe transitional, unavailable, or non-uniform peer state. A rising
 QUIC-failure count with working TCP connections usually indicates a UDP path
 problem rather than an identity problem.
 For controller-managed nodes it also reports whether candidate exchange is
@@ -378,6 +383,11 @@ and fallback counters. When direct connectivity is enabled,
 `laneway_path_direct_failures_total` and `laneway_path_switches_total` expose
 automatic fallback/recovery decisions; observations, aggregate failures, and
 bounded active-peer count are exported alongside them without per-peer labels.
+Hybrid WireGuard nodes additionally export label-free
+`laneway_wireguard_carrier_*` packet, failure, retry, observation, switch, and
+peer counters. These counters observe only opaque encrypted WireGuard messages
+and carrier state; they do not expose peer identities, endpoint addresses,
+failure strings, key material, or packet contents.
 The controller exports its up indicator and bounded request, success,
 malformed-input, authorization-failure, and internal-failure counters without
 identity-derived labels.

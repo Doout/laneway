@@ -16,11 +16,16 @@ import (
 )
 
 type fakeNodeWireGuard struct {
-	public       wireguard.PublicKey
-	events       []string
-	snapshots    []wireguard.SecureSnapshot
-	failSnapshot bool
-	closed       bool
+	public             wireguard.PublicKey
+	events             []string
+	snapshots          []wireguard.SecureSnapshot
+	failSnapshot       bool
+	closed             bool
+	carrier            string
+	summary            string
+	relayMetrics       wireguard.RelayEndpointMetrics
+	carrierMetrics     wireguard.CarrierMuxMetrics
+	carrierPathMetrics pathmanager.Metrics
 }
 
 func (f *fakeNodeWireGuard) Name() string                   { return "lane0" }
@@ -40,7 +45,23 @@ func (f *fakeNodeWireGuard) Attach(identity.NodeID, pathmanager.PathKind, pathma
 func (f *fakeNodeWireGuard) Detach(identity.NodeID, string) bool { return false }
 func (f *fakeNodeWireGuard) PathAvailable(identity.NodeID) bool  { return true }
 func (f *fakeNodeWireGuard) RelayMetrics() wireguard.RelayEndpointMetrics {
-	return wireguard.RelayEndpointMetrics{}
+	return f.relayMetrics
+}
+func (f *fakeNodeWireGuard) CarrierMetrics() wireguard.CarrierMuxMetrics {
+	return f.carrierMetrics
+}
+func (f *fakeNodeWireGuard) CarrierPathMetrics() pathmanager.Metrics { return f.carrierPathMetrics }
+func (f *fakeNodeWireGuard) SelectedCarrier(identity.NodeID) string {
+	if f.carrier != "" {
+		return f.carrier
+	}
+	return "wireguard-relay-quic"
+}
+func (f *fakeNodeWireGuard) CarrierSummary() string {
+	if f.summary != "" {
+		return f.summary
+	}
+	return "wireguard-relay-quic"
 }
 func (f *fakeNodeWireGuard) ApplyGuard(context.Context, wireguard.FirewallPlan) error {
 	f.events = append(f.events, "guard")
