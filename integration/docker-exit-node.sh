@@ -411,6 +411,8 @@ for node_name in "${client_name}" "${gateway_name}"; do
 done
 docker exec "${client_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200'
 docker exec "${gateway_name}" sh -c 'test "$(cat /sys/class/net/lane0/mtu)" = 1200 && ip link show eth1 >/dev/null'
+echo "==> fixed-port peers establish a direct path before Exit selection"
+wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" direct
 
 echo "==> create a second, disposable cone-like NAT between the Exit bridge and Internet fixture"
 docker create --name "${nat_name}" --hostname "${nat_name}" --label "${owner}" --network "${egress_network}" \
