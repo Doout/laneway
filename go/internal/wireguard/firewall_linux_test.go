@@ -4,6 +4,7 @@ package wireguard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/nftstate"
 )
 
 type fakeFirewallRunner struct {
@@ -23,6 +25,7 @@ type fakeFirewallRunner struct {
 	inputs    []string
 	calls     [][]string
 	failInput bool
+	staleJSON []byte
 }
 
 func (r *fakeFirewallRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -39,6 +42,9 @@ func (r *fakeFirewallRunner) Run(ctx context.Context, name string, args ...strin
 		return nil, nil
 	}
 	if slices.Equal(args, []string{"-j", "list", "table", "inet", "laneway_wg"}) && r.table {
+		if len(r.staleJSON) != 0 {
+			return append([]byte(nil), r.staleJSON...), nil
+		}
 		return []byte(fmt.Sprintf(`{"nftables":[{"table":{"family":"inet","name":"laneway_wg","handle":7}},`+
 			`{"rule":{"comment":%q,"handle":9,"expr":[{"counter":{"packets":3,"bytes":50}}]}}]}`, r.state)), nil
 	}
@@ -59,6 +65,7 @@ func (r *fakeFirewallRunner) RunInput(ctx context.Context, input []byte, name st
 	text := string(input)
 	if strings.Contains(text, "add table inet laneway_wg") {
 		r.table, r.state = true, text
+		r.staleJSON = nil
 		return nil, nil
 	}
 	if strings.TrimSpace(text) == "delete table inet laneway_wg" {
@@ -66,6 +73,37 @@ func (r *fakeFirewallRunner) RunInput(ctx context.Context, input []byte, name st
 		return nil, nil
 	}
 	return nil, fmt.Errorf("unexpected input %q", text)
+}
+
+func firewallShapeJSON(t *testing.T, shape nftstate.Shape, session string) []byte {
+	t.Helper()
+	objects := []any{map[string]any{"table": map[string]any{"family": shape.Family, "name": shape.Table, "handle": 1}}}
+	handle := 2
+	for _, chain := range shape.Chains {
+		value := map[string]any{"family": shape.Family, "table": shape.Table, "name": chain.Name, "handle": handle}
+		handle++
+		if chain.Base {
+			value["type"], value["hook"], value["prio"], value["policy"] = chain.Type, chain.Hook, chain.Priority, chain.Policy
+		}
+		objects = append(objects, map[string]any{"chain": value})
+	}
+	addRule := func(chain, comment string, expr []any) {
+		objects = append(objects, map[string]any{"rule": map[string]any{
+			"family": shape.Family, "table": shape.Table, "chain": chain, "handle": handle, "comment": comment, "expr": expr,
+		}})
+		handle++
+	}
+	counter := []any{map[string]any{"counter": map[string]any{"packets": 7, "bytes": 91}}}
+	addRule(shape.OwnerChain, shape.Marker, counter)
+	addRule(shape.OwnerChain, session, counter)
+	for _, rule := range shape.Rules {
+		addRule(rule.Chain, rule.Comment, rule.Expr)
+	}
+	raw, err := json.Marshal(map[string]any{"nftables": objects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
 }
 
 func testFirewallPlan() FirewallPlan {
@@ -163,6 +201,22 @@ func TestLinuxFirewallRefusesForeignOrChangedState(t *testing.T) {
 			t.Fatal("changed table was deleted")
 		}
 	})
+}
+
+func TestLinuxFirewallRecoversOnlyExactCrashResidue(t *testing.T) {
+	runner := &fakeFirewallRunner{table: true}
+	manager := newTestFirewall(t, runner).(*linuxFirewallManager)
+	_, statements, err := compileFirewallPlan(testFirewallPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.staleJSON = firewallShapeJSON(t, manager.tableShape(statements), firewallSessionPrefix+strings.Repeat("a", 32))
+	if err := manager.Apply(context.Background(), testFirewallPlan()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.inputs) != 2 || strings.TrimSpace(runner.inputs[0]) != "delete table inet laneway_wg" || !runner.table {
+		t.Fatalf("recovery inputs=%v table=%v", runner.inputs, runner.table)
+	}
 }
 
 func TestLinuxFirewallFailedAtomicReplacementKeepsPreviousState(t *testing.T) {

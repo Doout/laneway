@@ -73,6 +73,26 @@ func MatchPrefix(protocol, field, address string, bits int) any {
 	}}
 }
 
+// MatchAddressPrefix matches nft's JSON normalization: host prefixes are
+// emitted as scalar addresses while shorter prefixes retain a prefix object.
+func MatchAddressPrefix(protocol, field, address string, bits, addressBits int) any {
+	right := any(map[string]any{"prefix": map[string]any{"addr": address, "len": bits}})
+	if bits == addressBits {
+		right = address
+	}
+	return map[string]any{"match": map[string]any{
+		"op": "==", "left": map[string]any{"payload": map[string]any{"protocol": protocol, "field": field}}, "right": right,
+	}}
+}
+
+func MatchPayload(protocol, field string, right any) any {
+	return map[string]any{"match": map[string]any{
+		"op": "==", "left": map[string]any{"payload": map[string]any{"protocol": protocol, "field": field}}, "right": right,
+	}}
+}
+
+func Range(first, last uint16) any { return map[string]any{"range": []any{int(first), int(last)}} }
+
 // MatchCTStates builds the JSON expression emitted by nft for a conntrack
 // state-set match.
 func MatchCTStates(states ...string) any {
@@ -85,8 +105,10 @@ func MatchCTStates(states ...string) any {
 	}}
 }
 
-func Accept() any     { return map[string]any{"accept": nil} }
-func Masquerade() any { return map[string]any{"masquerade": nil} }
+func Accept() any            { return map[string]any{"accept": nil} }
+func Drop() any              { return map[string]any{"drop": nil} }
+func Jump(target string) any { return map[string]any{"jump": map[string]any{"target": target}} }
+func Masquerade() any        { return map[string]any{"masquerade": nil} }
 
 // Validate verifies a JSON `nft -j list table` response and returns the opaque
 // session-state comment. Callers must validate that state before deletion.
