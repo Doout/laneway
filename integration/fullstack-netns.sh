@@ -730,11 +730,13 @@ EOF
   client_join="$(ip netns exec "${client}" "${work_dir}/laneway" join "${client_token}" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-    --name controller-client --out-cert "${case_dir}/client.crt" --out-key "${case_dir}/client.key")"
+    --name controller-client --out-cert "${case_dir}/client.crt" --out-key "${case_dir}/client.key" \
+    --out-wireguard-key "${case_dir}/client.wireguard.key")"
   gateway_join="$(ip netns exec "${gateway}" "${work_dir}/laneway" join "${gateway_token}" \
     --controller "${controller_endpoint}" --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-    --name controller-gateway --out-cert "${case_dir}/gateway.crt" --out-key "${case_dir}/gateway.key")"
+    --name controller-gateway --out-cert "${case_dir}/gateway.crt" --out-key "${case_dir}/gateway.key" \
+    --out-wireguard-key "${case_dir}/gateway.wireguard.key")"
   client_id="$(printf '%s\n' "${client_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
   gateway_id="$(printf '%s\n' "${gateway_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
   client_overlays="$(printf '%s\n' "${client_join}" | sed -n 's/.* overlay=\([^ ]*\) certificate=.*/\1/p')"
@@ -940,7 +942,8 @@ EOF
     --ca "${case_dir}/ca.crt" \
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
     --cert "${case_dir}/client.crt" --key "${case_dir}/client.key" \
-    --out-cert "${case_dir}/client.next.crt" --out-key "${case_dir}/client.next.key")"
+    --out-cert "${case_dir}/client.next.crt" --out-key "${case_dir}/client.next.key" \
+    --out-wireguard-key "${case_dir}/client.wireguard.next.key")"
   if [[ "${renew_output}" != *"network=${network_id}"* || "${renew_output}" != *"node=${client_id}"* ]]; then
     echo "ERROR: renewal changed the immutable node identity" >&2
     printf '%s\n' "${renew_output}" >&2
