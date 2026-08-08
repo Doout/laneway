@@ -49,18 +49,81 @@ func credentialsForNode(t *testing.T, authority testAuthority, node identity.Nod
 }
 
 func newTestEndpoint(t *testing.T, local identity.NodeIdentity, credentials Credentials) *Endpoint {
+	return newTestEndpointMode(t, local, credentials, PayloadIP)
+}
+
+func newTestEndpointMode(t *testing.T, local identity.NodeIdentity, credentials Credentials, mode PayloadMode) *Endpoint {
 	t.Helper()
 	packetConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	endpoint, err := NewEndpoint(packetConn, local, credentials, Config{CandidatePolicy: CandidatePolicy{AllowLoopback: true}})
+	endpoint, err := NewEndpoint(packetConn, local, credentials, Config{PayloadMode: mode, CandidatePolicy: CandidatePolicy{AllowLoopback: true}})
 	if err != nil {
 		_ = packetConn.Close()
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
 	return endpoint
+}
+
+func TestWireGuardDirectPathUsesDistinctALPNAndOpaqueValidation(t *testing.T) {
+	authority := newTestAuthority(t)
+	network := testNetwork(t, "000102030405060708090a0b0c0d0e0f")
+	a := identity.NodeIdentity{NetworkID: network, NodeID: testNode(t, "101112131415161718191a1b1c1d1e1f")}
+	b := identity.NodeIdentity{NetworkID: network, NodeID: testNode(t, "202122232425262728292a2b2c2d2e2f")}
+	endpointA := newTestEndpointMode(t, a, credentialsForNode(t, authority, a), PayloadWireGuard)
+	endpointB := newTestEndpointMode(t, b, credentialsForNode(t, authority, b), PayloadWireGuard)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	accepted := make(chan acceptResult, 1)
+	go func() { path, err := endpointB.Accept(ctx); accepted <- acceptResult{path, err} }()
+	pathA, err := endpointA.Dial(ctx, endpointCandidate(t, endpointB, b.NodeID), b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pathA.Close()
+	result := <-accepted
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	defer result.path.Close()
+	payload := make([]byte, 148)
+	payload[0] = 1
+	if err := pathA.Send(ctx, b.NodeID, payload); err != nil {
+		t.Fatal(err)
+	}
+	received, err := result.path.Receive(ctx)
+	if err != nil || string(received.Packet) != string(payload) || received.Peer != a.NodeID {
+		t.Fatalf("received=%+v error=%v", received, err)
+	}
+	if err := pathA.Send(ctx, b.NodeID, ipv4Packet()); !errors.Is(err, protocol.ErrInvalidWireGuard) {
+		t.Fatalf("plaintext IP accepted: %v", err)
+	}
+}
+
+type acceptResult struct {
+	path *Path
+	err  error
+}
+
+func TestWireGuardDirectALPNRejectsLegacyPeer(t *testing.T) {
+	authority := newTestAuthority(t)
+	network := testNetwork(t, "000102030405060708090a0b0c0d0e0f")
+	a := identity.NodeIdentity{NetworkID: network, NodeID: testNode(t, "101112131415161718191a1b1c1d1e1f")}
+	b := identity.NodeIdentity{NetworkID: network, NodeID: testNode(t, "202122232425262728292a2b2c2d2e2f")}
+	wireGuardEndpoint := newTestEndpointMode(t, a, credentialsForNode(t, authority, a), PayloadWireGuard)
+	legacyEndpoint := newTestEndpoint(t, b, credentialsForNode(t, authority, b))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	accepted := make(chan error, 1)
+	go func() { _, err := legacyEndpoint.Accept(ctx); accepted <- err }()
+	if _, err := wireGuardEndpoint.Dial(ctx, endpointCandidate(t, legacyEndpoint, b.NodeID), b); err == nil {
+		t.Fatal("WireGuard direct endpoint negotiated legacy ALPN")
+	}
+	if err := <-accepted; err == nil {
+		t.Fatal("legacy endpoint accepted WireGuard ALPN")
+	}
 }
 
 func endpointCandidate(t *testing.T, endpoint *Endpoint, node identity.NodeID) Candidate {
@@ -121,10 +184,6 @@ func TestLoopbackMutualTLSDirectPacketPathAndProbe(t *testing.T) {
 		t.Fatalf("A probe response: %v", err)
 	}
 
-	type acceptResult struct {
-		path *Path
-		err  error
-	}
 	accepted := make(chan acceptResult, 1)
 	go func() { path, err := endpointB.Accept(ctx); accepted <- acceptResult{path, err} }()
 	pathA, err := endpointA.Dial(ctx, candidateB, b)
