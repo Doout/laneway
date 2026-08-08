@@ -621,6 +621,26 @@ online-backup procedure), deploy relay/controller first, then roll nodes. Keep
 the previous binaries and configuration available for rollback; never roll
 back the database independently of migrations without a tested backup.
 
+Tagged releases publish Linux AMD64/ARM64 archives and controller, relay,
+administrative, and isolated Exit Node images. Every release includes signed
+checksums, GitHub build provenance, immutable image digest records, and SPDX
+JSON SBOMs. Images are keylessly signed by the tagged release workflow and
+carry registry SBOM/provenance attestations. Production Compose requires both
+the semantic version and each verified manifest digest; it never consumes a
+mutable `latest` tag. Follow the exact verification commands in
+`deploy/compose/README.md` before an initial deployment, upgrade, or rollback.
+
+Laneway currently has one release channel: immutable semantic-version tags.
+There is no `latest`, edge, or floating production channel. Patch releases keep
+the same control/packet protocol contract; minor releases within one major must
+retain documented rolling compatibility long enough to upgrade controller and
+relay first, then nodes. A release that cannot do so must increment the major
+version and document an explicit migration. GitHub release assets and GHCR
+manifests for earlier versions are retained so operators can roll application
+images back to the immediately previous compatible version. Database state is
+never rolled back independently: restore a tested matching backup when a
+schema migration is not backward compatible.
+
 ## Containers and rootless operation
 
 The supplied scratch image is intended for the relay or controller. It runs as

@@ -1,14 +1,27 @@
-# syntax=docker/dockerfile:1.9
-FROM golang:1.26-alpine AS build
+# syntax=docker/dockerfile:1.9@sha256:fe40cf4e92cd0c467be2cfc30657a680ae2398318afd50b0c80585784c604f28
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
+ARG VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/laneway ./cmd/laneway
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -o /out/laneway ./cmd/laneway
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
 
-FROM alpine:3.23
-RUN apk add --no-cache ca-certificates iproute2 nftables procps-ng tini util-linux \
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+RUN apk add --no-cache \
+      ca-certificates=20260611-r0 \
+      iproute2-minimal=6.17.0-r0 \
+      nftables=1.1.5-r2 \
+      procps-ng=4.0.5-r0 \
+      setpriv=2.41.4-r0 \
+      tini=0.19.0-r3 \
     && addgroup -g 65532 laneway \
     && adduser -D -H -u 65532 -G laneway laneway \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway

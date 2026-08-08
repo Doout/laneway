@@ -14,6 +14,10 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 compose_file=$repo_dir/deploy/compose/compose.yaml
 
 LANEWAY_VERSION=1.2.3 \
+LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+LANEWAY_RELAY_IMAGE_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+LANEWAY_ADMIN_IMAGE_DIGEST=sha256:3333333333333333333333333333333333333333333333333333333333333333 \
+LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:4444444444444444444444444444444444444444444444444444444444444444 \
 LANEWAY_BIND_ADDRESS=127.0.0.1 \
 LANEWAY_CONTROLLER_PORT=18443 \
 LANEWAY_RELAY_QUIC_PORT=14433 \
@@ -30,7 +34,10 @@ jq -e '
   ([.services[] | .security_opt == ["no-new-privileges:true"]] | all) and
   ([.services[] | (.privileged // false) == false] | all) and
   ([.services[] | (.network_mode // "") != "host"] | all) and
-  ([.services[] | .image | endswith(":1.2.3")] | all) and
+  (.services.controller.image == "ghcr.io/doout/laneway-controller:1.2.3@sha256:1111111111111111111111111111111111111111111111111111111111111111") and
+  (.services.relay.image == "ghcr.io/doout/laneway-relay:1.2.3@sha256:2222222222222222222222222222222222222222222222222222222222222222") and
+  (.services.admin.image == "ghcr.io/doout/laneway-admin:1.2.3@sha256:3333333333333333333333333333333333333333333333333333333333333333") and
+  (.services["exit-node"].image == "ghcr.io/doout/laneway-exit-node:1.2.3@sha256:4444444444444444444444444444444444444444444444444444444444444444") and
   (.services.controller.ports | any(.host_ip == "127.0.0.1" and .target == 8443 and .published == "18443" and .protocol == "tcp")) and
   (.services.controller.ports | any(.host_ip == "127.0.0.1" and .target == 8443 and .published == "18443" and .protocol == "udp")) and
   (.services.relay.ports | any(.host_ip == "127.0.0.1" and .target == 4433 and .published == "14433" and .protocol == "udp")) and

@@ -17,7 +17,11 @@ images from this checkout.
 - an offline root, an online intermediate, and service identities created as
   described in [../../docs/operations.md](../../docs/operations.md)
 
-Copy `.env.example` to `.env` and pin a release. Set `LANEWAY_BIND_ADDRESS` to
+Copy `.env.example` to `.env` and pin a release. Download that release's
+`image-digests.txt`, verify the release as described below, and copy each
+service's immutable `sha256:` manifest digest into `.env`. Compose retains the
+semantic version for readability but pulls and runs only the exact signed
+multi-architecture manifest named by the digest. Set `LANEWAY_BIND_ADDRESS` to
 the public service address; use `127.0.0.1` for local-only validation. The published-port defaults are
 controller TCP+UDP 8443, relay UDP 4433, and relay fallback TCP 443; change them
 only when DNS/firewall/bootstrap metadata use the same values. Set
@@ -51,6 +55,29 @@ sudo chown -R root:root .
 sudo chmod 0700 . generated generated/pki generated/secrets generated/config generated/backups
 sudo ./bootstrap.sh
 ```
+
+Before the first pull or an upgrade, verify the checksum signature, artifact
+provenance, and image signatures. Replace `VERSION` and each digest with the
+values from the release; do not verify a mutable tag:
+
+```sh
+cosign verify-blob \
+  --bundle checksums.sigstore.json \
+  --certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/vVERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+sha256sum --check checksums.txt
+gh attestation verify laneway_linux_amd64.tar.gz --repo Doout/laneway
+cosign verify \
+  --certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/vVERSION" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/doout/laneway-controller@sha256:REPLACE_DIGEST
+```
+
+Repeat the image verification for relay, admin, and Exit Node. The release also
+contains an SPDX JSON SBOM for each binary archive and image. A tag whose
+signature identity, provenance repository, checksum, digest, or SBOM does not
+match must be rejected before `docker compose pull`.
 
 For a source build, replace the last two commands with:
 

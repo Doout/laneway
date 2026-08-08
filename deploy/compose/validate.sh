@@ -16,6 +16,26 @@ if ! printf '%s\n' "$version" | grep -E '^(dev|[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-
   exit 1
 fi
 
+for key in \
+  LANEWAY_CONTROLLER_IMAGE_DIGEST \
+  LANEWAY_RELAY_IMAGE_DIGEST \
+  LANEWAY_ADMIN_IMAGE_DIGEST \
+  LANEWAY_EXIT_NODE_IMAGE_DIGEST
+do
+  digest=$(printenv "$key" 2>/dev/null || true)
+  if [ -z "$digest" ]; then
+    digest=$(sed -n "s/^${key}=//p" "$base_dir/.env")
+  fi
+  if ! printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+    echo "$key must be an immutable sha256 image manifest digest" >&2
+    exit 1
+  fi
+  if [ "$version" != dev ] && [ "$digest" = sha256:0000000000000000000000000000000000000000000000000000000000000000 ]; then
+    echo "$key must use the release digest, not the development placeholder" >&2
+    exit 1
+  fi
+done
+
 read_setting() {
   key=$1
   value=$(sed -n "s/^${key}=//p" "$base_dir/.env")
