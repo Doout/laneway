@@ -181,7 +181,9 @@ emit_docker_exit_script() {
   exit_digest=$(read_setting "$env_file" LANEWAY_EXIT_NODE_IMAGE_DIGEST)
   admin_digest=$(read_setting "$env_file" LANEWAY_ADMIN_IMAGE_DIGEST)
   ca_file=$base_dir/generated/pki/ca.crt
-  [ -f "$ca_file" ] && [ ! -L "$ca_file" ] || die "control-plane CA certificate is missing"
+  if [ ! -f "$ca_file" ] || [ -L "$ca_file" ]; then
+    die "control-plane CA certificate is missing"
+  fi
   cat <<EOF
 #!/bin/sh
 set -eu
