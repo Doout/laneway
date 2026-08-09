@@ -41,7 +41,7 @@ do
   require "image: $image" "$workflow"
 done
 
-for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'backup_recovery' 'database was not rolled back'; do
+for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'backup_recovery' 'database was not rolled back' 'run_update' 'releases/latest' 'verify-blob'; do
   require "$value" "$lane_workflow"
 done
 for value in 'pki verify-authority' 'offline root private key ca.key must never' 'chown 65532:65532'; do

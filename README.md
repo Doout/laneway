@@ -66,15 +66,14 @@ firewall rules before running it.
 Upgrade an existing Compose control plane without rerunning the setup wizard:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/Doout/laneway/main/install.sh
-less install.sh
-sudo sh install.sh --upgrade-control-plane
+sudo laneway-control update
 ```
 
-Accept the latest stable release tag when prompted. The upgrade preserves the
+The command detects the Docker Compose deployment and installs the latest stable
+release. The upgrade preserves the
 deployment identity, PKI, state, DNS name, ports, firewall, and host networking.
-It verifies the release, takes an encrypted backup, and uses health-checked
-container replacement with the existing rollback path.
+It verifies the signed release and image digests, takes an encrypted backup, and
+uses health-checked container replacement with the existing rollback path.
 For the higher-assurance path, `--prepare-control-plane` creates the kit on a
 separate trusted Linux host; copy only its `control-plane-input` directory to
 production. See the [control-plane guide](deploy/compose/README.md).
