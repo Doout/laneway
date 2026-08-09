@@ -79,6 +79,7 @@ jobs:
           name: laneway-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             dist/laneway_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
+            dist/laneway_${{ matrix.os }}_${{ matrix.arch }}
             dist/laneway_${{ matrix.os }}_${{ matrix.arch }}.spdx.json
           if-no-files-found: error
 
@@ -231,7 +232,7 @@ jobs:
       - name: Create deterministic checksums and image manifest
         working-directory: dist
         run: |
-          LC_ALL=C sha256sum -- laneway_*.tar.gz *.spdx.json | sort -k2 > checksums.txt
+          LC_ALL=C sha256sum -- laneway_*.tar.gz laneway_darwin_amd64 laneway_darwin_arm64 *.spdx.json | sort -k2 > checksums.txt
           LC_ALL=C sort -o image-digests.txt -- *.digest.txt
           rm -- *.digest.txt
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -243,7 +244,10 @@ jobs:
       - name: Attest release artifact provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          subject-path: dist/laneway_*.tar.gz
+          subject-path: |
+            dist/laneway_*.tar.gz
+            dist/laneway_darwin_amd64
+            dist/laneway_darwin_arm64
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

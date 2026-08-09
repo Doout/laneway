@@ -45,8 +45,8 @@ Never reuse a self-signed or private-network certificate on the public
 bootstrap listener.
 
 Bootstrap configuration pins one network, the internal controller HTTPS and
-QUIC endpoints, its DNS name, both supported Linux release artifacts, their
-exact byte sizes, and lowercase SHA-256 digests. Enabled relay targets and
+QUIC endpoints, its DNS name, the configured Linux and macOS release artifacts,
+their exact byte sizes, and lowercase SHA-256 digests. Enabled relay targets and
 ServiceIDs are read from controller state for each short-lived response. The
 controller refuses to start if static bootstrap data is malformed or if the
 configured NetworkID differs from its controller certificate. A response
@@ -98,10 +98,22 @@ user-client-only: they do not include Connector, route-advertisement,
 control-plane, or Exit Node operations. Unknown exit flags fail during local
 argument parsing before enrollment or any networking change.
 
+The standalone release binary installs itself with `laneway configure`. It
+performs read-only preflight first, asks once before invoking `sudo`, stages
+both copies, and verifies that `/usr/local/bin/laneway` and the root-owned
+credential-free helper are byte-identical. `laneway configure --check` changes
+nothing, and `connect` fails before networking if either copy is missing,
+insecure, or mismatched. `laneway update DOMAIN` accepts only the current
+Darwin artifact pinned by that domain's public-Web-PKI bootstrap metadata,
+verifies its authenticated size and SHA-256 before extraction, and invokes the
+same configure transaction only after every unprivileged check succeeds.
+
 Linux login additionally requires its authenticated platform artifact record.
 macOS installation verifies the release checksum before installing a
 root-owned helper; an already installed macOS client can therefore connect to
 an older control plane whose bootstrap document lists only Linux artifacts.
+That older control plane cannot authorize `laneway update` until its bootstrap
+artifact list is extended with Darwin AMD64 and ARM64 release archives.
 
 Artifact downloaders must stream into an unprivileged temporary file, enforce
 the authenticated `size_bytes`, and call the same SHA-256 verification logic
@@ -702,8 +714,9 @@ listeners read-only. If an existing Laneway Compose stack owns containers, port
 collision checks are skipped so repeated init remains idempotent. The optional
 Exit profile additionally requires `/dev/net/tun`.
 
-Tagged releases publish Linux and macOS AMD64/ARM64 archives and controller, relay,
-administrative, and isolated Exit Node images. Every release includes signed
+Tagged releases publish Linux and macOS AMD64/ARM64 archives, standalone macOS
+client binaries, and controller, relay, administrative, and isolated Exit Node
+images. Every release includes signed
 checksums, GitHub build provenance, immutable image digest records, and SPDX
 JSON SBOMs. Images are keylessly signed by the tagged release workflow and
 carry registry SBOM/provenance attestations. Production Compose requires both

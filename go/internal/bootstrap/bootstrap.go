@@ -137,7 +137,7 @@ func (m Metadata) Validate(now time.Time) error {
 	}
 	seenArtifacts := make(map[string]struct{}, len(m.Artifacts))
 	for _, artifact := range m.Artifacts {
-		if artifact.OS != "linux" || (artifact.Arch != "amd64" && artifact.Arch != "arm64") {
+		if (artifact.OS != "linux" && artifact.OS != "darwin") || (artifact.Arch != "amd64" && artifact.Arch != "arm64") {
 			return errors.New("bootstrap: unsupported artifact platform")
 		}
 		parsed, err := url.Parse(artifact.URL)

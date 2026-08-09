@@ -22,7 +22,8 @@ leaf_validity = "720h"
 
 # Optional public discovery listener. This certificate MUST chain to public
 # Web PKI and is deliberately separate from the Laneway-CA controller identity.
-# Both Linux architectures are required when bootstrap is enabled.
+# Linux artifacts support host enrollment. Add both Darwin artifacts to enable
+# controller-approved macOS self-update.
 # [bootstrap]
 # listen = ":443"
 # certificate = "/etc/letsencrypt/live/lane.example.com/fullchain.pem"
@@ -35,6 +36,18 @@ leaf_validity = "720h"
 # os = "linux"
 # arch = "amd64"
 # url = "https://github.com/Doout/laneway/releases/download/vX.Y.Z/laneway_linux_amd64.tar.gz"
+# sha256 = "replace-with-64-lowercase-hex-characters"
+# size_bytes = 1
+# [[bootstrap.artifacts]]
+# os = "darwin"
+# arch = "amd64"
+# url = "https://github.com/Doout/laneway/releases/download/vX.Y.Z/laneway_darwin_amd64.tar.gz"
+# sha256 = "replace-with-64-lowercase-hex-characters"
+# size_bytes = 1
+# [[bootstrap.artifacts]]
+# os = "darwin"
+# arch = "arm64"
+# url = "https://github.com/Doout/laneway/releases/download/vX.Y.Z/laneway_darwin_arm64.tar.gz"
 # sha256 = "replace-with-64-lowercase-hex-characters"
 # size_bytes = 1
 # [[bootstrap.artifacts]]

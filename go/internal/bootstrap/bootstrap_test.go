@@ -86,6 +86,18 @@ func TestMetadataValidationAndStrictDecode(t *testing.T) {
 	}
 }
 
+func TestMetadataAcceptsDarwinUpdateArtifacts(t *testing.T) {
+	now := time.Unix(2_000_000_000, 0).UTC()
+	metadata := validMetadata(t, now)
+	metadata.Artifacts = append(metadata.Artifacts,
+		Artifact{OS: "darwin", Arch: "amd64", URL: "https://downloads.example.test/laneway-darwin-amd64.tar.gz", SHA256: strings.Repeat("1", 64), SizeBytes: 1},
+		Artifact{OS: "darwin", Arch: "arm64", URL: "https://downloads.example.test/laneway-darwin-arm64.tar.gz", SHA256: strings.Repeat("2", 64), SizeBytes: 1},
+	)
+	if err := metadata.Validate(now); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestArtifactVerification(t *testing.T) {
 	payload := []byte("verified release")
 	digest := sha256.Sum256(payload)
