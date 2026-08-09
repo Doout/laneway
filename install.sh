@@ -115,7 +115,7 @@ case "$(uname -m)" in
     ;;
 esac
 missing=
-for command in awk curl find grep mktemp readlink sed sha256sum tar; do
+for command in awk base64 curl find grep mktemp readlink sed sha256sum tar; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 

@@ -432,7 +432,7 @@ for node_name in "${client_name}" "${gateway_name}"; do
     .[0].HostConfig.NetworkMode != "host" and
     (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
     ((.[0].HostConfig.SecurityOpt // []) == []) and
-    (.[0].Config.Entrypoint | index("--no-new-privs") != null) and
+    .[0].Config.Entrypoint == ["/usr/local/bin/laneway-connector-entrypoint"] and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and
     .[0].HostConfig.Devices[0].PathInContainer == "/dev/net/tun"

@@ -38,7 +38,7 @@ jq -e '
   (.services.controller.image == "ghcr.io/doout/laneway-controller:1.2.3@sha256:1111111111111111111111111111111111111111111111111111111111111111") and
   (.services.relay.image == "ghcr.io/doout/laneway-relay:1.2.3@sha256:2222222222222222222222222222222222222222222222222222222222222222") and
   (.services.admin.image == "ghcr.io/doout/laneway-admin:1.2.3@sha256:3333333333333333333333333333333333333333333333333333333333333333") and
-  (.services["exit-node"].image == "ghcr.io/doout/laneway-exit-node:1.2.3@sha256:4444444444444444444444444444444444444444444444444444444444444444") and
+  (.services["exit-node"].image == "ghcr.io/doout/laneway-connector:1.2.3@sha256:4444444444444444444444444444444444444444444444444444444444444444") and
   (.services.controller.ports | any(.host_ip == "127.0.0.1" and .target == 8443 and .published == "18443" and .protocol == "tcp")) and
   (.services.controller.ports | any(.host_ip == "127.0.0.1" and .target == 8443 and .published == "18443" and .protocol == "udp")) and
   (.services.relay.ports | any(.host_ip == "127.0.0.1" and .target == 4433 and .published == "14433" and .protocol == "udp")) and

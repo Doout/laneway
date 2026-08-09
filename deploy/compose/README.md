@@ -81,24 +81,29 @@ cancelled attempt does not require retyping the domain, paths, pool, or ports.
 The file never contains a recovery identity, CA private key, admin token, or
 generated deployment secret. Explicit environment variables override it.
 
-## One-command Docker Exit Node
+## One-command Docker Connector
 
-Generate a capability-bound, single-use installer from the control plane:
+Generate a capability-bound, single-use Docker command from the control plane:
 
 ```sh
-umask 077
-sudo laneway-control invite --name egress-one --ephemeral --docker --exit-node > install-egress-one.sh
-chmod 0700 install-egress-one.sh
+sudo laneway-control invite --name egress-one --ephemeral --docker --connector
 ```
 
-Copy the script through a trusted administrative channel to a Linux Docker host
-and run `sudo ./install-egress-one.sh`. The token grants only the Exit Node role
-and an approved IPv4 default route; the generated script does not contain the
-control-plane admin token. It verifies Docker prerequisites, enrolls without
-putting the token in process arguments, writes a restricted Compose deployment,
-and starts the digest-pinned Exit Node image. Delete the installer after its
-single-use token is consumed. Allow UDP 4434 on the Exit Node host when external
-direct-path reachability is required.
+Copy the resulting `docker run` command through a trusted administrative channel
+and run it as root on a Linux Docker host. The token grants only the Connector
+role and an approved IPv4 default route; the command does not contain the
+control-plane admin token. The digest-pinned Connector runs non-root with only
+`NET_ADMIN` and `/dev/net/tun`. Its durable identity is stored in a named Docker
+volume, so replacing the container during an image upgrade does not enroll it
+again. The first-run token remains visible in Docker metadata after it is
+consumed; treat Docker access as root-equivalent. Allow UDP 4434 on the Connector
+host when external direct-path reachability is required.
+
+To upgrade, pull the new digest-pinned Connector image, remove only the old
+container, and rerun the generated `docker run` command with the new image
+reference and the same `laneway-connector-NAME-state` volume. The entrypoint
+finds the complete identity in that volume and does not read or consume another
+enrollment token. Never remove the named volume during an ordinary upgrade.
 
 Omit `--ephemeral` for a persistent production Exit Node; use ephemeral
 enrollment for tests or intentionally short-lived egress capacity.

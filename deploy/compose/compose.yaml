@@ -87,7 +87,9 @@ services:
     networks: [control]
 
   exit-node:
-    image: ghcr.io/doout/laneway-exit-node:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_EXIT_NODE_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ghcr.io/doout/laneway-connector:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_EXIT_NODE_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    entrypoint: [/bin/setpriv, --inh-caps=+net_admin, --ambient-caps=+net_admin, --no-new-privs, /sbin/tini, --, /usr/local/bin/laneway, node, run]
+    command: [-config, /etc/laneway/exit-node.toml]
     profiles: [exit-node]
     user: "65532:65532"
     read_only: true

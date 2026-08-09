@@ -5,6 +5,7 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 workflow=$repo_dir/.github/workflows/release.yml
 dockerfile=$repo_dir/deploy/containers/Dockerfile
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
+connector_entrypoint=$repo_dir/deploy/containers/connector-entrypoint.sh
 compose_file=$repo_dir/deploy/compose/compose.yaml
 lane_workflow=$repo_dir/deploy/compose/laneway-control
 prepare_workflow=$repo_dir/deploy/compose/prepare.sh
@@ -35,7 +36,7 @@ for image in \
   ghcr.io/doout/laneway-controller \
   ghcr.io/doout/laneway-relay \
   ghcr.io/doout/laneway-admin \
-  ghcr.io/doout/laneway-exit-node
+  ghcr.io/doout/laneway-connector
 do
   require "image: $image" "$workflow"
 done
@@ -123,6 +124,10 @@ for package in ca-certificates iproute2-minimal nftables procps-ng setpriv tini;
 done
 require 'libcap-setcap=2.78-r0' "$exit_dockerfile"
 require 'setcap cap_net_admin=ep /bin/setpriv' "$exit_dockerfile"
-require '"--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs"' "$exit_dockerfile"
+require 'connector-entrypoint.sh' "$exit_dockerfile"
+require '--inh-caps=+net_admin --ambient-caps=+net_admin --no-new-privs' "$connector_entrypoint"
+require "if [ \"\$identity_count\" -ne 5 ]" "$connector_entrypoint"
+require 'persistent volume contains an incomplete Connector identity' "$connector_entrypoint"
+require './integration/connector-upgrade.sh laneway-connector:ci' "$repo_dir/.github/workflows/ci.yml"
 
 echo "Release signing, provenance, SBOM, scan, and multi-architecture contract is valid"

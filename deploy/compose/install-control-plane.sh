@@ -274,14 +274,14 @@ image_digest() {
 controller_digest=$(image_digest ghcr.io/doout/laneway-controller)
 relay_digest=$(image_digest ghcr.io/doout/laneway-relay)
 admin_digest=$(image_digest ghcr.io/doout/laneway-admin)
-exit_node_digest=$(image_digest ghcr.io/doout/laneway-exit-node)
+exit_node_digest=$(image_digest ghcr.io/doout/laneway-connector)
 identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag"
 image_signatures_verified=true
 for reference in \
   "ghcr.io/doout/laneway-controller@$controller_digest" \
   "ghcr.io/doout/laneway-relay@$relay_digest" \
   "ghcr.io/doout/laneway-admin@$admin_digest" \
-  "ghcr.io/doout/laneway-exit-node@$exit_node_digest"
+  "ghcr.io/doout/laneway-connector@$exit_node_digest"
 do
   if [ -n "$cosign_bin" ] && command -v "$cosign_bin" >/dev/null 2>&1 && \
     "$cosign_bin" verify --certificate-identity "$identity" \

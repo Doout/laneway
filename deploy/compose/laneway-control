@@ -26,7 +26,7 @@ usage() {
 usage: laneway-control <init|invite|status|production-check|backup|restore|upgrade|rollback> [options]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
-  invite --name NAME [--ephemeral|--remembered] [--docker --exit-node]
+  invite --name NAME [--ephemeral|--remembered] [--docker --connector]
   backup [NAME.age]
   restore BUNDLE.age --identity AGE_IDENTITY_FILE
 EOF
@@ -118,7 +118,7 @@ verify_release_images() {
     "ghcr.io/doout/laneway-controller:LANEWAY_CONTROLLER_IMAGE_DIGEST" \
     "ghcr.io/doout/laneway-relay:LANEWAY_RELAY_IMAGE_DIGEST" \
     "ghcr.io/doout/laneway-admin:LANEWAY_ADMIN_IMAGE_DIGEST" \
-    "ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+    "ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
   do
     image=${item%%:*}; key=${item#*:}; digest=$(read_setting "$file" "$key")
     "$cosign_command" verify --certificate-identity "$identity" \
@@ -183,7 +183,7 @@ run_status() {
   [ "$failed" = false ] || die "one or more configured services are unhealthy"
 }
 
-emit_docker_exit_script() {
+emit_docker_connector_command() {
   enrollment_token=$1; node_name=$2
   version=$(read_setting "$env_file" LANEWAY_VERSION)
   network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
@@ -193,139 +193,44 @@ emit_docker_exit_script() {
   relay_id=$(read_setting "$env_file" LANEWAY_RELAY_SERVICE_ID)
   relay_endpoint=$(read_setting "$env_file" LANEWAY_RELAY_PUBLIC_ENDPOINT)
   exit_digest=$(read_setting "$env_file" LANEWAY_EXIT_NODE_IMAGE_DIGEST)
-  admin_digest=$(read_setting "$env_file" LANEWAY_ADMIN_IMAGE_DIGEST)
   ca_file=$base_dir/generated/pki/ca.crt
   if [ ! -f "$ca_file" ] || [ -L "$ca_file" ]; then
     die "control-plane CA certificate is missing"
   fi
+  ca_b64=$(base64 "$ca_file" | awk '{printf "%s", $0}')
   cat <<EOF
-#!/bin/sh
-set -eu
-
-# Single-use Laneway Docker Exit Node installer for $node_name.
-# Treat this file as a secret until enrollment succeeds, then delete it.
-[ "\$(id -u)" -eq 0 ] || { echo "run this installer as root" >&2; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo "Docker Engine is required" >&2; exit 1; }
-docker compose version >/dev/null 2>&1 || { echo "Docker Compose v2 is required" >&2; exit 1; }
-[ -c /dev/net/tun ] || { echo "/dev/net/tun is required" >&2; exit 1; }
-
-install_dir=\${LANEWAY_EXIT_DIR:-/opt/laneway-exit-$node_name}
-case "\$install_dir" in /*) ;; *) echo "LANEWAY_EXIT_DIR must be absolute" >&2; exit 1 ;; esac
-[ ! -e "\$install_dir" ] && [ ! -L "\$install_dir" ] || { echo "refusing to overwrite \$install_dir" >&2; exit 1; }
-install -d -m 0700 -o 0 -g 0 "\$install_dir"
-token_file=\$install_dir/enrollment.token
-cleanup_token() { [ ! -e "\$token_file" ] || find "\$token_file" -maxdepth 0 -delete; }
-trap cleanup_token EXIT HUP INT TERM
-cat > "\$token_file" <<'LANEWAY_ENROLLMENT_TOKEN'
-$enrollment_token
-LANEWAY_ENROLLMENT_TOKEN
-chmod 0600 "\$token_file"
-cat > "\$install_dir/ca.crt" <<'LANEWAY_NETWORK_CA'
-EOF
-  cat "$ca_file"
-  cat <<EOF
-LANEWAY_NETWORK_CA
-chmod 0444 "\$install_dir/ca.crt"
-
-docker run --rm --user 0:0 -v "\$install_dir:/work" \
-  ghcr.io/doout/laneway-admin:$version@$admin_digest \
-  join --token-file /work/enrollment.token \
-  --controller https://$controller_name:$controller_port \
-  --ca /work/ca.crt --server-name $controller_name \
-  --controller-network-id $network_id --controller-service-id $controller_id \
-  --name $node_name --out-cert /work/node.crt --out-key /work/node.key \
-  --out-wireguard-key /work/wireguard.key
-cleanup_token
-
-cat > "\$install_dir/exit-node.toml" <<'LANEWAY_EXIT_CONFIG'
-mode = "node"
-state_dir = "/var/lib/laneway"
-socket_path = "/run/laneway/lanewayd.sock"
-
-[tls]
-certificate = "/run/laneway-secrets/node.crt"
-private_key = "/run/laneway-secrets/node.key"
-ca = "/run/laneway-secrets/ca.crt"
-server_name = "$controller_name"
-
-[node]
-name = "$node_name"
-relay_address = "$relay_endpoint"
-relay_network_id = "$network_id"
-relay_service_id = "$relay_id"
-reconnect_min = "1s"
-reconnect_max = "30s"
-
-[controller]
-endpoint = "https://$controller_name:$controller_port"
-quic_endpoint = "$controller_name:$controller_port"
-server_name = "$controller_name"
-network_id = "$network_id"
-service_id = "$controller_id"
-poll_interval = "30s"
-
-[tcp_fallback]
-address = "$controller_name:443"
-quic_probe_interval = "30s"
-
-[direct]
-enabled = true
-listen = "0.0.0.0:4434"
-
-[routing]
-output_interface = "eth0"
-nat = true
-
-[exit]
-enabled = false
-serve = true
-failure_mode = "closed"
-LANEWAY_EXIT_CONFIG
-
-cat > "\$install_dir/compose.yaml" <<'LANEWAY_EXIT_COMPOSE'
-services:
-  exit-node:
-    image: ghcr.io/doout/laneway-exit-node:$version@$exit_digest
-    user: "65532:65532"
-    read_only: true
-    cap_drop: [ALL]
-    cap_add: [NET_ADMIN]
-    security_opt:
-      - no-new-privileges:true
-    restart: unless-stopped
-    stop_grace_period: 20s
-    devices: [/dev/net/tun:/dev/net/tun]
-    sysctls:
-      net.ipv4.ip_forward: "1"
-      net.ipv6.conf.all.forwarding: "1"
-    volumes:
-      - state:/var/lib/laneway
-      - ./exit-node.toml:/etc/laneway/exit-node.toml:ro
-      - ./ca.crt:/run/laneway-secrets/ca.crt:ro
-      - ./node.crt:/run/laneway-secrets/node.crt:ro
-      - ./node.key:/run/laneway-secrets/node.key:ro
-      - ./wireguard.key:/etc/laneway/wireguard.key:ro
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
-      - /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532
-    ports:
-      - "\${LANEWAY_EXIT_PORT:-4434}:4434/udp"
-    healthcheck:
-      test: [CMD, /usr/local/bin/laneway-healthcheck, -unix, /run/laneway/lanewayd.sock]
-      interval: 10s
-      timeout: 3s
-      retries: 6
-      start_period: 15s
-volumes:
-  state:
-LANEWAY_EXIT_COMPOSE
-
-chown 65532:65532 "\$install_dir/node.crt" "\$install_dir/node.key" "\$install_dir/wireguard.key"
-chmod 0444 "\$install_dir/node.crt" "\$install_dir/exit-node.toml" "\$install_dir/compose.yaml"
-chmod 0400 "\$install_dir/node.key" "\$install_dir/wireguard.key"
-docker compose --project-directory "\$install_dir" -f "\$install_dir/compose.yaml" up -d --wait
-echo "Laneway Docker Exit Node $node_name is running from \$install_dir"
-echo "The enrollment token is consumed. Delete the installer script that you copied to this host."
+docker run -d \\
+  --name 'laneway-connector-$node_name' \\
+  --hostname 'laneway-connector-$node_name' \\
+  --restart unless-stopped \\
+  --pull always \\
+  --user 65532:65532 \\
+  --read-only \\
+  --cap-drop ALL \\
+  --cap-add NET_ADMIN \\
+  --security-opt no-new-privileges:true \\
+  --device /dev/net/tun:/dev/net/tun \\
+  --sysctl net.ipv4.ip_forward=1 \\
+  --sysctl net.ipv6.conf.all.forwarding=1 \\
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
+  --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \\
+  --volume 'laneway-connector-$node_name-state:/var/lib/laneway' \\
+  --publish 4434:4434/udp \\
+  --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \\
+  --health-interval 10s \\
+  --health-timeout 3s \\
+  --health-retries 6 \\
+  --health-start-period 15s \\
+  --env 'LANEWAY_ENROLLMENT_TOKEN=$enrollment_token' \\
+  --env 'LANEWAY_NODE_NAME=$node_name' \\
+  --env 'LANEWAY_CONTROLLER_SERVER_NAME=$controller_name' \\
+  --env 'LANEWAY_CONTROLLER_PORT=$controller_port' \\
+  --env 'LANEWAY_NETWORK_ID=$network_id' \\
+  --env 'LANEWAY_CONTROLLER_SERVICE_ID=$controller_id' \\
+  --env 'LANEWAY_RELAY_ENDPOINT=$relay_endpoint' \\
+  --env 'LANEWAY_RELAY_SERVICE_ID=$relay_id' \\
+  --env 'LANEWAY_CA_B64=$ca_b64' \\
+  'ghcr.io/doout/laneway-connector:$version@$exit_digest'
 EOF
 }
 
@@ -367,14 +272,14 @@ run_invite() {
       --expires-in) [ "$#" -ge 2 ] || die "--expires-in requires a value"; expires=$2; shift 2 ;;
       --session-lifetime) [ "$#" -ge 2 ] || die "--session-lifetime requires a value"; session=$2; shift 2 ;;
       --docker) docker_install=true; shift ;;
-      --exit-node|--exit) exit_node=true; shift ;;
+      --connector|--exit-node|--exit) exit_node=true; shift ;;
       *) die "unknown invite option: $1" ;;
     esac
   done
   case "$name" in ''|*[!A-Za-z0-9._-]*) die "invite requires a safe --name NAME" ;; esac
   [ "$class" = ephemeral ] || [ -z "$session" ] || die "--session-lifetime requires --ephemeral"
   if [ "$docker_install" != "$exit_node" ]; then
-    die "--docker and --exit-node must be used together"
+    die "--docker and --connector must be used together"
   fi
   network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
   controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
@@ -391,7 +296,7 @@ run_invite() {
     result=$(admin "$@" --exit-node)
     enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
     [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
-    emit_docker_exit_script "$enrollment_token" "$name"
+    emit_docker_connector_command "$enrollment_token" "$name"
   else
     admin "$@"
   fi
