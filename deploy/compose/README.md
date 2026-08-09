@@ -45,7 +45,11 @@ moved registry tag; operators only select the semantic release tag.
 Defaults cover the usual production ports, public binding, network name, and
 overlay pool. Before confirmation, the wizard shows every listener it will
 publish. It does not configure or modify the host firewall, routes, interfaces,
-DNS, or sysctls.
+DNS, or sysctls. Validated non-secret answers are remembered in the root-owned,
+mode-`0600` `/var/lib/laneway-installer/control-plane.answers`, so a failed or
+cancelled attempt does not require retyping the domain, paths, pool, or ports.
+The file never contains a recovery identity, CA private key, admin token, or
+generated deployment secret. Explicit environment variables override it.
 
 ## Prerequisites
 
