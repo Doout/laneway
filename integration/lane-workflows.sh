@@ -150,7 +150,7 @@ test ! -e "$compose_dir/generated/lifecycle/production-verified"
 sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
   "$compose_dir/lane" production-check >/dev/null
 test "$(stat -c %a "$compose_dir/generated/lifecycle/production-verified")" = 600
-grep -Fx 'profile=quick' "$compose_dir/generated/lifecycle/production-verified" >/dev/null
+sudo grep -Fx 'profile=quick' "$compose_dir/generated/lifecycle/production-verified" >/dev/null
 
 "$compose_dir/lane" backup manual.age
 grep -F 'recovery <backup> <manual.age>' "$log" >/dev/null
