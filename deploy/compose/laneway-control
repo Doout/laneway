@@ -316,9 +316,10 @@ run_update() {
   done
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
   docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "Docker Engine is not running"
-  [ -f "$base_dir/compose.yaml" ] && [ ! -L "$base_dir/compose.yaml" ] && \
-    [ -f "$env_file" ] && [ ! -L "$env_file" ] || \
+  if [ ! -f "$base_dir/compose.yaml" ] || [ -L "$base_dir/compose.yaml" ] || \
+    [ ! -f "$env_file" ] || [ -L "$env_file" ]; then
     die "this control plane is not a supported Docker Compose installation"
+  fi
   compose config --quiet || die "the Docker Compose installation is invalid"
 
   current_version=$(read_setting "$env_file" LANEWAY_VERSION)
@@ -353,7 +354,9 @@ run_update() {
   esac
   temporary_parent=${TMPDIR:-/var/tmp}
   case "$temporary_parent" in /*) ;; *) die "TMPDIR must be absolute" ;; esac
-  [ -d "$temporary_parent" ] && [ ! -L "$temporary_parent" ] || die "TMPDIR must be a real directory"
+  if [ ! -d "$temporary_parent" ] || [ -L "$temporary_parent" ]; then
+    die "TMPDIR must be a real directory"
+  fi
   update_dir=$(mktemp -d "$temporary_parent/laneway-update.XXXXXX")
   cleanup_update() { [ ! -e "$update_dir" ] || find "$update_dir" -depth -delete; }
   trap cleanup_update EXIT
@@ -379,13 +382,15 @@ run_update() {
     tar -xzf "$asset"
   ) || die "release archive verification or extraction failed"
   package_dir=$update_dir/laneway
-  [ -f "$package_dir/VERSION" ] && [ ! -L "$package_dir/VERSION" ] && \
-    [ "$(sed -n '1p' "$package_dir/VERSION")" = "$latest_version" ] || \
+  if [ ! -f "$package_dir/VERSION" ] || [ -L "$package_dir/VERSION" ] || \
+    [ "$(sed -n '1p' "$package_dir/VERSION")" != "$latest_version" ]; then
     die "verified package version does not match $latest_tag"
-  [ -f "$package_dir/install.sh" ] && [ ! -L "$package_dir/install.sh" ] && \
-    [ -f "$package_dir/deploy/compose/upgrade-control-plane.sh" ] && \
-    [ ! -L "$package_dir/deploy/compose/upgrade-control-plane.sh" ] || \
+  fi
+  if [ ! -f "$package_dir/install.sh" ] || [ -L "$package_dir/install.sh" ] || \
+    [ ! -f "$package_dir/deploy/compose/upgrade-control-plane.sh" ] || \
+    [ -L "$package_dir/deploy/compose/upgrade-control-plane.sh" ]; then
     die "verified package is missing the Docker Compose updater"
+  fi
 
   echo "laneway-control: detected Docker Compose deployment at $base_dir"
   echo "laneway-control: updating from v$current_version to $latest_tag"
