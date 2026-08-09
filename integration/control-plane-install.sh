@@ -60,6 +60,14 @@ cat > "$mock_bin/age" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
+cat > "$mock_bin/age-keygen" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat > "$mock_bin/ss" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
 cat > "$mock_bin/getent" <<'EOF'
 #!/bin/sh
 test "$1" = ahosts
@@ -69,6 +77,7 @@ cat > "$mock_bin/cosign" <<'EOF'
 #!/bin/sh
 printf 'cosign %s\n' "$*" >> "$LANEWAY_TEST_LOG"
 test "$1" = verify
+[ "${LANEWAY_TEST_COSIGN_FAIL:-0}" = 0 ]
 EOF
 cat > "$mock_bin/curl" <<'EOF'
 #!/bin/sh
@@ -125,6 +134,7 @@ env \
 test "$(stat -c %a "$destination")" = 700
 test "$(stat -c %a "$destination/.env")" = 600
 grep -Fx 'LANEWAY_VERSION=0.2.8' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_INSTALL_PROFILE=quick' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_SERVER_NAME=lane.example.test' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433' "$destination/.env" >/dev/null
@@ -136,6 +146,8 @@ test "$(stat -c %a "$answers_file")" = 600
 grep -Fx 'LANEWAY_DOMAIN=lane.example.test' "$answers_file" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_PORT=8443' "$answers_file" >/dev/null
 grep -Fx "LANEWAY_PREPARED_INPUT_DIR=$issuer_dir" "$answers_file" >/dev/null
+test -f "$destination/PRODUCTION-CHECKLIST.md"
+grep -F 'lane production-check' "$destination/PRODUCTION-CHECKLIST.md" >/dev/null
 
 remembered_cancel=$test_root/remembered-cancel
 printf '0\n' > "$counter_file"
@@ -173,6 +185,7 @@ env \
   LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
   LANEWAY_TEST_COUNTER="$counter_file" \
   LANEWAY_TEST_LOG="$log_file" \
+  LANEWAY_TEST_COSIGN_FAIL=1 \
   LANEWAY_INSTALLER_ANSWERS_FILE="$automatic_answers" \
   "$source_dir/install-control-plane.sh" >/dev/null
 test -f "$automatic_kit/laneway-recovery.identity"
@@ -182,6 +195,33 @@ test -f "$automatic_kit/MANIFEST.sha256"
 test ! -e "$automatic_kit/control-plane-input"
 test "$(find "$automatic_kit" -maxdepth 1 -name 'initial-recovery-*.age' | wc -l)" -eq 1
 grep -Fx "LANEWAY_BACKUP_RECIPIENT=$recipient" "$automatic/.env" >/dev/null
+grep -Fx 'LANEWAY_INSTALL_PROFILE=quick' "$automatic/.env" >/dev/null
+grep -F 'All container image signatures verified: **false**' "$automatic/PRODUCTION-CHECKLIST.md" >/dev/null
+
+production_failed=$test_root/production-failed
+printf '0\n' > "$counter_file"
+if env \
+  PATH="$mock_bin:$PATH" \
+  LANEWAY_NONINTERACTIVE=true \
+  LANEWAY_VERSION=0.2.8 \
+  LANEWAY_PRODUCTION_MODE=true \
+  LANEWAY_DOMAIN=prod.example.test \
+  LANEWAY_DEPLOY_DIR="$production_failed" \
+  LANEWAY_BACKUP_RECIPIENT="$recipient" \
+  LANEWAY_ISSUER_DIR="$issuer_dir" \
+  LANEWAY_CONFIRM=deploy \
+  LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.2.8 \
+  LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
+  LANEWAY_TEST_COUNTER="$counter_file" \
+  LANEWAY_TEST_LOG="$log_file" \
+  LANEWAY_TEST_COSIGN_FAIL=1 \
+  LANEWAY_INSTALLER_ANSWERS_FILE="$test_root/production-installer-state/answers" \
+  "$source_dir/install-control-plane.sh" >/dev/null 2>"$test_root/production.err"; then
+  echo "production installer accepted failed image signatures" >&2
+  exit 1
+fi
+grep -F 'production signature verification failed' "$test_root/production.err" >/dev/null
+test ! -e "$production_failed"
 
 cancelled=$test_root/cancelled
 printf '0\n' > "$counter_file"

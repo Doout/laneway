@@ -9,7 +9,7 @@ Published releases use the pinned images in `compose.yaml`. Until those images
 are published, developers can add `-f compose.dev.yaml` to build equivalent
 images from this checkout.
 
-## Quick production install
+## Quick install, explicit production check
 
 Prepare public DNS, then run the interactive installer from the signed Laneway
 package:
@@ -36,11 +36,27 @@ control plane never retains the offline root key or recovery identity. Use the
 separate-host path below when the production host must never observe the root
 key or recovery identity, even transiently during setup.
 
-The wizard also downloads the release's image manifest, verifies every
+The wizard also downloads the release's image manifest, attempts to verify every
 immutable image against the tagged GitHub Actions signing identity, generates
 independent service IDs, writes the protected `.env`, and runs `lane init`.
 Hashes remain in the generated file so later starts cannot silently follow a
 moved registry tag; operators only select the semantic release tag.
+
+The default `quick` profile continues with a prominent warning if Sigstore or a
+registry signature endpoint is temporarily unavailable. It generates
+`/opt/laneway/PRODUCTION-CHECKLIST.md`. Before production traffic, complete that
+checklist and run:
+
+```sh
+sudo /opt/laneway/lane production-check
+```
+
+That command is fail-closed: it verifies every image signature, configuration,
+DNS/preflight state, required service health, and the presence of an encrypted
+recovery backup. Success creates a root-only
+`generated/lifecycle/production-verified` marker. To require the same strict
+signature behavior during the initial install, use
+`sudo sh install.sh --control-plane --production`.
 
 Defaults cover the usual production ports, public binding, network name, and
 overlay pool. Before confirmation, the wizard shows every listener it will
@@ -55,7 +71,8 @@ generated deployment secret. Explicit environment variables override it.
 
 - Docker Engine 26 or newer with Compose v2
 - `age` and `age-keygen` for encrypted recovery bundles
-- Cosign 3.1.3 or newer for release and image signature verification
+- Cosign is optional on the host; the top-level installer uses a checksum-pinned
+  Cosign 3.1.3 verifier when the host copy is missing or incompatible
 - `curl`, `getent`, and `ss` for downloads and read-only preflight checks
 - public DNS for the control host
 - inbound TCP+UDP 8443, UDP 4433, and TCP 443

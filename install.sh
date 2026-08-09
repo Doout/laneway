@@ -5,18 +5,82 @@ repository=${LANEWAY_REPOSITORY:-Doout/laneway}
 release=${LANEWAY_VERSION:-latest}
 install_control_plane=false
 prepare_control_plane=false
+production_mode=false
+cosign_bin=
+cosign_is_fallback=false
+
+add_missing() {
+  if [ -n "${missing:-}" ]; then missing="$missing
+$1"; else missing=$1; fi
+}
+
+version_at_least() {
+  awk -v have="$1" -v minimum="$2" 'BEGIN {
+    sub(/^v/, "", have); sub(/[-+].*$/, "", have)
+    split(have, h, "."); split(minimum, m, ".")
+    for (i=1; i<=3; i++) {
+      if (h[i] !~ /^[0-9]+$/) exit 1
+      if ((h[i]+0) > (m[i]+0)) exit 0
+      if ((h[i]+0) < (m[i]+0)) exit 1
+    }
+    exit 0
+  }'
+}
+
+cosign_version() {
+  "$1" version --json 2>/dev/null | sed -n 's/.*"gitVersion":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p'
+}
+
+select_cosign() {
+  host_cosign=$(command -v cosign 2>/dev/null || true)
+  if [ -n "$host_cosign" ]; then
+    host_version=$(cosign_version "$host_cosign")
+    if [ -n "$host_version" ] && version_at_least "$host_version" 3.1.3; then
+      cosign_bin=$host_cosign
+      return
+    fi
+    echo "Laneway pre-check: ignoring incompatible host Cosign (${host_version:-unversioned}); using pinned v3.1.3" >&2
+  else
+    echo "Laneway pre-check: host Cosign is missing; using pinned v3.1.3" >&2
+  fi
+  case "$architecture" in
+    amd64) cosign_sha=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71 ;;
+    arm64) cosign_sha=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a ;;
+    *) echo "no pinned Cosign verifier for architecture: $architecture" >&2; return 1 ;;
+  esac
+  cosign_bin=$download_dir/cosign-v3.1.3
+  if ! curl --fail --location --silent --show-error \
+    "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-$architecture" -o "$cosign_bin" || \
+    ! printf '%s  %s\n' "$cosign_sha" "$cosign_bin" | sha256sum -c - >/dev/null; then
+    echo "Laneway verification: could not install the pinned Cosign verifier" >&2
+    cosign_bin=
+    return 1
+  fi
+  chmod 0755 "$cosign_bin"
+  if [ "$(cosign_version "$cosign_bin")" != v3.1.3 ]; then
+    echo "pinned Cosign verifier reported an unexpected version" >&2
+    cosign_bin=
+    return 1
+  fi
+  cosign_is_fallback=true
+}
 
 case "${1:-}" in
   '') ;;
-  --control-plane) install_control_plane=true; shift ;;
+  --control-plane)
+    install_control_plane=true; shift
+    if [ "${1:-}" = --production ]; then production_mode=true; shift; fi
+    ;;
   --prepare-control-plane) prepare_control_plane=true; shift ;;
   -h|--help)
     cat <<'EOF'
-usage: sh install.sh [--control-plane | --prepare-control-plane]
+usage: sh install.sh [--control-plane [--production] | --prepare-control-plane]
 
 Without options, install the latest Laneway binaries and packaged files.
 With --control-plane, select a stable release tag, verify its signed release,
 install it, and start the interactive hardened control-plane installer.
+The default quick profile warns on unavailable signature services and writes a
+production checklist. Add --production to make all signature checks fail closed.
 With --prepare-control-plane, create a recovery kit and the limited input that
 may be copied to a separate production control-plane server.
 EOF
@@ -43,19 +107,44 @@ case "$(uname -m)" in
     exit 1
     ;;
 esac
-for command in curl grep sha256sum tar; do
-  if ! command -v "$command" >/dev/null 2>&1; then
-    echo "required command is missing: $command" >&2
-    exit 1
-  fi
+missing=
+for command in awk curl find grep mktemp sed sha256sum tar; do
+  command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
   [ -z "${DESTDIR:-}" ] || { echo "control-plane modes cannot be combined with DESTDIR" >&2; exit 1; }
-  if ! command -v cosign >/dev/null 2>&1; then
-    echo "cosign is required for a control-plane install" >&2
-    exit 1
+  [ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"
+  for command in age age-keygen chmod chown date dirname install stat sync wc; do
+    command -v "$command" >/dev/null 2>&1 || add_missing "$command"
+  done
+  if [ ! -d /dev/shm ] || [ -L /dev/shm ] || \
+    { command -v awk >/dev/null 2>&1 && ! awk '$2 == "/dev/shm" && $3 == "tmpfs" { found=1 } END { exit !found }' /proc/mounts; }; then
+    add_missing "/dev/shm mounted as tmpfs (required for memory-only offline-root generation)"
   fi
+fi
+if [ "$install_control_plane" = true ]; then
+  for command in docker getent ss; do
+    command -v "$command" >/dev/null 2>&1 || add_missing "$command"
+  done
+  if command -v docker >/dev/null 2>&1; then
+    docker compose version >/dev/null 2>&1 || add_missing "Docker Compose v2"
+    docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null || true)
+    if [ -z "$docker_version" ]; then
+      add_missing "a running Docker Engine daemon"
+    elif command -v awk >/dev/null 2>&1 && ! version_at_least "$docker_version" 26.0.0; then
+      add_missing "Docker Engine 26 or newer (found $docker_version)"
+    fi
+  fi
+fi
+if [ -n "$missing" ]; then
+  echo "Laneway pre-check found missing or incompatible prerequisites:" >&2
+  printf '%s\n' "$missing" | while IFS= read -r item; do printf '  - %s\n' "$item" >&2; done
+  echo "Install the listed prerequisites and rerun; no deployment changes were made." >&2
+  exit 1
+fi
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+  echo "Laneway pre-check: required host prerequisites are available." >&2
   if [ "$release" = latest ]; then
     latest_url=$(curl --fail --location --silent --show-error --output /dev/null \
       --write-out '%{url_effective}' "https://github.com/$repository/releases/latest")
@@ -85,6 +174,13 @@ fi
 download_dir=$(mktemp -d)
 trap 'find "$download_dir" -depth -delete' EXIT HUP INT TERM
 
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+  if ! select_cosign && [ "$production_mode" = true ]; then
+    echo "Laneway production install requires a working pinned signature verifier." >&2
+    exit 1
+  fi
+fi
+
 curl --fail --location --silent --show-error \
   "$base_url/$asset" -o "$download_dir/$asset"
 curl --fail --location --silent --show-error \
@@ -92,10 +188,18 @@ curl --fail --location --silent --show-error \
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
   curl --fail --location --silent --show-error \
     "$base_url/checksums.sigstore.json" -o "$download_dir/checksums.sigstore.json"
-  cosign verify-blob --bundle "$download_dir/checksums.sigstore.json" \
-    --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$release" \
-    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    "$download_dir/checksums.txt" >/dev/null
+  checksum_signature_verified=false
+  if [ -n "$cosign_bin" ] && "$cosign_bin" verify-blob --bundle "$download_dir/checksums.sigstore.json" \
+      --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$release" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      "$download_dir/checksums.txt" >/dev/null; then
+    checksum_signature_verified=true
+  elif [ "$production_mode" = true ]; then
+    echo "Laneway production install: release checksum signature verification failed." >&2
+    exit 1
+  else
+    echo "WARNING: checksum signature could not be verified; archive checksum validation will still run." >&2
+  fi
 fi
 (
   cd "$download_dir"
@@ -113,11 +217,19 @@ fi
 env DESTDIR="${DESTDIR:-}" PREFIX="/usr/local" \
   sh "$download_dir/laneway/install.sh"
 
+if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ]; then
+  install -D -m 0755 -o 0 -g 0 "$cosign_bin" /usr/local/libexec/laneway/cosign-v3.1.3
+  cosign_bin=/usr/local/libexec/laneway/cosign-v3.1.3
+fi
+
 if [ "$install_control_plane" = true ]; then
-  exec env LANEWAY_VERSION="${release#v}" \
+  exec env LANEWAY_VERSION="${release#v}" LANEWAY_COSIGN_BIN="$cosign_bin" \
+    LANEWAY_PRODUCTION_MODE="$production_mode" \
+    LANEWAY_CHECKSUM_SIGNATURE_VERIFIED="${checksum_signature_verified:-false}" \
     sh /usr/local/share/laneway/deploy/compose/install-control-plane.sh
 fi
 if [ "$prepare_control_plane" = true ]; then
   output=${LANEWAY_RECOVERY_KIT_DIR:-/root/laneway-recovery-kit-$(date -u +%Y%m%dT%H%M%SZ)}
-  exec sh /usr/local/share/laneway/deploy/compose/prepare-control-plane.sh "$output"
+  exec env LANEWAY_COSIGN_BIN="$cosign_bin" \
+    sh /usr/local/share/laneway/deploy/compose/prepare-control-plane.sh "$output"
 fi

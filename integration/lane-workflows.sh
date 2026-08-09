@@ -64,6 +64,7 @@ set -eu
 printf 'cosign' >> "$LANE_TEST_LOG"
 printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
+[ "${LANE_TEST_COSIGN_FAIL:-0}" = 0 ]
 EOF
 cat > "$fake_bin/age" <<'EOF'
 #!/bin/sh
@@ -75,6 +76,7 @@ write_env() {
   path=$1; version=$2; digit=$3
   cat > "$path" <<EOF
 LANEWAY_VERSION=$version
+LANEWAY_INSTALL_PROFILE=quick
 LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
 LANEWAY_RELAY_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
 LANEWAY_ADMIN_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
@@ -108,6 +110,10 @@ bootstrap_line=$(grep -n '^bootstrap$' "$log" | tail -1 | cut -d: -f1)
 [ "$pull_line" -lt "$bootstrap_line" ] || { echo "init bootstrapped before verified pull" >&2; exit 1; }
 : > "$log"
 
+LANE_TEST_COSIGN_FAIL=1 "$compose_dir/lane" init >/dev/null 2>"$test_dir/quick-warning.err"
+grep -F 'image signatures were not verified during quick install' "$test_dir/quick-warning.err" >/dev/null
+: > "$log"
+
 LANE_TEST_DNS_FAIL=1; export LANE_TEST_DNS_FAIL
 if "$compose_dir/preflight.sh" >/dev/null 2>&1; then echo "preflight accepted failed DNS" >&2; exit 1; fi
 LANE_TEST_DNS_FAIL=0; export LANE_TEST_DNS_FAIL
@@ -133,6 +139,19 @@ LANE_TEST_HEALTH=unhealthy; export LANE_TEST_HEALTH
 if "$compose_dir/lane" status >/dev/null 2>&1; then echo "status accepted an unhealthy required service" >&2; exit 1; fi
 LANE_TEST_HEALTH=healthy; export LANE_TEST_HEALTH
 
+mkdir -p "$compose_dir/generated/recovery"
+printf 'encrypted backup\n' > "$compose_dir/generated/recovery/initial.age"
+if sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+  LANE_TEST_COSIGN_FAIL=1 "$compose_dir/lane" production-check >/dev/null 2>&1; then
+  echo "production-check accepted failed image signatures" >&2
+  exit 1
+fi
+test ! -e "$compose_dir/generated/lifecycle/production-verified"
+sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+  "$compose_dir/lane" production-check >/dev/null
+test "$(stat -c %a "$compose_dir/generated/lifecycle/production-verified")" = 600
+sudo grep -Fx 'profile=quick' "$compose_dir/generated/lifecycle/production-verified" >/dev/null
+
 "$compose_dir/lane" backup manual.age
 grep -F 'recovery <backup> <manual.age>' "$log" >/dev/null
 mkdir "$compose_dir/generated/lifecycle/operator.lock"
@@ -152,6 +171,7 @@ bundle=$test_dir/recovery.age
 "$compose_dir/lane" restore "$bundle" --identity "$identity"
 grep -F "recovery <restore> <$bundle> <$identity>" "$log" >/dev/null
 
+: > "$log"
 "$compose_dir/lane" upgrade "$candidate"
 grep -F 'LANEWAY_VERSION=1.1.0' "$compose_dir/.env" >/dev/null
 grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/generated/lifecycle/previous.env" >/dev/null

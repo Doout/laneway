@@ -39,7 +39,7 @@ do
   require "image: $image" "$workflow"
 done
 
-for value in 'cosign verify' 'compose_with_env' 'backup_recovery' 'database was not rolled back'; do
+for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'backup_recovery' 'database was not rolled back'; do
   require "$value" "$lane_workflow"
 done
 for value in 'pki verify-authority' 'offline root private key ca.key must never' 'chown 65532:65532'; do
@@ -48,7 +48,7 @@ done
 for value in 'age --encrypt' 'age --decrypt' 'unexpected recovery archive entry' 'generated/recovery' 'chown 0:0'; do
   require "$value" "$recovery_workflow"
 done
-for value in 'Release tag' 'image-digests.txt' 'cosign verify' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup' 'control-plane.answers' 'save_answers'; do
+for value in 'Release tag' 'image-digests.txt' 'production signature verification failed' 'PRODUCTION-CHECKLIST.md' 'LANEWAY_INSTALL_PROFILE' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup' 'control-plane.answers' 'save_answers'; do
   require "$value" "$installer"
 done
 for value in '/dev/shm' 'offline-root.tar.age' 'control-plane-input' 'pki verify-authority' 'Never copy laneway-recovery.identity'; do

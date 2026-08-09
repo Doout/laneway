@@ -42,11 +42,12 @@ also includes hardened systemd units, examples, and operational documentation.
 It creates the locked `laneway` service account but never
 overwrites configuration or starts a service.
 
-For a new controller and relay host, use the interactive production installer.
+For a new controller and relay host, use the interactive installer.
 The default path asks for the release tag and DNS name, generates the issuer
 and recovery material automatically, supplies safe defaults for the remaining
-settings, verifies the signed release, starts the hardened Compose stack, and
-leaves one protected recovery-kit directory to copy off-host:
+settings, pins release artifacts and images by checksum/digest, starts the
+hardened Compose stack, and leaves one protected recovery-kit directory to
+copy off-host:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Doout/laneway/main/install.sh
@@ -55,7 +56,12 @@ sudo sh install.sh --control-plane
 ```
 
 The installer never changes the host firewall, routes, interfaces, DNS, or
-sysctls. Configure public DNS and external firewall rules before running it.
+sysctls. Its default quick profile warns instead of stopping when a signature
+service is unavailable and writes `/opt/laneway/PRODUCTION-CHECKLIST.md`. Run
+`sudo /opt/laneway/lane production-check` before production traffic; that check
+is fail-closed. Use `--control-plane --production` to require signature
+verification during installation itself. Configure public DNS and external
+firewall rules before running it.
 For the higher-assurance path, `--prepare-control-plane` creates the kit on a
 separate trusted Linux host; copy only its `control-plane-input` directory to
 production. See the [control-plane guide](deploy/compose/README.md).
