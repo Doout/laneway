@@ -87,6 +87,7 @@ chmod 0755 "$fake_bin/curl" "$fake_bin/docker" "$fake_bin/cosign"
 system_command=$test_root/sbin/laneway-control
 mkdir -p "$(dirname "$system_command")"
 env PATH="$fake_bin:$PATH" \
+  LANEWAY_VERSION=v9.9.9 \
   LANEWAY_DEPLOY_DIR="$deployment" \
   LANEWAY_CONTROL_COMMAND="$system_command" \
   LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.2.15 \
