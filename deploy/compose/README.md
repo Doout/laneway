@@ -11,9 +11,8 @@ images from this checkout.
 
 ## Quick production install
 
-Prepare public DNS, the offline issuer export, and an off-host age recovery
-recipient as described below. Then run the interactive installer from the
-signed Laneway package:
+Prepare public DNS, then run the interactive installer from the signed Laneway
+package:
 
 ```sh
 sudo /usr/local/share/laneway/deploy/compose/install-control-plane.sh
@@ -28,12 +27,20 @@ less install.sh
 sudo sh install.sh --control-plane
 ```
 
-The wizard asks for one stable release tag rather than four image hashes. It
-downloads the release's image manifest, verifies every immutable image against
-the tagged GitHub Actions signing identity, generates independent service IDs,
-writes the protected `.env`, and runs `lane init`. The hashes remain in the
-generated file so later starts cannot silently follow a moved registry tag;
-operators do not need to find or copy them.
+The convenience path generates a recovery identity, an offline root in memory-only
+temporary storage, and an online intermediate. It encrypts the offline root,
+deploys only the online intermediate, takes an initial encrypted recovery
+backup, and leaves one mode-`0700` recovery-kit directory. Copy that entire
+directory off the server, verify it, and remove the server copy. The running
+control plane never retains the offline root key or recovery identity. Use the
+separate-host path below when the production host must never observe the root
+key or recovery identity, even transiently during setup.
+
+The wizard also downloads the release's image manifest, verifies every
+immutable image against the tagged GitHub Actions signing identity, generates
+independent service IDs, writes the protected `.env`, and runs `lane init`.
+Hashes remain in the generated file so later starts cannot silently follow a
+moved registry tag; operators only select the semantic release tag.
 
 Defaults cover the usual production ports, public binding, network name, and
 overlay pool. Before confirmation, the wizard shows every listener it will
@@ -48,8 +55,31 @@ DNS, or sysctls.
 - `curl`, `getent`, and `ss` for downloads and read-only preflight checks
 - public DNS for the control host
 - inbound TCP+UDP 8443, UDP 4433, and TCP 443
-- an offline root and an exported online-intermediate bundle created as
-  described below and in [../../docs/operations.md](../../docs/operations.md)
+
+## Separate-host preparation
+
+For the strongest offline-root boundary, run the signed preparation flow on a
+separate trusted Linux host that has `age`, `age-keygen`, and Cosign:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/Doout/laneway/main/install.sh
+less install.sh
+sudo sh install.sh --prepare-control-plane
+```
+
+It creates one protected recovery kit with two categories of material:
+
+- `laneway-recovery.identity` and `offline-root.tar.age` stay on the trusted
+  host and are backed up;
+- only `control-plane-input/` is copied to the production server.
+
+Run the normal `--control-plane` installer on production and enter the copied
+directory at the optional prepared-input prompt. The recovery recipient is
+loaded automatically. After deployment, copy the initial encrypted recovery
+bundle shown by the installer back to the recovery kit, then delete the
+production copy of `control-plane-input`.
+
+## Manual issuer preparation
 
 On an offline Linux workstation, create the root and online intermediate. Keep
 the entire `offline-root` directory offline and backed up; only the three files
@@ -77,9 +107,9 @@ key or unexpected private key in the export is rejected. Repeating the command
 with the same completed material is idempotent; partial generated state is
 rejected for manual inspection.
 
-Create the recovery identity on a separate trusted workstation and keep its
-private file off the control host. Put the printed public recipient in `.env`
-as `LANEWAY_BACKUP_RECIPIENT`:
+For a fully manual import, create the recovery identity on a separate trusted
+workstation and keep its private file off the control host. Put the printed
+public recipient in `.env` as `LANEWAY_BACKUP_RECIPIENT`:
 
 ```sh
 age-keygen -o laneway-recovery.identity

@@ -664,15 +664,25 @@ procedure is documented in `deploy/compose/README.md`. Deploy relay/controller
 first, then roll nodes. Never roll back the database independently of migrations
 without a tested matching bundle.
 
-For a new Compose control plane, create the root and intermediate on an offline
-workstation. Transfer only `ca.crt`, the issuer-first
-`intermediate-chain.crt`, and `intermediate.key`; never transfer the root key.
-`sudo ./lane init --issuer DIR` verifies that boundary and generates the service
-identities, admin secret, and strict configuration without overwriting existing
-or partial state. Its preflight checks Docker version/Compose, public DNS, and
-foreign TCP/UDP listeners read-only. If an existing Laneway Compose stack owns
-containers, port collision checks are skipped so repeated init remains
-idempotent. The optional Exit profile additionally requires `/dev/net/tun`.
+For a new Compose control plane, the default installer generates the root in
+`/dev/shm`, encrypts it immediately to a newly generated age recovery identity,
+deploys only the online intermediate, creates an initial encrypted recovery
+bundle, and leaves one protected recovery-kit directory for immediate off-host
+copy. After verifying that copy, remove the server copy because it contains the
+private age identity. The running deployment retains neither that identity nor
+the root private key.
+
+For the higher-assurance boundary, run `install.sh --prepare-control-plane` on
+a separate trusted Linux host and transfer only its `control-plane-input`
+directory. The normal installer recognizes its issuer files and recovery
+recipient. The root key and recovery identity never reach production. Manual
+issuer exports remain supported. `sudo ./lane init --issuer DIR` rejects a root
+key, verifies the authority, and generates service identities, the admin secret,
+and strict configuration without overwriting existing or partial state. Its
+preflight checks Docker version/Compose, public DNS, and foreign TCP/UDP
+listeners read-only. If an existing Laneway Compose stack owns containers, port
+collision checks are skipped so repeated init remains idempotent. The optional
+Exit profile additionally requires `/dev/net/tun`.
 
 Tagged releases publish Linux AMD64/ARM64 archives and controller, relay,
 administrative, and isolated Exit Node images. Every release includes signed

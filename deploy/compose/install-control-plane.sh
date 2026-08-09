@@ -59,7 +59,7 @@ valid_ipv4_pool() {
   [ "$prefix" -le 32 ]
 }
 
-for command in curl cosign docker age getent grep sed sha256sum; do
+for command in curl cosign date docker age find getent grep install sed sha256sum sync wc; do
   command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
 done
 [ "$(id -u)" -eq 0 ] || die "run as root so the deployment can be protected and container ownership can be installed"
@@ -71,9 +71,10 @@ Laneway control-plane setup
 
 Press Enter to accept a shown default. You will need:
   - a public DNS name that already resolves to this host
-  - an age public recipient generated on a separate trusted machine
-  - an issuer export containing ca.crt, intermediate-chain.crt, and
-    intermediate.key (never copy the offline ca.key to this host)
+
+By default, the installer creates the issuer and recovery identity for you and
+leaves one protected recovery-kit directory to copy off this server. You can
+instead provide control-plane-input prepared on a separate trusted host.
 
 No host networking or firewall settings will be changed.
 EOF
@@ -135,25 +136,54 @@ valid_port "$relay_tcp_port" || die "relay TCP port is invalid"
 [ "$controller_port" != "$relay_quic_port" ] || die "controller and relay UDP ports must differ"
 [ "$controller_port" != "$relay_tcp_port" ] || die "controller and relay TCP ports must differ"
 
-ask "Off-host age recovery recipient" "${LANEWAY_BACKUP_RECIPIENT:-}"
-backup_recipient=$REPLY
-printf '%s\n' "$backup_recipient" | grep -Eq '^age1[0-9a-z]{58}$' || \
-  die "recovery recipient must be an age X25519 public recipient (the private identity stays off this host)"
-
-ask "Online issuer export directory" "${LANEWAY_ISSUER_DIR:-}"
-issuer_dir=$REPLY
-case "$issuer_dir" in /*) ;; *) die "issuer export directory must be an absolute path" ;; esac
-if [ ! -d "$issuer_dir" ] || [ -L "$issuer_dir" ]; then
-  die "issuer export directory is missing or unsafe"
-fi
-if [ -e "$issuer_dir/ca.key" ] || [ -L "$issuer_dir/ca.key" ]; then
-  die "offline root ca.key must not be present on this host"
-fi
-for name in ca.crt intermediate-chain.crt intermediate.key; do
-  if [ ! -f "$issuer_dir/$name" ] || [ -L "$issuer_dir/$name" ]; then
-    die "issuer export is missing a regular $name"
+validate_issuer_dir() {
+  directory=$1
+  case "$directory" in /*) ;; *) die "prepared input directory must be an absolute path" ;; esac
+  if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+    die "prepared input directory is missing or unsafe"
   fi
-done
+  if [ -e "$directory/ca.key" ] || [ -L "$directory/ca.key" ]; then
+    die "offline root ca.key must not be present in control-plane input"
+  fi
+  for name in ca.crt intermediate-chain.crt intermediate.key; do
+    if [ ! -f "$directory/$name" ] || [ -L "$directory/$name" ]; then
+      die "prepared input is missing a regular $name"
+    fi
+  done
+}
+
+automatic_issuer=false
+issuer_dir=${LANEWAY_ISSUER_DIR:-}
+if [ -z "$issuer_dir" ]; then
+  ask "Prepared control-plane input directory (Enter to generate automatically)" "${LANEWAY_PREPARED_INPUT_DIR:-}"
+  issuer_dir=$REPLY
+fi
+if [ -n "$issuer_dir" ]; then
+  validate_issuer_dir "$issuer_dir"
+  backup_recipient=${LANEWAY_BACKUP_RECIPIENT:-}
+  if [ -z "$backup_recipient" ] && [ -f "$issuer_dir/recovery-recipient.txt" ] && [ ! -L "$issuer_dir/recovery-recipient.txt" ]; then
+    [ "$(wc -l < "$issuer_dir/recovery-recipient.txt")" -eq 1 ] || die "prepared recovery recipient file must contain exactly one line"
+    backup_recipient=$(sed -n '1p' "$issuer_dir/recovery-recipient.txt")
+  fi
+  if [ -z "$backup_recipient" ]; then
+    ask "Off-host age recovery recipient" ""
+    backup_recipient=$REPLY
+  fi
+  printf '%s\n' "$backup_recipient" | grep -Eq '^age1[0-9a-z]{58}$' || \
+    die "recovery recipient must be an age X25519 public recipient"
+  recovery_description="prepared input: $issuer_dir"
+else
+  automatic_issuer=true
+  recovery_default=/root/laneway-recovery-$domain-$(date -u +%Y%m%dT%H%M%SZ)
+  ask "Recovery kit directory" "${LANEWAY_RECOVERY_KIT_DIR:-$recovery_default}"
+  recovery_kit=$REPLY
+  case "$recovery_kit" in /*) ;; *) die "recovery kit directory must be an absolute path" ;; esac
+  [ "$recovery_kit" != / ] || die "recovery kit directory cannot be /"
+  if [ -e "$recovery_kit" ] || [ -L "$recovery_kit" ]; then
+    die "recovery kit already exists; refusing to overwrite it: $recovery_kit"
+  fi
+  recovery_description="generate automatically; copy $recovery_kit off-host after setup"
+fi
 
 metadata_dir=$(mktemp -d)
 cleanup() { [ ! -e "$metadata_dir" ] || find "$metadata_dir" -depth -delete; }
@@ -201,6 +231,7 @@ Laneway is ready to deploy:
   directory:    $destination
   overlay pool: $ipv4_pool
   listeners:    $bind_address:$controller_port TCP+UDP, $bind_address:$relay_quic_port UDP, $bind_address:$relay_tcp_port TCP
+  recovery:     $recovery_description
 
 This starts an isolated Docker Compose control plane. It does not edit the host
 firewall, routes, interfaces, DNS, or sysctls. Ensure DNS and your external
@@ -214,8 +245,20 @@ else
 fi
 [ "$confirmation" = deploy ] || die "cancelled before changing the deployment"
 
+if [ "$automatic_issuer" = true ]; then
+  if [ ! -f "$source_dir/prepare-control-plane.sh" ] || [ -L "$source_dir/prepare-control-plane.sh" ]; then
+    die "packaged automatic issuer helper is missing or unsafe"
+  fi
+  "$source_dir/prepare-control-plane.sh" "$recovery_kit"
+  issuer_dir=$recovery_kit/control-plane-input
+  validate_issuer_dir "$issuer_dir"
+  [ "$(wc -l < "$issuer_dir/recovery-recipient.txt")" -eq 1 ] || die "generated recovery recipient file is invalid"
+  backup_recipient=$(sed -n '1p' "$issuer_dir/recovery-recipient.txt")
+  printf '%s\n' "$backup_recipient" | grep -Eq '^age1[0-9a-z]{58}$' || die "generated recovery recipient is invalid"
+fi
+
 install -d -m 0700 -o 0 -g 0 "$destination"
-for name in compose.yaml lane bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh install-control-plane.sh README.md; do
+for name in compose.yaml lane bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh install-control-plane.sh prepare-control-plane.sh README.md; do
   if [ ! -f "$source_dir/$name" ] || [ -L "$source_dir/$name" ]; then
     die "packaged deployment file is missing or unsafe: $name"
   fi
@@ -250,10 +293,47 @@ chmod 0600 "$env_tmp"
 mv "$env_tmp" "$destination/.env"
 
 (cd "$destination" && ./lane init --issuer "$issuer_dir")
+initial_backup=initial-recovery-$(date -u +%Y%m%dT%H%M%SZ).age
+(cd "$destination" && ./lane backup "$initial_backup")
+if [ "$automatic_issuer" = true ]; then
+  install -m 0600 -o 0 -g 0 "$destination/generated/recovery/$initial_backup" "$recovery_kit/$initial_backup"
+  find "$recovery_kit/control-plane-input" -depth -delete
+  cat > "$recovery_kit/DEPLOYED.txt" <<EOF
+Laneway $tag was deployed for $domain.
+
+This recovery kit contains the private age identity, encrypted offline root,
+and initial encrypted control-plane recovery bundle. Copy the entire directory
+off this server, verify the copy, and then securely remove this server copy.
+EOF
+  chmod 0600 "$recovery_kit/DEPLOYED.txt"
+  (
+    cd "$recovery_kit"
+    sha256sum README.txt DEPLOYED.txt laneway-recovery.identity offline-root.tar.age "$initial_backup" > MANIFEST.sha256
+  )
+  sync -f "$recovery_kit/MANIFEST.sha256"
+  sync -f "$recovery_kit"
+fi
 cat <<EOF
 
 Laneway $tag is running. Useful commands:
   sudo $destination/lane status
   sudo $destination/lane invite --name DEVICE --ephemeral
   sudo $destination/lane backup
+  initial encrypted backup: $destination/generated/recovery/$initial_backup
 EOF
+if [ "$automatic_issuer" = true ]; then
+  cat <<EOF
+
+IMPORTANT: copy this entire recovery kit off-host now:
+  $recovery_kit
+
+After verifying the off-host copy, securely remove the server copy. It contains
+the private recovery identity; the running control plane does not need it.
+EOF
+else
+  cat <<EOF
+
+Copy the initial encrypted backup shown above to the trusted host that holds
+your recovery kit. The private recovery identity remains off this server.
+EOF
+fi

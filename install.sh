@@ -4,17 +4,21 @@ set -eu
 repository=${LANEWAY_REPOSITORY:-Doout/laneway}
 release=${LANEWAY_VERSION:-latest}
 install_control_plane=false
+prepare_control_plane=false
 
 case "${1:-}" in
   '') ;;
   --control-plane) install_control_plane=true; shift ;;
+  --prepare-control-plane) prepare_control_plane=true; shift ;;
   -h|--help)
     cat <<'EOF'
-usage: sh install.sh [--control-plane]
+usage: sh install.sh [--control-plane | --prepare-control-plane]
 
 Without options, install the latest Laneway binaries and packaged files.
 With --control-plane, select a stable release tag, verify its signed release,
 install it, and start the interactive hardened control-plane installer.
+With --prepare-control-plane, create a recovery kit and the limited input that
+may be copied to a separate production control-plane server.
 EOF
     exit 0
     ;;
@@ -46,8 +50,8 @@ for command in curl grep sha256sum tar; do
   fi
 done
 
-if [ "$install_control_plane" = true ]; then
-  [ -z "${DESTDIR:-}" ] || { echo "--control-plane cannot be combined with DESTDIR" >&2; exit 1; }
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+  [ -z "${DESTDIR:-}" ] || { echo "control-plane modes cannot be combined with DESTDIR" >&2; exit 1; }
   if ! command -v cosign >/dev/null 2>&1; then
     echo "cosign is required for a control-plane install" >&2
     exit 1
@@ -85,7 +89,7 @@ curl --fail --location --silent --show-error \
   "$base_url/$asset" -o "$download_dir/$asset"
 curl --fail --location --silent --show-error \
   "$base_url/checksums.txt" -o "$download_dir/checksums.txt"
-if [ "$install_control_plane" = true ]; then
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
   curl --fail --location --silent --show-error \
     "$base_url/checksums.sigstore.json" -o "$download_dir/checksums.sigstore.json"
   cosign verify-blob --bundle "$download_dir/checksums.sigstore.json" \
@@ -100,8 +104,10 @@ fi
   sha256sum -c selected-checksum.txt
   tar -xzf "$asset"
 )
-if [ "$install_control_plane" = true ] && [ ! -f "$download_dir/laneway/deploy/compose/install-control-plane.sh" ]; then
-  echo "release $release predates the interactive control-plane installer; select a newer stable tag" >&2
+if { [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; } && \
+  { [ ! -f "$download_dir/laneway/deploy/compose/install-control-plane.sh" ] || \
+    [ ! -f "$download_dir/laneway/deploy/compose/prepare-control-plane.sh" ]; }; then
+    echo "release $release predates the requested control-plane workflow; select a newer stable tag" >&2
   exit 1
 fi
 env DESTDIR="${DESTDIR:-}" PREFIX="/usr/local" \
@@ -110,4 +116,8 @@ env DESTDIR="${DESTDIR:-}" PREFIX="/usr/local" \
 if [ "$install_control_plane" = true ]; then
   exec env LANEWAY_VERSION="${release#v}" \
     sh /usr/local/share/laneway/deploy/compose/install-control-plane.sh
+fi
+if [ "$prepare_control_plane" = true ]; then
+  output=${LANEWAY_RECOVERY_KIT_DIR:-/root/laneway-recovery-kit-$(date -u +%Y%m%dT%H%M%SZ)}
+  exec sh /usr/local/share/laneway/deploy/compose/prepare-control-plane.sh "$output"
 fi

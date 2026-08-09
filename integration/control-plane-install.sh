@@ -21,11 +21,31 @@ done
 cat > "$source_dir/lane" <<'EOF'
 #!/bin/sh
 printf 'lane %s\n' "$*" >> "$LANEWAY_TEST_LOG"
-test "$1" = init
-test "$2" = --issuer
-test -d "$3"
+case "$1" in
+  init)
+    test "$2" = --issuer
+    test -d "$3"
+    ;;
+  backup)
+    mkdir -p "$(dirname "$0")/generated/recovery"
+    printf 'encrypted recovery fixture\n' > "$(dirname "$0")/generated/recovery/$2"
+    ;;
+  *) exit 1 ;;
+esac
 EOF
-chmod 0755 "$source_dir/lane" "$source_dir/install-control-plane.sh"
+cat > "$source_dir/prepare-control-plane.sh" <<'EOF'
+#!/bin/sh
+output=$1
+mkdir -p "$output/control-plane-input"
+for name in ca.crt intermediate-chain.crt intermediate.key; do
+  printf 'generated %s\n' "$name" > "$output/control-plane-input/$name"
+done
+printf '%s\n' age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq > "$output/control-plane-input/recovery-recipient.txt"
+printf 'private identity fixture\n' > "$output/laneway-recovery.identity"
+printf 'encrypted root fixture\n' > "$output/offline-root.tar.age"
+printf 'instructions\n' > "$output/README.txt"
+EOF
+chmod 0755 "$source_dir/lane" "$source_dir/install-control-plane.sh" "$source_dir/prepare-control-plane.sh"
 for name in ca.crt intermediate-chain.crt intermediate.key; do
   printf 'fixture %s\n' "$name" > "$issuer_dir/$name"
 done
@@ -109,6 +129,31 @@ grep -Fx 'LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433' "$destination/.e
 grep -Fx 'LANEWAY_NETWORK_ID=000102030405060708090a0b0c0d0e0f' "$destination/.env" >/dev/null
 test "$(grep -c '^cosign verify ' "$log_file")" -eq 4
 grep -Fx "lane init --issuer $issuer_dir" "$log_file" >/dev/null
+grep -E '^lane backup initial-recovery-[0-9]{8}T[0-9]{6}Z\.age$' "$log_file" >/dev/null
+
+automatic=$test_root/automatic-control-plane
+automatic_kit=$test_root/automatic-recovery-kit
+printf '0\n' > "$counter_file"
+env \
+  PATH="$mock_bin:$PATH" \
+  LANEWAY_NONINTERACTIVE=true \
+  LANEWAY_VERSION=0.2.8 \
+  LANEWAY_DOMAIN=auto.example.test \
+  LANEWAY_DEPLOY_DIR="$automatic" \
+  LANEWAY_RECOVERY_KIT_DIR="$automatic_kit" \
+  LANEWAY_CONFIRM=deploy \
+  LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.2.8 \
+  LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
+  LANEWAY_TEST_COUNTER="$counter_file" \
+  LANEWAY_TEST_LOG="$log_file" \
+  "$source_dir/install-control-plane.sh" >/dev/null
+test -f "$automatic_kit/laneway-recovery.identity"
+test -f "$automatic_kit/offline-root.tar.age"
+test -f "$automatic_kit/DEPLOYED.txt"
+test -f "$automatic_kit/MANIFEST.sha256"
+test ! -e "$automatic_kit/control-plane-input"
+test "$(find "$automatic_kit" -maxdepth 1 -name 'initial-recovery-*.age' | wc -l)" -eq 1
+grep -Fx "LANEWAY_BACKUP_RECIPIENT=$recipient" "$automatic/.env" >/dev/null
 
 cancelled=$test_root/cancelled
 printf '0\n' > "$counter_file"
