@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -48,6 +47,11 @@ type runtimeCredentialFiles struct {
 	files []*os.File
 }
 
+type connectPlatformOptions struct {
+	exitSelector, failureMode string
+	dns, localLAN             []string
+}
+
 func (f *runtimeCredentialFiles) add(directory, label string, contents []byte) (string, error) {
 	file, err := os.CreateTemp(directory, "."+label+"-*")
 	if err != nil {
@@ -68,11 +72,7 @@ func (f *runtimeCredentialFiles) add(directory, label string, contents []byte) (
 	if err := os.Remove(file.Name()); err != nil {
 		return "", err
 	}
-	descriptorDirectory := "/proc/self/fd"
-	if runtime.GOOS == "darwin" {
-		descriptorDirectory = "/dev/fd"
-	}
-	return fmt.Sprintf("%s/%d", descriptorDirectory, file.Fd()), nil
+	return fmt.Sprintf("%s/%d", credentialDescriptorDirectory, file.Fd()), nil
 }
 
 func (f *runtimeCredentialFiles) close() error {
@@ -85,36 +85,20 @@ func (f *runtimeCredentialFiles) close() error {
 }
 
 func runConnect(args []string) error {
-	return runConnectForOS(args, runtime.GOOS)
-}
-
-func runConnectForOS(args []string, goos string) error {
-	if goos != "linux" && goos != "darwin" {
-		return errors.New("foreground connect currently requires Linux or macOS")
+	if err := connectPlatformPreflight(); err != nil {
+		return err
 	}
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the one-time enrollment code")
 	remembered := fs.Bool("remembered", false, "enroll and save a remembered-user login when none exists")
 	ephemeral := fs.Bool("ephemeral", false, "use a one-time temporary session instead of the saved login")
-	exitSelectorValue, failureModeValue := "", "closed"
-	exitSelector, failureMode := &exitSelectorValue, &failureModeValue
-	var routeValues, dnsValues, localLANValues []string
+	options := connectPlatformOptions{failureMode: "closed"}
+	var routeValues []string
 	fs.Func("route", "controller-authorized subnet prefix (repeatable)", func(value string) error {
 		routeValues = append(routeValues, value)
 		return nil
 	})
-	if goos == "linux" {
-		fs.StringVar(exitSelector, "exit", "", "controller-authorized exit node name or NodeID")
-		fs.StringVar(failureMode, "failure-mode", "closed", "exit path failure behavior: closed or open")
-		fs.Func("dns", "temporary exit DNS server (repeatable; omitted preserves native DNS)", func(value string) error {
-			dnsValues = append(dnsValues, value)
-			return nil
-		})
-		fs.Func("local-lan", "native local-LAN bypass prefix for exit mode (repeatable)", func(value string) error {
-			localLANValues = append(localLANValues, value)
-			return nil
-		})
-	}
+	addPlatformConnectFlags(fs, &options)
 	connectArgs := args
 	authority := ""
 	if len(connectArgs) != 0 && !strings.HasPrefix(connectArgs[0], "-") {
@@ -124,29 +108,29 @@ func runConnectForOS(args []string, goos string) error {
 		return err
 	}
 	if fs.NArg() > 1 || (fs.NArg() == 1 && authority != "") {
-		return connectUsageForOS(goos)
+		return connectUsage()
 	}
 	if fs.NArg() == 1 {
 		authority = fs.Arg(0)
 	}
 	if authority == "" || (*remembered && *ephemeral) {
-		return connectUsageForOS(goos)
+		return connectUsage()
 	}
-	if *failureMode != "closed" && *failureMode != "open" {
+	if options.failureMode != "closed" && options.failureMode != "open" {
 		return errors.New("--failure-mode must be closed or open")
 	}
-	if *exitSelector == "" && (len(dnsValues) != 0 || len(localLANValues) != 0 || flagProvided(args, "failure-mode")) {
+	if options.exitSelector == "" && (len(options.dns) != 0 || len(options.localLAN) != 0 || flagProvided(args, "failure-mode")) {
 		return errors.New("--dns, --local-lan, and --failure-mode require --exit")
 	}
 	routes, err := parseConnectPrefixes(routeValues, false)
 	if err != nil {
 		return fmt.Errorf("--route: %w", err)
 	}
-	localLAN, err := parseConnectPrefixes(localLANValues, false)
+	localLAN, err := parseConnectPrefixes(options.localLAN, false)
 	if err != nil {
 		return fmt.Errorf("--local-lan: %w", err)
 	}
-	dns, err := parseConnectAddresses(dnsValues)
+	dns, err := parseConnectAddresses(options.dns)
 	if err != nil {
 		return fmt.Errorf("--dns: %w", err)
 	}
@@ -158,10 +142,8 @@ func runConnectForOS(args []string, goos string) error {
 	if err != nil {
 		return err
 	}
-	if runtime.GOOS != "darwin" {
-		if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
-			return err
-		}
+	if err := validatePlatformArtifact(metadata); err != nil {
+		return err
 	}
 	runtimeDir, err := os.MkdirTemp("", "laneway-connect-*")
 	if err != nil {
@@ -272,7 +254,7 @@ func runConnectForOS(args []string, goos string) error {
 		return fmt.Errorf("fetch temporary session configuration: %w", err)
 	}
 	name := connectLocalName(initial, enrollment.identity.NodeID)
-	selectedExit, err := resolveConnectExit(initial, *exitSelector, enrollment.identity.NodeID)
+	selectedExit, err := resolveConnectExit(initial, options.exitSelector, enrollment.identity.NodeID)
 	if err != nil {
 		return err
 	}
@@ -284,7 +266,7 @@ func runConnectForOS(args []string, goos string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, *failureMode, dns, localLAN)
+	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, options.failureMode, dns, localLAN)
 	if err != nil {
 		return err
 	}
@@ -300,7 +282,7 @@ func runConnectForOS(args []string, goos string) error {
 		selection = "routes=" + strings.Join(values, ",")
 	}
 	if !selectedExit.IsZero() {
-		selection = "exit=" + *exitSelector + " failure-mode=" + *failureMode
+		selection = "exit=" + options.exitSelector + " failure-mode=" + options.failureMode
 	}
 	lastPath := ""
 	ownedRoutes := connectPrefixList(routes)
@@ -369,7 +351,7 @@ func runConnectForOS(args []string, goos string) error {
 			return err
 		}
 		caPath, certPath, keyPath, wireGuardKeyPath = savedProfileFiles.ca, savedProfileFiles.certificate, savedProfileFiles.privateKey, savedProfileFiles.wireGuardKey
-		cfg, err = connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, *failureMode, dns, localLAN)
+		cfg, err = connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, options.failureMode, dns, localLAN)
 		if err != nil {
 			return err
 		}
@@ -387,17 +369,6 @@ func connectPrefixList(prefixes []netip.Prefix) string {
 		values = append(values, prefix.String())
 	}
 	return strings.Join(values, ",")
-}
-
-func connectUsage() error {
-	return connectUsageForOS(runtime.GOOS)
-}
-
-func connectUsageForOS(goos string) error {
-	if goos == "darwin" {
-		return errors.New("usage: laneway connect lane.example.com [--route PREFIX] [--ephemeral [--token-file PATH]]")
-	}
-	return errors.New("usage: laneway connect lane.example.com [--route PREFIX] [--exit NAME_OR_NODE_ID] [--dns ADDRESS] [--ephemeral [--token-file PATH]]")
 }
 
 func connectEnrollmentCode(path string) (string, error) {
@@ -561,10 +532,7 @@ func helperNetworkOpener(ctx context.Context, tunConfig platform.TUNConfig, rout
 	for _, bypass := range routes.TransportBypass {
 		setup.Routes.Bypasses = append(setup.Routes.Bypasses, bypass.String())
 	}
-	options := nethelper.StartOptions{}
-	if runtime.GOOS == "darwin" {
-		options.Executable = "/Library/PrivilegedHelperTools/laneway-network-helper"
-	}
+	options := platformNetworkHelperOptions()
 	session, err := nethelper.Start(ctx, setup, options)
 	if err != nil {
 		return nodeapp.HostNetwork{}, err
