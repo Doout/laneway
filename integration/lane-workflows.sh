@@ -11,6 +11,7 @@ mkdir -p "$compose_dir/generated/backups" "$fake_bin"
 cp "$repo_dir/deploy/compose/laneway-control" "$repo_dir/deploy/compose/preflight.sh" "$compose_dir/"
 chmod 0755 "$compose_dir/laneway-control"
 chmod 0755 "$compose_dir/preflight.sh"
+ln -s "$compose_dir/laneway-control" "$test_dir/laneway-control"
 : > "$compose_dir/compose.yaml"
 : > "$log"
 
@@ -130,7 +131,7 @@ printf '%s\n' 'packet_rate_bits_per_second = 2000000' 'packet_burst_bytes = 6553
 : > "$compose_dir/generated/config/exit-node.toml"
 LANE_TEST_EXIT_RUNNING=1; export LANE_TEST_EXIT_RUNNING
 
-status_output=$("$compose_dir/laneway-control" status)
+status_output=$("$test_dir/laneway-control" status)
 printf '%s\n' "$status_output" | grep -F 'controller=healthy' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'relay=healthy' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'relay-limiter=configured rate_bits_per_second=2000000 burst_bytes=65536' >/dev/null

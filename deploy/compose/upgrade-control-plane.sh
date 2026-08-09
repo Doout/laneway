@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+# The top-level installer uses LANEWAY_VERSION to select the release. Do not
+# let that selector override the version in the verified candidate .env when
+# Docker Compose or validate.sh runs below.
+unset LANEWAY_VERSION
+
 die() { echo "Laneway control-plane upgrade: $*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run this command as root"

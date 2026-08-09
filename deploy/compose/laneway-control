@@ -1,7 +1,21 @@
 #!/bin/sh
 set -eu
 
-base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+script_path=$0
+link_count=0
+while [ -L "$script_path" ]; do
+  link_count=$((link_count + 1))
+  if [ "$link_count" -gt 16 ]; then
+    echo "laneway-control: too many symbolic links while resolving $0" >&2
+    exit 1
+  fi
+  link_target=$(readlink "$script_path") || exit 1
+  case "$link_target" in
+    /*) script_path=$link_target ;;
+    *) script_path=$(dirname "$script_path")/$link_target ;;
+  esac
+done
+base_dir=$(CDPATH='' cd -- "$(dirname -- "$script_path")" && pwd)
 env_file=$base_dir/.env
 state_dir=$base_dir/generated/lifecycle
 lock_dir=$state_dir/operator.lock
