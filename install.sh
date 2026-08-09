@@ -102,8 +102,14 @@ if [ "${PREFIX:-/usr/local}" != /usr/local ]; then
   exit 1
 fi
 
-if [ "$(uname -s)" != Linux ]; then
-  echo "Laneway packages currently support Linux only" >&2
+case "$(uname -s)" in
+  Linux) operating_system=linux ;;
+  Darwin) operating_system=darwin ;;
+  *) echo "Laneway packages support Linux and macOS only" >&2; exit 1 ;;
+esac
+if [ "$operating_system" = darwin ] && \
+  { [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; }; then
+  echo "control-plane installation is Linux-only; macOS installs the foreground client" >&2
   exit 1
 fi
 case "$(uname -m)" in
@@ -115,7 +121,9 @@ case "$(uname -m)" in
     ;;
 esac
 missing=
-for command in awk base64 curl find grep mktemp readlink sed sha256sum tar; do
+checksum_command=sha256sum
+if [ "$operating_system" = darwin ]; then checksum_command=shasum; fi
+for command in awk base64 curl find grep mktemp readlink sed "$checksum_command" tar; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 
@@ -173,7 +181,7 @@ if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] ||
   release=$selected_tag
 fi
 
-asset="laneway_linux_${architecture}.tar.gz"
+asset="laneway_${operating_system}_${architecture}.tar.gz"
 if [ -n "${LANEWAY_RELEASE_BASE_URL:-}" ]; then
   base_url=${LANEWAY_RELEASE_BASE_URL%/}
 elif [ "$release" = latest ]; then
@@ -215,7 +223,11 @@ fi
   cd "$download_dir"
   grep "  $asset\$" checksums.txt > selected-checksum.txt
   test -s selected-checksum.txt
-  sha256sum -c selected-checksum.txt
+  if [ "$operating_system" = darwin ]; then
+    shasum -a 256 -c selected-checksum.txt
+  else
+    sha256sum -c selected-checksum.txt
+  fi
   tar -xzf "$asset"
 )
 if { [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; } && \

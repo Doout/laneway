@@ -89,6 +89,16 @@ sudo ./laneway/install.sh
 The native Rust implementations remain available as
 [source builds](https://github.com/Doout/laneway/tree/main/rust).
 
+Install the checksum-verified client release on macOS (Intel or Apple Silicon):
+
+```bash
+curl -fsSLo laneway-install.sh https://raw.githubusercontent.com/Doout/laneway/main/install.sh
+sudo sh laneway-install.sh
+```
+
+Run `login` and `connect` afterward as your normal macOS user; only the narrow
+networking helper uses `sudo`.
+
 ## Quick start: connect a local user
 
 Create a ten-minute, single-use login token on the control plane:
@@ -104,6 +114,11 @@ laneway login lane.example.com
 laneway connect lane.example.com
 ```
 
+Linux and macOS (Intel and Apple Silicon) are supported. On macOS the client
+runs like an SSH tunnel: the foreground process remains owned by the local
+user, prompts for `sudo` only to start a credential-free networking helper,
+and removes its `utun` interface and owned routes when the process exits.
+
 `login` prompts with echo disabled and replaces the bootstrap token with a
 revocable device certificate and private keys in the local user's mode-0700
 profile directory. The bearer token is never retained. Laneway automatically
@@ -113,7 +128,9 @@ rotates that credential over authenticated mTLS and reconnects before expiry.
 from controller ACCEPT policy and sends each prefix only to its approved
 Connector; all other traffic continues to use the laptop's native network.
 Default routes are never selected automatically. Full-tunnel egress still
-requires an explicit controller-authorized `--exit NAME`.
+requires an explicit controller-authorized `--exit NAME` on Linux. macOS
+currently fails closed if `--exit` is requested and supports split-tunnel
+private subnet routes only.
 
 For an intentionally temporary session that stores no identity, use
 `laneway connect lane.example.com --ephemeral`. Remove a saved local login with

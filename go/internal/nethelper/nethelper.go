@@ -82,11 +82,12 @@ type request struct {
 }
 
 type response struct {
-	Version   int    `json:"version"`
-	ID        uint64 `json:"id"`
-	OK        bool   `json:"ok"`
-	Error     string `json:"error,omitempty"`
-	HelperPID int    `json:"helper_pid,omitempty"`
+	Version       int    `json:"version"`
+	ID            uint64 `json:"id"`
+	OK            bool   `json:"ok"`
+	Error         string `json:"error,omitempty"`
+	HelperPID     int    `json:"helper_pid,omitempty"`
+	InterfaceName string `json:"interface_name,omitempty"`
 }
 
 func parseSetup(value Setup) (platform.TUNConfig, platform.RoutePlan, error) {

@@ -68,7 +68,8 @@ if grep -F "cp -R \"\$project_dir/deploy/.\"" "$package_workflow" >/dev/null; th
 fi
 
 for value in \
-  'platforms: linux/amd64,linux/arm64' \
+	'os: [linux, darwin]' \
+	'platforms: linux/amd64,linux/arm64' \
   'provenance: mode=max' \
   'sbom: true' \
   'cosign sign' \
