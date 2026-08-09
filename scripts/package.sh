@@ -77,7 +77,7 @@ install -d -m 0755 "$package_dir/deploy/compose/generated/config"
 for name in .env.example README.md compose.dev.yaml compose.yaml; do
 	install -m 0644 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
 done
-for name in bootstrap.sh install-control-plane.sh preflight.sh prepare.sh recovery.sh validate.sh lane; do
+for name in bootstrap.sh install-control-plane.sh prepare-control-plane.sh preflight.sh prepare.sh recovery.sh validate.sh lane; do
 	install -m 0755 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
 done
 install -m 0644 "$project_dir"/deploy/compose/generated/config/*.example \
