@@ -105,22 +105,19 @@ and service identities, uses only controller-authorized routes, and restores
 its temporary networking when it exits. Administrators create the bounded,
 single-use code on the controller with `laneway-control invite --name laptop --ephemeral`.
 
-To provision a capability-bound Docker Exit Node, generate a single-use
-installer on the control plane, copy it to the Docker host over your trusted
-administrative channel, and run it as root:
+To provision a capability-bound Docker Connector, generate a single-use
+`docker run` command on the control plane, copy it to the Docker host over your
+trusted administrative channel, and run it as root:
 
 ```bash
-umask 077
-sudo laneway-control invite --name egress-one --ephemeral --docker --exit-node > install-egress-one.sh
-chmod 0700 install-egress-one.sh
-# Copy it securely to the Exit Node host, then:
-sudo ./install-egress-one.sh
+sudo laneway-control invite --name egress-one --docker --connector
 ```
 
-The script contains a short-lived one-time enrollment token, the public network
-CA, pinned image digests, and endpoint configuration. It never contains the
-control-plane admin token. Delete the script after enrollment succeeds and open
-UDP 4434 on the Exit Node host if direct paths should be reachable through its
+The command contains a short-lived one-time enrollment token, the public network
+CA, a pinned `ghcr.io/doout/laneway-connector` image, and endpoint configuration.
+It never contains the control-plane admin token. Connector identity is retained
+in a named Docker volume across image upgrades without re-enrollment. Open UDP
+4434 on the Connector host if direct paths should be reachable through its
 external firewall.
 
 For a long-running Exit Node, omit `--ephemeral`; ephemeral enrollment is best

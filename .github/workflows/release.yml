@@ -28,7 +28,7 @@ jobs:
           go test ./...
           go vet ./...
       - name: Check scripts
-        run: shellcheck install.sh scripts/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
+        run: shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/connector-upgrade.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
       - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
@@ -106,8 +106,8 @@ jobs:
             image: ghcr.io/doout/laneway-admin
             dockerfile: deploy/containers/Dockerfile
             binary: laneway
-          - name: exit-node
-            image: ghcr.io/doout/laneway-exit-node
+          - name: connector
+            image: ghcr.io/doout/laneway-connector
             dockerfile: deploy/containers/Dockerfile.exit-node
             binary: laneway
     steps:

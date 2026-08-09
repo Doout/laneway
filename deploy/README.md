@@ -57,7 +57,7 @@ after exact relay identity validation and registration.
 Managed Go node configurations enable authenticated direct paths unless
 `direct.enabled = false` is set explicitly; the Rust node always enables its
 direct manager. Host Node/User examples bind an ephemeral UDP port, while the
-isolated Docker Exit Node publishes a fixed port. `laneway peers` reports each
+isolated Docker Connector publishes a fixed port. `laneway peers` reports each
 peer as `direct`, `relay-quic`, `tcp-fallback`, or `disconnected`.
 Both relay implementations
 derive each candidate from the source address of the node's QUIC session,

@@ -169,14 +169,17 @@ grep -F '<--admin-token-file> </run/laneway-secrets/admin.token>' "$log" >/dev/n
 
 mkdir -p "$compose_dir/generated/pki"
 printf '%s\n' '-----BEGIN CERTIFICATE-----' 'fixture' '-----END CERTIFICATE-----' > "$compose_dir/generated/pki/ca.crt"
-exit_installer=$test_dir/install-exit.sh
-"$compose_dir/laneway-control" invite --name egress-one --ephemeral --session-lifetime 2h --docker --exit-node > "$exit_installer"
-sh -n "$exit_installer"
-grep -Fx '#!/bin/sh' "$exit_installer" >/dev/null
-grep -F 'single_use_secret' "$exit_installer" >/dev/null
-grep -F 'ghcr.io/doout/laneway-exit-node:1.0.0@sha256:' "$exit_installer" >/dev/null
-grep -F 'controller-network-id 11111111111111111111111111111111' "$exit_installer" >/dev/null
-grep -F 'serve = true' "$exit_installer" >/dev/null
+connector_command=$test_dir/connector-command.sh
+"$compose_dir/laneway-control" invite --name egress-one --ephemeral --session-lifetime 2h --docker --connector > "$connector_command"
+sh -n "$connector_command"
+grep -F 'docker run -d' "$connector_command" >/dev/null
+grep -F -- "--name 'laneway-connector-egress-one'" "$connector_command" >/dev/null
+grep -F -- "--volume 'laneway-connector-egress-one-state:/var/lib/laneway'" "$connector_command" >/dev/null
+grep -F -- "--env 'LANEWAY_ENROLLMENT_TOKEN=single_use_secret'" "$connector_command" >/dev/null
+grep -F 'ghcr.io/doout/laneway-connector:1.0.0@sha256:' "$connector_command" >/dev/null
+grep -F -- '--cap-drop ALL' "$connector_command" >/dev/null
+grep -F -- '--cap-add NET_ADMIN' "$connector_command" >/dev/null
+grep -F -- '--device /dev/net/tun:/dev/net/tun' "$connector_command" >/dev/null
 grep -F '<--exit-node>' "$log" >/dev/null
 grep -F '<--requested-name> <egress-one>' "$log" >/dev/null
 

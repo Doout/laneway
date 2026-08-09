@@ -21,7 +21,7 @@ services:
       args:
         BINARY: laneway
   exit-node:
-    image: laneway-exit-node:dev
+    image: laneway-connector:dev
     build:
       context: ../..
       dockerfile: deploy/containers/Dockerfile.exit-node

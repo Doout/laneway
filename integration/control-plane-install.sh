@@ -118,7 +118,7 @@ chmod 0755 "$mock_bin"/*
 cat > "$test_root/image-digests.txt" <<'EOF'
 ghcr.io/doout/laneway-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ghcr.io/doout/laneway-controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-ghcr.io/doout/laneway-exit-node@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ghcr.io/doout/laneway-connector@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 ghcr.io/doout/laneway-relay@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 EOF
 printf '0\n' > "$counter_file"

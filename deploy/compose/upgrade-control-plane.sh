@@ -49,7 +49,7 @@ image_digest() {
 controller_digest=$(image_digest ghcr.io/doout/laneway-controller)
 relay_digest=$(image_digest ghcr.io/doout/laneway-relay)
 admin_digest=$(image_digest ghcr.io/doout/laneway-admin)
-exit_digest=$(image_digest ghcr.io/doout/laneway-exit-node)
+exit_digest=$(image_digest ghcr.io/doout/laneway-connector)
 
 install -d -m 0700 -o 0 -g 0 "$destination/generated/lifecycle"
 candidate=$destination/generated/lifecycle/upgrade-$package_version.env

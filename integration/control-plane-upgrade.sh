@@ -54,7 +54,7 @@ cat > "$test_root/image-digests.txt" <<'EOF'
 ghcr.io/doout/laneway-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ghcr.io/doout/laneway-relay@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ghcr.io/doout/laneway-admin@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-ghcr.io/doout/laneway-exit-node@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ghcr.io/doout/laneway-connector@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 EOF
 cat > "$fake_bin/curl" <<'EOF'
 #!/bin/sh
