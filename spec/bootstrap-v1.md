@@ -27,7 +27,8 @@ artifact platforms. All IDs are canonical nonzero 128-bit lowercase hex.
 
 Release artifacts identify `os`, `arch`, an HTTPS URL, exact positive byte
 size no greater than 512 MiB, and canonical lowercase SHA-256. Stable v1
-requires Linux AMD64 and ARM64 records. A downloader MUST reject excess or
+requires Linux AMD64 and ARM64 records and MAY additionally advertise macOS
+AMD64 and ARM64 client records. A downloader MUST reject excess or
 short bytes and a digest mismatch before extraction or any privileged action.
 Authenticated bytes MUST never be piped into a shell.
 

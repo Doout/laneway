@@ -15,8 +15,8 @@ BENCHMARK_SMOKE_QUEUE ?= 256
 build:
 	cd go && go build ./...
 
-# Create a self-contained Linux release archive in dist/. The archive includes
-# the production Go binaries, examples, hardened systemd units, and installer.
+# Create a self-contained Linux or macOS release archive in dist/. Linux
+# packages include services; macOS installation selects the foreground client.
 package:
 	VERSION="$(VERSION)" PACKAGE_GOOS="$(PACKAGE_GOOS)" PACKAGE_GOARCH="$(PACKAGE_GOARCH)" ./scripts/package.sh
 

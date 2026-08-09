@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -75,8 +76,10 @@ func runLogin(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
-		return err
+	if runtime.GOOS != "darwin" {
+		if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
+			return err
+		}
 	}
 	code, err := connectEnrollmentCode(*tokenFile)
 	if err != nil {

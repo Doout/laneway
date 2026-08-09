@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 package nethelper
 
@@ -93,10 +93,12 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 			return nil, err
 		}
 	}
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+	fds, err := unix.Socketpair(unix.AF_UNIX, helperSocketType(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("create network helper channel: %w", err)
 	}
+	unix.CloseOnExec(fds[0])
+	unix.CloseOnExec(fds[1])
 	parentFile := os.NewFile(uintptr(fds[0]), "laneway-network-client")
 	childFile := os.NewFile(uintptr(fds[1]), "laneway-network-helper")
 	defer parentFile.Close()
@@ -183,8 +185,8 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 	if !reply.OK {
 		return fail(fmt.Errorf("network helper: %s", reply.Error))
 	}
-	if reply.HelperPID <= 0 {
-		return fail(errors.New("network helper omitted its process identity"))
+	if reply.HelperPID <= 0 || reply.InterfaceName == "" {
+		return fail(errors.New("network helper omitted its process or interface identity"))
 	}
 	files, err := rightsFiles(oob[:oobn])
 	if err != nil {
@@ -201,6 +203,7 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 		files[0].Close()
 		return fail(err)
 	}
+	tunConfig.Name = reply.InterfaceName
 	tun, err := platform.AdoptTUNFile(files[0], tunConfig)
 	if err != nil {
 		files[0].Close()
@@ -287,12 +290,11 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 		return err
 	}
 	var socketType int
-	var cred *unix.Ucred
 	var inspectErr error
 	if err := raw.Control(func(fd uintptr) {
 		socketType, inspectErr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_TYPE)
 		if inspectErr == nil {
-			cred, inspectErr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+			inspectErr = authenticateHelperPeer(int(fd))
 		}
 	}); err != nil {
 		return err
@@ -300,7 +302,7 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 	if inspectErr != nil {
 		return fmt.Errorf("inspect network helper peer: %w", inspectErr)
 	}
-	if socketType != unix.SOCK_SEQPACKET || cred == nil || cred.Pid <= 0 {
+	if socketType != unix.SOCK_SEQPACKET {
 		return errors.New("network helper requires an authenticated Unix SOCK_SEQPACKET peer")
 	}
 
@@ -362,7 +364,7 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 		_ = writeResponse(packet, req.ID, err, nil)
 		return err
 	}
-	if err := writeResponse(packet, req.ID, nil, transfer, os.Getpid()); err != nil {
+	if err := writeSetupResponse(packet, req.ID, transfer, os.Getpid(), tun.Name()); err != nil {
 		transfer.Close()
 		return err
 	}
@@ -496,6 +498,15 @@ func writeResponse(conn packetConn, id uint64, cause error, file *os.File, helpe
 	if len(helperPID) == 1 {
 		reply.HelperPID = helperPID[0]
 	}
+	return writeResponseValue(conn, reply, cause, file)
+}
+
+func writeSetupResponse(conn packetConn, id uint64, file *os.File, helperPID int, interfaceName string) error {
+	reply := response{Version: ProtocolVersion, ID: id, OK: true, HelperPID: helperPID, InterfaceName: interfaceName}
+	return writeResponseValue(conn, reply, nil, file)
+}
+
+func writeResponseValue(conn packetConn, reply response, cause error, file *os.File) error {
 	if cause != nil {
 		reply.Error = cause.Error()
 	}
@@ -508,28 +519,4 @@ func writeResponse(conn packetConn, id uint64, cause error, file *os.File, helpe
 		oob = unix.UnixRights(int(file.Fd()))
 	}
 	return conn.WritePacket(data, oob)
-}
-
-func hardenProcess() error {
-	// Drop every bounding capability except CAP_NET_ADMIN while CAP_SETPCAP is
-	// still available. The ambient bit preserves only NET_ADMIN across the
-	// helper's direct execution of ip(8).
-	for capability := 0; capability <= 63; capability++ {
-		if capability == unix.CAP_NET_ADMIN {
-			continue
-		}
-		if err := unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(capability), 0, 0, 0); err != nil && !errors.Is(err, unix.EINVAL) {
-			return err
-		}
-	}
-	mask := uint32(1 << uint(unix.CAP_NET_ADMIN))
-	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3, Pid: 0}
-	data := [2]unix.CapUserData{{Effective: mask, Permitted: mask, Inheritable: mask}}
-	if err := unix.Capset(&header, &data[0]); err != nil {
-		return err
-	}
-	if err := unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_RAISE, unix.CAP_NET_ADMIN, 0, 0); err != nil {
-		return err
-	}
-	return unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 }

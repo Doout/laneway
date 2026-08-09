@@ -68,7 +68,11 @@ func (f *runtimeCredentialFiles) add(directory, label string, contents []byte) (
 	if err := os.Remove(file.Name()); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("/proc/self/fd/%d", file.Fd()), nil
+	descriptorDirectory := "/proc/self/fd"
+	if runtime.GOOS == "darwin" {
+		descriptorDirectory = "/dev/fd"
+	}
+	return fmt.Sprintf("%s/%d", descriptorDirectory, file.Fd()), nil
 }
 
 func (f *runtimeCredentialFiles) close() error {
@@ -81,8 +85,8 @@ func (f *runtimeCredentialFiles) close() error {
 }
 
 func runConnect(args []string) error {
-	if runtime.GOOS != "linux" {
-		return errors.New("foreground connect currently requires Linux TUN and policy-routing support")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return errors.New("foreground connect currently requires Linux or macOS")
 	}
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the one-time enrollment code")
@@ -126,6 +130,9 @@ func runConnect(args []string) error {
 	if *exitSelector == "" && (len(dnsValues) != 0 || len(localLANValues) != 0 || flagProvided(args, "failure-mode")) {
 		return errors.New("--dns, --local-lan, and --failure-mode require --exit")
 	}
+	if runtime.GOOS == "darwin" && *exitSelector != "" {
+		return errors.New("macOS currently supports secure split-tunnel subnet routes only; --exit is not yet supported")
+	}
 	routes, err := parseConnectPrefixes(routeValues, false)
 	if err != nil {
 		return fmt.Errorf("--route: %w", err)
@@ -146,8 +153,10 @@ func runConnect(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
-		return err
+	if runtime.GOOS != "darwin" {
+		if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
+			return err
+		}
 	}
 	runtimeDir, err := os.MkdirTemp("", "laneway-connect-*")
 	if err != nil {
@@ -540,7 +549,11 @@ func helperNetworkOpener(ctx context.Context, tunConfig platform.TUNConfig, rout
 	for _, bypass := range routes.TransportBypass {
 		setup.Routes.Bypasses = append(setup.Routes.Bypasses, bypass.String())
 	}
-	session, err := nethelper.Start(ctx, setup, nethelper.StartOptions{})
+	options := nethelper.StartOptions{}
+	if runtime.GOOS == "darwin" {
+		options.Executable = "/Library/PrivilegedHelperTools/laneway-network-helper"
+	}
+	session, err := nethelper.Start(ctx, setup, options)
 	if err != nil {
 		return nodeapp.HostNetwork{}, err
 	}

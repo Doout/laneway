@@ -484,8 +484,8 @@ func validateBootstrap(value Bootstrap) error {
 	}
 	platforms := make(map[string]struct{}, len(value.Artifacts))
 	for i, artifact := range value.Artifacts {
-		if artifact.OS != "linux" || (artifact.Arch != "amd64" && artifact.Arch != "arm64") {
-			return fmt.Errorf("bootstrap.artifacts[%d] must target linux/amd64 or linux/arm64", i)
+		if (artifact.OS != "linux" && artifact.OS != "darwin") || (artifact.Arch != "amd64" && artifact.Arch != "arm64") {
+			return fmt.Errorf("bootstrap.artifacts[%d] must target linux or darwin on amd64 or arm64", i)
 		}
 		artifactURL, err := url.Parse(artifact.URL)
 		if err != nil || artifactURL.Scheme != "https" || artifactURL.Host == "" || artifactURL.User != nil || artifactURL.Fragment != "" {

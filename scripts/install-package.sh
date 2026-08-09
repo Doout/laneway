@@ -9,6 +9,20 @@ sbindir="$destination_root$prefix/sbin"
 sharedir="$destination_root$prefix/share/laneway"
 unitdir="$destination_root$prefix/lib/systemd/system"
 
+if [ "$(uname -s)" = Darwin ]; then
+  [ -z "$destination_root" ] || { echo "DESTDIR is not supported by the macOS client installer" >&2; exit 1; }
+  [ "$(id -u)" -eq 0 ] || { echo "run this installer with sudo" >&2; exit 1; }
+  install -d -m 0755 "$bindir"
+  install -d -m 0755 -o root -g wheel /Library/PrivilegedHelperTools
+  install -m 0755 -o root -g wheel "$script_dir/bin/laneway" "$bindir/laneway"
+  install -m 0755 -o root -g wheel "$script_dir/bin/laneway" /Library/PrivilegedHelperTools/laneway-network-helper
+  ln -sfn laneway "$bindir/lane"
+  echo "Laneway $(cat "$script_dir/VERSION") macOS client installed."
+  echo "Run as your normal user: laneway login DOMAIN"
+  echo "Then connect in the foreground: laneway connect DOMAIN"
+  exit 0
+fi
+
 if [ -z "$destination_root" ] && [ "$(id -u)" -ne 0 ]; then
   echo "run this installer as root, or set DESTDIR for a staged install" >&2
   exit 1

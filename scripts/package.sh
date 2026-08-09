@@ -7,10 +7,7 @@ version=${VERSION-dev}
 package_goos=${PACKAGE_GOOS:-$(cd "$project_dir/go" && go env GOOS)}
 package_goarch=${PACKAGE_GOARCH:-$(cd "$project_dir/go" && go env GOARCH)}
 
-if [ "$package_goos" != linux ]; then
-  echo "Laneway release packages currently support Linux only" >&2
-  exit 1
-fi
+case "$package_goos" in linux|darwin) ;; *) echo "unsupported package operating system: $package_goos" >&2; exit 1;; esac
 case "$package_goarch" in
   amd64|arm64) ;;
   *)

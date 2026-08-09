@@ -65,7 +65,7 @@ single-use, limited to one hour of validity, and protected by a bounded
 per-source token bucket. The advanced `laneway controller enrollment-token
 issue` interface remains available for automation.
 
-On a clean Linux AMD64 or ARM64 client:
+On a clean Linux or macOS AMD64/ARM64 client:
 
 ```sh
 laneway login lane.example.com
@@ -73,8 +73,7 @@ laneway connect lane.example.com
 ```
 
 The client obtains metadata using TLS 1.3 and the host system's public roots,
-rejects redirects and non-DNS authorities, validates its architecture and the
-authenticated artifact record, then prompts on `/dev/tty` with terminal echo
+rejects redirects and non-DNS authorities, then prompts on `/dev/tty` with terminal echo
 disabled. `login` stores only the resulting certificate and private keys in a
 mode-0700 directory owned by the local user; it does not save the enrollment
 code. The product token binds the requested device name, so the client does
@@ -90,6 +89,18 @@ DNS state when it exits. `--route PREFIX` remains an exact manual restriction;
 `--exit NAME` is the only way to select a default route. The older many-flag
 `join` form remains the advanced
 explicit enrollment path for migration, debugging, and automation.
+
+On macOS, `connect` behaves like an SSH tunnel. The user process retains all
+credentials while a short-lived, credential-free helper creates `utun`, adds
+only the validated private routes, and restores them on disconnect. The helper
+refuses to replace an existing route. macOS full-tunnel exit selection and DNS
+ownership are not yet implemented, so `--exit` fails before enrollment or any
+networking change.
+
+Linux login additionally requires its authenticated platform artifact record.
+macOS installation verifies the release checksum before installing a
+root-owned helper; an already installed macOS client can therefore connect to
+an older control plane whose bootstrap document lists only Linux artifacts.
 
 Artifact downloaders must stream into an unprivileged temporary file, enforce
 the authenticated `size_bytes`, and call the same SHA-256 verification logic
@@ -690,7 +701,7 @@ listeners read-only. If an existing Laneway Compose stack owns containers, port
 collision checks are skipped so repeated init remains idempotent. The optional
 Exit profile additionally requires `/dev/net/tun`.
 
-Tagged releases publish Linux AMD64/ARM64 archives and controller, relay,
+Tagged releases publish Linux and macOS AMD64/ARM64 archives and controller, relay,
 administrative, and isolated Exit Node images. Every release includes signed
 checksums, GitHub build provenance, immutable image digest records, and SPDX
 JSON SBOMs. Images are keylessly signed by the tagged release workflow and
