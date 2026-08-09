@@ -69,6 +69,8 @@ fi
 
 for value in \
 	'os: [linux, darwin]' \
+	'dist/laneway_${{ matrix.os }}_${{ matrix.arch }}' \
+	'laneway_darwin_amd64 laneway_darwin_arm64' \
 	'platforms: linux/amd64,linux/arm64' \
   'provenance: mode=max' \
   'sbom: true' \

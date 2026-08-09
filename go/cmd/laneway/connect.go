@@ -85,9 +85,6 @@ func (f *runtimeCredentialFiles) close() error {
 }
 
 func runConnect(args []string) error {
-	if err := connectPlatformPreflight(); err != nil {
-		return err
-	}
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the one-time enrollment code")
 	remembered := fs.Bool("remembered", false, "enroll and save a remembered-user login when none exists")
@@ -121,6 +118,9 @@ func runConnect(args []string) error {
 	}
 	if options.exitSelector == "" && (len(options.dns) != 0 || len(options.localLAN) != 0 || flagProvided(args, "failure-mode")) {
 		return errors.New("--dns, --local-lan, and --failure-mode require --exit")
+	}
+	if err := connectPlatformPreflight(); err != nil {
+		return err
 	}
 	routes, err := parseConnectPrefixes(routeValues, false)
 	if err != nil {

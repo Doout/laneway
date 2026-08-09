@@ -12,7 +12,13 @@ import (
 
 const credentialDescriptorDirectory = "/dev/fd"
 
-func connectPlatformPreflight() error { return nil }
+func connectPlatformPreflight() error {
+	source, err := currentExecutable()
+	if err != nil {
+		return err
+	}
+	return macConfigurationStatus(source)
+}
 
 func addPlatformConnectFlags(*flag.FlagSet, *connectPlatformOptions) {}
 

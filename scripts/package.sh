@@ -27,6 +27,7 @@ staging_dir=$(mktemp -d)
 trap 'find "$staging_dir" -depth -delete' EXIT HUP INT TERM
 package_dir="$staging_dir/laneway"
 archive="laneway_${package_goos}_${package_goarch}.tar.gz"
+standalone="laneway_${package_goos}_${package_goarch}"
 mkdir -p "$package_dir/bin" "$package_dir/docs" "$project_dir/dist"
 if [ "$package_goos" = linux ]; then
 	mkdir -p "$package_dir/sbin" "$package_dir/examples" "$package_dir/systemd" \
@@ -102,6 +103,10 @@ tmp_archive="$staging_dir/$archive"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
   -C "$staging_dir" -cf - laneway | gzip -n > "$tmp_archive"
 mv "$tmp_archive" "$project_dir/dist/$archive"
+if [ "$package_goos" = darwin ]; then
+	cp "$package_dir/bin/laneway" "$project_dir/dist/$standalone"
+	chmod 0755 "$project_dir/dist/$standalone"
+fi
 (
   cd "$project_dir/dist"
   sha256sum "$archive" > "$archive.sha256"
