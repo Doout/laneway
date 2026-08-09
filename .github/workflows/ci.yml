@@ -63,6 +63,7 @@ jobs:
           ./integration/release-contract.sh
           ./integration/control-plane-prepare.sh
           sudo env PATH="$PATH" ./integration/control-plane-install.sh
+          sudo env PATH="$PATH" ./integration/control-plane-upgrade.sh
           ./integration/lane-workflows.sh
           sudo ./integration/lane-prepare.sh
           sudo env PATH="$PATH" ./integration/lane-recovery.sh

@@ -313,12 +313,14 @@ type EnrollmentToken struct {
 	EnrollmentClass        string `json:"enrollment_class"`
 	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
 	RequestedName          string `json:"requested_name,omitempty"`
+	EnabledCapabilities    uint64 `json:"enabled_capabilities,omitempty"`
 }
 
 type EnrollmentTokenOptions struct {
-	Class           string
-	SessionLifetime time.Duration
-	RequestedName   string
+	Class               string
+	SessionLifetime     time.Duration
+	RequestedName       string
+	EnabledCapabilities uint64
 }
 
 type Route struct {
@@ -492,7 +494,8 @@ func (c *Client) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID 
 		EnrollmentClass        string `json:"enrollment_class"`
 		SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
 		RequestedName          string `json:"requested_name,omitempty"`
-	}{networkID.String(), label, expiresAt.Unix(), options.Class, int64(options.SessionLifetime / time.Second), options.RequestedName}, response, true)
+		EnabledCapabilities    uint64 `json:"enabled_capabilities,omitempty"`
+	}{networkID.String(), label, expiresAt.Unix(), options.Class, int64(options.SessionLifetime / time.Second), options.RequestedName, options.EnabledCapabilities}, response, true)
 	return response, err
 }
 

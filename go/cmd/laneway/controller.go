@@ -374,6 +374,8 @@ func runControllerEnrollmentToken(args []string) error {
 	expiresIn := fs.Duration("expires-in", time.Hour, "token lifetime")
 	class := fs.String("class", "durable", "enrollment class: durable, ephemeral, or remembered")
 	sessionLifetime := fs.Duration("session-lifetime", 0, "ephemeral identity lifetime (default 8h for --class ephemeral)")
+	requestedName := fs.String("requested-name", "", "bind enrollment to this exact node name")
+	exitNode := fs.Bool("exit-node", false, "bind Exit Node capability and an approved IPv4 default route to this invite")
 	if err := parseNoArgs(fs, args[1:]); err != nil {
 		return err
 	}
@@ -399,7 +401,13 @@ func runControllerEnrollmentToken(args []string) error {
 	}
 	ctx, cancel := commandContext()
 	defer cancel()
-	result, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, *label, time.Now().UTC().Add(*expiresIn), controllerclient.EnrollmentTokenOptions{Class: *class, SessionLifetime: *sessionLifetime})
+	var enabledCapabilities uint64
+	if *exitNode {
+		enabledCapabilities = uint64(protocol.CapabilityExitNodeV1)
+	}
+	result, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, *label, time.Now().UTC().Add(*expiresIn), controllerclient.EnrollmentTokenOptions{
+		Class: *class, SessionLifetime: *sessionLifetime, RequestedName: *requestedName, EnabledCapabilities: enabledCapabilities,
+	})
 	if err != nil {
 		return err
 	}

@@ -6,11 +6,12 @@ workflow=$repo_dir/.github/workflows/release.yml
 dockerfile=$repo_dir/deploy/containers/Dockerfile
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 compose_file=$repo_dir/deploy/compose/compose.yaml
-lane_workflow=$repo_dir/deploy/compose/lane
+lane_workflow=$repo_dir/deploy/compose/laneway-control
 prepare_workflow=$repo_dir/deploy/compose/prepare.sh
 recovery_workflow=$repo_dir/deploy/compose/recovery.sh
 installer=$repo_dir/deploy/compose/install-control-plane.sh
 preparer=$repo_dir/deploy/compose/prepare-control-plane.sh
+upgrader=$repo_dir/deploy/compose/upgrade-control-plane.sh
 package_workflow=$repo_dir/scripts/package.sh
 
 require() {
@@ -54,7 +55,10 @@ done
 for value in '/dev/shm' 'offline-root.tar.age' 'control-plane-input' 'pki verify-authority' 'Never copy laneway-recovery.identity'; do
   require "$value" "$preparer"
 done
-for value in '.env.example' 'install-control-plane.sh' 'prepare-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
+for value in 'generated/lifecycle' 'image-digests.txt' 'laneway-control upgrade' 'host networking are unchanged'; do
+  require "$value" "$upgrader"
+done
+for value in '.env.example' 'install-control-plane.sh' 'prepare-control-plane.sh' 'upgrade-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
   require "$value" "$package_workflow"
 done
 if grep -F "cp -R \"\$project_dir/deploy/.\"" "$package_workflow" >/dev/null; then

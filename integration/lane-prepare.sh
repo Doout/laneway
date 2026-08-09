@@ -10,8 +10,8 @@ issuer_dir=$test_dir/offline-export
 fake_bin=$test_dir/bin
 log=$test_dir/calls.log
 mkdir -p "$compose_dir/generated/backups" "$issuer_dir" "$fake_bin"
-cp "$repo_dir/deploy/compose/lane" "$repo_dir/deploy/compose/prepare.sh" "$repo_dir/deploy/compose/preflight.sh" "$compose_dir/"
-chmod 0755 "$compose_dir/lane" "$compose_dir/prepare.sh" "$compose_dir/preflight.sh"
+cp "$repo_dir/deploy/compose/laneway-control" "$repo_dir/deploy/compose/prepare.sh" "$repo_dir/deploy/compose/preflight.sh" "$compose_dir/"
+chmod 0755 "$compose_dir/laneway-control" "$compose_dir/prepare.sh" "$compose_dir/preflight.sh"
 : > "$compose_dir/compose.yaml"
 : > "$log"
 printf '%s\n' root-public > "$issuer_dir/ca.crt"
@@ -105,7 +105,7 @@ EOF
 chmod 0600 "$compose_dir/.env"
 export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log"
 
-"$compose_dir/lane" init --issuer "$issuer_dir"
+"$compose_dir/laneway-control" init --issuer "$issuer_dir"
 for path in \
   generated/config/controller.toml generated/config/relay.toml \
   generated/pki/ca.crt generated/pki/intermediate-chain.crt generated/pki/intermediate.key \
@@ -129,11 +129,11 @@ grep -F 'server_name = "lane.example.test"' "$compose_dir/generated/config/relay
 [ "$(grep -c 'pki controller' "$log")" -eq 1 ]
 [ "$(grep -c 'pki relay' "$log")" -eq 1 ]
 
-"$compose_dir/lane" init --issuer "$issuer_dir"
+"$compose_dir/laneway-control" init --issuer "$issuer_dir"
 [ "$(grep -c 'pki controller' "$log")" -eq 1 ] || { echo "idempotent init reissued controller identity" >&2; exit 1; }
 
 printf '%s\n' forbidden-root-key > "$issuer_dir/ca.key"
-if "$compose_dir/lane" init --issuer "$issuer_dir" >/dev/null 2>&1; then
+if "$compose_dir/laneway-control" init --issuer "$issuer_dir" >/dev/null 2>&1; then
   echo "init accepted an offline root private key" >&2
   exit 1
 fi

@@ -257,6 +257,7 @@ type tokenRequest struct {
 	EnrollmentClass        string `json:"enrollment_class,omitempty"`
 	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
 	RequestedName          string `json:"requested_name,omitempty"`
+	EnabledCapabilities    uint64 `json:"enabled_capabilities,omitempty"`
 }
 
 type tokenResponse struct {
@@ -266,6 +267,7 @@ type tokenResponse struct {
 	EnrollmentClass        string `json:"enrollment_class"`
 	SessionLifetimeSeconds int64  `json:"session_lifetime_seconds,omitempty"`
 	RequestedName          string `json:"requested_name,omitempty"`
+	EnabledCapabilities    uint64 `json:"enabled_capabilities,omitempty"`
 }
 
 func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
@@ -288,14 +290,14 @@ func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
 		class = controller.EnrollmentClassDurable
 	}
 	token, err := s.store.IssueEnrollmentTokenWithOptions(r.Context(), networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
-		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second, RequestedName: req.RequestedName,
+		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second, RequestedName: req.RequestedName, EnabledCapabilities: req.EnabledCapabilities,
 	})
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, tokenResponse{TokenID: token.ID.String(), EnrollmentToken: token.Secret, ExpiresAtUnix: token.ExpiresAt.Unix(),
-		EnrollmentClass: string(token.EnrollmentClass), SessionLifetimeSeconds: int64(token.SessionLifetime / time.Second), RequestedName: token.RequestedName})
+		EnrollmentClass: string(token.EnrollmentClass), SessionLifetimeSeconds: int64(token.SessionLifetime / time.Second), RequestedName: token.RequestedName, EnabledCapabilities: token.EnabledCapabilities})
 }
 
 func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {

@@ -3,7 +3,12 @@ set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 test_root=$(mktemp -d)
-cleanup() { [ ! -e "$test_root" ] || find "$test_root" -depth -delete; }
+cleanup() {
+  if [ -L /usr/local/sbin/laneway-control ]; then
+    case "$(readlink /usr/local/sbin/laneway-control)" in "$test_root"/*) find /usr/local/sbin/laneway-control -maxdepth 0 -delete ;; esac
+  fi
+  [ ! -e "$test_root" ] || find "$test_root" -depth -delete
+}
 trap cleanup EXIT HUP INT TERM
 
 source_dir=$test_root/package/deploy/compose
@@ -19,7 +24,7 @@ cp "$repo_dir/deploy/compose/install-control-plane.sh" "$source_dir/install-cont
 for name in compose.yaml bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh README.md; do
   printf 'fixture %s\n' "$name" > "$source_dir/$name"
 done
-cat > "$source_dir/lane" <<'EOF'
+cat > "$source_dir/laneway-control" <<'EOF'
 #!/bin/sh
 printf 'lane %s\n' "$*" >> "$LANEWAY_TEST_LOG"
 case "$1" in
@@ -46,7 +51,11 @@ printf 'private identity fixture\n' > "$output/laneway-recovery.identity"
 printf 'encrypted root fixture\n' > "$output/offline-root.tar.age"
 printf 'instructions\n' > "$output/README.txt"
 EOF
-chmod 0755 "$source_dir/lane" "$source_dir/install-control-plane.sh" "$source_dir/prepare-control-plane.sh"
+cat > "$source_dir/upgrade-control-plane.sh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod 0755 "$source_dir/laneway-control" "$source_dir/install-control-plane.sh" "$source_dir/prepare-control-plane.sh" "$source_dir/upgrade-control-plane.sh"
 for name in ca.crt intermediate-chain.crt intermediate.key; do
   printf 'fixture %s\n' "$name" > "$issuer_dir/$name"
 done
@@ -147,7 +156,12 @@ grep -Fx 'LANEWAY_DOMAIN=lane.example.test' "$answers_file" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_PORT=8443' "$answers_file" >/dev/null
 grep -Fx "LANEWAY_PREPARED_INPUT_DIR=$issuer_dir" "$answers_file" >/dev/null
 test -f "$destination/PRODUCTION-CHECKLIST.md"
-grep -F 'lane production-check' "$destination/PRODUCTION-CHECKLIST.md" >/dev/null
+grep -F 'laneway-control production-check' "$destination/PRODUCTION-CHECKLIST.md" >/dev/null
+test -x "$destination/laneway-control"
+test -L "$destination/lane"
+test "$(readlink "$destination/lane")" = laneway-control
+test "$(readlink /usr/local/sbin/laneway-control)" = "$destination/laneway-control"
+find /usr/local/sbin/laneway-control -maxdepth 0 -delete
 
 remembered_cancel=$test_root/remembered-cancel
 printf '0\n' > "$counter_file"
@@ -197,6 +211,7 @@ test "$(find "$automatic_kit" -maxdepth 1 -name 'initial-recovery-*.age' | wc -l
 grep -Fx "LANEWAY_BACKUP_RECIPIENT=$recipient" "$automatic/.env" >/dev/null
 grep -Fx 'LANEWAY_INSTALL_PROFILE=quick' "$automatic/.env" >/dev/null
 grep -F 'All container image signatures verified: **false**' "$automatic/PRODUCTION-CHECKLIST.md" >/dev/null
+find /usr/local/sbin/laneway-control -maxdepth 0 -delete
 
 production_failed=$test_root/production-failed
 printf '0\n' > "$counter_file"
