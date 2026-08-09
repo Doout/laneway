@@ -85,28 +85,36 @@ func (f *runtimeCredentialFiles) close() error {
 }
 
 func runConnect(args []string) error {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+	return runConnectForOS(args, runtime.GOOS)
+}
+
+func runConnectForOS(args []string, goos string) error {
+	if goos != "linux" && goos != "darwin" {
 		return errors.New("foreground connect currently requires Linux or macOS")
 	}
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the one-time enrollment code")
-	exitSelector := fs.String("exit", "", "controller-authorized exit node name or NodeID")
 	remembered := fs.Bool("remembered", false, "enroll and save a remembered-user login when none exists")
 	ephemeral := fs.Bool("ephemeral", false, "use a one-time temporary session instead of the saved login")
-	failureMode := fs.String("failure-mode", "closed", "exit path failure behavior: closed or open")
+	exitSelectorValue, failureModeValue := "", "closed"
+	exitSelector, failureMode := &exitSelectorValue, &failureModeValue
 	var routeValues, dnsValues, localLANValues []string
 	fs.Func("route", "controller-authorized subnet prefix (repeatable)", func(value string) error {
 		routeValues = append(routeValues, value)
 		return nil
 	})
-	fs.Func("dns", "temporary exit DNS server (repeatable; omitted preserves native DNS)", func(value string) error {
-		dnsValues = append(dnsValues, value)
-		return nil
-	})
-	fs.Func("local-lan", "native local-LAN bypass prefix for exit mode (repeatable)", func(value string) error {
-		localLANValues = append(localLANValues, value)
-		return nil
-	})
+	if goos == "linux" {
+		fs.StringVar(exitSelector, "exit", "", "controller-authorized exit node name or NodeID")
+		fs.StringVar(failureMode, "failure-mode", "closed", "exit path failure behavior: closed or open")
+		fs.Func("dns", "temporary exit DNS server (repeatable; omitted preserves native DNS)", func(value string) error {
+			dnsValues = append(dnsValues, value)
+			return nil
+		})
+		fs.Func("local-lan", "native local-LAN bypass prefix for exit mode (repeatable)", func(value string) error {
+			localLANValues = append(localLANValues, value)
+			return nil
+		})
+	}
 	connectArgs := args
 	authority := ""
 	if len(connectArgs) != 0 && !strings.HasPrefix(connectArgs[0], "-") {
@@ -116,22 +124,19 @@ func runConnect(args []string) error {
 		return err
 	}
 	if fs.NArg() > 1 || (fs.NArg() == 1 && authority != "") {
-		return connectUsage()
+		return connectUsageForOS(goos)
 	}
 	if fs.NArg() == 1 {
 		authority = fs.Arg(0)
 	}
 	if authority == "" || (*remembered && *ephemeral) {
-		return connectUsage()
+		return connectUsageForOS(goos)
 	}
 	if *failureMode != "closed" && *failureMode != "open" {
 		return errors.New("--failure-mode must be closed or open")
 	}
 	if *exitSelector == "" && (len(dnsValues) != 0 || len(localLANValues) != 0 || flagProvided(args, "failure-mode")) {
 		return errors.New("--dns, --local-lan, and --failure-mode require --exit")
-	}
-	if runtime.GOOS == "darwin" && *exitSelector != "" {
-		return errors.New("macOS currently supports secure split-tunnel subnet routes only; --exit is not yet supported")
 	}
 	routes, err := parseConnectPrefixes(routeValues, false)
 	if err != nil {
@@ -385,6 +390,13 @@ func connectPrefixList(prefixes []netip.Prefix) string {
 }
 
 func connectUsage() error {
+	return connectUsageForOS(runtime.GOOS)
+}
+
+func connectUsageForOS(goos string) error {
+	if goos == "darwin" {
+		return errors.New("usage: laneway connect lane.example.com [--route PREFIX] [--ephemeral [--token-file PATH]]")
+	}
 	return errors.New("usage: laneway connect lane.example.com [--route PREFIX] [--exit NAME_OR_NODE_ID] [--dns ADDRESS] [--ephemeral [--token-file PATH]]")
 }
 

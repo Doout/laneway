@@ -27,38 +27,43 @@ staging_dir=$(mktemp -d)
 trap 'find "$staging_dir" -depth -delete' EXIT HUP INT TERM
 package_dir="$staging_dir/laneway"
 archive="laneway_${package_goos}_${package_goarch}.tar.gz"
-mkdir -p "$package_dir/bin" "$package_dir/sbin" "$package_dir/examples" \
-	"$package_dir/systemd" "$package_dir/nftables" "$package_dir/docs" \
-	"$package_dir/spec" "$package_dir/deploy" "$package_dir/integration" "$project_dir/dist"
+mkdir -p "$package_dir/bin" "$package_dir/docs" "$project_dir/dist"
+if [ "$package_goos" = linux ]; then
+	mkdir -p "$package_dir/sbin" "$package_dir/examples" "$package_dir/systemd" \
+		"$package_dir/nftables" "$package_dir/spec" "$package_dir/deploy" "$package_dir/integration"
+fi
 
 ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=$version"
 (
   cd "$project_dir/go"
   CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
     go build -trimpath -ldflags "$ldflags" -o "$package_dir/bin/laneway" ./cmd/laneway
-  for command in laneway-relay laneway-controller; do
-    CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
-      go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/$command" "./cmd/$command"
-  done
-	ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
 	ln -s laneway "$package_dir/bin/lane"
+	if [ "$package_goos" = linux ]; then
+		for command in laneway-relay laneway-controller; do
+			CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
+				go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/$command" "./cmd/$command"
+		done
+		ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
+	fi
 )
 
+cp "$project_dir/README.md" "$package_dir/README.md"
+cp "$project_dir/LICENSE-MIT" "$project_dir/LICENSE-APACHE" "$package_dir/"
+cp "$project_dir/docs/operations.md" "$package_dir/docs/operations.md"
+if [ "$package_goos" = linux ]; then
 cp "$project_dir/deploy/examples/controller.toml" \
   "$project_dir/deploy/examples/node-controller.toml" \
   "$project_dir/deploy/examples/node.toml" \
   "$project_dir/deploy/examples/relay-controller.toml" \
-  "$project_dir/deploy/examples/relay.toml" \
-  "$package_dir/examples/"
+	"$project_dir/deploy/examples/relay.toml" \
+	"$package_dir/examples/"
 cp "$project_dir/deploy/systemd/lanewayd.service" \
   "$project_dir/deploy/systemd/laneway-relay.service" \
   "$project_dir/deploy/systemd/laneway-controller.service" \
   "$package_dir/systemd/"
 cp "$project_dir"/deploy/nftables/* "$package_dir/nftables/"
-cp "$project_dir/README.md" "$package_dir/README.md"
-cp "$project_dir/LICENSE-MIT" "$project_dir/LICENSE-APACHE" "$package_dir/"
 cp "$project_dir/deploy/README.md" "$package_dir/docs/deployment.md"
-cp "$project_dir/docs/operations.md" "$package_dir/docs/operations.md"
 cp "$project_dir/docs/benchmarks.md" "$package_dir/docs/benchmarks.md"
 cp "$project_dir/docs/rust-controller-node.md" "$package_dir/docs/rust-controller-node.md"
 cp "$project_dir/spec/threat-model.md" "$package_dir/docs/threat-model.md"
@@ -80,14 +85,18 @@ done
 install -m 0644 "$project_dir"/deploy/compose/generated/config/*.example \
 	"$package_dir/deploy/compose/generated/config/"
 cp "$project_dir/integration/README.md" "$package_dir/integration/README.md"
+cp "$project_dir/scripts/setup-node.sh" "$package_dir/sbin/laneway-setup-node"
+fi
 cp "$project_dir/SECURITY.md" "$package_dir/SECURITY.md"
 cp "$project_dir/scripts/install-package.sh" "$package_dir/install.sh"
-cp "$project_dir/scripts/setup-node.sh" "$package_dir/sbin/laneway-setup-node"
 printf '%s\n' "$version" > "$package_dir/VERSION"
 find "$package_dir" -type f -exec chmod 0644 {} +
 find "$package_dir" -type d -exec chmod 0755 {} +
-chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway" "$package_dir"/sbin/* \
-	"$package_dir"/deploy/compose/*.sh "$package_dir"/deploy/compose/laneway-control
+chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway"
+if [ "$package_goos" = linux ]; then
+	chmod 0755 "$package_dir"/sbin/* "$package_dir"/deploy/compose/*.sh \
+		"$package_dir"/deploy/compose/laneway-control
+fi
 
 tmp_archive="$staging_dir/$archive"
 tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
