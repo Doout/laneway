@@ -141,12 +141,14 @@ LANE_TEST_HEALTH=healthy; export LANE_TEST_HEALTH
 
 mkdir -p "$compose_dir/generated/recovery"
 printf 'encrypted backup\n' > "$compose_dir/generated/recovery/initial.age"
-if LANE_TEST_COSIGN_FAIL=1 "$compose_dir/lane" production-check >/dev/null 2>&1; then
+if sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+  LANE_TEST_COSIGN_FAIL=1 "$compose_dir/lane" production-check >/dev/null 2>&1; then
   echo "production-check accepted failed image signatures" >&2
   exit 1
 fi
 test ! -e "$compose_dir/generated/lifecycle/production-verified"
-"$compose_dir/lane" production-check >/dev/null
+sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+  "$compose_dir/lane" production-check >/dev/null
 test "$(stat -c %a "$compose_dir/generated/lifecycle/production-verified")" = 600
 grep -Fx 'profile=quick' "$compose_dir/generated/lifecycle/production-verified" >/dev/null
 
