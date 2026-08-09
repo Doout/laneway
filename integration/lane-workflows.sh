@@ -262,7 +262,7 @@ printf '\n' >> "$LANE_TEST_LOG"
 EOF
 chmod 0755 "$fake_bin/curl" "$fake_bin/env"
 : > "$log"
-current_output=$(/usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+current_output=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
   LANE_TEST_LATEST_TAG=v1.0.0 "$compose_dir/laneway-control" update)
 printf '%s\n' "$current_output" | grep -F 'already current (v1.0.0)' >/dev/null
 if grep -E 'update-env|verify-blob' "$log" >/dev/null; then
@@ -270,7 +270,7 @@ if grep -E 'update-env|verify-blob' "$log" >/dev/null; then
   exit 1
 fi
 : > "$log"
-update_output=$(/usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+update_output=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
   LANE_TEST_UPDATE_ASSETS="$update_assets" LANEWAY_COSIGN_BIN="$fake_bin/cosign" \
   LANEWAY_RELEASE_BASE_URL=https://fixture.invalid/v1.1.0 TMPDIR="$update_tmp" \
   "$compose_dir/laneway-control" update)
