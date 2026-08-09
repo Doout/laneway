@@ -21,7 +21,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -70,9 +69,6 @@ type managedNodeRelay struct {
 }
 
 func runNodeInstall(args []string) error {
-	if runtime.GOOS != "linux" {
-		return errors.New("managed node installation requires Linux and systemd")
-	}
 	fs := flag.NewFlagSet("node install", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the durable node invite")
 	name := fs.String("name", "", "requested node name (an invite-bound name takes precedence)")
@@ -274,7 +270,7 @@ func runNodeUninstall(args []string) error {
 	if fs.NArg() != 0 {
 		return errors.New("usage: laneway node uninstall [--keep-state]")
 	}
-	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+	if os.Geteuid() != 0 {
 		return errors.New("node uninstall requires root on Linux")
 	}
 	manifest, err := loadManagedNodeManifest("/etc/laneway/node-install.json")
@@ -302,7 +298,7 @@ func runManagedNodeRenew(args []string) error {
 	if fs.NArg() != 0 {
 		return errors.New("usage: laneway node renew")
 	}
-	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+	if os.Geteuid() != 0 {
 		return errors.New("node renew requires root on Linux")
 	}
 	groupID, err := managedNodePreflight()

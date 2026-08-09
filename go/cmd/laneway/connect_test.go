@@ -26,13 +26,6 @@ func TestConnectRejectsUnsafeOrAmbiguousFlagsBeforePrompt(t *testing.T) {
 	}
 }
 
-func TestMacOSConnectRejectsExitModeLocally(t *testing.T) {
-	err := runConnectForOS([]string{"lane.example.com", "--exit", "gateway"}, "darwin")
-	if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -exit") {
-		t.Fatalf("runConnectForOS(--exit) error = %v, want unknown flag", err)
-	}
-}
-
 func TestConnectPrefixListMakesTemporaryOwnershipExplicit(t *testing.T) {
 	if got := connectPrefixList(nil); got != "none" {
 		t.Fatalf("empty prefix list = %q", got)

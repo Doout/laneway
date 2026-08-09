@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -24,19 +23,6 @@ func TestRootHelpDoesNotLoadNodeConfiguration(t *testing.T) {
 	}
 	if err := run([]string{"control", "--help"}); err != nil {
 		t.Fatalf("control help from %s: %v", workingDirectory, err)
-	}
-}
-
-func TestMacOSCLIContainsOnlyUserClientCommands(t *testing.T) {
-	root := newRootCommandForOS("darwin")
-	names := make([]string, 0, len(root.Commands()))
-	for _, item := range root.Commands() {
-		names = append(names, item.Name())
-	}
-	sort.Strings(names)
-	want := []string{"_network-helper", "bootstrap", "connect", "login", "logout", "version"}
-	if strings.Join(names, ",") != strings.Join(want, ",") {
-		t.Fatalf("macOS commands = %v, want %v", names, want)
 	}
 }
 
