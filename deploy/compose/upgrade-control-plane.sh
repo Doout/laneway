@@ -14,7 +14,9 @@ for command in awk curl docker find grep install ln mktemp mv readlink sed wc; d
 done
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
 for path in "$destination/.env" "$destination/compose.yaml"; do
-  [ -f "$path" ] && [ ! -L "$path" ] || die "existing deployment file is missing or unsafe: $path"
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
+    die "existing deployment file is missing or unsafe: $path"
+  fi
 done
 
 package_version=
@@ -71,8 +73,9 @@ awk -v version="$package_version" -v controller="$controller_digest" -v relay="$
 ' "$destination/.env" > "$work_dir/candidate.env" || die "existing release environment is incomplete"
 install -m 0600 -o 0 -g 0 "$work_dir/candidate.env" "$candidate"
 
-[ -f "$source_dir/laneway-control" ] && [ ! -L "$source_dir/laneway-control" ] || \
+if [ ! -f "$source_dir/laneway-control" ] || [ -L "$source_dir/laneway-control" ]; then
   die "packaged laneway-control command is missing or unsafe"
+fi
 install -m 0755 -o 0 -g 0 "$source_dir/laneway-control" "$destination/.laneway-control.new"
 mv "$destination/.laneway-control.new" "$destination/laneway-control"
 
@@ -81,7 +84,9 @@ if [ -e "$destination/lane" ] || [ -L "$destination/lane" ]; then
     [ "$(readlink "$destination/lane")" = laneway-control ] || die "unexpected compatibility link: $destination/lane"
   elif [ -f "$destination/lane" ]; then
     legacy=$destination/generated/lifecycle/lane-before-$package_version
-    [ ! -e "$legacy" ] && [ ! -L "$legacy" ] || die "legacy wrapper backup already exists: $legacy"
+    if [ -e "$legacy" ] || [ -L "$legacy" ]; then
+      die "legacy wrapper backup already exists: $legacy"
+    fi
     mv "$destination/lane" "$legacy"
     ln -s laneway-control "$destination/lane"
   else
