@@ -80,15 +80,6 @@ func newRootCommand() *cobra.Command {
 		forwarded("run", "Run the persistent node service", "run", runNodeDispatch),
 		forwarded("uninstall", "Remove command-owned node state", "uninstall", runNodeDispatch),
 	)
-	// "start" has never been a supported spelling. Keep a hidden diagnostic
-	// command so older callers receive the precise node-service guidance.
-	node.AddCommand(&cobra.Command{
-		Use:    "start",
-		Hidden: true,
-		RunE: func(*cobra.Command, []string) error {
-			return runNode([]string{"start"})
-		},
-	})
 	root.AddCommand(node)
 	root.AddCommand(group("exit", "Configure exit-node routing", runExit,
 		forwarded("enable", "Advertise this gateway as an exit node", "enable", runExit),
@@ -136,7 +127,10 @@ func group(use, summary string, fallback commandHandler, children ...*cobra.Comm
 		Use:   use,
 		Short: summary,
 		Args:  cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return cmd.Help()
+			}
 			return fallback(args)
 		},
 	}
