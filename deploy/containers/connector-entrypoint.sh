@@ -40,14 +40,18 @@ if [ "$identity_count" -ne 5 ]; then
   case "$LANEWAY_NODE_NAME" in *[!A-Za-z0-9._-]*) die "invalid LANEWAY_NODE_NAME" ;; esac
   case "$LANEWAY_CONTROLLER_SERVER_NAME" in *[!A-Za-z0-9.-]*) die "invalid LANEWAY_CONTROLLER_SERVER_NAME" ;; esac
   case "$LANEWAY_CONTROLLER_PORT" in *[!0-9]*|'') die "invalid LANEWAY_CONTROLLER_PORT" ;; esac
-  [ "${#LANEWAY_CONTROLLER_PORT}" -le 5 ] && [ "$LANEWAY_CONTROLLER_PORT" -ge 1 ] && \
-    [ "$LANEWAY_CONTROLLER_PORT" -le 65535 ] || die "invalid LANEWAY_CONTROLLER_PORT"
+  if [ "${#LANEWAY_CONTROLLER_PORT}" -gt 5 ] || \
+    [ "$LANEWAY_CONTROLLER_PORT" -lt 1 ] || [ "$LANEWAY_CONTROLLER_PORT" -gt 65535 ]; then
+    die "invalid LANEWAY_CONTROLLER_PORT"
+  fi
   case "$LANEWAY_NETWORK_ID$LANEWAY_CONTROLLER_SERVICE_ID$LANEWAY_RELAY_SERVICE_ID" in
     *[!0-9a-f]*) die "invalid Laneway identity" ;;
   esac
-  [ "${#LANEWAY_NETWORK_ID}" -eq 32 ] && \
-    [ "${#LANEWAY_CONTROLLER_SERVICE_ID}" -eq 32 ] && \
-    [ "${#LANEWAY_RELAY_SERVICE_ID}" -eq 32 ] || die "invalid Laneway identity length"
+  if [ "${#LANEWAY_NETWORK_ID}" -ne 32 ] || \
+    [ "${#LANEWAY_CONTROLLER_SERVICE_ID}" -ne 32 ] || \
+    [ "${#LANEWAY_RELAY_SERVICE_ID}" -ne 32 ]; then
+    die "invalid Laneway identity length"
+  fi
   case "$LANEWAY_RELAY_ENDPOINT" in *'"'*|*\\*|*'
 '*) die "invalid LANEWAY_RELAY_ENDPOINT" ;; esac
 
