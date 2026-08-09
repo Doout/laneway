@@ -22,7 +22,6 @@ import (
 
 	"golang.org/x/term"
 	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/buildinfo"
 	"laneway.dev/laneway/internal/config"
 	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/identity"
@@ -45,53 +44,7 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 {
-		usage()
-		return errors.New("a command is required")
-	}
-	switch args[0] {
-	case "version", "--version", "-version":
-		fmt.Println(buildinfo.Version)
-		return nil
-	case "config":
-		return runConfig(args[1:])
-	case "id":
-		id, err := identity.NewID()
-		if err != nil {
-			return err
-		}
-		fmt.Println(id.String())
-		return nil
-	case "pki":
-		return runPKI(args[1:])
-	case "up", "status", "peers", "routes":
-		return runLocal(args[0], args[1:])
-	case "join":
-		return runJoin(args[1:])
-	case "connect":
-		return runConnect(args[1:])
-	case "invite":
-		return runInvite(args[1:])
-	case "bootstrap":
-		return runBootstrap(args[1:])
-	case "renew":
-		return runRenew(args[1:])
-	case "node":
-		return runNode(args[1:])
-	case "_network-helper":
-		return runNetworkHelper(args[1:])
-	case "controller":
-		return runController(args[1:])
-	case "route":
-		return runControllerRoute(args[1:])
-	case "exit":
-		return runExit(args[1:])
-	case "help", "-h", "--help":
-		usage()
-		return nil
-	default:
-		return fmt.Errorf("unknown command %q", args[0])
-	}
+	return executeCLI(args)
 }
 
 func runNetworkHelper(args []string) error {
@@ -104,39 +57,6 @@ func runNetworkHelper(args []string) error {
 		return errors.New("invalid privileged helper invocation")
 	}
 	return nethelper.ServeInheritedFD(context.Background(), *fd, nethelper.ProductionConfig())
-}
-
-func usage() {
-	fmt.Fprintln(os.Stderr, `usage: laneway <command>
-
-commands:
-  version           print the Laneway build version
-  up                verify the local daemon is running
-  status            show local daemon and transport status
-  peers             list configured peers
-  routes            list installed overlay routes
-  join TOKEN        enroll with a controller (or use --token-file PATH)
-  connect DOMAIN    run a temporary foreground User session
-  invite            issue a short-lived single-use join code on a controller
-  bootstrap         inspect metadata or download a verified release artifact
-  renew             renew this node's controller-issued certificate
-  node install      enroll and install a managed persistent host Node
-  node renew        safely rotate a managed Node credential
-  node run          run the persistent host Node service
-  node uninstall    gracefully remove command-owned Node state
-  controller        manage controller networks, relays, routes, ACLs, and audit events
-  route advertise   advertise or withdraw this node's subnet/exit routes
-  exit enable       advertise this configured gateway as an exit node
-  exit use NAME     select a controller-authorized exit node by name or NodeID
-  exit disable      return to split-tunnel routing
-  config validate   validate a laneway.toml file
-  id                generate a random Laneway 128-bit ID
-  pki init          create a development CA
-  pki intermediate  create an online issuer signed by an offline root
-  pki verify-authority validate an online issuer bundle against the offline root
-  pki node          issue a node certificate
-  pki relay         issue a relay service certificate
-  pki controller    issue a controller service certificate`)
 }
 
 func runNode(args []string) error {

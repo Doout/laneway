@@ -87,8 +87,8 @@ func runConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the one-time enrollment code")
 	exitSelector := fs.String("exit", "", "controller-authorized exit node name or NodeID")
-	remembered := fs.Bool("remembered", false, "require a remembered-user invite instead of an ephemeral invite")
-	ephemeral := fs.Bool("ephemeral", false, "explicitly require an ephemeral-user invite (the default)")
+	remembered := fs.Bool("remembered", false, "enroll and save a remembered-user login when none exists")
+	ephemeral := fs.Bool("ephemeral", false, "use a one-time temporary session instead of the saved login")
 	failureMode := fs.String("failure-mode", "closed", "exit path failure behavior: closed or open")
 	var routeValues, dnsValues, localLANValues []string
 	fs.Func("route", "controller-authorized subnet prefix (repeatable)", func(value string) error {
@@ -138,10 +138,6 @@ func runConnect(args []string) error {
 	if err != nil {
 		return fmt.Errorf("--dns: %w", err)
 	}
-	code, err := connectEnrollmentCode(*tokenFile)
-	if err != nil {
-		return err
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 20*time.Second)
@@ -151,17 +147,6 @@ func runConnect(args []string) error {
 		return err
 	}
 	if _, err := metadata.ArtifactForCurrentPlatform(); err != nil {
-		return err
-	}
-	expectedClass := lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER
-	if *remembered {
-		expectedClass = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER
-	}
-	enrollmentCtx, cancelEnrollment := context.WithTimeout(ctx, 30*time.Second)
-	enrollment, err := enrollForConnect(enrollmentCtx, metadata, code, expectedClass)
-	cancelEnrollment()
-	code = ""
-	if err != nil {
 		return err
 	}
 	runtimeDir, err := os.MkdirTemp("", "laneway-connect-*")
@@ -174,21 +159,87 @@ func runConnect(args []string) error {
 	}
 	credentials := new(runtimeCredentialFiles)
 	defer credentials.close()
-	caPath, err := credentials.add(runtimeDir, "ca", []byte(metadata.Trust.CAPEM))
-	if err != nil {
-		return err
-	}
-	certPath, err := credentials.add(runtimeDir, "certificate", enrollment.certificatePEM)
-	if err != nil {
-		return err
-	}
-	keyPath, err := credentials.add(runtimeDir, "private-key", enrollment.privateKeyPEM)
-	if err != nil {
-		return err
-	}
-	wireGuardKeyPath, err := credentials.add(runtimeDir, "wireguard-key", enrollment.wireGuardPrivateKey.Bytes())
-	if err != nil {
-		return err
+	var enrollment connectEnrollment
+	var caPath, certPath, keyPath, wireGuardKeyPath string
+	var savedProfile userProfile
+	var savedProfileFiles userProfileFiles
+	usingSavedLogin := !*ephemeral
+	if *ephemeral {
+		code, codeErr := connectEnrollmentCode(*tokenFile)
+		if codeErr != nil {
+			return codeErr
+		}
+		enrollmentCtx, cancelEnrollment := context.WithTimeout(ctx, 30*time.Second)
+		enrollment, err = enrollForConnect(enrollmentCtx, metadata, code, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER)
+		cancelEnrollment()
+		code = ""
+		if err != nil {
+			return err
+		}
+		caPath, err = credentials.add(runtimeDir, "ca", []byte(metadata.Trust.CAPEM))
+		if err == nil {
+			certPath, err = credentials.add(runtimeDir, "certificate", enrollment.certificatePEM)
+		}
+		if err == nil {
+			keyPath, err = credentials.add(runtimeDir, "private-key", enrollment.privateKeyPEM)
+		}
+		if err == nil {
+			wireGuardKeyPath, err = credentials.add(runtimeDir, "wireguard-key", enrollment.wireGuardPrivateKey.Bytes())
+		}
+		if err != nil {
+			return err
+		}
+	} else {
+		profile, profileFiles, profileErr := loadUserProfile(authority)
+		if errors.Is(profileErr, os.ErrNotExist) && *remembered {
+			code, codeErr := connectEnrollmentCode(*tokenFile)
+			if codeErr != nil {
+				return codeErr
+			}
+			enrollmentCtx, cancelEnrollment := context.WithTimeout(ctx, 30*time.Second)
+			rememberedEnrollment, enrollErr := enrollForConnect(enrollmentCtx, metadata, code, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER)
+			cancelEnrollment()
+			code = ""
+			if enrollErr != nil {
+				return enrollErr
+			}
+			profile = userProfile{Version: userProfileVersion, Authority: authority, NetworkID: metadata.NetworkID, ControllerServiceID: metadata.Controller.ServiceID, NodeID: rememberedEnrollment.identity.NodeID.String(), Name: "remembered-user", CreatedAt: time.Now().UTC()}
+			if err := saveUserProfile(profile, []byte(metadata.Trust.CAPEM), rememberedEnrollment.certificatePEM, rememberedEnrollment.privateKeyPEM, rememberedEnrollment.wireGuardPrivateKey.Bytes()); err != nil {
+				return err
+			}
+			profile, profileFiles, profileErr = loadUserProfile(authority)
+		}
+		if profileErr != nil {
+			if errors.Is(profileErr, os.ErrNotExist) {
+				return fmt.Errorf("no saved login for %s; run 'laneway login %s' or use --ephemeral", authority, authority)
+			}
+			return profileErr
+		}
+		if *tokenFile != "" {
+			return errors.New("--token-file is only used by login, --remembered enrollment, or --ephemeral sessions")
+		}
+		if err := validateProfileMetadata(profile, profileFiles, metadata); err != nil {
+			return err
+		}
+		due, _, err := profileRenewalDue(profileFiles.certificate, time.Now())
+		if err != nil {
+			return err
+		}
+		if due {
+			renewCtx, cancelRenew := context.WithTimeout(ctx, 30*time.Second)
+			profile, profileFiles, err = renewUserProfile(renewCtx, profile, profileFiles, metadata)
+			cancelRenew()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("laneway refreshed saved login network=%s node=%s\n", profile.NetworkID, profile.NodeID)
+		}
+		networkID, _ := identity.ParseNetworkID(profile.NetworkID)
+		nodeID, _ := identity.ParseNodeID(profile.NodeID)
+		enrollment.identity = identity.NodeIdentity{NetworkID: networkID, NodeID: nodeID}
+		enrollment.class = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER
+		caPath, certPath, keyPath, wireGuardKeyPath = profileFiles.ca, profileFiles.certificate, profileFiles.privateKey, profileFiles.wireGuardKey
+		savedProfile, savedProfileFiles = profile, profileFiles
 	}
 	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
 	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
@@ -212,7 +263,11 @@ func runConnect(args []string) error {
 		return err
 	}
 	filter := connectConfigurationFilter(routes, selectedExit, enrollment.identity.NodeID)
-	if _, err := filter(initial); err != nil {
+	if usingSavedLogin && len(routes) == 0 {
+		filter = connectAuthorizedConfigurationFilter(selectedExit, enrollment.identity.NodeID)
+	}
+	filteredInitial, err := filter(initial)
+	if err != nil {
 		return err
 	}
 	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, *failureMode, dns, localLAN)
@@ -220,6 +275,9 @@ func runConnect(args []string) error {
 		return err
 	}
 	selection := "overlay-only"
+	if usingSavedLogin && len(routes) == 0 {
+		selection = "authorized-private-routes"
+	}
 	if len(routes) != 0 {
 		values := make([]string, 0, len(routes))
 		for _, prefix := range routes {
@@ -232,6 +290,9 @@ func runConnect(args []string) error {
 	}
 	lastPath := ""
 	ownedRoutes := connectPrefixList(routes)
+	if usingSavedLogin && len(routes) == 0 {
+		ownedRoutes = connectPrefixList(connectSubnetPrefixes(filteredInitial))
+	}
 	bypasses := connectPrefixList(localLAN)
 	dnsOwnership := "native"
 	if len(dns) != 0 {
@@ -246,17 +307,61 @@ func runConnect(args []string) error {
 		for _, prefix := range value.OverlayAddresses {
 			overlays = append(overlays, prefix.String())
 		}
-		fmt.Printf("laneway connected actor=user network=%s node=%s name=%s overlay=%s identity_lease_expires_at=%d interface=%s selection=%s owned_routes=%s bypasses=%s dns_owner=%s cleanup_journal=helper-active path=%s\n",
-			value.NetworkID, value.NodeID, name, strings.Join(overlays, ","), enrollment.leaseExpiresAt.Unix(), value.Interface,
+		lease := "durable"
+		if !enrollment.leaseExpiresAt.IsZero() {
+			lease = fmt.Sprint(enrollment.leaseExpiresAt.Unix())
+		}
+		fmt.Printf("laneway connected actor=user network=%s node=%s name=%s overlay=%s identity_lease_expires_at=%s interface=%s selection=%s owned_routes=%s bypasses=%s dns_owner=%s cleanup_journal=helper-active path=%s\n",
+			value.NetworkID, value.NodeID, name, strings.Join(overlays, ","), lease, value.Interface,
 			selection, ownedRoutes, bypasses, dnsOwnership, value.Path)
 	}
-	err = nodeapp.RunForeground(ctx, cfg, nodeapp.ForegroundOptions{
-		NetworkOpener: helperNetworkOpener, Status: status, FilterConfiguration: filter,
-	})
-	if err == nil {
-		fmt.Println("laneway disconnected; temporary networking restored")
+	for {
+		sessionCtx := ctx
+		cancelSession := func() {}
+		if usingSavedLogin {
+			_, renewAt, renewalErr := profileRenewalDue(savedProfileFiles.certificate, time.Now())
+			if renewalErr != nil {
+				return renewalErr
+			}
+			sessionCtx, cancelSession = context.WithDeadline(ctx, renewAt)
+		}
+		err = nodeapp.RunForeground(sessionCtx, cfg, nodeapp.ForegroundOptions{
+			NetworkOpener: helperNetworkOpener, Status: status, FilterConfiguration: filter,
+		})
+		cancelSession()
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil || !usingSavedLogin {
+			fmt.Println("laneway disconnected; temporary networking restored")
+			return nil
+		}
+		// The foreground runtime has restored its temporary routes before key
+		// rotation. Refresh discovery, rotate the saved credential atomically,
+		// and reconnect without asking for another token.
+		discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 20*time.Second)
+		metadata, err = bootstrap.Fetch(discoveryCtx, authority)
+		cancelDiscovery()
+		if err != nil {
+			return fmt.Errorf("refresh discovery before login renewal: %w", err)
+		}
+		if err := validateProfileMetadata(savedProfile, savedProfileFiles, metadata); err != nil {
+			return err
+		}
+		renewCtx, cancelRenew := context.WithTimeout(ctx, 30*time.Second)
+		savedProfile, savedProfileFiles, err = renewUserProfile(renewCtx, savedProfile, savedProfileFiles, metadata)
+		cancelRenew()
+		if err != nil {
+			return err
+		}
+		caPath, certPath, keyPath, wireGuardKeyPath = savedProfileFiles.ca, savedProfileFiles.certificate, savedProfileFiles.privateKey, savedProfileFiles.wireGuardKey
+		cfg, err = connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, *failureMode, dns, localLAN)
+		if err != nil {
+			return err
+		}
+		lastPath = ""
+		fmt.Printf("laneway refreshed saved login network=%s node=%s; reconnecting authorized routes\n", savedProfile.NetworkID, savedProfile.NodeID)
 	}
-	return err
 }
 
 func connectPrefixList(prefixes []netip.Prefix) string {
@@ -271,7 +376,7 @@ func connectPrefixList(prefixes []netip.Prefix) string {
 }
 
 func connectUsage() error {
-	return errors.New("usage: laneway connect lane.example.com [--token-file PATH] [--route PREFIX] [--exit NAME_OR_NODE_ID] [--dns ADDRESS] [--remembered]")
+	return errors.New("usage: laneway connect lane.example.com [--route PREFIX] [--exit NAME_OR_NODE_ID] [--dns ADDRESS] [--ephemeral [--token-file PATH]]")
 }
 
 func connectEnrollmentCode(path string) (string, error) {
@@ -580,6 +685,148 @@ func connectConfigurationFilter(requested []netip.Prefix, selectedExit, local id
 		}
 		return filtered, nil
 	}
+}
+
+// connectAuthorizedConfigurationFilter derives split routes from ACCEPT rules
+// that can apply to this remembered user. The complete policy remains in the
+// snapshot and is still enforced packet-by-packet; this only limits which
+// private prefixes the host sends to Laneway. Default routes remain exclusive
+// to an explicit, controller-authorized --exit selection.
+func connectAuthorizedConfigurationFilter(selectedExit, local identity.NodeID) func(*lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error) {
+	return func(configuration *lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error) {
+		if configuration == nil || configuration.GetRoutes() == nil || configuration.GetPolicy() == nil {
+			return nil, errors.New("controller configuration is incomplete")
+		}
+		filtered := proto.Clone(configuration).(*lanewayv1.NodeConfiguration)
+		kept := filtered.Routes.Routes[:0]
+		seen := make(map[string]struct{})
+		exitRoute := false
+		for _, route := range filtered.Routes.Routes {
+			switch route.GetKind() {
+			case lanewayv1.RouteKind_ROUTE_KIND_OVERLAY:
+				kept = append(kept, route)
+			case lanewayv1.RouteKind_ROUTE_KIND_SUBNET:
+				routePrefix, err := connectProtoPrefix(route.GetDestination())
+				if err != nil {
+					return nil, err
+				}
+				if routePrefix.Bits() == 0 || bytes.Equal(route.GetViaNodeId(), local[:]) {
+					continue
+				}
+				for _, prefix := range connectAuthorizedRoutePrefixes(configuration, route, routePrefix, local) {
+					key := prefix.String() + "\x00" + string(route.GetViaNodeId())
+					if _, duplicate := seen[key]; duplicate {
+						continue
+					}
+					seen[key] = struct{}{}
+					copyRoute := proto.Clone(route).(*lanewayv1.Route)
+					copyRoute.Destination = &lanewayv1.IpPrefix{Address: append([]byte(nil), prefix.Addr().AsSlice()...), PrefixLength: uint32(prefix.Bits())}
+					kept = append(kept, copyRoute)
+				}
+			case lanewayv1.RouteKind_ROUTE_KIND_EXIT:
+				if !selectedExit.IsZero() && bytes.Equal(route.GetViaNodeId(), selectedExit[:]) {
+					kept = append(kept, route)
+					exitRoute = true
+				}
+			}
+		}
+		filtered.Routes.Routes = kept
+		if !selectedExit.IsZero() {
+			if !exitRoute {
+				return nil, errors.New("selected exit is no longer controller-authorized")
+			}
+			authorized := false
+			for _, raw := range configuration.GetExitPolicy().GetAuthorizedNodeIds() {
+				authorized = authorized || bytes.Equal(raw, selectedExit[:])
+			}
+			if !authorized {
+				return nil, errors.New("selected exit was withdrawn from controller exit policy")
+			}
+			if filtered.ExitPolicy == nil {
+				filtered.ExitPolicy = new(lanewayv1.ExitNodePolicy)
+			}
+			filtered.ExitPolicy.AuthorizedNodeIds = [][]byte{append([]byte(nil), selectedExit[:]...)}
+		} else if filtered.ExitPolicy != nil {
+			filtered.ExitPolicy.AuthorizedNodeIds = nil
+		}
+		return filtered, nil
+	}
+}
+
+func connectAuthorizedRoutePrefixes(configuration *lanewayv1.NodeConfiguration, route *lanewayv1.Route, routePrefix netip.Prefix, local identity.NodeID) []netip.Prefix {
+	var result []netip.Prefix
+	for _, rule := range configuration.GetPolicy().GetRules() {
+		if rule.GetAction() != lanewayv1.PolicyAction_POLICY_ACTION_ACCEPT || !connectSourceMatches(rule.GetSelector(), configuration.GetOverlayAddresses(), local) {
+			continue
+		}
+		selector := rule.GetSelector()
+		if len(selector.GetDestinationNodeIds()) != 0 && !connectIDListContains(selector.GetDestinationNodeIds(), route.GetViaNodeId()) {
+			continue
+		}
+		if len(selector.GetDestinationPrefixes()) == 0 {
+			result = append(result, routePrefix)
+			continue
+		}
+		for _, raw := range selector.GetDestinationPrefixes() {
+			prefix, err := connectProtoPrefix(raw)
+			if err != nil || prefix.Bits() == 0 || prefix.Addr().BitLen() != routePrefix.Addr().BitLen() {
+				continue
+			}
+			switch {
+			case routePrefix.Contains(prefix.Addr()) && prefix.Bits() >= routePrefix.Bits():
+				result = append(result, prefix)
+			case prefix.Contains(routePrefix.Addr()) && routePrefix.Bits() >= prefix.Bits():
+				result = append(result, routePrefix)
+			}
+		}
+	}
+	return result
+}
+
+func connectSourceMatches(selector *lanewayv1.TrafficSelector, overlays [][]byte, local identity.NodeID) bool {
+	if selector == nil {
+		return false
+	}
+	if len(selector.GetSourceNodeIds()) != 0 && !connectIDListContains(selector.GetSourceNodeIds(), local[:]) {
+		return false
+	}
+	if len(selector.GetSourcePrefixes()) == 0 {
+		return true
+	}
+	for _, rawPrefix := range selector.GetSourcePrefixes() {
+		prefix, err := connectProtoPrefix(rawPrefix)
+		if err != nil {
+			continue
+		}
+		for _, rawAddress := range overlays {
+			if address, ok := netip.AddrFromSlice(rawAddress); ok && !address.Is4In6() && prefix.Contains(address) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func connectIDListContains(values [][]byte, wanted []byte) bool {
+	for _, value := range values {
+		if bytes.Equal(value, wanted) {
+			return true
+		}
+	}
+	return false
+}
+
+func connectSubnetPrefixes(configuration *lanewayv1.NodeConfiguration) []netip.Prefix {
+	var result []netip.Prefix
+	for _, route := range configuration.GetRoutes().GetRoutes() {
+		if route.GetKind() != lanewayv1.RouteKind_ROUTE_KIND_SUBNET {
+			continue
+		}
+		if prefix, err := connectProtoPrefix(route.GetDestination()); err == nil {
+			result = append(result, prefix)
+		}
+	}
+	return result
 }
 
 func connectProtoPrefix(value *lanewayv1.IpPrefix) (netip.Prefix, error) {

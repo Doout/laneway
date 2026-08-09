@@ -58,7 +58,7 @@ sudo sh install.sh --control-plane
 The installer never changes the host firewall, routes, interfaces, DNS, or
 sysctls. Its default quick profile warns instead of stopping when a signature
 service is unavailable and writes `/opt/laneway/PRODUCTION-CHECKLIST.md`. Run
-`sudo laneway-control production-check` before production traffic; that check
+`sudo laneway control production-check` before production traffic; that check
 is fail-closed. Use `--control-plane --production` to require signature
 verification during installation itself. Configure public DNS and external
 firewall rules before running it.
@@ -66,7 +66,7 @@ firewall rules before running it.
 Upgrade an existing Compose control plane without rerunning the setup wizard:
 
 ```bash
-sudo laneway-control update
+sudo laneway control update
 ```
 
 The command detects the Docker Compose deployment and installs the latest stable
@@ -89,27 +89,43 @@ sudo ./laneway/install.sh
 The native Rust implementations remain available as
 [source builds](https://github.com/Doout/laneway/tree/main/rust).
 
-## Quick start: join a managed network
+## Quick start: connect a local user
 
-For a temporary foreground User session, ask an administrator for an
-ephemeral invite and run one command. The enrollment code is prompted for on
-the terminal with echo disabled, so it does not enter shell history or argv:
+Create a ten-minute, single-use login token on the control plane:
 
 ```bash
+sudo laneway control user-token --name laptop
+```
+
+On the laptop, exchange that token once and then connect:
+
+```bash
+laneway login lane.example.com
 laneway connect lane.example.com
 ```
 
-The session authenticates public bootstrap metadata, pins the private network
-and service identities, uses only controller-authorized routes, and restores
-its temporary networking when it exits. Administrators create the bounded,
-single-use code on the controller with `laneway-control invite --name laptop --ephemeral`.
+`login` prompts with echo disabled and replaces the bootstrap token with a
+revocable device certificate and private keys in the local user's mode-0700
+profile directory. The bearer token is never retained. Laneway automatically
+rotates that credential over authenticated mTLS and reconnects before expiry.
+
+`connect` is split tunnel by default. It derives the minimum private prefixes
+from controller ACCEPT policy and sends each prefix only to its approved
+Connector; all other traffic continues to use the laptop's native network.
+Default routes are never selected automatically. Full-tunnel egress still
+requires an explicit controller-authorized `--exit NAME`.
+
+For an intentionally temporary session that stores no identity, use
+`laneway connect lane.example.com --ephemeral`. Remove a saved local login with
+`laneway logout lane.example.com`; revoke its printed NodeID at the controller
+as well when retiring or losing a device.
 
 To provision a capability-bound Docker Connector, generate a single-use
 `docker run` command on the control plane, copy it to the Docker host over your
 trusted administrative channel, and run it as root:
 
 ```bash
-sudo laneway-control invite --name egress-one --docker --connector
+sudo laneway control invite --name egress-one --docker --connector
 ```
 
 The command contains a short-lived one-time enrollment token, the public network

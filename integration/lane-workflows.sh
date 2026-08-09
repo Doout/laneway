@@ -167,6 +167,10 @@ rmdir "$compose_dir/generated/lifecycle/operator.lock"
 grep -F '<--class> <ephemeral>' "$log" >/dev/null
 grep -F '<--admin-token-file> </run/laneway-secrets/admin.token>' "$log" >/dev/null
 
+"$compose_dir/laneway-control" user-token --name remembered-laptop
+grep -F '<--requested-name> <remembered-laptop>' "$log" >/dev/null
+grep -F '<--class> <remembered>' "$log" >/dev/null
+
 mkdir -p "$compose_dir/generated/pki"
 printf '%s\n' '-----BEGIN CERTIFICATE-----' 'fixture' '-----END CERTIFICATE-----' > "$compose_dir/generated/pki/ca.crt"
 connector_command=$test_dir/connector-command.sh
