@@ -120,7 +120,7 @@ valid_ipv4_pool() {
 }
 
 missing=
-for command in age age-keygen chown curl date dirname docker find getent grep install laneway sed sha256sum ss stat sync wc; do
+for command in age age-keygen chown curl date dirname docker find getent grep install laneway ln sed sha256sum ss stat sync wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 [ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"
@@ -178,6 +178,9 @@ case "$destination" in /*) ;; *) die "deployment directory must be an absolute p
 [ "$destination" != / ] || die "deployment directory cannot be /"
 if [ -e "$destination" ] || [ -L "$destination" ]; then
   die "deployment directory already exists; refusing to overwrite it: $destination"
+fi
+if [ -e /usr/local/sbin/laneway-control ] || [ -L /usr/local/sbin/laneway-control ]; then
+  die "system control-plane command already exists: /usr/local/sbin/laneway-control"
 fi
 
 ask "Network name" "${LANEWAY_NETWORK_NAME:-$(remembered LANEWAY_NETWORK_NAME production)}"
@@ -338,14 +341,16 @@ if [ "$automatic_issuer" = true ]; then
 fi
 
 install -d -m 0700 -o 0 -g 0 "$destination"
-for name in compose.yaml lane bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh install-control-plane.sh prepare-control-plane.sh README.md; do
+for name in compose.yaml laneway-control bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh install-control-plane.sh prepare-control-plane.sh upgrade-control-plane.sh README.md; do
   if [ ! -f "$source_dir/$name" ] || [ -L "$source_dir/$name" ]; then
     die "packaged deployment file is missing or unsafe: $name"
   fi
   mode=0644
-  case "$name" in lane|*.sh) mode=0755 ;; esac
+  case "$name" in laneway-control|*.sh) mode=0755 ;; esac
   install -m "$mode" -o 0 -g 0 "$source_dir/$name" "$destination/$name"
 done
+ln -s laneway-control "$destination/lane"
+ln -s "$destination/laneway-control" /usr/local/sbin/laneway-control
 
 cat > "$destination/PRODUCTION-CHECKLIST.md" <<EOF
 # Laneway production checklist
@@ -361,7 +366,7 @@ firewall were not changed by the installer.
 - [ ] Confirm DNS \`$domain\` resolves to this server's public address.
 - [ ] Confirm the external firewall allows TCP 443, UDP 4433, and TCP+UDP 8443.
 - [ ] Keep SSH restricted to your trusted access path; do not expose TCP 22 publicly.
-- [ ] Run \`sudo $destination/lane production-check\` until it succeeds.
+- [ ] Run \`sudo laneway-control production-check\` until it succeeds.
 - [ ] Test a client enrollment and recovery restore before depending on the service.
 - [ ] Configure monitoring, security updates, and recurring encrypted backups.
 
@@ -405,9 +410,9 @@ env_tmp=$(mktemp "$destination/.env.XXXXXX")
 chmod 0600 "$env_tmp"
 mv "$env_tmp" "$destination/.env"
 
-(cd "$destination" && ./lane init --issuer "$issuer_dir")
+(cd "$destination" && ./laneway-control init --issuer "$issuer_dir")
 initial_backup=initial-recovery-$(date -u +%Y%m%dT%H%M%SZ).age
-(cd "$destination" && ./lane backup "$initial_backup")
+(cd "$destination" && ./laneway-control backup "$initial_backup")
 if [ "$automatic_issuer" = true ]; then
   install -m 0600 -o 0 -g 0 "$destination/generated/recovery/$initial_backup" "$recovery_kit/$initial_backup"
   find "$recovery_kit/control-plane-input" -depth -delete
@@ -429,10 +434,10 @@ fi
 cat <<EOF
 
 Laneway $tag is running. Useful commands:
-  sudo $destination/lane status
-  sudo $destination/lane production-check
-  sudo $destination/lane invite --name DEVICE --ephemeral
-  sudo $destination/lane backup
+  sudo laneway-control status
+  sudo laneway-control production-check
+  sudo laneway-control invite --name DEVICE --ephemeral
+  sudo laneway-control backup
   initial encrypted backup: $destination/generated/recovery/$initial_backup
 EOF
 if [ "$automatic_issuer" = true ]; then

@@ -78,23 +78,25 @@ type Node struct {
 // EnrollmentToken contains the immutable token record and, only when returned
 // by IssueEnrollmentToken, its bearer Secret. The secret is never persisted.
 type EnrollmentToken struct {
-	ID              identity.ID
-	NetworkID       identity.NetworkID
-	Label           string
-	Secret          string
-	ExpiresAt       time.Time
-	CreatedAt       time.Time
-	ConsumedAt      *time.Time
-	ConsumedBy      *identity.NodeID
-	EnrollmentClass EnrollmentClass
-	SessionLifetime time.Duration
-	RequestedName   string
+	ID                  identity.ID
+	NetworkID           identity.NetworkID
+	Label               string
+	Secret              string
+	ExpiresAt           time.Time
+	CreatedAt           time.Time
+	ConsumedAt          *time.Time
+	ConsumedBy          *identity.NodeID
+	EnrollmentClass     EnrollmentClass
+	SessionLifetime     time.Duration
+	RequestedName       string
+	EnabledCapabilities uint64
 }
 
 type EnrollmentTokenOptions struct {
-	Class           EnrollmentClass
-	SessionLifetime time.Duration
-	RequestedName   string
+	Class               EnrollmentClass
+	SessionLifetime     time.Duration
+	RequestedName       string
+	EnabledCapabilities uint64
 }
 
 type RouteKind string

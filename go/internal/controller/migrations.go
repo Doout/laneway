@@ -175,6 +175,9 @@ ALTER TABLE nodes ADD COLUMN wireguard_public_key BLOB
     CHECK(wireguard_public_key IS NULL OR length(wireguard_public_key) = 32);
 CREATE UNIQUE INDEX nodes_wireguard_public_key ON nodes(wireguard_public_key)
     WHERE wireguard_public_key IS NOT NULL;
+`, `
+ALTER TABLE enrollment_tokens ADD COLUMN enabled_capabilities INTEGER NOT NULL DEFAULT 0
+    CHECK(enabled_capabilities BETWEEN 0 AND 9223372036854775807);
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

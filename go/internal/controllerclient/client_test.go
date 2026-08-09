@@ -251,7 +251,7 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 	if token, err := client.IssueEnrollmentToken(ctx, networkID, "label", time.Unix(100, 0)); err != nil || token.EnrollmentToken != "issued-secret" {
 		t.Fatalf("token=%+v err=%v", token, err)
 	}
-	if _, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, "temporary", time.Unix(200, 0), EnrollmentTokenOptions{Class: "ephemeral", SessionLifetime: 8 * time.Hour, RequestedName: "laptop"}); err != nil {
+	if _, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, "temporary", time.Unix(200, 0), EnrollmentTokenOptions{Class: "ephemeral", SessionLifetime: 8 * time.Hour, RequestedName: "laptop", EnabledCapabilities: 16}); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(lastTokenBody, []byte(`"enrollment_class":"ephemeral"`)) || !bytes.Contains(lastTokenBody, []byte(`"session_lifetime_seconds":28800`)) {
@@ -259,6 +259,9 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 	}
 	if !bytes.Contains(lastTokenBody, []byte(`"requested_name":"laptop"`)) {
 		t.Fatalf("name-bound token request=%s", lastTokenBody)
+	}
+	if !bytes.Contains(lastTokenBody, []byte(`"enabled_capabilities":16`)) {
+		t.Fatalf("capability-bound token request=%s", lastTokenBody)
 	}
 	if _, err := client.AdvertiseRoute(ctx, netip.MustParsePrefix("192.0.2.0/24"), "subnet", "nat", 5, nil); err != nil {
 		t.Fatal(err)

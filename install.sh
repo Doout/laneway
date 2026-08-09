@@ -5,6 +5,7 @@ repository=${LANEWAY_REPOSITORY:-Doout/laneway}
 release=${LANEWAY_VERSION:-latest}
 install_control_plane=false
 prepare_control_plane=false
+upgrade_control_plane=false
 production_mode=false
 cosign_bin=
 cosign_is_fallback=false
@@ -72,9 +73,13 @@ case "${1:-}" in
     if [ "${1:-}" = --production ]; then production_mode=true; shift; fi
     ;;
   --prepare-control-plane) prepare_control_plane=true; shift ;;
+  --upgrade-control-plane)
+    upgrade_control_plane=true; shift
+    if [ "${1:-}" = --production ]; then production_mode=true; shift; fi
+    ;;
   -h|--help)
     cat <<'EOF'
-usage: sh install.sh [--control-plane [--production] | --prepare-control-plane]
+usage: sh install.sh [--control-plane [--production] | --prepare-control-plane | --upgrade-control-plane [--production]]
 
 Without options, install the latest Laneway binaries and packaged files.
 With --control-plane, select a stable release tag, verify its signed release,
@@ -83,6 +88,8 @@ The default quick profile warns on unavailable signature services and writes a
 production checklist. Add --production to make all signature checks fail closed.
 With --prepare-control-plane, create a recovery kit and the limited input that
 may be copied to a separate production control-plane server.
+With --upgrade-control-plane, safely upgrade an existing /opt/laneway control
+plane while preserving its identity, PKI, state, endpoints, and host networking.
 EOF
     exit 0
     ;;
@@ -112,18 +119,21 @@ for command in awk curl find grep mktemp sed sha256sum tar; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 
-if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   [ -z "${DESTDIR:-}" ] || { echo "control-plane modes cannot be combined with DESTDIR" >&2; exit 1; }
   [ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"
-  for command in age age-keygen chmod chown date dirname install stat sync wc; do
+  for command in age chmod chown date dirname install stat sync wc; do
     command -v "$command" >/dev/null 2>&1 || add_missing "$command"
   done
+fi
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+  command -v age-keygen >/dev/null 2>&1 || add_missing "age-keygen"
   if [ ! -d /dev/shm ] || [ -L /dev/shm ] || \
     { command -v awk >/dev/null 2>&1 && ! awk '$2 == "/dev/shm" && $3 == "tmpfs" { found=1 } END { exit !found }' /proc/mounts; }; then
     add_missing "/dev/shm mounted as tmpfs (required for memory-only offline-root generation)"
   fi
 fi
-if [ "$install_control_plane" = true ]; then
+if [ "$install_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   for command in docker getent ss; do
     command -v "$command" >/dev/null 2>&1 || add_missing "$command"
   done
@@ -143,7 +153,7 @@ if [ -n "$missing" ]; then
   echo "Install the listed prerequisites and rerun; no deployment changes were made." >&2
   exit 1
 fi
-if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   echo "Laneway pre-check: required host prerequisites are available." >&2
   if [ "$release" = latest ]; then
     latest_url=$(curl --fail --location --silent --show-error --output /dev/null \
@@ -174,7 +184,7 @@ fi
 download_dir=$(mktemp -d)
 trap 'find "$download_dir" -depth -delete' EXIT HUP INT TERM
 
-if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   if ! select_cosign && [ "$production_mode" = true ]; then
     echo "Laneway production install requires a working pinned signature verifier." >&2
     exit 1
@@ -185,7 +195,7 @@ curl --fail --location --silent --show-error \
   "$base_url/$asset" -o "$download_dir/$asset"
 curl --fail --location --silent --show-error \
   "$base_url/checksums.txt" -o "$download_dir/checksums.txt"
-if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; then
+if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   curl --fail --location --silent --show-error \
     "$base_url/checksums.sigstore.json" -o "$download_dir/checksums.sigstore.json"
   checksum_signature_verified=false
@@ -208,10 +218,15 @@ fi
   sha256sum -c selected-checksum.txt
   tar -xzf "$asset"
 )
-if { [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ]; } && \
+if { [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; } && \
   { [ ! -f "$download_dir/laneway/deploy/compose/install-control-plane.sh" ] || \
     [ ! -f "$download_dir/laneway/deploy/compose/prepare-control-plane.sh" ]; }; then
     echo "release $release predates the requested control-plane workflow; select a newer stable tag" >&2
+  exit 1
+fi
+if [ "$upgrade_control_plane" = true ] && \
+  [ ! -f "$download_dir/laneway/deploy/compose/upgrade-control-plane.sh" ]; then
+  echo "release $release predates control-plane upgrades; select a newer stable tag" >&2
   exit 1
 fi
 env DESTDIR="${DESTDIR:-}" PREFIX="/usr/local" \
@@ -232,4 +247,8 @@ if [ "$prepare_control_plane" = true ]; then
   output=${LANEWAY_RECOVERY_KIT_DIR:-/root/laneway-recovery-kit-$(date -u +%Y%m%dT%H%M%SZ)}
   exec env LANEWAY_COSIGN_BIN="$cosign_bin" \
     sh /usr/local/share/laneway/deploy/compose/prepare-control-plane.sh "$output"
+fi
+if [ "$upgrade_control_plane" = true ]; then
+  exec env LANEWAY_COSIGN_BIN="$cosign_bin" \
+    sh /usr/local/share/laneway/deploy/compose/upgrade-control-plane.sh
 fi

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"testing"
+	"time"
 
 	"laneway.dev/laneway/internal/protocol"
 )
@@ -53,6 +54,33 @@ func TestNodePolicyCapabilitiesGateAdvertisementAndApproval(t *testing.T) {
 	got, err := store.SetNodeCapabilities(context.Background(), node.ID, 0)
 	if err != nil || got != before.ConfigurationEpoch {
 		t.Fatalf("no-op epoch=%d want=%d error=%v", got, before.ConfigurationEpoch, err)
+	}
+}
+
+func TestExitCapabilityBoundInviteCreatesApprovedDefault(t *testing.T) {
+	store, _ := openTestStore(t)
+	network := createTestNetwork(t, store, "10.51.0.0/24")
+	token, err := store.IssueEnrollmentTokenWithOptions(context.Background(), network.ID, "docker-exit", time.Now().Add(time.Hour), EnrollmentTokenOptions{
+		Class: EnrollmentClassEphemeral, SessionLifetime: MinEphemeralLifetime, RequestedName: "docker-exit",
+		EnabledCapabilities: uint64(protocol.CapabilityExitNodeV1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := store.EnrollNode(context.Background(), token.Secret, "docker-exit", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protocol.Capability(node.EnabledCapabilities) != protocol.CapabilityExitNodeV1 {
+		t.Fatalf("capabilities=%d", node.EnabledCapabilities)
+	}
+	routes, err := store.NetworkRoutes(context.Background(), network.ID, 10)
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes=%+v error=%v", routes, err)
+	}
+	route := routes[0]
+	if route.NodeID != node.ID || route.Prefix.String() != "0.0.0.0/0" || route.Kind != RouteKindExit || route.Mode != RouteModeNAT || route.State != RouteStateApproved || route.ValidUntil == nil || !route.ValidUntil.Equal(*node.LeaseExpiresAt) {
+		t.Fatalf("invited exit route=%+v node=%+v", route, node)
 	}
 }
 

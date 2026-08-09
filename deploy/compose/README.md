@@ -27,6 +27,20 @@ less install.sh
 sudo sh install.sh --control-plane
 ```
 
+To upgrade an existing `/opt/laneway` deployment, use the same installer in
+upgrade mode and accept the desired stable release tag:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/Doout/laneway/main/install.sh
+less install.sh
+sudo sh install.sh --upgrade-control-plane
+```
+
+This refreshes the `laneway-control` operator command and upgrades only the
+release-selected containers. It preserves deployment identity, PKI, state,
+endpoints, firewall rules, and host networking, and it uses the normal verified
+backup, readiness, and rollback sequence.
+
 The convenience path generates a recovery identity, an offline root in memory-only
 temporary storage, and an online intermediate. It encrypts the offline root,
 deploys only the online intermediate, takes an initial encrypted recovery
@@ -48,7 +62,7 @@ registry signature endpoint is temporarily unavailable. It generates
 checklist and run:
 
 ```sh
-sudo /opt/laneway/lane production-check
+sudo laneway-control production-check
 ```
 
 That command is fail-closed: it verifies every image signature, configuration,
@@ -66,6 +80,28 @@ mode-`0600` `/var/lib/laneway-installer/control-plane.answers`, so a failed or
 cancelled attempt does not require retyping the domain, paths, pool, or ports.
 The file never contains a recovery identity, CA private key, admin token, or
 generated deployment secret. Explicit environment variables override it.
+
+## One-command Docker Exit Node
+
+Generate a capability-bound, single-use installer from the control plane:
+
+```sh
+umask 077
+sudo laneway-control invite --name egress-one --ephemeral --docker --exit-node > install-egress-one.sh
+chmod 0700 install-egress-one.sh
+```
+
+Copy the script through a trusted administrative channel to a Linux Docker host
+and run `sudo ./install-egress-one.sh`. The token grants only the Exit Node role
+and an approved IPv4 default route; the generated script does not contain the
+control-plane admin token. It verifies Docker prerequisites, enrolls without
+putting the token in process arguments, writes a restricted Compose deployment,
+and starts the digest-pinned Exit Node image. Delete the installer after its
+single-use token is consumed. Allow UDP 4434 on the Exit Node host when external
+direct-path reachability is required.
+
+Omit `--ephemeral` for a persistent production Exit Node; use ephemeral
+enrollment for tests or intentionally short-lived egress capacity.
 
 ## Prerequisites
 
@@ -118,7 +154,7 @@ chmod 0400 issuer-export/intermediate.key
 test ! -e issuer-export/ca.key
 ```
 
-After completing `.env`, run `sudo ./lane init --issuer /path/to/issuer-export`.
+After completing `.env`, run `sudo laneway-control init --issuer /path/to/issuer-export`.
 The command validates that the online key matches an ordered, currently valid
 chain anchored by the exact offline root certificate. It generates controller
 and relay service identities, strict configurations, and an independent admin
@@ -183,22 +219,22 @@ sudo chown 65532:65532 generated/backups
 sudo ./bootstrap.sh
 ```
 
-The packaged `./lane` wrapper is the normal operator entry point. `lane init`
-performs idempotent validation/bootstrap. `lane status` reports controller,
+The packaged `laneway-control` wrapper is the normal operator entry point. `laneway-control init`
+performs idempotent validation/bootstrap. `laneway-control status` reports controller,
 relay, limiter, optional Exit Node, and live Exit direct-path health, and exits
-nonzero for an unhealthy required service. `lane invite --name DEVICE` issues a single-use token
-through the isolated admin container. `sudo lane backup [NAME.age]` creates a
-complete encrypted recovery bundle, and `sudo lane restore BUNDLE.age
+nonzero for an unhealthy required service. `laneway-control invite --name DEVICE` issues a single-use token
+through the isolated admin container. `sudo laneway-control backup [NAME.age]` creates a
+complete encrypted recovery bundle, and `sudo laneway-control restore BUNDLE.age
 --identity FILE` performs a guarded fresh-state restore as documented below.
 
 For an upgrade, prepare a complete candidate environment file with the new
 semantic version and four signed manifest digests, leaving deployment identity
-and endpoint values unchanged, then run `sudo ./lane upgrade CANDIDATE.env`.
+and endpoint values unchanged, then run `sudo laneway-control upgrade CANDIDATE.env`.
 The wrapper validates Compose, verifies every image with Cosign against the
 tagged release workflow identity, pulls all images, takes a database backup,
 and only then gracefully stops and recreates the stack. If readiness fails, it
 restores the prior image/config selection and restarts it; database state is
-never independently rolled back. `sudo ./lane rollback` applies the same
+never independently rolled back. `sudo laneway-control rollback` applies the same
 verification and backup sequence to the previously successful selection.
 Runtime rollback metadata is private under `generated/lifecycle` and never
 contains PKI keys or the admin token.
@@ -291,7 +327,7 @@ copying credentials is not a valid recovery procedure. Create a consistent,
 encrypted bundle while the controller is running:
 
 ```sh
-sudo ./lane backup
+sudo laneway-control backup
 sudo ls -l generated/recovery/recovery-*.age
 ```
 
@@ -310,9 +346,9 @@ generated credentials, and an empty controller volume. Transfer one encrypted
 bundle plus the age identity through separate trusted channels, then run:
 
 ```sh
-sudo ./lane restore /trusted/control-recovery.age \
+sudo laneway-control restore /trusted/control-recovery.age \
   --identity /trusted/laneway-recovery.identity
-sudo ./lane init
+sudo laneway-control init
 ```
 
 Restore accepts only the fixed versioned file set, rejects duplicate,

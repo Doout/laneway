@@ -8,8 +8,8 @@ compose_dir=$test_dir/compose
 fake_bin=$test_dir/bin
 log=$test_dir/calls.log
 mkdir -p "$compose_dir/generated/backups" "$fake_bin"
-cp "$repo_dir/deploy/compose/lane" "$repo_dir/deploy/compose/preflight.sh" "$compose_dir/"
-chmod 0755 "$compose_dir/lane"
+cp "$repo_dir/deploy/compose/laneway-control" "$repo_dir/deploy/compose/preflight.sh" "$compose_dir/"
+chmod 0755 "$compose_dir/laneway-control"
 chmod 0755 "$compose_dir/preflight.sh"
 : > "$compose_dir/compose.yaml"
 : > "$log"
@@ -39,6 +39,7 @@ printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
 if [ "${1:-} ${2:-}" = "version --format" ]; then printf '26.1.0\n'; exit 0; fi
 case " $* " in
+  *" enrollment-token issue "*) printf '%s\n' '{' '  "token_id": "000102030405060708090a0b0c0d0e0f",' '  "enrollment_token": "single_use_secret",' '  "expires_at_unix_seconds": 2000000000' '}' ;;
   *" ps --all --quiet "*) [ "${LANE_TEST_OWNED_STACK:-0}" = 0 ] || printf 'owned-id\n' ;;
   *" ps --status running -q controller "*) [ "${LANE_TEST_CONTROLLER_RUNNING:-0}" = 0 ] || printf 'controller-id\n' ;;
   *" ps --status running -q exit-node "*) [ "${LANE_TEST_EXIT_RUNNING:-0}" = 0 ] || printf 'exit-id\n' ;;
@@ -103,14 +104,14 @@ candidate=$test_dir/candidate.env
 write_env "$candidate" 1.1.0 2
 export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log"
 
-"$compose_dir/lane" init
+"$compose_dir/laneway-control" init
 [ "$(grep -c '^cosign ' "$log")" -eq 4 ]
 pull_line=$(grep -n '<pull>' "$log" | tail -1 | cut -d: -f1)
 bootstrap_line=$(grep -n '^bootstrap$' "$log" | tail -1 | cut -d: -f1)
 [ "$pull_line" -lt "$bootstrap_line" ] || { echo "init bootstrapped before verified pull" >&2; exit 1; }
 : > "$log"
 
-LANE_TEST_COSIGN_FAIL=1 "$compose_dir/lane" init >/dev/null 2>"$test_dir/quick-warning.err"
+LANE_TEST_COSIGN_FAIL=1 "$compose_dir/laneway-control" init >/dev/null 2>"$test_dir/quick-warning.err"
 grep -F 'image signatures were not verified during quick install' "$test_dir/quick-warning.err" >/dev/null
 : > "$log"
 
@@ -129,50 +130,63 @@ printf '%s\n' 'packet_rate_bits_per_second = 2000000' 'packet_burst_bytes = 6553
 : > "$compose_dir/generated/config/exit-node.toml"
 LANE_TEST_EXIT_RUNNING=1; export LANE_TEST_EXIT_RUNNING
 
-status_output=$("$compose_dir/lane" status)
+status_output=$("$compose_dir/laneway-control" status)
 printf '%s\n' "$status_output" | grep -F 'controller=healthy' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'relay=healthy' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'relay-limiter=configured rate_bits_per_second=2000000 burst_bytes=65536' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'carrier=direct-wireguard limiter=healthy' >/dev/null
 grep -F '<ps>' "$log" >/dev/null
 LANE_TEST_HEALTH=unhealthy; export LANE_TEST_HEALTH
-if "$compose_dir/lane" status >/dev/null 2>&1; then echo "status accepted an unhealthy required service" >&2; exit 1; fi
+if "$compose_dir/laneway-control" status >/dev/null 2>&1; then echo "status accepted an unhealthy required service" >&2; exit 1; fi
 LANE_TEST_HEALTH=healthy; export LANE_TEST_HEALTH
 
 mkdir -p "$compose_dir/generated/recovery"
 printf 'encrypted backup\n' > "$compose_dir/generated/recovery/initial.age"
 if sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
-  LANE_TEST_COSIGN_FAIL=1 "$compose_dir/lane" production-check >/dev/null 2>&1; then
+  LANE_TEST_COSIGN_FAIL=1 "$compose_dir/laneway-control" production-check >/dev/null 2>&1; then
   echo "production-check accepted failed image signatures" >&2
   exit 1
 fi
 test ! -e "$compose_dir/generated/lifecycle/production-verified"
 sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
-  "$compose_dir/lane" production-check >/dev/null
+  "$compose_dir/laneway-control" production-check >/dev/null
 test "$(stat -c %a "$compose_dir/generated/lifecycle/production-verified")" = 600
 sudo grep -Fx 'profile=quick' "$compose_dir/generated/lifecycle/production-verified" >/dev/null
 
-"$compose_dir/lane" backup manual.age
+"$compose_dir/laneway-control" backup manual.age
 grep -F 'recovery <backup> <manual.age>' "$log" >/dev/null
 mkdir "$compose_dir/generated/lifecycle/operator.lock"
-if "$compose_dir/lane" backup locked.age >/dev/null 2>&1; then
+if "$compose_dir/laneway-control" backup locked.age >/dev/null 2>&1; then
   echo "lane accepted a concurrent lifecycle operation" >&2
   exit 1
 fi
 rmdir "$compose_dir/generated/lifecycle/operator.lock"
 
-"$compose_dir/lane" invite --name laptop --ephemeral --session-lifetime 2h
+"$compose_dir/laneway-control" invite --name laptop --ephemeral --session-lifetime 2h
 grep -F '<--class> <ephemeral>' "$log" >/dev/null
 grep -F '<--admin-token-file> </run/laneway-secrets/admin.token>' "$log" >/dev/null
+
+mkdir -p "$compose_dir/generated/pki"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'fixture' '-----END CERTIFICATE-----' > "$compose_dir/generated/pki/ca.crt"
+exit_installer=$test_dir/install-exit.sh
+"$compose_dir/laneway-control" invite --name egress-one --ephemeral --session-lifetime 2h --docker --exit-node > "$exit_installer"
+sh -n "$exit_installer"
+grep -Fx '#!/bin/sh' "$exit_installer" >/dev/null
+grep -F 'single_use_secret' "$exit_installer" >/dev/null
+grep -F 'ghcr.io/doout/laneway-exit-node:1.0.0@sha256:' "$exit_installer" >/dev/null
+grep -F 'controller-network-id 11111111111111111111111111111111' "$exit_installer" >/dev/null
+grep -F 'serve = true' "$exit_installer" >/dev/null
+grep -F '<--exit-node>' "$log" >/dev/null
+grep -F '<--requested-name> <egress-one>' "$log" >/dev/null
 
 identity=$test_dir/identity.txt
 bundle=$test_dir/recovery.age
 : > "$identity"; : > "$bundle"
-"$compose_dir/lane" restore "$bundle" --identity "$identity"
+"$compose_dir/laneway-control" restore "$bundle" --identity "$identity"
 grep -F "recovery <restore> <$bundle> <$identity>" "$log" >/dev/null
 
 : > "$log"
-"$compose_dir/lane" upgrade "$candidate"
+"$compose_dir/laneway-control" upgrade "$candidate"
 grep -F 'LANEWAY_VERSION=1.1.0' "$compose_dir/.env" >/dev/null
 grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/generated/lifecycle/previous.env" >/dev/null
 [ "$(grep -c '^cosign ' "$log")" -eq 4 ]
@@ -183,18 +197,18 @@ stop_line=$(grep -n '<stop>' "$log" | tail -1 | cut -d: -f1)
 identity_change=$test_dir/identity-change.env
 write_env "$identity_change" 1.2.0 3
 sed -i 's/^LANEWAY_NETWORK_ID=.*/LANEWAY_NETWORK_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$identity_change"
-if "$compose_dir/lane" upgrade "$identity_change" >/dev/null 2>&1; then
+if "$compose_dir/laneway-control" upgrade "$identity_change" >/dev/null 2>&1; then
   echo "upgrade accepted a changed network identity" >&2
   exit 1
 fi
 
-"$compose_dir/lane" rollback
+"$compose_dir/laneway-control" rollback
 grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
 
 write_env "$candidate" 1.2.0 3
 LANE_TEST_FAIL_UP=1
 export LANE_TEST_FAIL_UP
-if "$compose_dir/lane" upgrade "$candidate" >/dev/null 2>&1; then
+if "$compose_dir/laneway-control" upgrade "$candidate" >/dev/null 2>&1; then
   echo "failed readiness was reported as success" >&2
   exit 1
 fi

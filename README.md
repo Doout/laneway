@@ -58,10 +58,23 @@ sudo sh install.sh --control-plane
 The installer never changes the host firewall, routes, interfaces, DNS, or
 sysctls. Its default quick profile warns instead of stopping when a signature
 service is unavailable and writes `/opt/laneway/PRODUCTION-CHECKLIST.md`. Run
-`sudo /opt/laneway/lane production-check` before production traffic; that check
+`sudo laneway-control production-check` before production traffic; that check
 is fail-closed. Use `--control-plane --production` to require signature
 verification during installation itself. Configure public DNS and external
 firewall rules before running it.
+
+Upgrade an existing Compose control plane without rerunning the setup wizard:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Doout/laneway/main/install.sh
+less install.sh
+sudo sh install.sh --upgrade-control-plane
+```
+
+Accept the latest stable release tag when prompted. The upgrade preserves the
+deployment identity, PKI, state, DNS name, ports, firewall, and host networking.
+It verifies the release, takes an encrypted backup, and uses health-checked
+container replacement with the existing rollback path.
 For the higher-assurance path, `--prepare-control-plane` creates the kit on a
 separate trusted Linux host; copy only its `control-plane-input` directory to
 production. See the [control-plane guide](deploy/compose/README.md).
@@ -90,7 +103,28 @@ laneway connect lane.example.com
 The session authenticates public bootstrap metadata, pins the private network
 and service identities, uses only controller-authorized routes, and restores
 its temporary networking when it exits. Administrators create the bounded,
-single-use code on the controller with `lane invite --name laptop --ephemeral`.
+single-use code on the controller with `laneway-control invite --name laptop --ephemeral`.
+
+To provision a capability-bound Docker Exit Node, generate a single-use
+installer on the control plane, copy it to the Docker host over your trusted
+administrative channel, and run it as root:
+
+```bash
+umask 077
+sudo laneway-control invite --name egress-one --ephemeral --docker --exit-node > install-egress-one.sh
+chmod 0700 install-egress-one.sh
+# Copy it securely to the Exit Node host, then:
+sudo ./install-egress-one.sh
+```
+
+The script contains a short-lived one-time enrollment token, the public network
+CA, pinned image digests, and endpoint configuration. It never contains the
+control-plane admin token. Delete the script after enrollment succeeds and open
+UDP 4434 on the Exit Node host if direct paths should be reachable through its
+external firewall.
+
+For a long-running Exit Node, omit `--ephemeral`; ephemeral enrollment is best
+for testing or intentionally short-lived egress capacity.
 
 Get the public Laneway domain and a durable Node invite from your administrator.
 Save the one-time code in a protected file. One command authenticates discovery,

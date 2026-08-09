@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	currentSchemaVersion = 6
+	currentSchemaVersion = 7
 	busyTimeoutMS        = 5_000
 )
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -17,6 +18,33 @@ import (
 )
 
 const enrollmentSecretBytes = 32
+
+func insertInvitedExitRouteTx(ctx context.Context, tx *sql.Tx, networkID identity.NetworkID, nodeID identity.NodeID, validUntil *time.Time, now time.Time) error {
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM routes WHERE network_id=? AND kind='exit' AND state='approved'`, idBytes(networkID)).Scan(&active); err != nil {
+		return fmt.Errorf("count existing invited exit routes: %w", err)
+	}
+	metric := 100 + active
+	if metric > MaxRouteMetric {
+		return fmt.Errorf("%w: too many active exit routes", ErrConflict)
+	}
+	routeID, err := newID()
+	if err != nil {
+		return err
+	}
+	prefix := netip.MustParsePrefix("0.0.0.0/0")
+	var valid any
+	if validUntil != nil {
+		valid = unix(*validUntil)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO routes
+        (id,network_id,node_id,prefix_address,prefix_length,kind,mode,metric,state,valid_until,created_at,approved_at)
+        VALUES(?,?,?,?,0,'exit','nat',?,'approved',?,?,?)`, idBytes(routeID), idBytes(networkID), idBytes(nodeID), prefix.Addr().AsSlice(), metric, valid, unix(now), unix(now)); err != nil {
+		return fmt.Errorf("create invited exit route: %w", err)
+	}
+	target := routeID
+	return auditTx(ctx, tx, networkID, nil, "route.invited_exit.approve", "route", &target, fmt.Sprintf(`{"prefix":%q,"metric":%d}`, prefix.String(), metric), now)
+}
 
 func tokenDigest(secret string) ([32]byte, error) {
 	var zero [32]byte
@@ -51,6 +79,9 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 			return EnrollmentToken{}, err
 		}
 	}
+	if options.EnabledCapabilities > math.MaxInt64 || protocol.Capability(options.EnabledCapabilities)&^NodePolicyCapabilities != 0 {
+		return EnrollmentToken{}, fmt.Errorf("%w: enrollment token contains unsupported policy capabilities", ErrInvalid)
+	}
 	if options.Class == EnrollmentClassEphemeral {
 		options.SessionLifetime = options.SessionLifetime.Truncate(time.Second)
 		if options.SessionLifetime < MinEphemeralLifetime || options.SessionLifetime > MaxEphemeralLifetime {
@@ -83,17 +114,17 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 		requestedName = options.RequestedName
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_tokens
-		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name) VALUES(?,?,?,?,?,?,?,?,?)`,
-		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName); err != nil {
+		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName, int64(options.EnabledCapabilities)); err != nil {
 		if isConstraint(err) {
 			return EnrollmentToken{}, fmt.Errorf("%w: network does not exist", ErrNotFound)
 		}
 		return EnrollmentToken{}, fmt.Errorf("insert enrollment token: %w", err)
 	}
 	target := id
-	details := fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q}`, options.Class, options.RequestedName)
+	details := fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q,"enabled_capabilities":%d}`, options.Class, options.RequestedName, options.EnabledCapabilities)
 	if options.Class == EnrollmentClassEphemeral {
-		details = fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q,"session_lifetime_seconds":%d}`, options.Class, options.RequestedName, int64(options.SessionLifetime/time.Second))
+		details = fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q,"session_lifetime_seconds":%d,"enabled_capabilities":%d}`, options.Class, options.RequestedName, int64(options.SessionLifetime/time.Second), options.EnabledCapabilities)
 	}
 	if err := auditTx(ctx, tx, networkID, nil, "enrollment_token.issue", "enrollment_token", &target, details, now); err != nil {
 		return EnrollmentToken{}, err
@@ -102,7 +133,7 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 		return EnrollmentToken{}, fmt.Errorf("commit enrollment token: %w", err)
 	}
 	return EnrollmentToken{ID: id, NetworkID: networkID, Label: label, Secret: secret, ExpiresAt: expiresAt, CreatedAt: now,
-		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName}, nil
+		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName, EnabledCapabilities: options.EnabledCapabilities}, nil
 }
 
 // EnrollNode atomically consumes a single-use bearer token, creates a node and
@@ -186,7 +217,8 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	var class string
 	var sessionLifetime sql.NullInt64
 	var requestedName sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds,requested_name FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed, &class, &sessionLifetime, &requestedName)
+	var tokenCapabilities int64
+	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed, &class, &sessionLifetime, &requestedName, &tokenCapabilities)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Enrollment{}, ErrTokenInvalid
 	}
@@ -228,6 +260,10 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	if expectedClass != "" && enrollmentClass != expectedClass {
 		return Enrollment{}, ErrTokenClass
 	}
+	if tokenCapabilities < 0 || protocol.Capability(tokenCapabilities)&^NodePolicyCapabilities != 0 {
+		return Enrollment{}, errors.New("corrupt enrollment token capabilities")
+	}
+	enabledCapabilities |= uint64(tokenCapabilities)
 	var leaseExpiresAt *time.Time
 	if enrollmentClass == EnrollmentClassEphemeral {
 		lifetime := time.Duration(sessionLifetime.Int64) * time.Second
@@ -267,6 +303,11 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	address6, err := allocateIPv6Tx(ctx, tx, networkID, nodeID, now)
 	if err != nil {
 		return Enrollment{}, err
+	}
+	if protocol.Capability(enabledCapabilities).Has(protocol.CapabilityExitNodeV1) {
+		if err := insertInvitedExitRouteTx(ctx, tx, networkID, nodeID, leaseExpiresAt, now); err != nil {
+			return Enrollment{}, err
+		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET consumed_at=?,consumed_by=?
         WHERE id=? AND consumed_at IS NULL AND expires_at>?`, unix(now), idBytes(nodeID), idBytes(tokenID), unix(now))

@@ -146,7 +146,7 @@ $relative"
     sync -f "$recovery_dir/$name"
     sync -f "$recovery_dir"
     published=
-    echo "lane: encrypted recovery bundle: generated/recovery/$name"
+    echo "laneway-control: encrypted recovery bundle: generated/recovery/$name"
     ;;
   restore)
     [ "$#" -eq 3 ] || die "usage: recovery.sh restore BUNDLE.age IDENTITY"
@@ -248,7 +248,7 @@ generated/pki/exit-node.key"
     compose run --rm --no-deps controller -config /etc/laneway/controller.toml -restore "/backups/$(basename "$restore_db")"
     published=
     cleanup_database_snapshot
-    echo "lane: recovery bundle restored; run ./lane init to verify signed images and start the stack"
+    echo "laneway-control: recovery bundle restored; run laneway-control init to verify signed images and start the stack"
     ;;
   *) die "usage: recovery.sh <backup NAME.age|restore BUNDLE.age IDENTITY>" ;;
 esac

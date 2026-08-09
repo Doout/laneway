@@ -651,11 +651,11 @@ confirmed. Restore DNS with `resolvectl revert lane0` if the interface still
 exists, and compare routes and forwarding with the site's documented baseline.
 
 For Compose upgrades and disaster recovery, configure an off-host age X25519
-recipient and use `sudo ./lane backup`. It takes a validated SQLite online
+recipient and use `sudo laneway-control backup`. It takes a validated SQLite online
 snapshot and encrypts it together with the exact pinned release environment,
 configuration, online intermediate, service identities, and admin token. The
 root-owned final bundle is isolated from the controller-writable staging
-directory and must be copied to separately controlled storage. `lane restore
+directory and must be copied to separately controlled storage. `laneway-control restore
 BUNDLE.age --identity FILE` is fresh-state only: it rejects unexpected archive
 types/paths, checksum failures, existing files, a running controller, and an
 existing database. The private age identity and offline root key remain
@@ -676,7 +676,7 @@ For the higher-assurance boundary, run `install.sh --prepare-control-plane` on
 a separate trusted Linux host and transfer only its `control-plane-input`
 directory. The normal installer recognizes its issuer files and recovery
 recipient. The root key and recovery identity never reach production. Manual
-issuer exports remain supported. `sudo ./lane init --issuer DIR` rejects a root
+issuer exports remain supported. `sudo laneway-control init --issuer DIR` rejects a root
 key, verifies the authority, and generates service identities, the admin secret,
 and strict configuration without overwriting existing or partial state. Its
 preflight checks Docker version/Compose, public DNS, and foreign TCP/UDP
