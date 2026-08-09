@@ -218,4 +218,67 @@ if "$compose_dir/laneway-control" upgrade "$candidate" >/dev/null 2>&1; then
 fi
 grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
 
+update_assets=$test_dir/update-assets
+update_package=$test_dir/update-package/laneway
+update_tmp=$test_dir/update-tmp
+mkdir -p "$update_assets" "$update_package/deploy/compose" "$update_tmp"
+printf '%s\n' '1.1.0' > "$update_package/VERSION"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$update_package/install.sh"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$update_package/deploy/compose/upgrade-control-plane.sh"
+tar -C "$test_dir/update-package" -czf "$update_assets/laneway_linux_amd64.tar.gz" laneway
+(
+  cd "$update_assets"
+  sha256sum laneway_linux_amd64.tar.gz > checksums.txt
+)
+: > "$update_assets/checksums.sigstore.json"
+cat > "$fake_bin/curl" <<'EOF'
+#!/bin/sh
+set -eu
+case " $* " in
+  *"releases/latest"*)
+    printf '%s' "https://github.com/Doout/laneway/releases/tag/${LANE_TEST_LATEST_TAG:-v1.1.0}"
+    exit 0
+    ;;
+esac
+output=
+url=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|--output) output=$2; shift 2 ;;
+    --write-out) shift 2 ;;
+    --*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+[ -n "$output" ] && [ -n "$url" ]
+cp "$LANE_TEST_UPDATE_ASSETS/${url##*/}" "$output"
+EOF
+cat > "$fake_bin/env" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'update-env' >> "$LANE_TEST_LOG"
+printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
+printf '\n' >> "$LANE_TEST_LOG"
+EOF
+chmod 0755 "$fake_bin/curl" "$fake_bin/env"
+: > "$log"
+current_output=$(/usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_LATEST_TAG=v1.0.0 "$compose_dir/laneway-control" update)
+printf '%s\n' "$current_output" | grep -F 'already current (v1.0.0)' >/dev/null
+if grep -E 'update-env|verify-blob' "$log" >/dev/null; then
+  echo "already-current update performed package work" >&2
+  exit 1
+fi
+: > "$log"
+update_output=$(/usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_UPDATE_ASSETS="$update_assets" LANEWAY_COSIGN_BIN="$fake_bin/cosign" \
+  LANEWAY_RELEASE_BASE_URL=https://fixture.invalid/v1.1.0 TMPDIR="$update_tmp" \
+  "$compose_dir/laneway-control" update)
+printf '%s\n' "$update_output" | grep -F "detected Docker Compose deployment at $compose_dir" >/dev/null
+printf '%s\n' "$update_output" | grep -F 'updating from v1.0.0 to v1.1.0' >/dev/null
+grep -F 'verify-blob' "$log" >/dev/null
+grep -F '<PREFIX=/usr/local>' "$log" >/dev/null
+grep -F "<LANEWAY_DEPLOY_DIR=$compose_dir>" "$log" >/dev/null
+test ! -e "$compose_dir/generated/lifecycle/operator.lock"
+
 echo "Lane lifecycle workflows are fail-closed and recoverable"

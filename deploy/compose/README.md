@@ -27,19 +27,18 @@ less install.sh
 sudo sh install.sh --control-plane
 ```
 
-To upgrade an existing `/opt/laneway` deployment, use the same installer in
-upgrade mode and accept the desired stable release tag:
+To update an existing control plane to the latest stable release:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Doout/laneway/main/install.sh
-less install.sh
-sudo sh install.sh --upgrade-control-plane
+sudo laneway-control update
 ```
 
-This refreshes the `laneway-control` operator command and upgrades only the
+This detects the Docker Compose installation, downloads and verifies the signed
+latest stable package, refreshes `laneway-control`, and upgrades only the
 release-selected containers. It preserves deployment identity, PKI, state,
-endpoints, firewall rules, and host networking, and it uses the normal verified
-backup, readiness, and rollback sequence.
+endpoints, firewall rules, and host networking, and it uses the normal encrypted
+backup, readiness, and rollback sequence. Unsupported installation types fail
+without making deployment changes.
 
 The convenience path generates a recovery identity, an offline root in memory-only
 temporary storage, and an online intermediate. It encrypts the offline root,

@@ -23,10 +23,11 @@ lock_held=false
 
 usage() {
   cat >&2 <<'EOF'
-usage: laneway-control <init|invite|status|production-check|backup|restore|upgrade|rollback> [options]
+usage: laneway-control <init|invite|status|update|production-check|backup|restore|upgrade|rollback> [options]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   invite --name NAME [--ephemeral|--remembered] [--docker --connector]
+  update
   backup [NAME.age]
   restore BUNDLE.age --identity AGE_IDENTITY_FILE
 EOF
@@ -103,15 +104,7 @@ validate_release_env() {
 
 verify_release_images() {
   file=$1
-  cosign_command=
-  if [ -n "${LANEWAY_COSIGN_BIN+x}" ]; then
-    [ -n "$LANEWAY_COSIGN_BIN" ] && command -v "$LANEWAY_COSIGN_BIN" >/dev/null 2>&1 && cosign_command=$LANEWAY_COSIGN_BIN
-  elif [ -x /usr/local/libexec/laneway/cosign-v3.1.3 ]; then
-    cosign_command=/usr/local/libexec/laneway/cosign-v3.1.3
-  elif command -v cosign >/dev/null 2>&1; then
-    cosign_command=$(command -v cosign)
-  fi
-  [ -n "$cosign_command" ] || die "a compatible Cosign verifier is required"
+  cosign_command=$(cosign_verifier)
   version=$(read_setting "$file" LANEWAY_VERSION)
   identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v$version"
   for item in \
@@ -124,6 +117,19 @@ verify_release_images() {
     "$cosign_command" verify --certificate-identity "$identity" \
       --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image@$digest" >/dev/null
   done
+}
+
+cosign_verifier() {
+  cosign_command=
+  if [ -n "${LANEWAY_COSIGN_BIN+x}" ]; then
+    [ -n "$LANEWAY_COSIGN_BIN" ] && command -v "$LANEWAY_COSIGN_BIN" >/dev/null 2>&1 && cosign_command=$LANEWAY_COSIGN_BIN
+  elif [ -x /usr/local/libexec/laneway/cosign-v3.1.3 ]; then
+    cosign_command=/usr/local/libexec/laneway/cosign-v3.1.3
+  elif command -v cosign >/dev/null 2>&1; then
+    cosign_command=$(command -v cosign)
+  fi
+  [ -n "$cosign_command" ] || die "a compatible Cosign verifier is required"
+  printf '%s' "$cosign_command"
 }
 
 backup_recovery() { "$base_dir/recovery.sh" backup "$1"; }
@@ -302,6 +308,97 @@ run_invite() {
   fi
 }
 
+run_update() {
+  [ "$#" -eq 0 ] || die "update accepts no arguments"
+  [ "$(id -u)" -eq 0 ] || die "update must run as root"
+  for required_command in awk curl docker find grep mktemp sed sha256sum tar uname wc; do
+    command -v "$required_command" >/dev/null 2>&1 || die "update requires $required_command"
+  done
+  docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "Docker Engine is not running"
+  [ -f "$base_dir/compose.yaml" ] && [ ! -L "$base_dir/compose.yaml" ] && \
+    [ -f "$env_file" ] && [ ! -L "$env_file" ] || \
+    die "this control plane is not a supported Docker Compose installation"
+  compose config --quiet || die "the Docker Compose installation is invalid"
+
+  current_version=$(read_setting "$env_file" LANEWAY_VERSION)
+  printf '%s\n' "$current_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
+    die "the installed version is not a stable semantic release"
+  repository=${LANEWAY_REPOSITORY:-Doout/laneway}
+  case "$repository" in *[!A-Za-z0-9._/-]*|*/*/*|'') die "LANEWAY_REPOSITORY is invalid" ;; esac
+  latest_url=$(curl --fail --location --silent --show-error --output /dev/null \
+    --write-out '%{url_effective}' "https://github.com/$repository/releases/latest") || \
+    die "could not resolve the latest stable release"
+  latest_tag=${latest_url##*/}
+  printf '%s\n' "$latest_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
+    die "GitHub latest did not resolve to a stable semantic release"
+  latest_version=${latest_tag#v}
+  if [ "$latest_version" = "$current_version" ]; then
+    echo "laneway-control: Docker Compose control plane is already current ($latest_tag)"
+    return
+  fi
+  awk -v candidate="$latest_version" -v current="$current_version" 'BEGIN {
+    split(candidate, c, "."); split(current, p, ".")
+    for (i=1; i<=3; i++) {
+      if ((c[i]+0) > (p[i]+0)) exit 0
+      if ((c[i]+0) < (p[i]+0)) exit 1
+    }
+    exit 1
+  }' || die "latest release $latest_tag would downgrade installed v$current_version"
+
+  case "$(uname -m)" in
+    x86_64|amd64) architecture=amd64 ;;
+    aarch64|arm64) architecture=arm64 ;;
+    *) die "unsupported update architecture: $(uname -m)" ;;
+  esac
+  temporary_parent=${TMPDIR:-/var/tmp}
+  case "$temporary_parent" in /*) ;; *) die "TMPDIR must be absolute" ;; esac
+  [ -d "$temporary_parent" ] && [ ! -L "$temporary_parent" ] || die "TMPDIR must be a real directory"
+  update_dir=$(mktemp -d "$temporary_parent/laneway-update.XXXXXX")
+  cleanup_update() { [ ! -e "$update_dir" ] || find "$update_dir" -depth -delete; }
+  trap cleanup_update EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  asset=laneway_linux_${architecture}.tar.gz
+  release_url=${LANEWAY_RELEASE_BASE_URL:-https://github.com/$repository/releases/download/$latest_tag}
+  for release_file in "$asset" checksums.txt checksums.sigstore.json; do
+    curl --fail --location --silent --show-error "$release_url/$release_file" \
+      -o "$update_dir/$release_file" || die "could not download $release_file for $latest_tag"
+  done
+  cosign_command=$(cosign_verifier)
+  "$cosign_command" verify-blob --bundle "$update_dir/checksums.sigstore.json" \
+    --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$latest_tag" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$update_dir/checksums.txt" >/dev/null || die "release checksum signature verification failed"
+  (
+    cd "$update_dir"
+    grep "  $asset\$" checksums.txt > selected-checksum.txt
+    [ "$(wc -l < selected-checksum.txt)" -eq 1 ]
+    sha256sum -c selected-checksum.txt
+    tar -xzf "$asset"
+  ) || die "release archive verification or extraction failed"
+  package_dir=$update_dir/laneway
+  [ -f "$package_dir/VERSION" ] && [ ! -L "$package_dir/VERSION" ] && \
+    [ "$(sed -n '1p' "$package_dir/VERSION")" = "$latest_version" ] || \
+    die "verified package version does not match $latest_tag"
+  [ -f "$package_dir/install.sh" ] && [ ! -L "$package_dir/install.sh" ] && \
+    [ -f "$package_dir/deploy/compose/upgrade-control-plane.sh" ] && \
+    [ ! -L "$package_dir/deploy/compose/upgrade-control-plane.sh" ] || \
+    die "verified package is missing the Docker Compose updater"
+
+  echo "laneway-control: detected Docker Compose deployment at $base_dir"
+  echo "laneway-control: updating from v$current_version to $latest_tag"
+  acquire_lock
+  trap 'release_lock; cleanup_update' EXIT
+  env PREFIX=/usr/local sh "$package_dir/install.sh"
+  cleanup_update
+  release_lock
+  trap - EXIT HUP INT TERM
+  exec env LANEWAY_DEPLOY_DIR="$base_dir" LANEWAY_COSIGN_BIN="$cosign_command" \
+    sh /usr/local/share/laneway/deploy/compose/upgrade-control-plane.sh
+}
+
 atomic_copy() {
   source=$1; destination=$2; directory=$(dirname "$destination")
   if [ -e "$destination" ] || [ -L "$destination" ]; then
@@ -389,6 +486,7 @@ case "$command" in
   init) acquire_lock; run_init "$@" ;;
   invite) run_invite "$@" ;;
   status) run_status "$@" ;;
+  update) run_update "$@" ;;
   production-check) acquire_lock; run_production_check "$@" ;;
   backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
   restore)
