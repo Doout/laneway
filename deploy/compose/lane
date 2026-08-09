@@ -9,7 +9,7 @@ lock_held=false
 
 usage() {
   cat >&2 <<'EOF'
-usage: ./lane <init|invite|status|backup|restore|upgrade|rollback> [options]
+usage: ./lane <init|invite|status|production-check|backup|restore|upgrade|rollback> [options]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   backup [NAME.age]
@@ -88,7 +88,15 @@ validate_release_env() {
 
 verify_release_images() {
   file=$1
-  command -v cosign >/dev/null 2>&1 || die "cosign is required"
+  cosign_command=
+  if [ -n "${LANEWAY_COSIGN_BIN+x}" ]; then
+    [ -n "$LANEWAY_COSIGN_BIN" ] && command -v "$LANEWAY_COSIGN_BIN" >/dev/null 2>&1 && cosign_command=$LANEWAY_COSIGN_BIN
+  elif [ -x /usr/local/libexec/laneway/cosign-v3.1.3 ]; then
+    cosign_command=/usr/local/libexec/laneway/cosign-v3.1.3
+  elif command -v cosign >/dev/null 2>&1; then
+    cosign_command=$(command -v cosign)
+  fi
+  [ -n "$cosign_command" ] || die "a compatible Cosign verifier is required"
   version=$(read_setting "$file" LANEWAY_VERSION)
   identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v$version"
   for item in \
@@ -98,7 +106,7 @@ verify_release_images() {
     "ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
   do
     image=${item%%:*}; key=${item#*:}; digest=$(read_setting "$file" "$key")
-    cosign verify --certificate-identity "$identity" \
+    "$cosign_command" verify --certificate-identity "$identity" \
       --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image@$digest" >/dev/null
   done
 }
@@ -158,6 +166,32 @@ run_status() {
     echo "exit-direct-path=not-configured"
   fi
   [ "$failed" = false ] || die "one or more configured services are unhealthy"
+}
+
+run_production_check() {
+  [ "$#" -eq 0 ] || die "production-check accepts no arguments"
+  [ "$(id -u)" -eq 0 ] || die "production-check must run as root"
+  "$base_dir/preflight.sh"
+  validate_release_env "$env_file"
+  verify_release_images "$env_file"
+  run_status
+  recovery_dir=$base_dir/generated/recovery
+  [ -d "$recovery_dir" ] && [ ! -L "$recovery_dir" ] || die "encrypted recovery backup directory is missing"
+  backup_found=false
+  for bundle in "$recovery_dir"/*.age; do
+    [ -f "$bundle" ] && [ ! -L "$bundle" ] && backup_found=true
+  done
+  [ "$backup_found" = true ] || die "no encrypted .age recovery backup exists"
+  install -d -m 0700 "$state_dir"
+  marker_tmp=$(mktemp "$state_dir/.production-verified.XXXXXX")
+  {
+    printf 'verified_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'version=%s\n' "$(read_setting "$env_file" LANEWAY_VERSION)"
+    printf 'profile=%s\n' "$(read_setting "$env_file" LANEWAY_INSTALL_PROFILE)"
+  } > "$marker_tmp"
+  chmod 0600 "$marker_tmp"
+  mv "$marker_tmp" "$state_dir/production-verified"
+  echo "lane: production check passed; marker: generated/lifecycle/production-verified"
 }
 
 run_invite() {
@@ -257,7 +291,16 @@ run_init() {
   esac
   "$base_dir/preflight.sh"
   validate_release_env "$env_file"
-  verify_release_images "$env_file"
+  profile=$(read_setting "$env_file" LANEWAY_INSTALL_PROFILE)
+  case "$profile" in
+    production) verify_release_images "$env_file" ;;
+    quick)
+      if ! (verify_release_images "$env_file"); then
+        echo "lane: WARNING: image signatures were not verified during quick install; run 'lane production-check' before production use" >&2
+      fi
+      ;;
+    *) die "LANEWAY_INSTALL_PROFILE must be quick or production" ;;
+  esac
   compose pull
   "$base_dir/bootstrap.sh"
 }
@@ -267,6 +310,7 @@ case "$command" in
   init) acquire_lock; run_init "$@" ;;
   invite) run_invite "$@" ;;
   status) run_status "$@" ;;
+  production-check) acquire_lock; run_production_check "$@" ;;
   backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
   restore)
     acquire_lock

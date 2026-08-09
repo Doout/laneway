@@ -5,8 +5,18 @@ source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository=${LANEWAY_REPOSITORY:-Doout/laneway}
 noninteractive=${LANEWAY_NONINTERACTIVE:-false}
 answers_file=${LANEWAY_INSTALLER_ANSWERS_FILE:-/var/lib/laneway-installer/control-plane.answers}
+production_mode=${LANEWAY_PRODUCTION_MODE:-false}
+cosign_bin=${LANEWAY_COSIGN_BIN-cosign}
+checksum_signature_verified=${LANEWAY_CHECKSUM_SIGNATURE_VERIFIED:-unknown}
 
 die() { echo "Laneway installer: $*" >&2; exit 1; }
+add_missing() {
+  if [ -n "${missing:-}" ]; then missing="$missing
+$1"; else missing=$1; fi
+}
+
+case "$production_mode" in true|false) ;; *) die "LANEWAY_PRODUCTION_MODE must be true or false" ;; esac
+if [ "$production_mode" = true ]; then install_profile=production; else install_profile=quick; fi
 
 remembered() {
   key=$1
@@ -109,11 +119,19 @@ valid_ipv4_pool() {
   [ "$prefix" -le 32 ]
 }
 
-for command in chown curl cosign date dirname docker age find getent grep install sed sha256sum stat sync wc; do
-  command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
+missing=
+for command in age age-keygen chown curl date dirname docker find getent grep install laneway sed sha256sum ss stat sync wc; do
+  command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
-[ "$(id -u)" -eq 0 ] || die "run as root so the deployment can be protected and container ownership can be installed"
-docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is unavailable"
+[ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"
+if command -v docker >/dev/null 2>&1; then
+  docker compose version >/dev/null 2>&1 || add_missing "Docker Compose v2"
+fi
+if [ -n "$missing" ]; then
+  echo "Laneway pre-check found missing prerequisites:" >&2
+  printf '%s\n' "$missing" | while IFS= read -r item; do printf '  - %s\n' "$item" >&2; done
+  die "install the listed prerequisites and rerun; no deployment changes were made"
+fi
 
 if [ "$noninteractive" != true ]; then
   cat >&2 <<'EOF'
@@ -255,14 +273,23 @@ relay_digest=$(image_digest ghcr.io/doout/laneway-relay)
 admin_digest=$(image_digest ghcr.io/doout/laneway-admin)
 exit_node_digest=$(image_digest ghcr.io/doout/laneway-exit-node)
 identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag"
+image_signatures_verified=true
 for reference in \
   "ghcr.io/doout/laneway-controller@$controller_digest" \
   "ghcr.io/doout/laneway-relay@$relay_digest" \
   "ghcr.io/doout/laneway-admin@$admin_digest" \
   "ghcr.io/doout/laneway-exit-node@$exit_node_digest"
 do
-  cosign verify --certificate-identity "$identity" \
-    --certificate-oidc-issuer https://token.actions.githubusercontent.com "$reference" >/dev/null
+  if [ -n "$cosign_bin" ] && command -v "$cosign_bin" >/dev/null 2>&1 && \
+    "$cosign_bin" verify --certificate-identity "$identity" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$reference" >/dev/null; then
+    :
+  elif [ "$production_mode" = true ]; then
+    die "production signature verification failed for $reference"
+  else
+    image_signatures_verified=false
+    echo "WARNING: image signature could not be verified now: $reference" >&2
+  fi
 done
 
 network_id=$(laneway id)
@@ -278,7 +305,8 @@ fi
 cat >&2 <<EOF
 
 Laneway is ready to deploy:
-  release:      $tag (signed images are pinned automatically)
+  release:      $tag (images are pinned by immutable digest)
+  profile:      $install_profile
   public name:  $domain
   directory:    $destination
   overlay pool: $ipv4_pool
@@ -319,10 +347,43 @@ for name in compose.yaml lane bootstrap.sh preflight.sh prepare.sh recovery.sh v
   install -m "$mode" -o 0 -g 0 "$source_dir/$name" "$destination/$name"
 done
 
+cat > "$destination/PRODUCTION-CHECKLIST.md" <<EOF
+# Laneway production checklist
+
+This installation uses the **$install_profile** profile for **$domain** on Laneway **$tag**.
+The containers are pinned to immutable image digests. The host firewall and cloud
+firewall were not changed by the installer.
+
+## Before production traffic
+
+- [ ] Copy the recovery kit and initial encrypted recovery bundle off this server.
+- [ ] Verify the copied recovery kit's \`MANIFEST.sha256\`, then securely remove the server copy.
+- [ ] Confirm DNS \`$domain\` resolves to this server's public address.
+- [ ] Confirm the external firewall allows TCP 443, UDP 4433, and TCP+UDP 8443.
+- [ ] Keep SSH restricted to your trusted access path; do not expose TCP 22 publicly.
+- [ ] Run \`sudo $destination/lane production-check\` until it succeeds.
+- [ ] Test a client enrollment and recovery restore before depending on the service.
+- [ ] Configure monitoring, security updates, and recurring encrypted backups.
+
+## Verification recorded during install
+
+- Release checksum signature verified: **$checksum_signature_verified**
+- All container image signatures verified: **$image_signatures_verified**
+
+Signature verification can depend on registry and transparency-log availability.
+The \`production-check\` command is fail-closed and records a root-only marker only
+after signatures, configuration, service health, DNS, and recovery backup checks pass.
+
+Cloud firewall policy cannot be inspected reliably from inside this host. Confirm it
+in your provider's control panel before putting Laneway into production.
+EOF
+chmod 0644 "$destination/PRODUCTION-CHECKLIST.md"
+
 umask 077
 env_tmp=$(mktemp "$destination/.env.XXXXXX")
 {
   printf 'LANEWAY_VERSION=%s\n' "$release"
+  printf 'LANEWAY_INSTALL_PROFILE=%s\n' "$install_profile"
   printf 'LANEWAY_CONTROLLER_IMAGE_DIGEST=%s\n' "$controller_digest"
   printf 'LANEWAY_RELAY_IMAGE_DIGEST=%s\n' "$relay_digest"
   printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\n' "$admin_digest"
@@ -369,6 +430,7 @@ cat <<EOF
 
 Laneway $tag is running. Useful commands:
   sudo $destination/lane status
+  sudo $destination/lane production-check
   sudo $destination/lane invite --name DEVICE --ephemeral
   sudo $destination/lane backup
   initial encrypted backup: $destination/generated/recovery/$initial_backup
