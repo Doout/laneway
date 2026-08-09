@@ -30,7 +30,7 @@ sudo sh install.sh --control-plane
 To update an existing control plane to the latest stable release:
 
 ```sh
-sudo laneway-control update
+sudo laneway control update
 ```
 
 This detects the Docker Compose installation, downloads and verifies the signed
@@ -61,7 +61,7 @@ registry signature endpoint is temporarily unavailable. It generates
 checklist and run:
 
 ```sh
-sudo laneway-control production-check
+sudo laneway control production-check
 ```
 
 That command is fail-closed: it verifies every image signature, configuration,
@@ -85,7 +85,7 @@ generated deployment secret. Explicit environment variables override it.
 Generate a capability-bound, single-use Docker command from the control plane:
 
 ```sh
-sudo laneway-control invite --name egress-one --ephemeral --docker --connector
+sudo laneway control invite --name egress-one --ephemeral --docker --connector
 ```
 
 Copy the resulting `docker run` command through a trusted administrative channel
@@ -103,6 +103,20 @@ container, and rerun the generated `docker run` command with the new image
 reference and the same `laneway-connector-NAME-state` volume. The entrypoint
 finds the complete identity in that volume and does not read or consume another
 enrollment token. Never remove the named volume during an ordinary upgrade.
+
+## Local-user login tokens
+
+Issue a short-lived, single-use token for a remembered local user:
+
+```sh
+sudo laneway control user-token --name laptop
+```
+
+The user runs `laneway login DOMAIN` once and `laneway connect DOMAIN` after
+that. The token is exchanged for a locally protected, renewable mTLS identity;
+it is not stored as a permanent bearer credential. Remembered connections
+install only controller-policy-authorized private prefixes. Default-route
+egress remains explicit with `--exit`.
 
 Omit `--ephemeral` for a persistent production Exit Node; use ephemeral
 enrollment for tests or intentionally short-lived egress capacity.
@@ -158,7 +172,7 @@ chmod 0400 issuer-export/intermediate.key
 test ! -e issuer-export/ca.key
 ```
 
-After completing `.env`, run `sudo laneway-control init --issuer /path/to/issuer-export`.
+After completing `.env`, run `sudo laneway control init --issuer /path/to/issuer-export`.
 The command validates that the online key matches an ordered, currently valid
 chain anchored by the exact offline root certificate. It generates controller
 and relay service identities, strict configurations, and an independent admin
@@ -223,22 +237,23 @@ sudo chown 65532:65532 generated/backups
 sudo ./bootstrap.sh
 ```
 
-The packaged `laneway-control` wrapper is the normal operator entry point. `laneway-control init`
-performs idempotent validation/bootstrap. `laneway-control status` reports controller,
+The `laneway control` command is the normal operator entry point. It delegates to
+the packaged `laneway-control` compatibility wrapper. `laneway control init`
+performs idempotent validation/bootstrap. `laneway control status` reports controller,
 relay, limiter, optional Exit Node, and live Exit direct-path health, and exits
-nonzero for an unhealthy required service. `laneway-control invite --name DEVICE` issues a single-use token
-through the isolated admin container. `sudo laneway-control backup [NAME.age]` creates a
-complete encrypted recovery bundle, and `sudo laneway-control restore BUNDLE.age
+nonzero for an unhealthy required service. `laneway control invite --name DEVICE` issues a single-use token
+through the isolated admin container. `sudo laneway control backup [NAME.age]` creates a
+complete encrypted recovery bundle, and `sudo laneway control restore BUNDLE.age
 --identity FILE` performs a guarded fresh-state restore as documented below.
 
 For an upgrade, prepare a complete candidate environment file with the new
 semantic version and four signed manifest digests, leaving deployment identity
-and endpoint values unchanged, then run `sudo laneway-control upgrade CANDIDATE.env`.
+and endpoint values unchanged, then run `sudo laneway control upgrade CANDIDATE.env`.
 The wrapper validates Compose, verifies every image with Cosign against the
 tagged release workflow identity, pulls all images, takes a database backup,
 and only then gracefully stops and recreates the stack. If readiness fails, it
 restores the prior image/config selection and restarts it; database state is
-never independently rolled back. `sudo laneway-control rollback` applies the same
+never independently rolled back. `sudo laneway control rollback` applies the same
 verification and backup sequence to the previously successful selection.
 Runtime rollback metadata is private under `generated/lifecycle` and never
 contains PKI keys or the admin token.
@@ -331,7 +346,7 @@ copying credentials is not a valid recovery procedure. Create a consistent,
 encrypted bundle while the controller is running:
 
 ```sh
-sudo laneway-control backup
+sudo laneway control backup
 sudo ls -l generated/recovery/recovery-*.age
 ```
 
@@ -350,9 +365,9 @@ generated credentials, and an empty controller volume. Transfer one encrypted
 bundle plus the age identity through separate trusted channels, then run:
 
 ```sh
-sudo laneway-control restore /trusted/control-recovery.age \
+sudo laneway control restore /trusted/control-recovery.age \
   --identity /trusted/laneway-recovery.identity
-sudo laneway-control init
+sudo laneway control init
 ```
 
 Restore accepts only the fixed versioned file set, rejects duplicate,

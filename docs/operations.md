@@ -52,37 +52,43 @@ controller refuses to start if static bootstrap data is malformed or if the
 configured NetworkID differs from its controller certificate. A response
 fails closed when there is no enabled relay.
 
-On the controller host, issue a ten-minute code without spelling controller,
-CA, relay, network, or service IDs:
+On the control-plane host, issue a ten-minute local-user login token without
+spelling controller, CA, relay, network, or service IDs:
 
 ```sh
-lane invite --name laptop --ephemeral
+sudo laneway control user-token --name laptop
 ```
 
-`lane` is a packaged alias of the single `laneway` binary. Durable and
-remembered codes use `lane invite --name NAME` and `--remembered`
-respectively. The advanced `laneway controller enrollment-token issue`
-interface remains available for automation. Codes are random, stored only as
-a hash, network/class-bound, single-use, limited to one hour of validity, and
-the enrollment endpoint applies a bounded per-source token bucket.
+This is a remembered-user enrollment code, not a permanent API bearer token.
+Codes are random, stored by the controller only as a hash, network/class-bound,
+single-use, limited to one hour of validity, and protected by a bounded
+per-source token bucket. The advanced `laneway controller enrollment-token
+issue` interface remains available for automation.
 
 On a clean Linux AMD64 or ARM64 client:
 
 ```sh
+laneway login lane.example.com
 laneway connect lane.example.com
 ```
 
 The client obtains metadata using TLS 1.3 and the host system's public roots,
 rejects redirects and non-DNS authorities, validates its architecture and the
 authenticated artifact record, then prompts on `/dev/tty` with terminal echo
-disabled. The product invite binds the requested device name, so the client
-does not repeat it and a substitution attempt leaves the code unused. For
-non-interactive provisioning, pass a mode-0600 `--token-file`;
+disabled. `login` stores only the resulting certificate and private keys in a
+mode-0700 directory owned by the local user; it does not save the enrollment
+code. The product token binds the requested device name, so the client does
+not repeat it and a substitution attempt leaves the code unused. For
+non-interactive login, pass a mode-0600 `--token-file`;
 the bootstrap flow rejects codes in argv. It also refuses endpoint/pin
 overrides and sends the authenticated expected NetworkID so a wrong-network
-code is rejected before consumption. `connect` runs the User session in the
-foreground and transactionally restores its temporary interface, routes, and
-DNS state when it exits. The older many-flag `join` form remains the advanced
+code is rejected before consumption. Saved credentials rotate automatically
+over mTLS before expiry. `connect` derives private split routes from ACCEPT
+policy, preserves the native default route, runs the User session in the
+foreground, and transactionally restores its temporary interface, routes, and
+DNS state when it exits. `--route PREFIX` remains an exact manual restriction;
+`--exit NAME` is the only way to select a default route. The older many-flag
+`join` form remains the advanced
 explicit enrollment path for migration, debugging, and automation.
 
 Artifact downloaders must stream into an unprivileged temporary file, enforce
@@ -651,11 +657,11 @@ confirmed. Restore DNS with `resolvectl revert lane0` if the interface still
 exists, and compare routes and forwarding with the site's documented baseline.
 
 For Compose upgrades and disaster recovery, configure an off-host age X25519
-recipient and use `sudo laneway-control backup`. It takes a validated SQLite online
+recipient and use `sudo laneway control backup`. It takes a validated SQLite online
 snapshot and encrypts it together with the exact pinned release environment,
 configuration, online intermediate, service identities, and admin token. The
 root-owned final bundle is isolated from the controller-writable staging
-directory and must be copied to separately controlled storage. `laneway-control restore
+directory and must be copied to separately controlled storage. `laneway control restore
 BUNDLE.age --identity FILE` is fresh-state only: it rejects unexpected archive
 types/paths, checksum failures, existing files, a running controller, and an
 existing database. The private age identity and offline root key remain
@@ -676,7 +682,7 @@ For the higher-assurance boundary, run `install.sh --prepare-control-plane` on
 a separate trusted Linux host and transfer only its `control-plane-input`
 directory. The normal installer recognizes its issuer files and recovery
 recipient. The root key and recovery identity never reach production. Manual
-issuer exports remain supported. `sudo laneway-control init --issuer DIR` rejects a root
+issuer exports remain supported. `sudo laneway control init --issuer DIR` rejects a root
 key, verifies the authority, and generates service identities, the admin secret,
 and strict configuration without overwriting existing or partial state. Its
 preflight checks Docker version/Compose, public DNS, and foreign TCP/UDP

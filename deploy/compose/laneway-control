@@ -23,9 +23,10 @@ lock_held=false
 
 usage() {
   cat >&2 <<'EOF'
-usage: laneway-control <init|invite|status|update|production-check|backup|restore|upgrade|rollback> [options]
+usage: laneway-control <init|user-token|invite|status|update|production-check|backup|restore|upgrade|rollback> [options]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
+  user-token --name NAME [--expires-in 10m]
   invite --name NAME [--ephemeral|--remembered] [--docker --connector]
   update
   backup [NAME.age]
@@ -308,6 +309,14 @@ run_invite() {
   fi
 }
 
+run_user_token() {
+  result=$(run_invite --remembered "$@")
+  enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
+  [ -n "$enrollment_token" ] || die "controller returned no unique user login token"
+  echo "Single-use local-user login token (enter it at the hidden laneway login prompt):" >&2
+  printf '%s\n' "$enrollment_token"
+}
+
 run_update() {
   [ "$#" -eq 0 ] || die "update accepts no arguments"
   [ "$(id -u)" -eq 0 ] || die "update must run as root"
@@ -477,7 +486,7 @@ run_init() {
     production) verify_release_images "$env_file" ;;
     quick)
       if ! (verify_release_images "$env_file"); then
-        echo "laneway-control: WARNING: image signatures were not verified during quick install; run 'laneway-control production-check' before production use" >&2
+        echo "laneway-control: WARNING: image signatures were not verified during quick install; run 'laneway control production-check' before production use" >&2
       fi
       ;;
     *) die "LANEWAY_INSTALL_PROFILE must be quick or production" ;;
@@ -489,6 +498,7 @@ run_init() {
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 case "$command" in
   init) acquire_lock; run_init "$@" ;;
+  user-token|api-token) run_user_token "$@" ;;
   invite) run_invite "$@" ;;
   status) run_status "$@" ;;
   update) run_update "$@" ;;
