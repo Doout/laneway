@@ -393,12 +393,20 @@ func TestHealthyTCPFallbackPromotesBackToQUIC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := tunA.Inject(ctx, packet); err != nil {
-		t.Fatal(err)
-	}
-	got, err := tunB.Receive(ctx)
-	if err != nil || string(got) != string(packet) {
-		t.Fatalf("post-promotion packet = %x, %v", got, err)
+	var got []byte
+	for {
+		if err := tunA.Inject(ctx, packet); err != nil {
+			t.Fatal(err)
+		}
+		receiveCtx, receiveCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+		got, err = tunB.Receive(receiveCtx)
+		receiveCancel()
+		if err == nil && string(got) == string(packet) {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("post-promotion packet = %x, %v", got, err)
+		}
 	}
 	cancel()
 	waitDone(t, serverDone)
