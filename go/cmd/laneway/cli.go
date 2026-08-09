@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/spf13/cobra"
 	"laneway.dev/laneway/internal/buildinfo"
@@ -25,6 +26,10 @@ func executeCLI(args []string) error {
 }
 
 func newRootCommand() *cobra.Command {
+	return newRootCommandForOS(runtime.GOOS)
+}
+
+func newRootCommandForOS(goos string) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "laneway",
 		Short:         "Private networking without the network-shaped command line",
@@ -42,6 +47,21 @@ func newRootCommand() *cobra.Command {
 		fmt.Fprintln(os.Stdout, buildinfo.Version)
 		return nil
 	}))
+	root.AddCommand(
+		command("login DOMAIN", "Save a renewable user login", runLogin),
+		command("connect DOMAIN", "Connect using a saved login", runConnect),
+		command("logout DOMAIN", "Remove a saved user login", runLogout),
+	)
+	root.AddCommand(group("bootstrap", "Inspect bootstrap metadata or download a verified release", runBootstrap,
+		forwarded("inspect DOMAIN", "Inspect public bootstrap metadata", "inspect", runBootstrap),
+		forwarded("download DOMAIN", "Download a verified release artifact", "download", runBootstrap),
+	))
+	helper := command("_network-helper", "Internal privileged network helper", runNetworkHelper)
+	helper.Hidden = true
+	root.AddCommand(helper)
+	if goos == "darwin" {
+		return root
+	}
 	root.AddCommand(command("id", "Generate a random Laneway ID", func([]string) error {
 		id, err := identity.NewID()
 		if err != nil {
@@ -63,17 +83,10 @@ func newRootCommand() *cobra.Command {
 
 	root.AddCommand(
 		command("join TOKEN", "Enroll a node with a controller", runJoin),
-		command("login DOMAIN", "Save a renewable user login", runLogin),
-		command("connect DOMAIN", "Connect using a saved login", runConnect),
-		command("logout DOMAIN", "Remove a saved user login", runLogout),
 		command("invite", "Issue an invite using a controller configuration", runInvite),
 		command("renew", "Renew this node's controller-issued certificate", runRenew),
 	)
 
-	root.AddCommand(group("bootstrap", "Inspect bootstrap metadata or download a verified release", runBootstrap,
-		forwarded("inspect DOMAIN", "Inspect public bootstrap metadata", "inspect", runBootstrap),
-		forwarded("download DOMAIN", "Download a verified release artifact", "download", runBootstrap),
-	))
 	node := group("node", "Install and operate a persistent host node", runNode,
 		forwarded("install DOMAIN", "Enroll and install a managed node", "install", runNodeDispatch),
 		forwarded("renew", "Rotate a managed node credential", "renew", runNodeDispatch),
@@ -94,9 +107,6 @@ func newRootCommand() *cobra.Command {
 	))
 	root.AddCommand(controlCommand())
 
-	helper := command("_network-helper", "Internal privileged network helper", runNetworkHelper)
-	helper.Hidden = true
-	root.AddCommand(helper)
 	return root
 }
 

@@ -93,9 +93,10 @@ explicit enrollment path for migration, debugging, and automation.
 On macOS, `connect` behaves like an SSH tunnel. The user process retains all
 credentials while a short-lived, credential-free helper creates `utun`, adds
 only the validated private routes, and restores them on disconnect. The helper
-refuses to replace an existing route. macOS full-tunnel exit selection and DNS
-ownership are not yet implemented, so `--exit` fails before enrollment or any
-networking change.
+refuses to replace an existing route. The macOS package and command surface are
+user-client-only: they do not include Connector, route-advertisement,
+control-plane, or Exit Node operations. Unknown exit flags fail during local
+argument parsing before enrollment or any networking change.
 
 Linux login additionally requires its authenticated platform artifact record.
 macOS installation verifies the release checksum before installing a

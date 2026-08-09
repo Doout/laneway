@@ -128,9 +128,9 @@ rotates that credential over authenticated mTLS and reconnects before expiry.
 from controller ACCEPT policy and sends each prefix only to its approved
 Connector; all other traffic continues to use the laptop's native network.
 Default routes are never selected automatically. Full-tunnel egress still
-requires an explicit controller-authorized `--exit NAME` on Linux. macOS
-currently fails closed if `--exit` is requested and supports split-tunnel
-private subnet routes only.
+requires an explicit controller-authorized `--exit NAME` on Linux. The macOS
+package is user-client-only: it has no Connector, route-advertisement,
+control-plane, or Exit Node commands and supports private split routes only.
 
 For an intentionally temporary session that stores no identity, use
 `laneway connect lane.example.com --ephemeral`. Remove a saved local login with
