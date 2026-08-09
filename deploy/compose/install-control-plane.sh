@@ -4,8 +4,58 @@ set -eu
 source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repository=${LANEWAY_REPOSITORY:-Doout/laneway}
 noninteractive=${LANEWAY_NONINTERACTIVE:-false}
+answers_file=${LANEWAY_INSTALLER_ANSWERS_FILE:-/var/lib/laneway-installer/control-plane.answers}
 
 die() { echo "Laneway installer: $*" >&2; exit 1; }
+
+remembered() {
+  key=$1
+  fallback=${2:-}
+  if [ ! -e "$answers_file" ] && [ ! -L "$answers_file" ]; then
+    printf '%s' "$fallback"
+    return
+  fi
+  if [ ! -f "$answers_file" ] || [ -L "$answers_file" ]; then
+    die "remembered-answer file is not a safe regular file: $answers_file"
+  fi
+  [ "$(stat -c %u "$answers_file")" -eq 0 ] || die "remembered-answer file must be owned by root"
+  [ "$(stat -c %a "$answers_file")" = 600 ] || die "remembered-answer file must have mode 0600"
+  matches=$(sed -n "s/^${key}=//p" "$answers_file")
+  count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)
+  [ "$count" -le 1 ] || die "remembered-answer file contains duplicate $key"
+  if [ -n "$matches" ]; then printf '%s' "$matches"; else printf '%s' "$fallback"; fi
+}
+
+save_answers() {
+  case "$answers_file" in /*) ;; *) die "remembered-answer file must use an absolute path" ;; esac
+  answers_dir=$(dirname "$answers_file")
+  if [ -e "$answers_dir" ] || [ -L "$answers_dir" ]; then
+    if [ ! -d "$answers_dir" ] || [ -L "$answers_dir" ]; then
+      die "remembered-answer directory is unsafe: $answers_dir"
+    fi
+    [ "$(stat -c %u "$answers_dir")" -eq 0 ] || die "remembered-answer directory must be owned by root"
+    [ "$(stat -c %a "$answers_dir")" = 700 ] || die "remembered-answer directory must have mode 0700"
+  else
+    install -d -m 0700 -o 0 -g 0 "$answers_dir"
+  fi
+  temporary=$(mktemp "$answers_dir/.control-plane-installer.XXXXXX")
+  {
+    printf 'LANEWAY_DOMAIN=%s\n' "$domain"
+    printf 'LANEWAY_DEPLOY_DIR=%s\n' "$destination"
+    printf 'LANEWAY_NETWORK_NAME=%s\n' "$network_name"
+    printf 'LANEWAY_IPV4_POOL=%s\n' "$ipv4_pool"
+    printf 'LANEWAY_BIND_ADDRESS=%s\n' "$bind_address"
+    printf 'LANEWAY_CONTROLLER_PORT=%s\n' "$controller_port"
+    printf 'LANEWAY_RELAY_QUIC_PORT=%s\n' "$relay_quic_port"
+    printf 'LANEWAY_RELAY_TCP_PORT=%s\n' "$relay_tcp_port"
+    printf 'LANEWAY_PREPARED_INPUT_DIR=%s\n' "${issuer_dir:-}"
+    printf 'LANEWAY_RECOVERY_KIT_DIR=%s\n' "${recovery_kit:-}"
+    printf 'LANEWAY_BACKUP_RECIPIENT=%s\n' "${backup_recipient:-}"
+  } > "$temporary"
+  chmod 0600 "$temporary"
+  chown 0:0 "$temporary"
+  mv "$temporary" "$answers_file"
+}
 
 ask() {
   label=$1
@@ -59,7 +109,7 @@ valid_ipv4_pool() {
   [ "$prefix" -le 32 ]
 }
 
-for command in curl cosign date docker age find getent grep install sed sha256sum sync wc; do
+for command in chown curl cosign date dirname docker age find getent grep install sed sha256sum stat sync wc; do
   command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
 done
 [ "$(id -u)" -eq 0 ] || die "run as root so the deployment can be protected and container ownership can be installed"
@@ -99,12 +149,12 @@ if [ -n "$package_version" ] && [ "$package_version" != "$release" ]; then
   die "the installed package is $package_version but the selected release is $release; install the matching package first"
 fi
 
-ask "Public DNS name" "${LANEWAY_DOMAIN:-}"
+ask "Public DNS name" "${LANEWAY_DOMAIN:-$(remembered LANEWAY_DOMAIN)}"
 domain=$REPLY
 valid_dns_name "$domain" || die "public DNS name is invalid"
 getent ahosts "$domain" >/dev/null 2>&1 || die "public DNS does not resolve: $domain"
 
-ask "Deployment directory" "${LANEWAY_DEPLOY_DIR:-/opt/laneway}"
+ask "Deployment directory" "${LANEWAY_DEPLOY_DIR:-$(remembered LANEWAY_DEPLOY_DIR /opt/laneway)}"
 destination=$REPLY
 case "$destination" in /*) ;; *) die "deployment directory must be an absolute path" ;; esac
 [ "$destination" != / ] || die "deployment directory cannot be /"
@@ -112,25 +162,25 @@ if [ -e "$destination" ] || [ -L "$destination" ]; then
   die "deployment directory already exists; refusing to overwrite it: $destination"
 fi
 
-ask "Network name" "${LANEWAY_NETWORK_NAME:-production}"
+ask "Network name" "${LANEWAY_NETWORK_NAME:-$(remembered LANEWAY_NETWORK_NAME production)}"
 network_name=$REPLY
 case "$network_name" in ''|*[!A-Za-z0-9._-]*) die "network name may contain only letters, numbers, dot, underscore, and dash" ;; esac
 
-ask "Overlay IPv4 pool" "${LANEWAY_IPV4_POOL:-100.96.0.0/16}"
+ask "Overlay IPv4 pool" "${LANEWAY_IPV4_POOL:-$(remembered LANEWAY_IPV4_POOL 100.96.0.0/16)}"
 ipv4_pool=$REPLY
 valid_ipv4_pool "$ipv4_pool" || die "overlay IPv4 pool is invalid"
 
-ask "Host bind address" "${LANEWAY_BIND_ADDRESS:-0.0.0.0}"
+ask "Host bind address" "${LANEWAY_BIND_ADDRESS:-$(remembered LANEWAY_BIND_ADDRESS 0.0.0.0)}"
 bind_address=$REPLY
 valid_ipv4 "$bind_address" || die "bind address must be an IPv4 address"
 
-ask "Controller TCP/UDP port" "${LANEWAY_CONTROLLER_PORT:-8443}"
+ask "Controller TCP/UDP port" "${LANEWAY_CONTROLLER_PORT:-$(remembered LANEWAY_CONTROLLER_PORT 8443)}"
 controller_port=$REPLY
 valid_port "$controller_port" || die "controller port is invalid"
-ask "Relay QUIC/UDP port" "${LANEWAY_RELAY_QUIC_PORT:-4433}"
+ask "Relay QUIC/UDP port" "${LANEWAY_RELAY_QUIC_PORT:-$(remembered LANEWAY_RELAY_QUIC_PORT 4433)}"
 relay_quic_port=$REPLY
 valid_port "$relay_quic_port" || die "relay QUIC port is invalid"
-ask "Relay TCP fallback port" "${LANEWAY_RELAY_TCP_PORT:-443}"
+ask "Relay TCP fallback port" "${LANEWAY_RELAY_TCP_PORT:-$(remembered LANEWAY_RELAY_TCP_PORT 443)}"
 relay_tcp_port=$REPLY
 valid_port "$relay_tcp_port" || die "relay TCP port is invalid"
 [ "$controller_port" != "$relay_quic_port" ] || die "controller and relay UDP ports must differ"
@@ -155,12 +205,12 @@ validate_issuer_dir() {
 automatic_issuer=false
 issuer_dir=${LANEWAY_ISSUER_DIR:-}
 if [ -z "$issuer_dir" ]; then
-  ask "Prepared control-plane input directory (Enter to generate automatically)" "${LANEWAY_PREPARED_INPUT_DIR:-}"
+  ask "Prepared control-plane input directory (Enter to generate automatically)" "${LANEWAY_PREPARED_INPUT_DIR:-$(remembered LANEWAY_PREPARED_INPUT_DIR)}"
   issuer_dir=$REPLY
 fi
 if [ -n "$issuer_dir" ]; then
   validate_issuer_dir "$issuer_dir"
-  backup_recipient=${LANEWAY_BACKUP_RECIPIENT:-}
+  backup_recipient=${LANEWAY_BACKUP_RECIPIENT:-$(remembered LANEWAY_BACKUP_RECIPIENT)}
   if [ -z "$backup_recipient" ] && [ -f "$issuer_dir/recovery-recipient.txt" ] && [ ! -L "$issuer_dir/recovery-recipient.txt" ]; then
     [ "$(wc -l < "$issuer_dir/recovery-recipient.txt")" -eq 1 ] || die "prepared recovery recipient file must contain exactly one line"
     backup_recipient=$(sed -n '1p' "$issuer_dir/recovery-recipient.txt")
@@ -175,7 +225,7 @@ if [ -n "$issuer_dir" ]; then
 else
   automatic_issuer=true
   recovery_default=/root/laneway-recovery-$domain-$(date -u +%Y%m%dT%H%M%SZ)
-  ask "Recovery kit directory" "${LANEWAY_RECOVERY_KIT_DIR:-$recovery_default}"
+  ask "Recovery kit directory" "${LANEWAY_RECOVERY_KIT_DIR:-$(remembered LANEWAY_RECOVERY_KIT_DIR "$recovery_default")}"
   recovery_kit=$REPLY
   case "$recovery_kit" in /*) ;; *) die "recovery kit directory must be an absolute path" ;; esac
   [ "$recovery_kit" != / ] || die "recovery kit directory cannot be /"
@@ -184,6 +234,8 @@ else
   fi
   recovery_description="generate automatically; copy $recovery_kit off-host after setup"
 fi
+
+save_answers
 
 metadata_dir=$(mktemp -d)
 cleanup() { [ ! -e "$metadata_dir" ] || find "$metadata_dir" -depth -delete; }

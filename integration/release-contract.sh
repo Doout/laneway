@@ -48,7 +48,7 @@ done
 for value in 'age --encrypt' 'age --decrypt' 'unexpected recovery archive entry' 'generated/recovery' 'chown 0:0'; do
   require "$value" "$recovery_workflow"
 done
-for value in 'Release tag' 'image-digests.txt' 'cosign verify' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup'; do
+for value in 'Release tag' 'image-digests.txt' 'cosign verify' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup' 'control-plane.answers' 'save_answers'; do
   require "$value" "$installer"
 done
 for value in '/dev/shm' 'offline-root.tar.age' 'control-plane-input' 'pki verify-authority' 'Never copy laneway-recovery.identity'; do

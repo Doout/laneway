@@ -12,6 +12,7 @@ issuer_dir=$test_root/issuer
 destination=$test_root/control-plane
 log_file=$test_root/calls.log
 counter_file=$test_root/id-counter
+answers_file=$test_root/installer-state/answers
 mkdir -p "$source_dir" "$mock_bin" "$issuer_dir"
 printf '0.2.8\n' > "$test_root/package/VERSION"
 cp "$repo_dir/deploy/compose/install-control-plane.sh" "$source_dir/install-control-plane.sh"
@@ -118,6 +119,7 @@ env \
   LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
   LANEWAY_TEST_COUNTER="$counter_file" \
   LANEWAY_TEST_LOG="$log_file" \
+  LANEWAY_INSTALLER_ANSWERS_FILE="$answers_file" \
   "$source_dir/install-control-plane.sh" >/dev/null
 
 test "$(stat -c %a "$destination")" = 700
@@ -130,9 +132,34 @@ grep -Fx 'LANEWAY_NETWORK_ID=000102030405060708090a0b0c0d0e0f' "$destination/.en
 test "$(grep -c '^cosign verify ' "$log_file")" -eq 4
 grep -Fx "lane init --issuer $issuer_dir" "$log_file" >/dev/null
 grep -E '^lane backup initial-recovery-[0-9]{8}T[0-9]{6}Z\.age$' "$log_file" >/dev/null
+test "$(stat -c %a "$answers_file")" = 600
+grep -Fx 'LANEWAY_DOMAIN=lane.example.test' "$answers_file" >/dev/null
+grep -Fx 'LANEWAY_CONTROLLER_PORT=8443' "$answers_file" >/dev/null
+grep -Fx "LANEWAY_PREPARED_INPUT_DIR=$issuer_dir" "$answers_file" >/dev/null
+
+remembered_cancel=$test_root/remembered-cancel
+printf '0\n' > "$counter_file"
+if env \
+  PATH="$mock_bin:$PATH" \
+  LANEWAY_NONINTERACTIVE=true \
+  LANEWAY_VERSION=0.2.8 \
+  LANEWAY_DEPLOY_DIR="$remembered_cancel" \
+  LANEWAY_CONFIRM=no \
+  LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.2.8 \
+  LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
+  LANEWAY_TEST_COUNTER="$counter_file" \
+  LANEWAY_TEST_LOG="$log_file" \
+  LANEWAY_INSTALLER_ANSWERS_FILE="$answers_file" \
+  "$source_dir/install-control-plane.sh" >/dev/null 2>"$test_root/remembered.err"; then
+  echo "installer accepted a remembered deployment without confirmation" >&2
+  exit 1
+fi
+grep -F 'cancelled before changing the deployment' "$test_root/remembered.err" >/dev/null
+test ! -e "$remembered_cancel"
 
 automatic=$test_root/automatic-control-plane
 automatic_kit=$test_root/automatic-recovery-kit
+automatic_answers=$test_root/automatic-installer-state/answers
 printf '0\n' > "$counter_file"
 env \
   PATH="$mock_bin:$PATH" \
@@ -146,6 +173,7 @@ env \
   LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
   LANEWAY_TEST_COUNTER="$counter_file" \
   LANEWAY_TEST_LOG="$log_file" \
+  LANEWAY_INSTALLER_ANSWERS_FILE="$automatic_answers" \
   "$source_dir/install-control-plane.sh" >/dev/null
 test -f "$automatic_kit/laneway-recovery.identity"
 test -f "$automatic_kit/offline-root.tar.age"
@@ -170,6 +198,7 @@ if env \
   LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
   LANEWAY_TEST_COUNTER="$counter_file" \
   LANEWAY_TEST_LOG="$log_file" \
+  LANEWAY_INSTALLER_ANSWERS_FILE="$test_root/cancelled-installer-state/answers" \
   "$source_dir/install-control-plane.sh" >/dev/null 2>&1; then
   echo "installer accepted a deployment without explicit confirmation" >&2
   exit 1
