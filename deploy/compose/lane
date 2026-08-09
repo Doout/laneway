@@ -176,7 +176,9 @@ run_production_check() {
   verify_release_images "$env_file"
   run_status
   recovery_dir=$base_dir/generated/recovery
-  [ -d "$recovery_dir" ] && [ ! -L "$recovery_dir" ] || die "encrypted recovery backup directory is missing"
+  if [ ! -d "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
+    die "encrypted recovery backup directory is missing"
+  fi
   backup_found=false
   for bundle in "$recovery_dir"/*.age; do
     [ -f "$bundle" ] && [ ! -L "$bundle" ] && backup_found=true
