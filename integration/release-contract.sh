@@ -14,6 +14,7 @@ installer=$repo_dir/deploy/compose/install-control-plane.sh
 preparer=$repo_dir/deploy/compose/prepare-control-plane.sh
 upgrader=$repo_dir/deploy/compose/upgrade-control-plane.sh
 package_workflow=$repo_dir/scripts/package.sh
+client_installer=$repo_dir/install-client.sh
 
 require() {
   pattern=$1
@@ -62,6 +63,9 @@ done
 for value in '.env.example' 'install-control-plane.sh' 'prepare-control-plane.sh' 'upgrade-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
   require "$value" "$package_workflow"
 done
+for value in 'releases/latest' 'laneway_darwin_' 'shasum -a 256 -c' 'configure --yes' 'configure --check' 'run as your normal macOS user'; do
+  require "$value" "$client_installer"
+done
 if grep -F "cp -R \"\$project_dir/deploy/.\"" "$package_workflow" >/dev/null; then
   echo "package workflow recursively copies private deployment runtime state" >&2
   exit 1
@@ -71,6 +75,7 @@ for value in \
 	'os: [linux, darwin]' \
 	"dist/laneway_\${{ matrix.os }}_\${{ matrix.arch }}" \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \
+	'install-client.sh' \
 	'platforms: linux/amd64,linux/arm64' \
   'provenance: mode=max' \
   'sbom: true' \

@@ -74,6 +74,19 @@ laneway login lane.example.com
 laneway connect lane.example.com
 ```
 
+On a clean Mac, install the user-only client first with:
+
+```sh
+curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install-client.sh | sh
+```
+
+The installer runs as the normal user, resolves a stable release tag, verifies
+the downloaded architecture-specific binary against that release's checksum,
+and invokes the built-in configuration transaction. Privilege is requested
+only after the checks pass and only to install the client and credential-free
+network helper. To pin a release, put `LANEWAY_VERSION=vX.Y.Z` immediately
+before `sh` in the pipeline.
+
 The client obtains metadata using TLS 1.3 and the host system's public roots,
 rejects redirects and non-DNS authorities, then prompts on `/dev/tty` with terminal echo
 disabled. `login` stores only the resulting certificate and private keys in a
