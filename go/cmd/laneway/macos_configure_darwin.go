@@ -89,13 +89,20 @@ func runMacUpdate(args []string) error {
 		return err
 	}
 	if fs.NArg() > 1 || (fs.NArg() == 1 && authority != "") {
-		return errors.New("usage: laneway update DOMAIN [--yes]")
+		return errors.New("usage: laneway update [DOMAIN] [--yes]")
 	}
 	if fs.NArg() == 1 {
 		authority = fs.Arg(0)
 	}
 	if authority == "" {
-		return errors.New("usage: laneway update DOMAIN [--yes]")
+		resolved, err := defaultUserProfileAuthority()
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("no saved login; run 'laneway login DOMAIN' or specify DOMAIN")
+		}
+		if err != nil {
+			return err
+		}
+		authority = resolved
 	}
 	if os.Geteuid() != 0 {
 		if _, err := exec.LookPath("sudo"); err != nil {
@@ -137,7 +144,10 @@ func runMacUpdate(args []string) error {
 	if err := process.Run(); err != nil {
 		return fmt.Errorf("install verified macOS update: %w", err)
 	}
-	fmt.Printf("updated from controller-approved artifact sha256=%s\n", artifact.SHA256)
+	if err := macConfigurationStatus(candidate); err != nil {
+		return fmt.Errorf("verify updated macOS client and helper: %w", err)
+	}
+	fmt.Printf("updated client and network helper from controller-approved artifact sha256=%s\n", artifact.SHA256)
 	return nil
 }
 

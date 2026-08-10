@@ -8,12 +8,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestDarwinHelperUsesSupportedUnixDatagrams(t *testing.T) {
-	if got := helperSocketType(); got != unix.SOCK_DGRAM {
-		t.Fatalf("helper socket type = %d, want SOCK_DGRAM", got)
+func TestDarwinHelperUsesSupportedUnixStreams(t *testing.T) {
+	if got := helperSocketType(); got != unix.SOCK_STREAM {
+		t.Fatalf("helper socket type = %d, want SOCK_STREAM", got)
 	}
-	if got := helperSocketProtocol(); got != unix.SOCK_DGRAM {
-		t.Fatalf("helper socket protocol = %d, want SOCK_DGRAM", got)
+	if got := helperSocketProtocol(); got != unix.SOCK_STREAM {
+		t.Fatalf("helper socket protocol = %d, want SOCK_STREAM", got)
 	}
 	fds, err := unix.Socketpair(unix.AF_UNIX, helperSocketType(), 0)
 	if err != nil {
