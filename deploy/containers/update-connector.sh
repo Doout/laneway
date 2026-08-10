@@ -71,8 +71,10 @@ else
   cosign_command=/usr/local/libexec/laneway/cosign-v3.1.3
 fi
 
-latest_url=$(curl --fail --silent --show-error --location --output /dev/null \
-  --write-out '%{url_effective}' "https://github.com/$repository/releases/latest") || \
+latest_url=$(curl --fail --silent --show-error --location \
+  --header 'Cache-Control: no-cache' --header 'Pragma: no-cache' --output /dev/null \
+  --write-out '%{url_effective}' \
+  "https://github.com/$repository/releases/latest?laneway_cache_bust=$(date +%s)") || \
   die "could not discover the latest stable release"
 tag=${latest_url##*/}
 printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || \

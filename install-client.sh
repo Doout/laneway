@@ -26,8 +26,9 @@ esac
 case "$release" in
   latest)
     latest_url=$(curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      --header 'Cache-Control: no-cache' --header 'Pragma: no-cache' \
       --output /dev/null --write-out '%{url_effective}' \
-      "https://github.com/$repository/releases/latest")
+      "https://github.com/$repository/releases/latest?laneway_cache_bust=$(date +%s)")
     release=${latest_url##*/}
     ;;
   v*) ;;

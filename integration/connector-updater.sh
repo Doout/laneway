@@ -31,13 +31,13 @@ url=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) output=$2; shift 2 ;;
-    --write-out) shift 2 ;;
+    --header|--write-out) shift 2 ;;
     --fail|--silent|--show-error|--location) shift ;;
     *) url=$1; shift ;;
   esac
 done
 case "$url" in
-  */releases/latest)
+  */releases/latest\?laneway_cache_bust=*)
     [ "$output" = /dev/null ]
     printf '%s' 'https://github.com/Doout/laneway/releases/tag/v9.8.7'
     ;;
