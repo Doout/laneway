@@ -59,6 +59,9 @@ func TestUserProfileRejectsSymlinkedDirectory(t *testing.T) {
 
 func TestDefaultUserProfileAuthority(t *testing.T) {
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("LANEWAY_PROFILE_DIR", root)
 	if _, err := defaultUserProfileAuthority(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty profile root error = %v", err)
