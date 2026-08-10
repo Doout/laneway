@@ -71,7 +71,9 @@ docker run --rm -v "$volume:/state" "$fixture_image" \
   test ! -e /state/connector/enrollment.token
 docker run --rm -v "$volume:/state" "$fixture_image" sh -eu -c '
   grep -F "userspace = true" /state/connector/connector.toml >/dev/null
-  ! grep -E "output_interface|serve = true|enabled = true" /state/connector/connector.toml >/dev/null
+  grep -F "enabled = true" /state/connector/connector.toml >/dev/null
+  grep -F "listen = \":0\"" /state/connector/connector.toml >/dev/null
+  ! grep -E "output_interface|serve = true" /state/connector/connector.toml >/dev/null
 '
 
 echo "Connector replacement migrates its persistent identity without re-enrollment or TUN"

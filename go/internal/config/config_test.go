@@ -110,7 +110,7 @@ func TestDecodeDirectConnectivityCanBeExplicitlyDisabled(t *testing.T) {
 	}
 }
 
-func TestUserspaceConnectorRejectsPrivilegedDataplanes(t *testing.T) {
+func TestUserspaceConnectorAllowsDirectAndRejectsPrivilegedDataplanes(t *testing.T) {
 	source := validNode + "\n[direct]\nenabled = false\n[connector]\nuserspace = true\n"
 	base, err := Decode(strings.NewReader(source))
 	if err != nil {
@@ -119,12 +119,17 @@ func TestUserspaceConnectorRejectsPrivilegedDataplanes(t *testing.T) {
 	if !base.Connector.Userspace {
 		t.Fatal("userspace Connector setting was ignored")
 	}
+	direct := base
+	direct.Direct.Enabled = true
+	direct.Direct.Listen = ":0"
+	if err := direct.Validate(); err != nil {
+		t.Fatalf("userspace Connector rejected outbound direct NAT traversal: %v", err)
+	}
 	tests := []struct {
 		name string
 		edit func(*Config)
 	}{
 		{"WireGuard", func(c *Config) { c.WireGuard.Enabled = true }},
-		{"direct paths", func(c *Config) { c.Direct.Enabled = true }},
 		{"host routing", func(c *Config) { c.Routing.OutputInterface = "eth0" }},
 		{"route advertisement", func(c *Config) { c.Routing.Advertise = []string{"10.0.0.0/8"} }},
 		{"Exit client", func(c *Config) { c.Exit.Enabled = true }},

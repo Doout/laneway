@@ -76,12 +76,12 @@ func configureConnector(stateDir string) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if cfg.Connector.Userspace {
+	if cfg.Connector.Userspace && cfg.Direct.Enabled {
 		return nil
 	}
-	if cfg.Mode != config.ModeNode || !cfg.Direct.Enabled || cfg.Routing.OutputInterface == "" || !cfg.Routing.NAT ||
+	if !cfg.Connector.Userspace && (cfg.Mode != config.ModeNode || !cfg.Direct.Enabled || cfg.Routing.OutputInterface == "" || !cfg.Routing.NAT ||
 		cfg.Exit.Enabled || !cfg.Exit.Serve || cfg.WireGuard.Enabled || cfg.Controller.Endpoint == "" ||
-		cfg.Controller.QUICEndpoint == "" || cfg.Controller.ServerName == "" {
+		cfg.Controller.QUICEndpoint == "" || cfg.Controller.ServerName == "") {
 		return errors.New("existing configuration is not a recognized legacy Docker Connector; refusing automatic migration")
 	}
 	setup := connectorSetup{
@@ -261,7 +261,8 @@ poll_interval = "30s"
 address = %q
 
 [direct]
-enabled = false
+enabled = true
+listen = ":0"
 
 [connector]
 userspace = true
