@@ -98,6 +98,53 @@ func socketPair(t *testing.T) (*net.UnixConn, *net.UnixConn) {
 	return wrap(fds[0]), wrap(fds[1])
 }
 
+func TestUnixStreamFramingPreservesMessageAndRights(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrap := func(fd int) *net.UnixConn {
+		file := os.NewFile(uintptr(fd), "stream-helper-test")
+		connection, err := net.FileConn(file)
+		file.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return connection.(*net.UnixConn)
+	}
+	client := &unixPacketConn{conn: wrap(fds[0]), stream: true}
+	server := &unixPacketConn{conn: wrap(fds[1]), stream: true}
+	defer client.Close()
+	defer server.Close()
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := client.WritePacket([]byte("packet"), unix.UnixRights(int(file.Fd()))); err != nil {
+		t.Fatal(err)
+	}
+	data := make([]byte, maxMessageSize)
+	oob := make([]byte, unix.CmsgSpace(4))
+	n, oobn, flags, err := server.ReadPacket(data, oob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&(unix.MSG_TRUNC|unix.MSG_CTRUNC) != 0 || string(data[:n]) != "packet" {
+		t.Fatalf("invalid frame payload=%q flags=%d", data[:n], flags)
+	}
+	received, err := rightsFiles(oob[:oobn])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, receivedFile := range received {
+		defer receivedFile.Close()
+	}
+	if len(received) != 1 {
+		t.Fatalf("received %d descriptors", len(received))
+	}
+}
+
 func testService(t *testing.T) (*net.UnixConn, *testTUN, *testRoutes, *exitnode.MemoryRouteManager, *exitnode.MemoryDNSManager, <-chan error) {
 	t.Helper()
 	clientConn, serviceConn := socketPair(t)

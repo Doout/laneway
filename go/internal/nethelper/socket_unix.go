@@ -4,6 +4,7 @@ package nethelper
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,7 +21,10 @@ import (
 	"laneway.dev/laneway/internal/platform"
 )
 
-type unixPacketConn struct{ conn *net.UnixConn }
+type unixPacketConn struct {
+	conn   *net.UnixConn
+	stream bool
+}
 
 const (
 	unixMessageTruncated = unix.MSG_TRUNC
@@ -29,10 +33,59 @@ const (
 )
 
 func (c *unixPacketConn) ReadPacket(data, oob []byte) (int, int, int, error) {
+	if c.stream {
+		var header [4]byte
+		n, oobn, flags, _, err := c.conn.ReadMsgUnix(header[:], oob)
+		if err != nil {
+			return 0, oobn, flags, err
+		}
+		if n == 0 {
+			return 0, oobn, flags, io.EOF
+		}
+		if n < len(header) {
+			if _, err := io.ReadFull(c.conn, header[n:]); err != nil {
+				return 0, oobn, flags, err
+			}
+		}
+		length := int(binary.BigEndian.Uint32(header[:]))
+		if length <= 0 || length > len(data) || length > maxMessageSize {
+			return 0, oobn, flags, errors.New("network helper frame has invalid length")
+		}
+		if _, err := io.ReadFull(c.conn, data[:length]); err != nil {
+			return 0, oobn, flags, err
+		}
+		return length, oobn, flags, nil
+	}
 	n, oobn, flags, _, err := c.conn.ReadMsgUnix(data, oob)
 	return n, oobn, flags, err
 }
 func (c *unixPacketConn) WritePacket(data, oob []byte) error {
+	if c.stream {
+		if len(data) == 0 || len(data) > maxMessageSize {
+			return errors.New("network helper frame has invalid length")
+		}
+		frame := make([]byte, 4+len(data))
+		binary.BigEndian.PutUint32(frame[:4], uint32(len(data)))
+		copy(frame[4:], data)
+		n, oobn, err := c.conn.WriteMsgUnix(frame, oob, nil)
+		if err != nil {
+			return err
+		}
+		if oobn != len(oob) {
+			return io.ErrShortWrite
+		}
+		for n < len(frame) {
+			written, err := c.conn.Write(frame[n:])
+			if err != nil {
+				return err
+			}
+			if written == 0 {
+				return io.ErrShortWrite
+			}
+			n += written
+		}
+		return nil
+	}
 	_, _, err := c.conn.WriteMsgUnix(data, oob, nil)
 	return err
 }
@@ -155,7 +208,7 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 		return nil, cause
 	}
 
-	client := &unixPacketConn{conn: unixConn}
+	client := &unixPacketConn{conn: unixConn, stream: helperSocketProtocol() == unix.SOCK_STREAM}
 	deadline := time.Now().Add(roundTripTimeout)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
@@ -306,7 +359,7 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 		return errors.New("network helper requires an authenticated message-oriented Unix socket peer")
 	}
 
-	packet := &unixPacketConn{conn: conn}
+	packet := &unixPacketConn{conn: conn, stream: socketType == unix.SOCK_STREAM}
 	req, err := readRequest(packet)
 	if err != nil {
 		return err

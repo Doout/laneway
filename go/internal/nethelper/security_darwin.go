@@ -19,11 +19,11 @@ func authenticateHelperPeer(fd int) error {
 	return nil
 }
 
-// Darwin does not implement SOCK_SEQPACKET for AF_UNIX socket pairs. A
-// connected SOCK_DGRAM pair preserves message boundaries and descriptor
-// passing while LOCAL_PEERPID still authenticates the inherited peer.
-func helperSocketType() int     { return unix.SOCK_DGRAM }
-func helperSocketProtocol() int { return unix.SOCK_DGRAM }
+// Darwin does not reliably implement message-oriented AF_UNIX socket pairs.
+// SOCK_STREAM is universally supported; socket_unix adds strict length framing
+// while retaining SCM_RIGHTS and LOCAL_PEERPID authentication.
+func helperSocketType() int     { return unix.SOCK_STREAM }
+func helperSocketProtocol() int { return unix.SOCK_STREAM }
 
 // macOS has no Linux-style capability set. The helper remains a separate,
 // credential-free root process reachable only through its inherited socket;

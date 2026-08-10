@@ -27,3 +27,14 @@ func TestMacOSConnectRejectsExitModeLocally(t *testing.T) {
 		t.Fatalf("runConnect(--exit) error = %v, want unknown flag", err)
 	}
 }
+
+func TestMacOSUpdateDomainIsOptional(t *testing.T) {
+	root := newRootCommand()
+	update, _, err := root.Find([]string{"update"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if update.Use != "update [DOMAIN]" {
+		t.Fatalf("update usage = %q", update.Use)
+	}
+}

@@ -138,10 +138,11 @@ performs read-only preflight first, asks once before invoking `sudo`, stages
 both copies, and verifies that `/usr/local/bin/laneway` and the root-owned
 credential-free helper are byte-identical. `laneway configure --check` changes
 nothing, and `connect` fails before networking if either copy is missing,
-insecure, or mismatched. `laneway update DOMAIN` accepts only the current
-Darwin artifact pinned by that domain's public-Web-PKI bootstrap metadata,
-verifies its authenticated size and SHA-256 before extraction, and invokes the
-same configure transaction only after every unprivileged check succeeds.
+insecure, or mismatched. `laneway update [DOMAIN]` accepts only the current
+Darwin artifact pinned by that domain's public-Web-PKI bootstrap metadata. It
+infers the domain when exactly one saved login exists. The updater verifies the
+artifact's authenticated size and SHA-256 before extraction and invokes the same
+configure transaction only after every unprivileged check succeeds.
 
 Linux login additionally requires its authenticated platform artifact record.
 macOS installation verifies the release checksum before installing a
