@@ -11,13 +11,16 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,6 +173,65 @@ func openPair(t *testing.T, config *Config) sessionPair {
 	}
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 	return sessionPair{server: server, client: client}
+}
+
+func TestHTTPSAndFallbackShareListenerByALPN(t *testing.T) {
+	credentials := newTestCredentials(t)
+	publicTLS := credentials.serverTLS.Clone()
+	publicTLS.ClientAuth = tls.NoClientCert
+	publicTLS.ClientCAs = nil
+	publicTLS.VerifyConnection = nil
+	publicTLS.NextProtos = []string{"http/1.1"}
+	listener, err := ListenWithHTTPS("127.0.0.1:0", credentials.serverTLS, nil, HTTPSOptions{
+		TLSConfig: publicTLS,
+		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path != "/bootstrap" {
+				http.NotFound(writer, request)
+				return
+			}
+			_, _ = io.WriteString(writer, "public")
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan *Session, 1)
+	acceptErrors := make(chan error, 1)
+	go func() {
+		session, acceptErr := listener.Accept(context.Background())
+		if acceptErr != nil {
+			acceptErrors <- acceptErr
+			return
+		}
+		accepted <- session
+	}()
+	transport := &http.Transport{TLSClientConfig: &tls.Config{ //nolint:gosec -- test certificate
+		InsecureSkipVerify: true, MinVersion: tls.VersionTLS13, NextProtos: []string{"http/1.1"},
+	}}
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+	response, err := client.Get("https://" + listener.Addr().String() + "/bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || response.StatusCode != http.StatusOK || strings.TrimSpace(string(body)) != "public" {
+		t.Fatalf("public HTTPS response status=%d body=%q err=%v", response.StatusCode, body, err)
+	}
+	clientSession, err := Dial(context.Background(), listener.Addr().String(), credentials.clientTLS, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientSession.Close()
+	select {
+	case serverSession := <-accepted:
+		defer serverSession.Close()
+	case err := <-acceptErrors:
+		t.Fatal(err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback session was not accepted after public HTTPS")
+	}
 }
 
 func TestPacketReceiveReusesBoundedOwnedBuffer(t *testing.T) {

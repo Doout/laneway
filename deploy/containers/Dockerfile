@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
-RUN mkdir -p /out/controller-state /out/relay-state && chown 65532:65532 /out/controller-state /out/relay-state
+RUN mkdir -p /out/controller-state /out/relay-state /out/relay-public && chown 65532:65532 /out/controller-state /out/relay-state /out/relay-public
 
 FROM scratch
 ARG BINARY=laneway-relay
@@ -23,5 +23,6 @@ COPY --from=build /out/laneway /usr/local/bin/laneway
 COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --from=build --chown=65532:65532 /out/controller-state /var/lib/laneway-controller
 COPY --from=build --chown=65532:65532 /out/relay-state /var/lib/laneway-relay
+COPY --from=build --chown=65532:65532 /out/relay-public /var/lib/laneway-public
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway"]

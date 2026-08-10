@@ -124,7 +124,7 @@ laneway pki relay --ca-cert "$staging/intermediate-chain.crt" --ca-key "$staging
 token=$(laneway id)$(laneway id)
 printf '%s\n' "$token" > "$staging/admin.token"
 
-cat > "$staging/controller.toml" <<'EOF'
+cat > "$staging/controller.toml" <<EOF
 mode = "controller"
 state_dir = "/var/lib/laneway-controller"
 socket_path = "/tmp/controller.sock"
@@ -142,6 +142,12 @@ ca_private_key = "/run/laneway-secrets/intermediate.key"
 issuer_certificate = "/run/laneway-secrets/intermediate-chain.crt"
 admin_token_file = "/run/laneway-secrets/admin.token"
 leaf_validity = "720h"
+
+[bootstrap]
+network_id = "$network_id"
+controller_endpoint = "https://$server_name:${LANEWAY_CONTROLLER_PORT:-8443}"
+controller_quic_endpoint = "$server_name:${LANEWAY_CONTROLLER_PORT:-8443}"
+controller_server_name = "$server_name"
 EOF
 cat > "$staging/relay.toml" <<EOF
 mode = "relay"
@@ -171,6 +177,10 @@ poll_interval = "30s"
 
 [tcp_fallback]
 listen = ":8443"
+
+[public_https]
+server_name = "$server_name"
+cache_dir = "/var/lib/laneway-public"
 EOF
 
 for name in intermediate.key controller.key relay.key admin.token; do chmod 0400 "$staging/$name"; chown 65532:65532 "$staging/$name"; done

@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"golang.org/x/crypto/acme"
+	"golang.org/x/crypto/acme/autocert"
+	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/buildinfo"
 	"laneway.dev/laneway/internal/config"
 	"laneway.dev/laneway/internal/controllerclient"
@@ -60,6 +65,7 @@ func run(path, diagnostics string) error {
 	var authorizer relayservice.Authorizer
 	var packetPolicy relayservice.PacketPolicy
 	var controllerSource relayConfigurationSource
+	var controllerClient *controllerclient.Client
 	var controllerState *controllerRelayState
 	if cfg.Controller.Endpoint == "" {
 		static, err := staticAuthorizer(cfg.Peers)
@@ -107,6 +113,7 @@ func run(path, diagnostics string) error {
 		if err != nil {
 			return err
 		}
+		controllerClient = client
 		controllerSource = client
 		authorizer, packetPolicy = controllerState, controllerState
 	}
@@ -221,7 +228,30 @@ func run(path, diagnostics string) error {
 		fmt.Printf("laneway-relay QUIC listening on %s\n", cfg.Relay.Listen)
 		go func() { serveDone <- service.Serve(runCtx, quicListener) }()
 	} else {
-		tcpListener, listenErr := tcpfallback.Listen(cfg.TCPFallback.Listen, tlsConfig, tcpConfig)
+		var tcpListener *tcpfallback.Listener
+		var listenErr error
+		if cfg.PublicHTTPS.ServerName == "" {
+			tcpListener, listenErr = tcpfallback.Listen(cfg.TCPFallback.Listen, tlsConfig, tcpConfig)
+		} else {
+			if err := os.MkdirAll(cfg.PublicHTTPS.CacheDir, 0o700); err != nil {
+				return fmt.Errorf("create public certificate cache: %w", err)
+			}
+			manager := &autocert.Manager{
+				Prompt: autocert.AcceptTOS, Cache: autocert.DirCache(cfg.PublicHTTPS.CacheDir),
+				HostPolicy: autocert.HostWhitelist(cfg.PublicHTTPS.ServerName),
+			}
+			publicTLS := manager.TLSConfig()
+			publicTLS.MinVersion = tls.VersionTLS13
+			publicTLS.MaxVersion = tls.VersionTLS13
+			// The socket is handed to an already-TLS HTTP/1 server after ALPN
+			// dispatch; keep TLS-ALPN ACME and HTTP/1.1 explicit here.
+			publicTLS.NextProtos = []string{"http/1.1", acme.ALPNProto}
+			limiter := newPublicRateLimiter()
+			tcpListener, listenErr = tcpfallback.ListenWithHTTPS(cfg.TCPFallback.Listen, tlsConfig, tcpConfig, tcpfallback.HTTPSOptions{
+				TLSConfig: publicTLS, Handler: publicBootstrapHandler(controllerClient, limiter),
+				Authenticated: limiter.MarkAuthenticated,
+			})
+		}
 		if listenErr != nil {
 			cancelRun()
 			if updatesDone != nil {
@@ -255,6 +285,35 @@ func run(path, diagnostics string) error {
 	fmt.Printf("laneway-relay stopped sessions=%d forwarded=%d dropped=%d\n",
 		metrics.Sessions, metrics.ForwardedPackets, dropped)
 	return err
+}
+
+func publicBootstrapHandler(client *controllerclient.Client, limiter *publicRateLimiter) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Cache-Control", "no-store")
+		writer.Header().Set("X-Content-Type-Options", "nosniff")
+		writer.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		if !limiter.Allow(request.RemoteAddr) {
+			writer.Header().Set("Retry-After", "1")
+			http.Error(writer, "rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		if request.Method != http.MethodGet || request.URL.Path != bootstrap.WellKnownPath || request.URL.RawQuery != "" {
+			http.NotFound(writer, request)
+			return
+		}
+		if client == nil {
+			http.Error(writer, "bootstrap metadata temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		contents, err := client.BootstrapMetadata(request.Context())
+		if err != nil {
+			http.Error(writer, "bootstrap metadata temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write(contents)
+	})
 }
 
 func staticAuthorizer(peers []config.AuthorizedPeer) (relayservice.StaticAuthorizer, error) {

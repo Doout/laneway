@@ -142,6 +142,14 @@ enrollment for tests or intentionally short-lived egress capacity.
 - public DNS for the control host
 - inbound TCP+UDP 8443, UDP 4433, and TCP 443
 
+TCP 443 serves both relay fallback and the public bootstrap document by TLS
+ALPN. The relay obtains and renews the public certificate automatically with
+ACME TLS-ALPN validation and stores it in the persistent
+`laneway-relay-public-certs` volume. No additional port or manually copied
+certificate is required. The discovery handler is rate-limited globally and
+by source network; an IP is temporarily promoted only after authenticated
+Laneway mutual TLS succeeds.
+
 ## Separate-host preparation
 
 For the strongest offline-root boundary, run the signed preparation flow on a

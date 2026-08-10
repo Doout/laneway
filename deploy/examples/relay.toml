@@ -26,6 +26,12 @@ idle_timeout = "45s"
 keepalive_period = "15s"
 queue_depth = 128
 
+# Share this TCP listener with public bootstrap HTTPS. ACME issuance and
+# renewal are automatic; the cache directory must be persistent and private.
+[public_https]
+server_name = "lane.example.com"
+cache_dir = "/var/lib/laneway-public"
+
 [[peers]]
 network_id = "000102030405060708090a0b0c0d0e0f"
 node_id = "101112131415161718191a1b1c1d1e1f"

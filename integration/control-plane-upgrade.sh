@@ -9,10 +9,18 @@ compose_source=$package_dir/deploy/compose
 deployment=$test_root/laneway
 fake_bin=$test_root/bin
 log=$test_root/calls.log
-mkdir -p "$compose_source" "$deployment/generated/lifecycle" "$fake_bin"
+mkdir -p "$compose_source" "$deployment/generated/lifecycle" "$deployment/generated/config" "$fake_bin"
 cp "$repo_dir/deploy/compose/upgrade-control-plane.sh" "$repo_dir/deploy/compose/laneway-control" "$compose_source/"
+cp "$repo_dir/deploy/compose/compose.yaml" "$compose_source/compose.yaml"
 printf '0.2.15\n' > "$package_dir/VERSION"
 : > "$deployment/compose.yaml"
+cat > "$deployment/generated/config/controller.toml" <<'EOF'
+mode = "controller"
+EOF
+cat > "$deployment/generated/config/relay.toml" <<'EOF'
+mode = "relay"
+EOF
+chmod 0444 "$deployment/generated/config/controller.toml" "$deployment/generated/config/relay.toml"
 : > "$log"
 
 cat > "$deployment/.env" <<'EOF'
@@ -59,6 +67,12 @@ EOF
 cat > "$fake_bin/curl" <<'EOF'
 #!/bin/sh
 set -eu
+case " $* " in
+  *" /.well-known/laneway/bootstrap.json "*|*"https://lane.example.test/.well-known/laneway/bootstrap.json"*)
+    printf '%s\n' '{"network_id":"000102030405060708090a0b0c0d0e0f"}'
+    exit 0
+    ;;
+esac
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -o ]; then output=$2; shift 2; continue; fi
   shift
