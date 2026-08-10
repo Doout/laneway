@@ -69,9 +69,11 @@ func (f remoteFlags) client() (*controllerclient.Client, error) {
 
 func runController(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: laneway controller <network|enrollment-token|route|acl|node|certificate|relay|audit> ...")
+		return errors.New("usage: laneway controller <overview|network|enrollment-token|route|acl|node|certificate|relay|audit> ...")
 	}
 	switch args[0] {
+	case "overview":
+		return runControllerOverview(args[1:])
 	case "network":
 		return runControllerNetwork(args[1:])
 	case "enrollment-token":
@@ -377,6 +379,7 @@ func runControllerEnrollmentToken(args []string) error {
 	class := fs.String("class", "durable", "enrollment class: durable, ephemeral, or remembered")
 	sessionLifetime := fs.Duration("session-lifetime", 0, "ephemeral identity lifetime (default 8h for --class ephemeral)")
 	requestedName := fs.String("requested-name", "", "bind enrollment to this exact node name")
+	connector := fs.Bool("connector", false, "bind Connector subnet-forwarding capability to this invite")
 	exitNode := fs.Bool("exit-node", false, "bind Exit Node capability and an approved IPv4 default route to this invite")
 	if err := parseNoArgs(fs, args[1:]); err != nil {
 		return err
@@ -397,6 +400,9 @@ func runControllerEnrollmentToken(args []string) error {
 	if (*class == "ephemeral" && *sessionLifetime <= 0) || (*class != "ephemeral" && *sessionLifetime != 0) {
 		return errors.New("--session-lifetime is required only for ephemeral enrollment")
 	}
+	if *connector && *exitNode {
+		return errors.New("choose either --connector or --exit-node")
+	}
 	client, err := remote.client()
 	if err != nil {
 		return err
@@ -404,7 +410,9 @@ func runControllerEnrollmentToken(args []string) error {
 	ctx, cancel := commandContext()
 	defer cancel()
 	var enabledCapabilities uint64
-	if *exitNode {
+	if *connector {
+		enabledCapabilities = uint64(protocol.CapabilitySubnetRouterV1)
+	} else if *exitNode {
 		enabledCapabilities = uint64(protocol.CapabilityExitNodeV1)
 	}
 	result, err := client.IssueEnrollmentTokenWithOptions(ctx, networkID, *label, time.Now().UTC().Add(*expiresIn), controllerclient.EnrollmentTokenOptions{

@@ -19,8 +19,10 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
+	"laneway.dev/laneway/internal/protocol"
 	"laneway.dev/laneway/internal/wireguard"
 )
 
@@ -37,6 +39,7 @@ func TestControllerCommandValidation(t *testing.T) {
 		"token bad expiry":              {"enrollment-token", "issue", "--network-id", validNetwork, "--label", "x", "--expires-in", "0s"},
 		"token bad class":               {"enrollment-token", "issue", "--network-id", validNetwork, "--label", "x", "--class", "root"},
 		"durable token with lease":      {"enrollment-token", "issue", "--network-id", validNetwork, "--label", "x", "--session-lifetime", "1h"},
+		"connector and exit token":      {"enrollment-token", "issue", "--network-id", validNetwork, "--label", "x", "--connector", "--exit-node"},
 		"route bad kind":                {"route", "advertise", "--prefix", "192.0.2.0/24", "--kind", "overlay"},
 		"route bad ID":                  {"route", "withdraw", "--route-id", "bad"},
 		"route bad limit":               {"route", "list", "--network-id", validNetwork, "--limit", "0"},
@@ -57,6 +60,33 @@ func TestControllerCommandValidation(t *testing.T) {
 				t.Fatal("invalid command accepted")
 			}
 		})
+	}
+}
+
+func TestBuildControllerOverviewJoinsActiveNodesAndForwarding(t *testing.T) {
+	now := time.Unix(2_000, 0)
+	revoked, expired, routeExpired := int64(1_900), int64(2_000), int64(1_999)
+	nodes := []controllerclient.Node{
+		{NodeID: "connector-id", Name: "ibmcloud", EnrollmentClass: "durable", IPv4Address: "100.96.0.12", EnabledCapabilities: uint64(protocol.CapabilitySubnetRouterV1)},
+		{NodeID: "user-id", Name: "laptop", EnrollmentClass: "remembered", IPv4Address: "100.96.0.20"},
+		{NodeID: "revoked-id", Name: "old", EnrollmentClass: "durable", RevokedAtUnixSeconds: &revoked},
+		{NodeID: "expired-id", Name: "temporary", EnrollmentClass: "ephemeral", LeaseExpiresAtUnixSeconds: &expired},
+	}
+	routes := []controllerclient.Route{
+		{NodeID: "connector-id", Prefix: "10.240.64.6/32", Kind: "subnet", Mode: "nat", State: "approved"},
+		{NodeID: "connector-id", Prefix: "10.240.0.0/16", Kind: "subnet", Mode: "routed", State: "withdrawn"},
+		{NodeID: "connector-id", Prefix: "10.250.0.0/16", Kind: "subnet", Mode: "nat", State: "approved", ValidUntilUnixSeconds: &routeExpired},
+	}
+
+	overview := buildControllerOverview("network-id", nodes, routes, now)
+	if len(overview.Nodes) != 2 {
+		t.Fatalf("active overview nodes = %#v", overview.Nodes)
+	}
+	if got := overview.Nodes[0]; got.Name != "ibmcloud" || got.Role != "connector" || len(got.Forwarding) != 1 || got.Forwarding[0].Prefix != "10.240.64.6/32" {
+		t.Fatalf("connector overview = %#v", got)
+	}
+	if got := overview.Nodes[1]; got.Name != "laptop" || got.Role != "user" || len(got.Forwarding) != 0 {
+		t.Fatalf("user overview = %#v", got)
 	}
 }
 

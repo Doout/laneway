@@ -36,20 +36,38 @@ func newRootCommand() *cobra.Command {
 		},
 	}
 	root.CompletionOptions.HiddenDefaultCmd = true
+	root.SetHelpCommandGroupID("utility")
+	root.AddGroup(
+		&cobra.Group{ID: "client", Title: "Client Commands:"},
+		&cobra.Group{ID: "host", Title: "Host Commands:"},
+		&cobra.Group{ID: "control", Title: "Control Plane Commands:"},
+		&cobra.Group{ID: "utility", Title: "Other Commands:"},
+	)
 
-	root.AddCommand(command("version", "Print the Laneway build version", func([]string) error {
+	version := command("version", "Print the Laneway build version", func([]string) error {
 		fmt.Fprintln(os.Stdout, buildinfo.Version)
 		return nil
-	}))
-	root.AddCommand(
+	})
+	version.GroupID = "utility"
+	root.AddCommand(version)
+	for _, client := range []*cobra.Command{
 		command("login DOMAIN", "Save a renewable user login", runLogin),
 		command("connect [DOMAIN]", "Connect using a saved login", runConnect),
 		command("logout DOMAIN", "Remove a saved user login", runLogout),
-	)
-	root.AddCommand(group("bootstrap", "Inspect bootstrap metadata or download a verified release", runBootstrap,
+	} {
+		client.GroupID = "client"
+		root.AddCommand(client)
+	}
+
+	// These commands are implementation and recovery surfaces used by the
+	// installers, control-plane wrapper, and advanced deployments. Keep their
+	// stable spellings without presenting them as everyday product workflows.
+	bootstrap := group("bootstrap", "Inspect bootstrap metadata or download a verified release", runBootstrap,
 		forwarded("inspect DOMAIN", "Inspect public bootstrap metadata", "inspect", runBootstrap),
 		forwarded("download DOMAIN", "Download a verified release artifact", "download", runBootstrap),
-	))
+	)
+	bootstrap.Hidden = true
+	root.AddCommand(bootstrap)
 	helper := command("_network-helper", "Internal privileged network helper", runNetworkHelper)
 	helper.Hidden = true
 	root.AddCommand(helper)
@@ -110,6 +128,7 @@ func routeCommand(use, summary string) *cobra.Command {
 func controllerCommand() *cobra.Command {
 	controller := group("controller", "Administer controller resources", runController)
 	controller.AddCommand(
+		command("overview", "Show active nodes and their approved forwarding", runControllerOverview),
 		resourceCommand("network", "Manage networks", runControllerNetwork, "create", "get", "list"),
 		resourceCommand("enrollment-token", "Issue enrollment tokens", runControllerEnrollmentToken, "issue"),
 		routeCommand("route", "Manage controller routes"),
@@ -155,7 +174,7 @@ func controlCommand() *cobra.Command {
 		{"user-token", "Create a one-time local-user login token"},
 		{"invite", "Create a single-use enrollment command"},
 		{"route", "Assign an approved destination to a Connector"},
-		{"status", "Show control-plane service health"},
+		{"status", "Show service health, active enrollments, and forwarding"},
 		{"update", "Update to the latest stable release"},
 		{"production-check", "Run fail-closed production checks"},
 		{"backup", "Create an encrypted recovery bundle"},

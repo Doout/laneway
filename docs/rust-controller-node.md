@@ -17,11 +17,11 @@ daemon on `socket_path` (the deployment default is
 parsing the Rust TOML schema:
 
 ```sh
-laneway status --socket /run/laneway/lanewayd.sock
-laneway peers --socket /run/laneway/lanewayd.sock
-laneway routes --socket /run/laneway/lanewayd.sock
-laneway exit use NODE_ID --socket /run/laneway/lanewayd.sock
-laneway exit disable --socket /run/laneway/lanewayd.sock
+laneway node status --socket /run/laneway/lanewayd.sock
+laneway node peers --socket /run/laneway/lanewayd.sock
+laneway node routes --socket /run/laneway/lanewayd.sock
+laneway node exit use NODE_ID --socket /run/laneway/lanewayd.sock
+laneway node exit disable --socket /run/laneway/lanewayd.sock
 ```
 
 The socket is created mode `0600`; a live socket is never replaced and cleanup

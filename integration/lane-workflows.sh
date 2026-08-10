@@ -61,6 +61,7 @@ printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
 case " $* " in
   *" controller enrollment-token issue "*) printf '%s\n' '{' '  "token_id": "000102030405060708090a0b0c0d0e0f",' '  "enrollment_token": "single_use_secret",' '  "expires_at_unix_seconds": 2000000000' '}' ;;
+  *" controller overview "*) printf '%s\n' '' 'Active enrollment inventory (11111111111111111111111111111111)' 'NAME       ROLE       OVERLAY       FORWARDING' 'ibmcloud   connector  100.96.0.12  10.240.64.6/32 (nat)' ;;
 esac
 EOF
 cat > "$fake_bin/getent" <<'EOF'
@@ -147,6 +148,8 @@ printf '%s\n' "$status_output" | grep -F 'controller=healthy' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'relay=healthy' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'relay-limiter=configured rate_bits_per_second=2000000 burst_bytes=65536' >/dev/null
 printf '%s\n' "$status_output" | grep -F 'carrier=direct-wireguard limiter=healthy' >/dev/null
+printf '%s\n' "$status_output" | grep -F 'Active enrollment inventory' >/dev/null
+printf '%s\n' "$status_output" | grep -F 'ibmcloud   connector' >/dev/null
 grep -F '<ps>' "$log" >/dev/null
 LANE_TEST_HEALTH=unhealthy; export LANE_TEST_HEALTH
 if "$compose_dir/laneway-control" status >/dev/null 2>&1; then echo "status accepted an unhealthy required service" >&2; exit 1; fi
@@ -154,13 +157,13 @@ LANE_TEST_HEALTH=healthy; export LANE_TEST_HEALTH
 
 mkdir -p "$compose_dir/generated/recovery"
 printf 'encrypted backup\n' > "$compose_dir/generated/recovery/initial.age"
-if sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+if sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
   LANE_TEST_COSIGN_FAIL=1 "$compose_dir/laneway-control" production-check >/dev/null 2>&1; then
   echo "production-check accepted failed image signatures" >&2
   exit 1
 fi
 test ! -e "$compose_dir/generated/lifecycle/production-verified"
-sudo env PATH="$PATH" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
   "$compose_dir/laneway-control" production-check >/dev/null
 test "$(stat -c %a "$compose_dir/generated/lifecycle/production-verified")" = 600
 sudo grep -Fx 'profile=quick' "$compose_dir/generated/lifecycle/production-verified" >/dev/null
@@ -217,7 +220,7 @@ if grep -E -- '--cap-add|--device|--sysctl|--publish|LANEWAY_(ENROLLMENT|NETWORK
   echo "userspace Connector command exposed privileged networking or expanded bootstrap metadata" >&2
   exit 1
 fi
-grep -F '<--exit-node>' "$log" >/dev/null
+grep -F '<--connector>' "$log" >/dev/null
 grep -F '<--requested-name> <egress-one>' "$log" >/dev/null
 
 identity=$test_dir/identity.txt

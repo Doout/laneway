@@ -257,7 +257,7 @@ hardened unit, a durable Node invite is the only secret input required:
 ```sh
 install -m 0600 enrollment-code.txt ./laneway.code
 sudo laneway node install lane.example.com --token-file ./laneway.code
-sudo laneway status
+sudo laneway node status
 ```
 
 The command verifies the root-owned package files and service account before it
@@ -276,7 +276,7 @@ invite was consumed by that point, so retry with a newly issued invite.
 
 Package upgrades replace the binary and unit but preserve `/etc/laneway` and
 `/var/lib/laneway`. Confirm `systemctl is-enabled lanewayd`, restart the unit,
-and check `laneway status` after an upgrade. Reboot behavior follows the same
+and check `laneway node status` after an upgrade. Reboot behavior follows the same
 enabled unit. Rotate a managed credential with `sudo laneway node renew`; it
 stages a locally generated key, stops the service for pair promotion, verifies
 the restarted service remains active, and restores the previous pair if the
@@ -390,9 +390,9 @@ relay `server_name` remains the shared WebPKI/SNI name for v1 discovery.
 For a node, use the protected local Unix-socket API through the CLI:
 
 ```sh
-laneway status --config /etc/laneway/laneway.toml
-laneway peers --config /etc/laneway/laneway.toml
-laneway routes --config /etc/laneway/laneway.toml
+laneway node status --config /etc/laneway/laneway.toml
+laneway node peers --config /etc/laneway/laneway.toml
+laneway node routes --config /etc/laneway/laneway.toml
 ```
 
 All local-management commands also accept `--socket PATH`. The explicit socket
@@ -459,9 +459,9 @@ The controller exports its up indicator and bounded request, success,
 malformed-input, authorization-failure, and internal-failure counters without
 identity-derived labels.
 Diagnostics are disabled when the flag is omitted; node counters also remain
-available through `laneway status`.
+available through `laneway node status`.
 
-`laneway status` is the concise readiness view for either node
+`laneway node status` is the concise readiness view for either node
 implementation. It reports the actor, overlay addresses, selected route
 prefixes, active carrier, controller certificate and ephemeral identity-lease
 deadlines, and Exit selection. A serving Exit Node also reports forwarding/NAT
@@ -469,7 +469,7 @@ readiness, forwarded packets, and cleanup failures. The JSON form uses the same
 fields and is preferred for automation:
 
 ```sh
-laneway status -json
+laneway node status -json
 ```
 
 Foreground `laneway connect` sessions identify `actor=user`, their owned
@@ -614,7 +614,7 @@ journalctl -u laneway-relay --since '30 minutes ago' --no-pager
 
 ### Overlay packets connect but do not pass
 
-- Compare `laneway routes` with the approved controller snapshot and confirm
+- Compare `laneway node routes` with the approved controller snapshot and confirm
   the destination prefix has exactly one expected next hop.
 - Check packet/drop counters on both endpoint and relay. Source/destination
   validation intentionally drops spoofed packets and unapproved prefixes.
@@ -633,9 +633,9 @@ journalctl -u laneway-relay --since '30 minutes ago' --no-pager
 
 ### Exit selection fails or leaks are suspected
 
-- Exit use is explicit: confirm `laneway status` shows the intended authorized
+- Exit use is explicit: confirm `laneway node status` shows the intended authorized
   exit node and expected failure mode.
-- `laneway exit use` and `laneway exit disable` durably record the local choice
+- `laneway node exit use` and `laneway node exit disable` durably record the local choice
   in `/var/lib/laneway/exit-intent-v1.json` (or the configured `state_dir`) with
   mode `0600`. A persisted CLI choice takes precedence over `[exit].enabled`,
   `selected_node_id`, and `failure_mode` in TOML; static configuration is only
@@ -660,7 +660,7 @@ journalctl -u laneway-relay --since '30 minutes ago' --no-pager
   `forwarding.dns_state_file` preserves the exact predecessor across a crash.
   Do not edit or delete a journal to bypass an ownership error: inspect current
   resolver state and reconcile external changes deliberately.
-- Disable exit routing through `laneway exit disable`; verify native routes and
+- Disable exit routing through `laneway node exit disable`; verify native routes and
   DNS are restored before stopping investigation.
 
 ### Controller-backed configuration stops updating

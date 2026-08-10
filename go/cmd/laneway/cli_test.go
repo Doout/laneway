@@ -26,6 +26,28 @@ func TestRootHelpDoesNotLoadNodeConfiguration(t *testing.T) {
 	}
 }
 
+func TestPublicCommandTreeGroupsWorkflows(t *testing.T) {
+	root := newRootCommand()
+	for _, name := range []string{"connect", "login", "logout", "node", "control", "version"} {
+		command, _, err := root.Find([]string{name})
+		if err != nil || command.Hidden {
+			t.Fatalf("public command %q: hidden=%t error=%v", name, command != nil && command.Hidden, err)
+		}
+	}
+	for _, name := range []string{"bootstrap", "config", "connector", "controller", "exit", "id", "invite", "join", "pki", "renew", "route", "status", "peers", "routes", "up"} {
+		command, _, err := root.Find([]string{name})
+		if err != nil || !command.Hidden {
+			t.Fatalf("compatibility command %q: hidden=%t error=%v", name, command != nil && command.Hidden, err)
+		}
+	}
+	for _, name := range []string{"status", "peers", "routes", "up", "exit", "route"} {
+		command, _, err := root.Find([]string{"node", name})
+		if err != nil || command.Hidden {
+			t.Fatalf("node command %q: hidden=%t error=%v", name, command != nil && command.Hidden, err)
+		}
+	}
+}
+
 func TestControlCommandIsIndependentOfWorkingDirectory(t *testing.T) {
 	directory := t.TempDir()
 	operator := filepath.Join(directory, "laneway-control")
