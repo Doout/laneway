@@ -14,7 +14,7 @@ destination=${LANEWAY_DEPLOY_DIR:-/opt/laneway}
 case "$destination" in /*) ;; *) die "LANEWAY_DEPLOY_DIR must be absolute" ;; esac
 [ "$destination" != / ] || die "deployment directory cannot be /"
 
-for command in awk curl docker find grep install ln mktemp mv readlink sed sleep wc; do
+for command in awk curl docker find grep install ln mktemp mv readlink sed sha256sum sleep wc; do
   command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
 done
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
@@ -23,14 +23,6 @@ for path in "$destination/.env" "$destination/compose.yaml"; do
     die "existing deployment file is missing or unsafe: $path"
   fi
 done
-artifacts_file=${LANEWAY_BOOTSTRAP_ARTIFACTS_FILE:-}
-if [ -z "$artifacts_file" ] || [ ! -f "$artifacts_file" ] || [ -L "$artifacts_file" ]; then
-  die "signed bootstrap artifact manifest is missing or unsafe"
-fi
-if [ "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$artifacts_file")" -ne 4 ]; then
-  die "signed bootstrap artifact manifest must contain four platform artifacts"
-fi
-
 package_version=
 [ -f "$source_dir/../../VERSION" ] && [ ! -L "$source_dir/../../VERSION" ] && \
   package_version=$(sed -n '1p' "$source_dir/../../VERSION")
@@ -45,6 +37,34 @@ cleanup() {
   [ ! -e "$work_dir" ] || find "$work_dir" -depth -delete
 }
 trap cleanup EXIT HUP INT TERM
+artifacts_file=${LANEWAY_BOOTSTRAP_ARTIFACTS_FILE:-}
+if [ -z "$artifacts_file" ] || [ ! -f "$artifacts_file" ] || [ -L "$artifacts_file" ]; then
+  # Compatibility path for an older laneway-control updater. It has already
+  # installed this verified package, but cannot pass the manifest introduced
+  # with it, so independently authenticate the release metadata here.
+  artifacts_file=$work_dir/bootstrap-artifacts.toml
+  curl --fail --location --silent --show-error "$base_url/bootstrap-artifacts.toml" -o "$artifacts_file" || \
+    die "could not download the bootstrap artifact manifest"
+  curl --fail --location --silent --show-error "$base_url/checksums.txt" -o "$work_dir/checksums.txt" || \
+    die "could not download release checksums"
+  curl --fail --location --silent --show-error "$base_url/checksums.sigstore.json" -o "$work_dir/checksums.sigstore.json" || \
+    die "could not download the release signature bundle"
+  cosign_command=${LANEWAY_COSIGN_BIN:-/usr/local/libexec/laneway/cosign-v3.1.3}
+  command -v "$cosign_command" >/dev/null 2>&1 || die "a compatible Cosign verifier is required"
+  "$cosign_command" verify-blob --bundle "$work_dir/checksums.sigstore.json" \
+    --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$tag" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$work_dir/checksums.txt" >/dev/null 2>&1 || die "release checksum signature verification failed"
+  (
+    cd "$work_dir"
+    grep '  bootstrap-artifacts.toml$' checksums.txt > bootstrap-artifacts-checksum.txt
+    [ "$(wc -l < bootstrap-artifacts-checksum.txt)" -eq 1 ]
+    sha256sum -c bootstrap-artifacts-checksum.txt >/dev/null
+  ) || die "bootstrap artifact manifest checksum verification failed"
+fi
+if [ "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$artifacts_file")" -ne 4 ]; then
+  die "signed bootstrap artifact manifest must contain four platform artifacts"
+fi
 curl --fail --location --silent --show-error "$base_url/image-digests.txt" -o "$work_dir/image-digests.txt"
 
 image_digest() {
@@ -163,8 +183,9 @@ install -m 0644 "$source_dir/compose.yaml" "$migration_dir/compose.yaml"
 install -m 0444 "$work_dir/controller.toml" "$migration_dir/controller.toml"
 install -m 0444 "$work_dir/relay.toml" "$migration_dir/relay.toml"
 
-echo "Upgrading Laneway control plane from v$current_version to $tag."
-echo "Deployment identity, PKI, state, ports, firewall, and host networking are unchanged."
+printf '\nApplying Laneway control-plane release\n'
+printf '  Version: v%s -> %s\n' "$current_version" "$tag"
+printf '  Network identity, PKI, state, ports, firewall, and host networking remain unchanged.\n\n'
 if ! (cd "$destination" && ./laneway-control upgrade "$candidate" "$migration_dir"); then
   die "upgrade failed; restoring the previous deployment files and containers"
 fi
@@ -191,6 +212,6 @@ for name in compose.yaml validate.sh preflight.sh recovery.sh bootstrap.sh READM
     *) install -m 0644 -o 0 -g 0 "$source_dir/$name" "$destination/$name" ;;
   esac
 done
-echo "Laneway control plane upgraded to $tag."
-echo "Public HTTPS certificates for $server_name are issued and renewed automatically on TCP 443."
-echo "Run: sudo laneway-control status"
+printf '\nLaneway control plane is now on %s\n' "$tag"
+printf '  Public HTTPS: automatic certificate management on TCP 443\n'
+printf '  Verify:       sudo laneway-control status\n'

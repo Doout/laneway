@@ -100,6 +100,11 @@ url = "https://github.com/Doout/laneway/releases/download/v0.2.15/laneway_darwin
 sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
 size_bytes = 1
 EOF
+(
+  cd "$test_root"
+  sha256sum bootstrap-artifacts.toml > checksums.txt
+)
+: > "$test_root/checksums.sigstore.json"
 cat > "$fake_bin/curl" <<'EOF'
 #!/bin/sh
 set -eu
@@ -111,9 +116,15 @@ case " $* " in
 esac
 while [ "$#" -gt 0 ]; do
   if [ "$1" = -o ]; then output=$2; shift 2; continue; fi
+  url=$1
   shift
 done
-cp "$LANEWAY_TEST_DIGESTS" "$output"
+case "${url##*/}" in
+  bootstrap-artifacts.toml) cp "$LANEWAY_TEST_ARTIFACTS" "$output" ;;
+  checksums.txt) cp "$LANEWAY_TEST_CHECKSUMS" "$output" ;;
+  checksums.sigstore.json) cp "$LANEWAY_TEST_SIGNATURE" "$output" ;;
+  *) cp "$LANEWAY_TEST_DIGESTS" "$output" ;;
+esac
 EOF
 cat > "$fake_bin/docker" <<'EOF'
 #!/bin/sh
@@ -142,7 +153,9 @@ env PATH="$fake_bin:$PATH" \
   LANEWAY_CONTROL_COMMAND="$system_command" \
   LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.2.15 \
   LANEWAY_COSIGN_BIN="$fake_bin/cosign" \
-  LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$test_root/bootstrap-artifacts.toml" \
+  LANEWAY_TEST_ARTIFACTS="$test_root/bootstrap-artifacts.toml" \
+  LANEWAY_TEST_CHECKSUMS="$test_root/checksums.txt" \
+  LANEWAY_TEST_SIGNATURE="$test_root/checksums.sigstore.json" \
   LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
   LANEWAY_TEST_LOG="$log" \
   "$compose_source/upgrade-control-plane.sh" > "$test_root/output"
@@ -158,7 +171,9 @@ test "$(readlink "$system_command")" = "$deployment/laneway-control"
 grep -F 'recovery <backup> <pre-upgrade-' "$log" >/dev/null
 grep -F 'docker <compose>' "$log" >/dev/null
 grep -F 'cosign <verify>' "$log" >/dev/null
-grep -F 'host networking are unchanged' "$test_root/output" >/dev/null
+grep -F 'host networking remain unchanged' "$test_root/output" >/dev/null
+grep -F '✓ Verify signed container images' "$test_root/output" >/dev/null
+grep -F '✓ Start controller and relay' "$test_root/output" >/dev/null
 grep -Fx '[bootstrap]' "$deployment/generated/config/controller.toml" >/dev/null
 test "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$deployment/generated/config/controller.toml")" -eq 4
 if grep -F 'downloads.example.test/old.tar.gz' "$deployment/generated/config/controller.toml" >/dev/null; then

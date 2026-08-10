@@ -35,6 +35,23 @@ EOF
 }
 die() { echo "laneway-control: $*" >&2; exit 1; }
 
+run_step() {
+  step_label=$1; shift
+  install -d -m 0700 "$state_dir"
+  step_log=$(mktemp "$state_dir/.operation-step.XXXXXX") || die "could not create operation log"
+  if "$@" > "$step_log" 2>&1; then
+    find "$step_log" -maxdepth 0 -delete
+    printf '  ✓ %s\n' "$step_label"
+    return 0
+  else
+    step_status=$?
+  fi
+  printf '  ✗ %s\n' "$step_label" >&2
+  sed 's/^/      /' "$step_log" >&2
+  find "$step_log" -maxdepth 0 -delete
+  return "$step_status"
+}
+
 release_lock() {
   [ "$lock_held" = false ] || [ ! -d "$lock_dir" ] || find "$lock_dir" -maxdepth 0 -delete 2>/dev/null || true
   lock_held=false
@@ -330,7 +347,7 @@ run_user_token() {
 run_update() {
   [ "$#" -eq 0 ] || die "update accepts no arguments"
   [ "$(id -u)" -eq 0 ] || die "update must run as root"
-  for required_command in awk curl docker find grep mktemp sed sha256sum tar uname wc; do
+  for required_command in awk curl docker find grep install mktemp sed sha256sum tar uname wc; do
     command -v "$required_command" >/dev/null 2>&1 || die "update requires $required_command"
   done
   docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
@@ -384,7 +401,10 @@ run_update() {
   trap 'exit 143' TERM
   asset=laneway_linux_${architecture}.tar.gz
   release_url=${LANEWAY_RELEASE_BASE_URL:-https://github.com/$repository/releases/download/$latest_tag}
-  for release_file in "$asset" checksums.txt checksums.sigstore.json; do
+  printf '\nLaneway control-plane update\n'
+  printf '  Deployment: %s\n' "$base_dir"
+  printf '  Version:    v%s -> %s\n\n' "$current_version" "$latest_tag"
+  for release_file in "$asset" bootstrap-artifacts.toml checksums.txt checksums.sigstore.json; do
     curl --fail --location --silent --show-error "$release_url/$release_file" \
       -o "$update_dir/$release_file" || die "could not download $release_file for $latest_tag"
   done
@@ -392,14 +412,17 @@ run_update() {
   "$cosign_command" verify-blob --bundle "$update_dir/checksums.sigstore.json" \
     --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$latest_tag" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-    "$update_dir/checksums.txt" >/dev/null || die "release checksum signature verification failed"
+    "$update_dir/checksums.txt" >/dev/null 2>&1 || die "release checksum signature verification failed"
   (
     cd "$update_dir"
-    grep "  $asset\$" checksums.txt > selected-checksum.txt
-    [ "$(wc -l < selected-checksum.txt)" -eq 1 ]
-    sha256sum -c selected-checksum.txt
+    grep -E "  (${asset}|bootstrap-artifacts\.toml)\$" checksums.txt > selected-checksums.txt
+    [ "$(wc -l < selected-checksums.txt)" -eq 2 ]
+    sha256sum -c selected-checksums.txt >/dev/null
     tar -xzf "$asset"
   ) || die "release archive verification or extraction failed"
+  [ "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$update_dir/bootstrap-artifacts.toml")" -eq 4 ] || \
+    die "signed bootstrap artifact manifest must contain four platform artifacts"
+  printf '  ✓ Download and verify signed release\n'
   package_dir=$update_dir/laneway
   if [ ! -f "$package_dir/VERSION" ] || [ -L "$package_dir/VERSION" ] || \
     [ "$(sed -n '1p' "$package_dir/VERSION")" != "$latest_version" ]; then
@@ -411,15 +434,17 @@ run_update() {
     die "verified package is missing the Docker Compose updater"
   fi
 
-  echo "laneway-control: detected Docker Compose deployment at $base_dir"
-  echo "laneway-control: updating from v$current_version to $latest_tag"
   acquire_lock
   trap 'release_lock; cleanup_update' EXIT
-  env PREFIX=/usr/local sh "$package_dir/install.sh"
+  run_step "Install control-plane tools" env PREFIX=/usr/local sh "$package_dir/install.sh" || \
+    die "could not install the verified release package"
+  bootstrap_manifest=$state_dir/bootstrap-artifacts-$latest_version.toml
+  install -m 0600 -o 0 -g 0 "$update_dir/bootstrap-artifacts.toml" "$bootstrap_manifest"
   cleanup_update
   release_lock
   trap - EXIT HUP INT TERM
   exec env LANEWAY_DEPLOY_DIR="$base_dir" LANEWAY_COSIGN_BIN="$cosign_command" \
+    LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$bootstrap_manifest" \
     sh /usr/local/share/laneway/deploy/compose/upgrade-control-plane.sh
 }
 
@@ -447,8 +472,11 @@ activate_release() {
       fi
     done
   fi
-  validate_release_env "$candidate"; verify_release_images "$candidate"; compose_with_env "$candidate" pull
-  backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).age"; backup_recovery "$backup_name"
+  run_step "Validate release configuration" validate_release_env "$candidate" || die "$operation configuration validation failed"
+  run_step "Verify signed container images" verify_release_images "$candidate" || die "$operation image verification failed"
+  run_step "Pull release images" compose_with_env "$candidate" pull || die "$operation image pull failed"
+  backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).age"
+  run_step "Create encrypted recovery backup" backup_recovery "$backup_name" || die "$operation recovery backup failed"
   if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
     if [ ! -d "$state_dir" ] || [ -L "$state_dir" ]; then
       die "generated/lifecycle must be a real directory"
@@ -468,9 +496,9 @@ activate_release() {
   install -m 0444 "$base_dir/generated/config/relay.toml" "$current_files/relay.toml"
   exit_was_running=false
   [ -z "$(compose --profile exit-node ps --status running -q exit-node)" ] || exit_was_running=true
-  if ! compose --profile exit-node stop exit-node relay controller; then
-    compose up -d --wait controller relay || true
-    [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node || true
+  if ! run_step "Stop current control plane" compose --profile exit-node stop exit-node relay controller; then
+    run_step "Restore current control plane" compose up -d --wait controller relay || true
+    [ "$exit_was_running" = false ] || run_step "Restore current exit node" compose --profile exit-node up -d --wait exit-node || true
     die "$operation could not stop the current stack; release selection is unchanged"
   fi
   if [ -n "$migration_dir" ]; then
@@ -479,8 +507,13 @@ activate_release() {
     install -m 0444 "$migration_dir/relay.toml" "$base_dir/generated/config/relay.toml"
   fi
   atomic_copy "$candidate" "$env_file"
-  if "$base_dir/validate.sh" && compose up -d --wait controller relay; then
-    [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node
+  startup_ok=true
+  run_step "Validate migrated deployment" "$base_dir/validate.sh" || startup_ok=false
+  if [ "$startup_ok" = true ]; then
+    run_step "Start controller and relay" compose up -d --wait controller relay || startup_ok=false
+  fi
+  if [ "$startup_ok" = true ]; then
+    [ "$exit_was_running" = false ] || run_step "Start exit node" compose --profile exit-node up -d --wait exit-node
     atomic_copy "$current_copy" "$state_dir/previous.env"
     previous_files=$state_dir/previous-files
     install -d -m 0700 "$previous_files"
@@ -488,7 +521,8 @@ activate_release() {
     install -m 0444 "$current_files/controller.toml" "$previous_files/controller.toml"
     install -m 0444 "$current_files/relay.toml" "$previous_files/relay.toml"
     find "$current_files" -depth -delete
-    echo "laneway-control: $operation complete; backup: generated/recovery/$backup_name"
+    printf '\nLaneway control-plane %s complete\n' "$operation"
+    printf '  Recovery backup: generated/recovery/%s\n' "$backup_name"
     return
   fi
   echo "laneway-control: $operation failed; restoring previous images/config" >&2
@@ -497,8 +531,8 @@ activate_release() {
   install -m 0444 "$current_files/controller.toml" "$base_dir/generated/config/controller.toml"
   install -m 0444 "$current_files/relay.toml" "$base_dir/generated/config/relay.toml"
   find "$current_files" -depth -delete
-  compose up -d --wait controller relay || true
-  [ "$exit_was_running" = false ] || compose --profile exit-node up -d --wait exit-node || true
+  run_step "Restore previous controller and relay" compose up -d --wait controller relay || true
+  [ "$exit_was_running" = false ] || run_step "Restore previous exit node" compose --profile exit-node up -d --wait exit-node || true
   die "$operation failed; database was not rolled back; backup: generated/recovery/$backup_name"
 }
 
