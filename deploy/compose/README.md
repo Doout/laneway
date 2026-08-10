@@ -115,6 +115,22 @@ reference and the same `laneway-connector-NAME-state` volume. The entrypoint
 finds the complete identity in that volume and ignores `SETUP_TOKEN`; no new
 enrollment occurs. Never remove the named volume during an ordinary upgrade.
 
+The packaged updater automates that replacement, verifies the latest stable
+release and Connector image with Cosign, waits for health, and restores the old
+container automatically if the replacement fails:
+
+```sh
+sudo laneway-update-connector laneway-connector-egress-one
+```
+
+It is idempotent and safe to invoke periodically. For example, after reviewing
+the installed script, root's crontab can check hourly without restarting a
+current Connector:
+
+```cron
+17 * * * * /usr/local/sbin/laneway-update-connector laneway-connector-egress-one >>/var/log/laneway-connector-update.log 2>&1
+```
+
 After the Connector enrolls, assign a reachable private destination without
 copying credentials or route IDs between hosts:
 
