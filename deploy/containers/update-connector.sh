@@ -29,11 +29,7 @@ case "$lock_parent" in /*) ;; *) die "LANEWAY_LOCK_DIR must be absolute" ;; esac
 lock_dir=$lock_parent/laneway-connector-update-$container
 mkdir "$lock_dir" 2>/dev/null || die "another update is already running for $container"
 update_dir=
-config_backup_volume=
 cleanup() {
-  if [ -n "$config_backup_volume" ]; then
-    docker volume rm "$config_backup_volume" >/dev/null 2>&1 || true
-  fi
   find "$update_dir" -depth -delete 2>/dev/null || true
   rmdir "$lock_dir" 2>/dev/null || true
 }
@@ -145,46 +141,20 @@ docker run --rm --pull never \
     done
   ' || die "durable Connector identity is incomplete; existing container was not changed"
 
-config_backup_volume=$state_volume-config-backup-$$
-docker volume create "$config_backup_volume" >/dev/null || \
-  die "could not create the temporary rollback volume"
-docker run --rm --pull never \
-  --user 0:0 --read-only --cap-drop ALL \
-  --security-opt no-new-privileges:true \
-  --volume "$state_volume:/state:ro" \
-  --volume "$config_backup_volume:/backup" \
-  --entrypoint /bin/sh "$target" -eu -c '
-    cp -p /state/connector/connector.toml /backup/connector.toml
-  ' || {
-    docker volume rm "$config_backup_volume" >/dev/null 2>&1 || true
-    die "could not preserve the Connector configuration for rollback"
-  }
-
 previous=$container-previous-$$
 docker stop "$container" >/dev/null || die "could not stop $container"
 if ! docker rename "$container" "$previous"; then
   docker start "$container" >/dev/null 2>&1 || true
-  docker volume rm "$config_backup_volume" >/dev/null 2>&1 || true
   die "could not preserve the previous container"
 fi
 
 rollback() {
   echo "Replacement failed; restoring $current_ref" >&2
   docker rm -f "$container" >/dev/null 2>&1 || true
-  docker run --rm --pull never \
-    --user 0:0 --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true \
-    --volume "$state_volume:/state" \
-    --volume "$config_backup_volume:/backup:ro" \
-    --entrypoint /bin/sh "$target" -eu -c '
-      cp -p /backup/connector.toml /state/connector/.connector.toml.rollback
-      mv -f /state/connector/.connector.toml.rollback /state/connector/connector.toml
-    ' >/dev/null 2>&1 || die "automatic rollback could not restore the previous configuration"
   docker rename "$previous" "$container" >/dev/null 2>&1 || \
     die "automatic rollback could not restore the previous container name"
   docker start "$container" >/dev/null 2>&1 || \
     die "automatic rollback could not restart the previous container"
-  docker volume rm "$config_backup_volume" >/dev/null 2>&1 || true
   die "replacement did not become healthy; previous Connector restored"
 }
 
@@ -227,6 +197,4 @@ if [ "$health" != healthy ]; then
 fi
 
 docker rm "$previous" >/dev/null || die "updated successfully but could not remove $previous"
-docker volume rm "$config_backup_volume" >/dev/null || \
-  die "updated successfully but could not remove the temporary rollback volume"
 echo "$container updated successfully to $tag ($connector_digest)"
