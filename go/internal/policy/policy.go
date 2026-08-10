@@ -209,9 +209,27 @@ func (e *Engine) Evaluate(sourceNode, destinationNode identity.NodeID, packet []
 	return Result{Action: e.defaultAction}
 }
 
+// EvaluateReturn evaluates a packet as return traffic for a selector written
+// in the initiating direction. Node IDs, address prefixes, and transport ports
+// are matched in reverse while rule priority and action remain unchanged.
+func (e *Engine) EvaluateReturn(sourceNode, destinationNode identity.NodeID, packet []byte) Result {
+	parsed, ok := parsePacket(packet)
+	if !ok {
+		return Result{Action: Deny}
+	}
+	for i := range e.rules {
+		rule := &e.rules[i]
+		if rule.matchesReturn(sourceNode, destinationNode, parsed) {
+			return Result{Action: rule.action, RuleID: rule.id, Matched: true}
+		}
+	}
+	return Result{Action: e.defaultAction}
+}
+
 type packetFields struct {
 	source, destination netip.Addr
 	protocol            uint8
+	sourcePort          uint16
 	destinationPort     uint16
 	hasPort             bool
 }
@@ -242,6 +260,7 @@ func parsePacket(packet []byte) (packetFields, bool) {
 		transportOffset = 40
 	}
 	if (result.protocol == 6 || result.protocol == 17) && len(packet) >= transportOffset+4 {
+		result.sourcePort = binary.BigEndian.Uint16(packet[transportOffset : transportOffset+2])
 		result.destinationPort = binary.BigEndian.Uint16(packet[transportOffset+2 : transportOffset+4])
 		result.hasPort = true
 	}
@@ -264,6 +283,28 @@ func (r *compiledRule) matches(sourceNode, destinationNode identity.NodeID, pack
 	}
 	for _, port := range r.ports {
 		if packet.destinationPort >= port.first && packet.destinationPort <= port.last {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *compiledRule) matchesReturn(sourceNode, destinationNode identity.NodeID, packet packetFields) bool {
+	if !matchesNode(r.sourceNodes, destinationNode) || !matchesNode(r.destinationNodes, sourceNode) ||
+		!matchesPrefix(r.sourcePrefixes, packet.destination) || !matchesPrefix(r.destinationPrefixes, packet.source) {
+		return false
+	}
+	if r.protocol != int32(lanewayv1.IpProtocol_IP_PROTOCOL_ANY) && r.protocol != int32(packet.protocol) {
+		return false
+	}
+	if len(r.ports) == 0 {
+		return true
+	}
+	if !packet.hasPort {
+		return false
+	}
+	for _, port := range r.ports {
+		if packet.sourcePort >= port.first && packet.sourcePort <= port.last {
 			return true
 		}
 	}
@@ -314,4 +355,12 @@ func (t *Table) Evaluate(sourceNode, destinationNode identity.NodeID, packet []b
 		return Result{Action: Deny}
 	}
 	return engine.Evaluate(sourceNode, destinationNode, packet)
+}
+
+func (t *Table) EvaluateReturn(sourceNode, destinationNode identity.NodeID, packet []byte) Result {
+	engine := t.current.Load()
+	if engine == nil {
+		return Result{Action: Deny}
+	}
+	return engine.EvaluateReturn(sourceNode, destinationNode, packet)
 }

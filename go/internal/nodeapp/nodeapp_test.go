@@ -2,6 +2,7 @@ package nodeapp
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"laneway.dev/laneway/internal/config"
 	"laneway.dev/laneway/internal/exitnode"
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/nodeservice"
 	"laneway.dev/laneway/internal/pathmanager"
 	"laneway.dev/laneway/internal/platform"
 	"laneway.dev/laneway/internal/policy"
@@ -20,6 +22,64 @@ import (
 	"laneway.dev/laneway/internal/routing"
 	"laneway.dev/laneway/internal/wireguard"
 )
+
+func TestUserspaceConnectorAllowsOnlyAuthorizedReturnTraffic(t *testing.T) {
+	network, client, connector := testID(1), identity.NodeID(testID(2)), identity.NodeID(testID(3))
+	acceptID, denyID := testID(4), testID(5)
+	engine, err := policy.Compile(&lanewayv1.PolicySnapshot{
+		NetworkId: network[:], DefaultAction: lanewayv1.PolicyAction_POLICY_ACTION_DENY,
+		Rules: []*lanewayv1.PolicyRule{{
+			RuleId: acceptID[:], Priority: 100, Action: lanewayv1.PolicyAction_POLICY_ACTION_ACCEPT,
+			Selector: &lanewayv1.TrafficSelector{
+				SourceNodeIds:       [][]byte{client[:]},
+				DestinationPrefixes: []*lanewayv1.IpPrefix{{Address: []byte{10, 240, 64, 6}, PrefixLength: 32}},
+				IpProtocol:          lanewayv1.IpProtocol_IP_PROTOCOL_TCP,
+				DestinationPorts:    []*lanewayv1.PortRange{{First: 22, Last: 22}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var table policy.Table
+	if err := table.Replace(engine); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := nodeservice.IPv4Packet(netip.MustParseAddr("10.240.64.6"), netip.MustParseAddr("100.96.0.2"), make([]byte, 20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet[9] = 6
+	binary.BigEndian.PutUint16(packet[20:22], 22)
+	binary.BigEndian.PutUint16(packet[22:24], 49152)
+	if controllerPacketAllowed(&table, connector, false, connector, client, packet) {
+		t.Fatal("native node admitted unmatched return traffic")
+	}
+	if !controllerPacketAllowed(&table, connector, true, connector, client, packet) {
+		t.Fatal("userspace Connector denied an authorized TCP reply")
+	}
+
+	engine, err = policy.Compile(&lanewayv1.PolicySnapshot{
+		NetworkId: network[:], DefaultAction: lanewayv1.PolicyAction_POLICY_ACTION_DENY,
+		Rules: []*lanewayv1.PolicyRule{
+			{RuleId: denyID[:], Priority: 50, Action: lanewayv1.PolicyAction_POLICY_ACTION_DENY, Selector: &lanewayv1.TrafficSelector{
+				SourceNodeIds: [][]byte{connector[:]}, DestinationNodeIds: [][]byte{client[:]}, IpProtocol: lanewayv1.IpProtocol_IP_PROTOCOL_ANY,
+			}},
+			{RuleId: acceptID[:], Priority: 100, Action: lanewayv1.PolicyAction_POLICY_ACTION_ACCEPT, Selector: &lanewayv1.TrafficSelector{
+				SourceNodeIds: [][]byte{client[:]}, DestinationPrefixes: []*lanewayv1.IpPrefix{{Address: []byte{10, 240, 64, 6}, PrefixLength: 32}}, IpProtocol: lanewayv1.IpProtocol_IP_PROTOCOL_ANY,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := table.Replace(engine); err != nil {
+		t.Fatal(err)
+	}
+	if controllerPacketAllowed(&table, connector, true, connector, client, packet) {
+		t.Fatal("userspace return handling overrode an explicit deny")
+	}
+}
 
 type diagnosticsPath struct{ name string }
 
