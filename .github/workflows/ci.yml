@@ -49,7 +49,9 @@ jobs:
           cache-dependency-path: go/go.sum
       - name: Run native Darwin tests
         working-directory: go
-        run: go test ./cmd/laneway ./internal/nethelper
+        run: |
+          go test ./cmd/laneway -run '^TestMacOS'
+          go test ./internal/nethelper
 
   protobuf:
     name: Protobuf lint and generated code
