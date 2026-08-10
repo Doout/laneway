@@ -115,6 +115,18 @@ reference and the same `laneway-connector-NAME-state` volume. The entrypoint
 finds the complete identity in that volume and ignores `SETUP_TOKEN`; no new
 enrollment occurs. Never remove the named volume during an ordinary upgrade.
 
+After the Connector enrolls, assign a reachable private destination without
+copying credentials or route IDs between hosts:
+
+```sh
+sudo laneway control route add --connector ibmcloud --to 10.240.64.6 --allow laptop
+```
+
+The operation is idempotent and accepts either a single IP or a canonical CIDR.
+It preserves existing Connector capabilities, approves the route, and creates
+a destination-scoped user authorization. Omit `--allow` only when every
+enrolled user should reach the destination.
+
 ## Local-user login tokens
 
 Issue a short-lived, single-use token for a remembered local user:
@@ -123,8 +135,9 @@ Issue a short-lived, single-use token for a remembered local user:
 sudo laneway control user-token --name laptop
 ```
 
-The user runs `laneway login DOMAIN` once and `laneway connect DOMAIN` after
-that. The token is exchanged for a locally protected, renewable mTLS identity;
+The user runs `laneway login DOMAIN` once and `laneway connect` after that. If
+several logins are saved, use `laneway connect DOMAIN` to select one. The token
+is exchanged for a locally protected, renewable mTLS identity;
 it is not stored as a permanent bearer credential. Remembered connections
 install only controller-policy-authorized private prefixes. Default-route
 egress remains explicit with `--exit`.

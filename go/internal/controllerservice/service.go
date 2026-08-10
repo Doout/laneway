@@ -164,6 +164,7 @@ func New(opts Options) (*Service, error) {
 	mux.HandleFunc("GET /v1/admin/networks/{network_id}/audit", s.readAudit)
 	mux.HandleFunc("POST /v1/routes", s.advertiseRoute)
 	mux.HandleFunc("DELETE /v1/routes/{route_id}", s.withdrawRoute)
+	mux.HandleFunc("POST /v1/admin/routes/assign", s.assignRoute)
 	mux.HandleFunc("POST /v1/admin/routes/{route_id}/approve", s.approveRoute)
 	mux.HandleFunc("POST /v1/admin/networks/{network_id}/acl-rules", s.addACLRule)
 	mux.HandleFunc("DELETE /v1/admin/acl-rules/{rule_id}", s.deleteACLRule)

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/protocol"
@@ -417,12 +419,93 @@ func runControllerEnrollmentToken(args []string) error {
 
 func runControllerRoute(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: laneway controller route <advertise|withdraw|approve|list> [options]")
+		return errors.New("usage: laneway controller route <advertise|assign|withdraw|approve|list> [options]")
 	}
 	fs := flag.NewFlagSet("controller route "+args[0], flag.ContinueOnError)
 	nodeAuth := args[0] == "advertise" || args[0] == "withdraw"
 	remote := addRemoteFlags(fs, nodeAuth, !nodeAuth)
 	switch args[0] {
+	case "assign":
+		networkText := fs.String("network-id", "", "network ID")
+		nodeSelector := fs.String("connector", "", "exact Connector name or node ID")
+		destination := fs.String("to", "", "destination IP address or prefix")
+		allowedUser := fs.String("allow", "", "optional exact user node name or node ID")
+		mode := fs.String("mode", "nat", "nat or routed")
+		metric := fs.Uint("metric", 0, "route metric")
+		if err := parseNoArgs(fs, args[1:]); err != nil {
+			return err
+		}
+		networkID, err := identity.ParseNetworkID(*networkText)
+		if err != nil || *nodeSelector == "" || *destination == "" {
+			return errors.New("route assign requires --network-id, --connector, and --to")
+		}
+		if *mode != "nat" && *mode != "routed" {
+			return errors.New("--mode must be nat or routed")
+		}
+		if *metric > uint(^uint32(0)) {
+			return errors.New("--metric exceeds uint32")
+		}
+		prefix, err := assignedRoutePrefix(*destination)
+		if err != nil {
+			return err
+		}
+		client, err := remote.client()
+		if err != nil {
+			return err
+		}
+		ctx, cancel := commandContext()
+		defer cancel()
+		nodeID, err := resolveControllerNode(ctx, client, networkID, *nodeSelector)
+		if err != nil {
+			return err
+		}
+		var allowedUserID identity.NodeID
+		if *allowedUser != "" {
+			allowedUserID, err = resolveControllerNode(ctx, client, networkID, *allowedUser)
+			if err != nil {
+				return fmt.Errorf("resolve --allow: %w", err)
+			}
+		}
+		route, err := client.AssignRoute(ctx, networkID, nodeID, prefix, *mode, uint32(*metric))
+		if err != nil {
+			return err
+		}
+		trafficSelector := &lanewayv1.TrafficSelector{
+			DestinationPrefixes: []*lanewayv1.IpPrefix{{Address: prefix.Addr().AsSlice(), PrefixLength: uint32(prefix.Bits())}},
+			IpProtocol:          lanewayv1.IpProtocol_IP_PROTOCOL_ANY,
+		}
+		if *allowedUser != "" {
+			trafficSelector.SourceNodeIds = [][]byte{append([]byte(nil), allowedUserID[:]...)}
+		}
+		selector, err := (protojson.MarshalOptions{UseProtoNames: true}).Marshal(trafficSelector)
+		if err != nil {
+			return err
+		}
+		description := "managed route " + prefix.String() + " via " + *nodeSelector
+		if *allowedUser != "" {
+			description += " for " + *allowedUser
+		}
+		rules, err := client.ACLRules(ctx, networkID, 1000)
+		if err != nil {
+			return err
+		}
+		var acl *controllerclient.ACLRule
+		for i := range rules {
+			if rules[i].Action == "accept" && string(rules[i].Selector) == string(selector) {
+				acl = &rules[i]
+				break
+			}
+		}
+		if acl == nil {
+			acl, err = client.AddACLRule(ctx, networkID, 100, "accept", selector, description)
+			if err != nil {
+				return err
+			}
+		}
+		return printJSON(struct {
+			Route *controllerclient.Route   `json:"route"`
+			ACL   *controllerclient.ACLRule `json:"acl_rule"`
+		}{route, acl})
 	case "advertise":
 		prefixText := fs.String("prefix", "", "canonical route prefix")
 		kind := fs.String("kind", "subnet", "subnet or exit")
@@ -535,6 +618,57 @@ func runControllerRoute(args []string) error {
 	default:
 		return fmt.Errorf("unknown controller route command %q", args[0])
 	}
+}
+
+func assignedRoutePrefix(value string) (netip.Prefix, error) {
+	if address, err := netip.ParseAddr(value); err == nil {
+		bits := 128
+		if address.Is4() {
+			bits = 32
+		}
+		return netip.PrefixFrom(address, bits), nil
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || prefix != prefix.Masked() || prefix.Bits() == 0 {
+		return netip.Prefix{}, errors.New("--to must be an IP address or canonical non-default prefix")
+	}
+	return prefix, nil
+}
+
+func resolveControllerNode(ctx context.Context, client *controllerclient.Client, networkID identity.NetworkID, selector string) (identity.NodeID, error) {
+	if nodeID, err := identity.ParseNodeID(selector); err == nil {
+		return nodeID, nil
+	}
+	nodes, err := client.Nodes(ctx, networkID, 1000)
+	if err != nil {
+		return identity.NodeID{}, err
+	}
+	names := map[string]struct{}{selector: {}}
+	if strings.HasPrefix(selector, "laneway-connector-") {
+		names[strings.TrimPrefix(selector, "laneway-connector-")] = struct{}{}
+	}
+	var match identity.NodeID
+	count := 0
+	for _, node := range nodes {
+		if node.RevokedAtUnixSeconds != nil {
+			continue
+		}
+		if _, ok := names[node.Name]; !ok {
+			continue
+		}
+		parsed, err := identity.ParseNodeID(node.NodeID)
+		if err != nil {
+			return identity.NodeID{}, errors.New("controller returned an invalid node identity")
+		}
+		match, count = parsed, count+1
+	}
+	if count == 0 {
+		return identity.NodeID{}, fmt.Errorf("no active Connector has the exact name %q", selector)
+	}
+	if count != 1 {
+		return identity.NodeID{}, fmt.Errorf("Connector name %q is ambiguous", selector)
+	}
+	return match, nil
 }
 
 func runControllerACL(args []string) error {

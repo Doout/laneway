@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,7 +99,7 @@ func runLogin(args []string) error {
 		return err
 	}
 	fmt.Printf("logged in network=%s node=%s profile=%s\n", profile.NetworkID, profile.NodeID, profilePath(authority))
-	fmt.Printf("Connect with: laneway connect %s\n", authority)
+	fmt.Println("Connect with: laneway connect")
 	return nil
 }
 
@@ -139,6 +140,54 @@ func userProfileRoot() string {
 func profilePath(authority string) string {
 	digest := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(authority))))
 	return filepath.Join(userProfileRoot(), hex.EncodeToString(digest[:16]))
+}
+
+func defaultUserProfileAuthority() (string, error) {
+	root := userProfileRoot()
+	if err := requireSafeDirectory(root); err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", err
+	}
+	var authorities []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if len(name) != 32 {
+			continue
+		}
+		if _, err := hex.DecodeString(name); err != nil {
+			continue
+		}
+		directory := filepath.Join(root, name)
+		if err := requireSafeDirectory(directory); err != nil {
+			return "", err
+		}
+		manifest, err := readProtectedProfileFile(filepath.Join(directory, "profile.json"), 64<<10)
+		if err != nil {
+			return "", err
+		}
+		var candidate struct {
+			Authority string `json:"authority"`
+		}
+		if err := json.Unmarshal(manifest, &candidate); err != nil || candidate.Authority == "" || profilePath(candidate.Authority) != directory {
+			return "", errors.New("saved login metadata is invalid or stored under the wrong authority")
+		}
+		if _, _, err := loadUserProfile(candidate.Authority); err != nil {
+			return "", err
+		}
+		authorities = append(authorities, candidate.Authority)
+	}
+	sort.Strings(authorities)
+	switch len(authorities) {
+	case 0:
+		return "", os.ErrNotExist
+	case 1:
+		return authorities[0], nil
+	default:
+		return "", fmt.Errorf("multiple saved logins (%s); specify DOMAIN", strings.Join(authorities, ", "))
+	}
 }
 
 func saveUserProfile(profile userProfile, ca, certificate, privateKey, wireGuardKey []byte) error {

@@ -110,8 +110,18 @@ func runConnect(args []string) error {
 	if fs.NArg() == 1 {
 		authority = fs.Arg(0)
 	}
-	if authority == "" || (*remembered && *ephemeral) {
+	if *remembered && *ephemeral {
 		return connectUsage()
+	}
+	if authority == "" {
+		var err error
+		authority, err = defaultUserProfileAuthority()
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("no saved login; run 'laneway login DOMAIN' or specify DOMAIN for an ephemeral connection")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	if options.failureMode != "closed" && options.failureMode != "open" {
 		return errors.New("--failure-mode must be closed or open")

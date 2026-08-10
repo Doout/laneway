@@ -23,11 +23,12 @@ lock_held=false
 
 usage() {
   cat >&2 <<'EOF'
-usage: laneway-control <init|user-token|invite|status|update|production-check|backup|restore|upgrade|rollback> [options]
+usage: laneway-control <init|user-token|invite|route|status|update|production-check|backup|restore|upgrade|rollback> [options]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
   invite --name NAME [--ephemeral|--remembered] [--docker --connector]
+  route add --connector NAME --to IP_OR_PREFIX [--allow USER] [--mode nat|routed] [--metric NUMBER]
   update
   backup [NAME.age]
   restore BUNDLE.age --identity AGE_IDENTITY_FILE
@@ -344,6 +345,38 @@ run_user_token() {
   printf '%s\n' "$enrollment_token"
 }
 
+run_route() {
+  [ "${1:-}" = add ] || die "route requires: add --connector NAME --to IP_OR_PREFIX"
+  shift
+  connector=; destination=; allowed_user=; mode=nat; metric=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --connector) [ "$#" -ge 2 ] || die "--connector requires a value"; connector=$2; shift 2 ;;
+      --to) [ "$#" -ge 2 ] || die "--to requires a value"; destination=$2; shift 2 ;;
+      --allow) [ "$#" -ge 2 ] || die "--allow requires a value"; allowed_user=$2; shift 2 ;;
+      --mode) [ "$#" -ge 2 ] || die "--mode requires a value"; mode=$2; shift 2 ;;
+      --metric) [ "$#" -ge 2 ] || die "--metric requires a value"; metric=$2; shift 2 ;;
+      *) die "unknown route option: $1" ;;
+    esac
+  done
+  [ -n "$connector" ] && [ -n "$destination" ] || die "route add requires --connector and --to"
+  case "$connector" in *[!A-Za-z0-9._-]*) die "--connector contains an unsafe character" ;; esac
+  case "$allowed_user" in *[!A-Za-z0-9._-]*) die "--allow contains an unsafe character" ;; esac
+  case "$destination" in *[!A-Fa-f0-9.:/]*) die "--to must be an IP address or prefix" ;; esac
+  case "$mode" in nat|routed) ;; *) die "--mode must be nat or routed" ;; esac
+  case "$metric" in ''|*[!0-9]*) die "--metric must be an unsigned number" ;; esac
+  network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+  controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
+  server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
+  set -- controller route assign --network-id "$network_id" --connector "$connector" --to "$destination" \
+    --mode "$mode" --metric "$metric" --controller "$(local_controller_endpoint)" \
+    --ca "$base_dir/generated/pki/ca.crt" --server-name "$server_name" \
+    --controller-network-id "$network_id" --controller-service-id "$controller_id" \
+    --admin-token-file "$base_dir/generated/secrets/admin.token"
+  [ -z "$allowed_user" ] || set -- "$@" --allow "$allowed_user"
+  admin "$@"
+}
+
 run_update() {
   [ "$#" -eq 0 ] || die "update accepts no arguments"
   [ "$(id -u)" -eq 0 ] || die "update must run as root"
@@ -572,6 +605,7 @@ case "$command" in
   init) acquire_lock; run_init "$@" ;;
   user-token|api-token) run_user_token "$@" ;;
   invite) run_invite "$@" ;;
+  route) run_route "$@" ;;
   status) run_status "$@" ;;
   update) run_update "$@" ;;
   production-check) acquire_lock; run_production_check "$@" ;;

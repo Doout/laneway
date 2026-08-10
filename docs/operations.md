@@ -70,6 +70,17 @@ spelling controller, CA, relay, network, or service IDs:
 sudo laneway control user-token --name laptop
 ```
 
+Assign a private destination to a Connector and authorize that user with one
+idempotent control-plane operation:
+
+```sh
+sudo laneway control route add --connector ibmcloud --to 10.240.64.6 --allow laptop
+```
+
+Single addresses are converted to host prefixes automatically. `--to` also
+accepts a canonical subnet prefix; omit `--allow` to authorize all enrolled
+users for that destination.
+
 This is a remembered-user enrollment code, not a permanent API bearer token.
 Codes are random, stored by the controller only as a hash, network/class-bound,
 single-use, limited to one hour of validity, and protected by a bounded
@@ -80,7 +91,7 @@ On a clean Linux or macOS AMD64/ARM64 client:
 
 ```sh
 laneway login lane.example.com
-laneway connect lane.example.com
+laneway connect
 ```
 
 On a clean Mac, install the user-only client first with:
