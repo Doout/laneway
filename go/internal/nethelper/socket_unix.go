@@ -186,11 +186,9 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 		args = append([]string{"--", executable}, args...)
 	}
 	command := exec.Command(commandName, args...)
-	// The foreground client owns signal handling. Keep the privileged helper in
-	// a separate process group so terminal Ctrl-C/SIGTERM cannot kill it before
-	// the parent sends the authenticated close request and receives cleanup
-	// confirmation.
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Keep sudo in the foreground process group while it authenticates. The
+	// helper isolates itself after sudo has replaced it; detaching here causes
+	// an interactive sudo to be stopped by SIGTTIN while reading /dev/tty.
 	command.Stdin = childFile
 	command.Stdout = childFile
 	command.Stderr = os.Stderr
@@ -316,6 +314,11 @@ func ServeInheritedFD(ctx context.Context, fd int, config ServiceConfig) error {
 	if fd < 0 {
 		return errors.New("network helper control descriptor is invalid")
 	}
+	// The foreground client owns signal handling. Isolate only the authenticated
+	// helper so terminal Ctrl-C cannot interrupt cleanup after setup succeeds.
+	if err := isolateProcessGroup(); err != nil {
+		return err
+	}
 	file := os.NewFile(uintptr(fd), "laneway-network-helper")
 	if file == nil {
 		return errors.New("invalid network helper control descriptor")
@@ -332,6 +335,17 @@ func ServeInheritedFD(ctx context.Context, fd int, config ServiceConfig) error {
 	}
 	defer unixConn.Close()
 	return Serve(ctx, unixConn, config)
+}
+
+func isolateProcessGroup() error {
+	if err := unix.Setpgid(0, 0); err != nil {
+		group, groupErr := unix.Getpgid(0)
+		if groupErr == nil && group == os.Getpid() {
+			return nil
+		}
+		return fmt.Errorf("isolate network helper process group: %w", err)
+	}
+	return nil
 }
 
 func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error {
