@@ -138,18 +138,17 @@ performs read-only preflight first, asks once before invoking `sudo`, stages
 both copies, and verifies that `/usr/local/bin/laneway` and the root-owned
 credential-free helper are byte-identical. `laneway configure --check` changes
 nothing, and `connect` fails before networking if either copy is missing,
-insecure, or mismatched. `laneway update [DOMAIN]` accepts only the current
-Darwin artifact pinned by that domain's public-Web-PKI bootstrap metadata. It
-infers the domain when exactly one saved login exists. The updater verifies the
-artifact's authenticated size and SHA-256 before extraction and invokes the same
-configure transaction only after every unprivileged check succeeds.
+insecure, or mismatched. `laneway update` resolves the latest stable release
+directly from GitHub, downloads the architecture-specific macOS client, and
+verifies it against that immutable release's checksum manifest. It rejects
+downgrades and invokes the same configure transaction only after every
+unprivileged check succeeds.
 
 Linux login additionally requires its authenticated platform artifact record.
 macOS installation verifies the release checksum before installing a
 root-owned helper; an already installed macOS client can therefore connect to
-an older control plane whose bootstrap document lists only Linux artifacts.
-That older control plane cannot authorize `laneway update` until its bootstrap
-artifact list is extended with Darwin AMD64 and ARM64 release archives.
+an older control plane whose bootstrap document lists only Linux artifacts,
+and client updates do not depend on the control plane's artifact version.
 
 Artifact downloaders must stream into an unprivileged temporary file, enforce
 the authenticated `size_bytes`, and call the same SHA-256 verification logic

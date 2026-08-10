@@ -28,13 +28,33 @@ func TestMacOSConnectRejectsExitModeLocally(t *testing.T) {
 	}
 }
 
-func TestMacOSUpdateDomainIsOptional(t *testing.T) {
+func TestMacOSUpdateDoesNotRequireControllerDomain(t *testing.T) {
 	root := newRootCommand()
 	update, _, err := root.Find([]string{"update"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if update.Use != "update [DOMAIN]" {
+	if update.Use != "update" {
 		t.Fatalf("update usage = %q", update.Use)
+	}
+}
+
+func TestMacOSCompareStableVersions(t *testing.T) {
+	for _, test := range []struct {
+		left       string
+		right      string
+		want       int
+		comparable bool
+	}{
+		{left: "0.2.41", right: "0.2.42", want: -1, comparable: true},
+		{left: "0.2.42", right: "0.2.42", comparable: true},
+		{left: "1.0.0", right: "0.99.99", want: 1, comparable: true},
+		{left: "dev", right: "0.2.42"},
+		{left: "0.02.42", right: "0.2.42"},
+	} {
+		got, comparable := compareStableVersions(test.left, test.right)
+		if got != test.want || comparable != test.comparable {
+			t.Errorf("compareStableVersions(%q, %q) = (%d, %t), want (%d, %t)", test.left, test.right, got, comparable, test.want, test.comparable)
+		}
 	}
 }

@@ -548,7 +548,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	if cfg.Controller.Endpoint != "" {
 		subnetManager = &daemonSubnetManager{
 			forwarding: subnetForwarding, fixedForwardPrefixes: append([]netip.Prefix(nil), forwardPrefixes...),
-			setRelayPrefixes: service.SetForwardPrefixes, serveExit: cfg.Exit.Serve,
+			setRelayPrefixes: service.SetForwardPrefixes, userspace: userspaceConnector != nil, serveExit: cfg.Exit.Serve,
 		}
 		if unifiedDataPlane != nil {
 			subnetManager.setDirectPrefixes = unifiedDataPlane.SetForwardPrefixes

@@ -102,11 +102,11 @@ downloads and verifies the release checksum, and only then allows `configure`
 to ask once for `sudo`. It installs and verifies the client and its root-owned,
 credential-free helper. To pin a release, use
 `curl -fsSL URL | LANEWAY_VERSION=vX.Y.Z sh` with the same URL above.
-`laneway configure --check` is non-mutating. With one saved login, a
-controller-approved upgrade is `laneway update`; specify
-`laneway update lane.example.com` when multiple logins exist. It downloads and
-verifies as the normal user before reusing the same configure transaction. Run `login`, `connect`, and
-`update` as your normal macOS user.
+`laneway configure --check` is non-mutating. Future upgrades are simply
+`laneway update`. It resolves the latest stable GitHub release, verifies the
+release checksum as the normal user, rejects downgrades, and then reuses the
+same configure transaction. Run `login`, `connect`, and `update` as your
+normal macOS user.
 
 ## Quick start: connect a local user
 

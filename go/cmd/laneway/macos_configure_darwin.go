@@ -13,12 +13,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/releasearchive"
+	"laneway.dev/laneway/internal/buildinfo"
+	"laneway.dev/laneway/internal/releaseupdate"
 )
 
 const (
@@ -80,60 +82,41 @@ func runMacConfigure(args []string) error {
 func runMacUpdate(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	yes := fs.Bool("yes", false, "install the verified update without the confirmation prompt")
-	updateArgs := args
-	authority := ""
-	if len(updateArgs) != 0 && !strings.HasPrefix(updateArgs[0], "-") {
-		authority, updateArgs = updateArgs[0], updateArgs[1:]
-	}
-	if err := fs.Parse(updateArgs); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() > 1 || (fs.NArg() == 1 && authority != "") {
-		return errors.New("usage: laneway update [DOMAIN] [--yes]")
-	}
-	if fs.NArg() == 1 {
-		authority = fs.Arg(0)
-	}
-	if authority == "" {
-		resolved, err := defaultUserProfileAuthority()
-		if errors.Is(err, os.ErrNotExist) {
-			return errors.New("no saved login; run 'laneway login DOMAIN' or specify DOMAIN")
-		}
-		if err != nil {
-			return err
-		}
-		authority = resolved
+	if fs.NArg() != 0 {
+		return errors.New("usage: laneway update [--yes]")
 	}
 	if os.Geteuid() != 0 {
 		if _, err := exec.LookPath("sudo"); err != nil {
 			return errors.New("macOS update requires sudo for the final install, but sudo is not available")
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	metadata, err := bootstrap.Fetch(ctx, authority)
-	cancel()
-	if err != nil {
-		return err
-	}
-	artifact, err := metadata.ArtifactForCurrentPlatform()
-	if err != nil {
-		return fmt.Errorf("controller-approved macOS update is unavailable: %w", err)
-	}
 	work, err := os.MkdirTemp("", "laneway-macos-update-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(work)
-	archive := filepath.Join(work, "release.tar.gz")
+	candidate := filepath.Join(work, "laneway")
+	client := releaseupdate.NewGitHubClient("Doout/laneway")
+	defer client.Close()
 	downloadCtx, downloadCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	err = bootstrap.DownloadArtifact(downloadCtx, artifact, archive)
+	release, err := client.DownloadLatest(downloadCtx, "laneway_darwin_"+runtime.GOARCH, candidate, macBinaryLimit)
 	downloadCancel()
 	if err != nil {
 		return err
 	}
-	candidate := filepath.Join(work, "laneway")
-	if err := releasearchive.ExtractRegularFile(archive, "laneway/bin/laneway", candidate, 0o700, macBinaryLimit); err != nil {
-		return err
+	if comparison, comparable := compareStableVersions(buildinfo.Version, strings.TrimPrefix(release.Tag, "v")); comparable && comparison > 0 {
+		return fmt.Errorf("latest stable release %s would downgrade installed v%s", release.Tag, buildinfo.Version)
+	}
+	versionOutput, err := exec.Command(candidate, "version").Output()
+	if err != nil {
+		return fmt.Errorf("verify downloaded macOS client version: %w", err)
+	}
+	expectedVersion := strings.TrimPrefix(release.Tag, "v")
+	if actualVersion := strings.TrimSpace(string(versionOutput)); actualVersion != expectedVersion {
+		return fmt.Errorf("downloaded macOS client reports version %q, expected %q", actualVersion, expectedVersion)
 	}
 	configureArgs := []string{"configure"}
 	if *yes {
@@ -147,8 +130,43 @@ func runMacUpdate(args []string) error {
 	if err := macConfigurationStatus(candidate); err != nil {
 		return fmt.Errorf("verify updated macOS client and helper: %w", err)
 	}
-	fmt.Printf("updated client and network helper from controller-approved artifact sha256=%s\n", artifact.SHA256)
+	fmt.Printf("updated client and network helper to %s sha256=%s\n", release.Tag, release.SHA256)
 	return nil
+}
+
+func compareStableVersions(left, right string) (int, bool) {
+	parse := func(value string) ([3]uint64, bool) {
+		var result [3]uint64
+		parts := strings.Split(value, ".")
+		if len(parts) != len(result) {
+			return result, false
+		}
+		for index, part := range parts {
+			if part == "" || (len(part) > 1 && part[0] == '0') {
+				return result, false
+			}
+			number, err := strconv.ParseUint(part, 10, 64)
+			if err != nil {
+				return result, false
+			}
+			result[index] = number
+		}
+		return result, true
+	}
+	leftParts, leftOK := parse(left)
+	rightParts, rightOK := parse(right)
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	for index := range leftParts {
+		if leftParts[index] < rightParts[index] {
+			return -1, true
+		}
+		if leftParts[index] > rightParts[index] {
+			return 1, true
+		}
+	}
+	return 0, true
 }
 
 func currentExecutable() (string, error) {

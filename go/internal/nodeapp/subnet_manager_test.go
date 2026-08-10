@@ -64,6 +64,52 @@ func TestDaemonSubnetManagerReconcilesApprovedSelfOwnedRoutes(t *testing.T) {
 	}
 }
 
+func TestDaemonSubnetManagerUserspaceConnectorAcceptsAssignedHostRoute(t *testing.T) {
+	local := identity.NodeIdentity{NetworkID: identity.NetworkID(testID(1)), NodeID: identity.NodeID(testID(2))}
+	var relayPrefixes []netip.Prefix
+	manager := &daemonSubnetManager{
+		userspace: true,
+		setRelayPrefixes: func(prefixes []netip.Prefix) error {
+			relayPrefixes = append([]netip.Prefix(nil), prefixes...)
+			return nil
+		},
+	}
+	configuration := &lanewayv1.NodeConfiguration{
+		EnabledCapabilities: uint64(protocol.CapabilitySubnetRouterV1),
+		Routes: &lanewayv1.RouteSnapshot{Routes: []*lanewayv1.Route{
+			subnetRoute(local.NodeID, "10.240.64.6/32", lanewayv1.RouteAdvertisementMode_ROUTE_ADVERTISEMENT_MODE_NAT),
+		}},
+	}
+	families, err := manager.RequiredIPForwardFamilies(configuration, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if families.any() {
+		t.Fatalf("userspace Connector requested kernel IP forwarding: %+v", families)
+	}
+	if err := manager.Apply(context.Background(), configuration, local); err != nil {
+		t.Fatal(err)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("10.240.64.6/32")}
+	if !slices.Equal(relayPrefixes, want) {
+		t.Fatalf("userspace forwarding prefixes = %v, want %v", relayPrefixes, want)
+	}
+}
+
+func TestDaemonSubnetManagerNativeRouteStillRequiresOutputInterface(t *testing.T) {
+	local := identity.NodeIdentity{NetworkID: identity.NetworkID(testID(1)), NodeID: identity.NodeID(testID(2))}
+	manager := &daemonSubnetManager{}
+	configuration := &lanewayv1.NodeConfiguration{
+		EnabledCapabilities: uint64(protocol.CapabilitySubnetRouterV1),
+		Routes: &lanewayv1.RouteSnapshot{Routes: []*lanewayv1.Route{
+			subnetRoute(local.NodeID, "10.240.64.6/32", lanewayv1.RouteAdvertisementMode_ROUTE_ADVERTISEMENT_MODE_NAT),
+		}},
+	}
+	if err := manager.Apply(context.Background(), configuration, local); err == nil {
+		t.Fatal("native subnet route without routing.output_interface was accepted")
+	}
+}
+
 func TestApprovedLocalSubnetRoutesRejectsMissingMode(t *testing.T) {
 	local := identity.NodeIdentity{NetworkID: identity.NetworkID(testID(1)), NodeID: identity.NodeID(testID(2))}
 	configuration := &lanewayv1.NodeConfiguration{Routes: &lanewayv1.RouteSnapshot{Routes: []*lanewayv1.Route{

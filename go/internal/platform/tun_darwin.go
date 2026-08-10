@@ -102,7 +102,7 @@ func AdoptTUNFile(file *os.File, config TUNConfig) (TUNDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	device, err := wgtun.CreateTUNFromFile(file, normalized.MTU)
+	device, err := adoptDarwinTUNDevice(file, normalized.MTU, wgtun.CreateTUNFromFile)
 	if err != nil {
 		return nil, fmt.Errorf("platform: adopt macOS utun descriptor: %w", err)
 	}
@@ -115,6 +115,26 @@ func AdoptTUNFile(file *os.File, config TUNConfig) (TUNDevice, error) {
 		return nil, fmt.Errorf("platform: verify macOS utun descriptor: %w", err)
 	}
 	return &darwinTUN{device: device, name: name, mtu: normalized.MTU, addresses: append([]netip.Prefix(nil), normalized.Addresses...)}, nil
+}
+
+func adoptDarwinTUNDevice(file *os.File, expectedMTU int, create func(*os.File, int) (wgtun.Device, error)) (wgtun.Device, error) {
+	// The privileged helper already configured the interface MTU. Passing it
+	// again makes wireguard-go issue SIOCSIFMTU from the unprivileged client,
+	// which macOS correctly rejects with EPERM.
+	device, err := create(file, 0)
+	if err != nil {
+		return nil, err
+	}
+	actualMTU, err := device.MTU()
+	if err != nil {
+		_ = device.Close()
+		return nil, fmt.Errorf("read transferred interface MTU: %w", err)
+	}
+	if actualMTU != expectedMTU {
+		_ = device.Close()
+		return nil, fmt.Errorf("transferred interface MTU is %d, expected %d", actualMTU, expectedMTU)
+	}
+	return device, nil
 }
 
 func (t *darwinTUN) Name() string { return t.name }
