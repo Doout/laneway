@@ -256,9 +256,15 @@ printf '%s\n' '1.1.0' > "$update_package/VERSION"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$update_package/install.sh"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$update_package/deploy/compose/upgrade-control-plane.sh"
 tar -C "$test_dir/update-package" -czf "$update_assets/laneway_linux_amd64.tar.gz" laneway
+cat > "$update_assets/bootstrap-artifacts.toml" <<'EOF'
+[[bootstrap.artifacts]]
+[[bootstrap.artifacts]]
+[[bootstrap.artifacts]]
+[[bootstrap.artifacts]]
+EOF
 (
   cd "$update_assets"
-  sha256sum laneway_linux_amd64.tar.gz > checksums.txt
+  sha256sum bootstrap-artifacts.toml laneway_linux_amd64.tar.gz > checksums.txt
 )
 : > "$update_assets/checksums.sigstore.json"
 cat > "$fake_bin/curl" <<'EOF'
@@ -304,11 +310,20 @@ update_output=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
   LANE_TEST_UPDATE_ASSETS="$update_assets" LANEWAY_COSIGN_BIN="$fake_bin/cosign" \
   LANEWAY_RELEASE_BASE_URL=https://fixture.invalid/v1.1.0 TMPDIR="$update_tmp" \
   "$compose_dir/laneway-control" update)
-printf '%s\n' "$update_output" | grep -F "detected Docker Compose deployment at $compose_dir" >/dev/null
-printf '%s\n' "$update_output" | grep -F 'updating from v1.0.0 to v1.1.0' >/dev/null
+printf '%s\n' "$update_output" | grep -F 'Laneway control-plane update' >/dev/null
+printf '%s\n' "$update_output" | grep -F "Deployment: $compose_dir" >/dev/null
+printf '%s\n' "$update_output" | grep -F 'Version:    v1.0.0 -> v1.1.0' >/dev/null
 grep -F 'verify-blob' "$log" >/dev/null
 grep -F '<PREFIX=/usr/local>' "$log" >/dev/null
 grep -F "<LANEWAY_DEPLOY_DIR=$compose_dir>" "$log" >/dev/null
+grep -F "<LANEWAY_BOOTSTRAP_ARTIFACTS_FILE=$compose_dir/generated/lifecycle/bootstrap-artifacts-1.1.0.toml>" "$log" >/dev/null
+grep -F '✓ Download and verify signed release' <<EOF >/dev/null
+$update_output
+EOF
+grep -F '✓ Install control-plane tools' <<EOF >/dev/null
+$update_output
+EOF
+test -f "$compose_dir/generated/lifecycle/bootstrap-artifacts-1.1.0.toml"
 test ! -e "$compose_dir/generated/lifecycle/operator.lock"
 
 echo "Lane lifecycle workflows are fail-closed and recoverable"
