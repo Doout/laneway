@@ -16,6 +16,12 @@ printf '0.2.15\n' > "$package_dir/VERSION"
 : > "$deployment/compose.yaml"
 cat > "$deployment/generated/config/controller.toml" <<'EOF'
 mode = "controller"
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "amd64"
+url = "https://downloads.example.test/old.tar.gz"
+sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+size_bytes = 1
 EOF
 cat > "$deployment/generated/config/relay.toml" <<'EOF'
 mode = "relay"
@@ -68,12 +74,38 @@ ghcr.io/doout/laneway-relay@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ghcr.io/doout/laneway-admin@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 ghcr.io/doout/laneway-connector@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 EOF
+cat > "$test_root/bootstrap-artifacts.toml" <<'EOF'
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "amd64"
+url = "https://github.com/Doout/laneway/releases/download/v0.2.15/laneway_linux_amd64.tar.gz"
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+size_bytes = 1
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "arm64"
+url = "https://github.com/Doout/laneway/releases/download/v0.2.15/laneway_linux_arm64.tar.gz"
+sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+size_bytes = 1
+[[bootstrap.artifacts]]
+os = "darwin"
+arch = "amd64"
+url = "https://github.com/Doout/laneway/releases/download/v0.2.15/laneway_darwin_amd64.tar.gz"
+sha256 = "3333333333333333333333333333333333333333333333333333333333333333"
+size_bytes = 1
+[[bootstrap.artifacts]]
+os = "darwin"
+arch = "arm64"
+url = "https://github.com/Doout/laneway/releases/download/v0.2.15/laneway_darwin_arm64.tar.gz"
+sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
+size_bytes = 1
+EOF
 cat > "$fake_bin/curl" <<'EOF'
 #!/bin/sh
 set -eu
 case " $* " in
   *" /.well-known/laneway/bootstrap.json "*|*"https://lane.example.test/.well-known/laneway/bootstrap.json"*)
-    printf '%s\n' '{"network_id":"000102030405060708090a0b0c0d0e0f"}'
+    printf '%s\n' '{"network_id":"000102030405060708090a0b0c0d0e0f","artifacts":[{"url":"https://github.com/Doout/laneway/releases/download/v0.2.15/laneway_linux_amd64.tar.gz"}]}'
     exit 0
     ;;
 esac
@@ -110,6 +142,7 @@ env PATH="$fake_bin:$PATH" \
   LANEWAY_CONTROL_COMMAND="$system_command" \
   LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.2.15 \
   LANEWAY_COSIGN_BIN="$fake_bin/cosign" \
+  LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$test_root/bootstrap-artifacts.toml" \
   LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
   LANEWAY_TEST_LOG="$log" \
   "$compose_source/upgrade-control-plane.sh" > "$test_root/output"
@@ -127,6 +160,11 @@ grep -F 'docker <compose>' "$log" >/dev/null
 grep -F 'cosign <verify>' "$log" >/dev/null
 grep -F 'host networking are unchanged' "$test_root/output" >/dev/null
 grep -Fx '[bootstrap]' "$deployment/generated/config/controller.toml" >/dev/null
+test "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$deployment/generated/config/controller.toml")" -eq 4
+if grep -F 'downloads.example.test/old.tar.gz' "$deployment/generated/config/controller.toml" >/dev/null; then
+  echo "upgrade retained a stale bootstrap artifact" >&2
+  exit 1
+fi
 grep -Fx '[public_https]' "$deployment/generated/config/relay.toml" >/dev/null
 
 echo "control-plane upgrade integration test passed"

@@ -57,7 +57,7 @@ done
 for value in '/dev/shm' 'offline-root.tar.age' 'control-plane-input' 'pki verify-authority' 'Never copy laneway-recovery.identity'; do
   require "$value" "$preparer"
 done
-for value in 'generated/lifecycle' 'image-digests.txt' 'laneway-control upgrade' 'host networking are unchanged'; do
+for value in 'generated/lifecycle' 'image-digests.txt' 'LANEWAY_BOOTSTRAP_ARTIFACTS_FILE' 'laneway-control upgrade' 'host networking are unchanged'; do
   require "$value" "$upgrader"
 done
 for value in '.env.example' 'install-control-plane.sh' 'prepare-control-plane.sh' 'upgrade-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
@@ -76,6 +76,7 @@ for value in \
 	"dist/laneway_\${{ matrix.os }}_\${{ matrix.arch }}" \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \
 	'install-client.sh' \
+	'bootstrap-artifacts.toml' \
 	'platforms: linux/amd64,linux/arm64' \
   'provenance: mode=max' \
   'sbom: true' \
