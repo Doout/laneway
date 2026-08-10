@@ -28,13 +28,14 @@ jobs:
           go test ./...
           go vet ./...
       - name: Check scripts
-        run: shellcheck install.sh install-client.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/client-installer.sh integration/connector-upgrade.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
+        run: shellcheck install.sh install-client.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
       - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
           printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           test "$GITHUB_REF_TYPE" = tag
           ./integration/client-installer.sh
+          ./integration/connector-updater.sh
           ./integration/release-contract.sh
           ./integration/control-plane-prepare.sh
           sudo env PATH="$PATH" ./integration/control-plane-install.sh

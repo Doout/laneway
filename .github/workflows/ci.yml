@@ -76,6 +76,7 @@ jobs:
         run: |
           ./integration/compose-config.sh
           ./integration/release-contract.sh
+          ./integration/connector-updater.sh
           ./integration/control-plane-prepare.sh
           sudo env PATH="$PATH" ./integration/control-plane-install.sh
           sudo env PATH="$PATH" ./integration/control-plane-upgrade.sh

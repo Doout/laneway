@@ -96,7 +96,8 @@ find "$package_dir" -type d -exec chmod 0755 {} +
 chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway"
 if [ "$package_goos" = linux ]; then
 	chmod 0755 "$package_dir"/sbin/* "$package_dir"/deploy/compose/*.sh \
-		"$package_dir"/deploy/compose/laneway-control
+		"$package_dir"/deploy/compose/laneway-control \
+		"$package_dir"/deploy/containers/update-connector.sh
 fi
 
 tmp_archive="$staging_dir/$archive"

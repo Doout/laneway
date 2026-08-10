@@ -6,6 +6,7 @@ workflow=$repo_dir/.github/workflows/release.yml
 dockerfile=$repo_dir/deploy/containers/Dockerfile
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 connector_entrypoint=$repo_dir/deploy/containers/connector-entrypoint.sh
+connector_updater=$repo_dir/deploy/containers/update-connector.sh
 compose_file=$repo_dir/deploy/compose/compose.yaml
 lane_workflow=$repo_dir/deploy/compose/laneway-control
 prepare_workflow=$repo_dir/deploy/compose/prepare.sh
@@ -14,6 +15,7 @@ installer=$repo_dir/deploy/compose/install-control-plane.sh
 preparer=$repo_dir/deploy/compose/prepare-control-plane.sh
 upgrader=$repo_dir/deploy/compose/upgrade-control-plane.sh
 package_workflow=$repo_dir/scripts/package.sh
+package_installer=$repo_dir/scripts/install-package.sh
 client_installer=$repo_dir/install-client.sh
 
 require() {
@@ -144,5 +146,20 @@ require '/usr/local/bin/laneway connector configure --state-dir "$state_dir"' "$
 # shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
 require 'exec /sbin/tini -- /usr/local/bin/laneway node run -config "$config_file"' "$connector_entrypoint"
 require './integration/connector-upgrade.sh laneway-connector:ci' "$repo_dir/.github/workflows/ci.yml"
+require './integration/connector-updater.sh' "$repo_dir/.github/workflows/ci.yml"
+for value in \
+  'releases/latest' \
+  'checksums.sigstore.json' \
+  'verify-blob' \
+  'image-digests.txt' \
+  'Connector image signature verification failed' \
+  'container must mount the named volume' \
+  'config_backup_volume' \
+  'previous Connector restored'
+do
+  require "$value" "$connector_updater"
+done
+require 'deploy/containers/update-connector.sh' "$package_workflow"
+require 'laneway-update-connector' "$package_installer"
 
 echo "Release signing, provenance, SBOM, scan, and multi-architecture contract is valid"

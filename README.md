@@ -178,6 +178,14 @@ The default invitation is durable. Add `--ephemeral` only for testing or
 intentionally short-lived Connector capacity; durable identity is the normal
 choice when the container will be upgraded in place.
 
+On a Connector host with the Linux package installed, the signed, rollback-safe
+updater can be run manually or from cron. It preserves the durable state volume
+and exits without disruption when the current signed release is already active:
+
+```bash
+sudo laneway-update-connector laneway-connector-egress-one
+```
+
 Assign a private IP or subnet to an enrolled Connector from the control-plane
 host with one idempotent command:
 

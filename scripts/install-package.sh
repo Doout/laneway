@@ -76,6 +76,8 @@ for command in laneway-relay laneway-controller; do
 done
 ln -sfn ../bin/laneway "$sbindir/lanewayd"
 install -m 0755 "$script_dir/sbin/laneway-setup-node" "$sbindir/laneway-setup-node"
+install -m 0755 "$script_dir/deploy/containers/update-connector.sh" \
+  "$sbindir/laneway-update-connector"
 install -m 0644 "$script_dir"/examples/*.toml "$sharedir/examples/"
 install -m 0644 "$script_dir"/docs/*.md "$sharedir/docs/"
 install -m 0644 "$script_dir"/nftables/* "$sharedir/nftables/"
@@ -95,3 +97,4 @@ echo "Laneway $(cat "$script_dir/VERSION") installed."
 echo "Examples: $prefix/share/laneway/examples"
 echo "Next for a managed Node: sudo laneway node install DOMAIN"
 echo "Compatibility alias: laneway-setup-node DOMAIN"
+echo "Connector updater: laneway-update-connector laneway-connector-NAME"
