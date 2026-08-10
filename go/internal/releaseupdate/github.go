@@ -98,7 +98,8 @@ func (c *Client) DownloadLatest(ctx context.Context, asset, destination string, 
 }
 
 func (c *Client) latestTag(ctx context.Context) (string, error) {
-	latestURL := strings.TrimRight(c.baseURL, "/") + "/" + c.repository + "/releases/latest"
+	latestURL := strings.TrimRight(c.baseURL, "/") + "/" + c.repository + "/releases/latest" +
+		"?laneway_cache_bust=" + fmt.Sprint(time.Now().UnixNano())
 	response, err := c.get(ctx, latestURL, "text/html")
 	if err != nil {
 		return "", fmt.Errorf("release update: resolve latest release: %w", err)
@@ -186,6 +187,8 @@ func (c *Client) get(ctx context.Context, address, accept string) (*http.Respons
 		return nil, err
 	}
 	request.Header.Set("Accept", accept)
+	request.Header.Set("Cache-Control", "no-cache")
+	request.Header.Set("Pragma", "no-cache")
 	response, err := c.httpClient.Do(request)
 	if err != nil {
 		return nil, err

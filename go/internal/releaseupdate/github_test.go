@@ -19,6 +19,12 @@ func TestDownloadLatest(t *testing.T) {
 	handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/Doout/laneway/releases/latest":
+			if request.Header.Get("Cache-Control") != "no-cache" || request.Header.Get("Pragma") != "no-cache" {
+				t.Errorf("latest release request permits cached response")
+			}
+			if request.URL.Query().Get("laneway_cache_bust") == "" {
+				t.Error("latest release request does not bypass a cached redirect")
+			}
 			http.Redirect(response, request, server.URL+"/Doout/laneway/releases/tag/v1.2.3", http.StatusFound)
 		case "/Doout/laneway/releases/tag/v1.2.3":
 			response.WriteHeader(http.StatusOK)
