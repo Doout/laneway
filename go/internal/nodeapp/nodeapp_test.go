@@ -23,7 +23,7 @@ import (
 	"laneway.dev/laneway/internal/wireguard"
 )
 
-func TestUserspaceConnectorAllowsOnlyAuthorizedReturnTraffic(t *testing.T) {
+func TestControllerPacketPolicyAllowsOnlyAuthorizedBidirectionalTraffic(t *testing.T) {
 	network, client, connector := testID(1), identity.NodeID(testID(2)), identity.NodeID(testID(3))
 	acceptID, denyID := testID(4), testID(5)
 	engine, err := policy.Compile(&lanewayv1.PolicySnapshot{
@@ -52,11 +52,8 @@ func TestUserspaceConnectorAllowsOnlyAuthorizedReturnTraffic(t *testing.T) {
 	packet[9] = 6
 	binary.BigEndian.PutUint16(packet[20:22], 22)
 	binary.BigEndian.PutUint16(packet[22:24], 49152)
-	if controllerPacketAllowed(&table, connector, false, connector, client, packet) {
-		t.Fatal("native node admitted unmatched return traffic")
-	}
-	if !controllerPacketAllowed(&table, connector, true, connector, client, packet) {
-		t.Fatal("userspace Connector denied an authorized TCP reply")
+	if !controllerPacketAllowed(&table, connector, client, packet) {
+		t.Fatal("endpoint denied an authorized TCP reply")
 	}
 
 	engine, err = policy.Compile(&lanewayv1.PolicySnapshot{
@@ -76,8 +73,8 @@ func TestUserspaceConnectorAllowsOnlyAuthorizedReturnTraffic(t *testing.T) {
 	if err := table.Replace(engine); err != nil {
 		t.Fatal(err)
 	}
-	if controllerPacketAllowed(&table, connector, true, connector, client, packet) {
-		t.Fatal("userspace return handling overrode an explicit deny")
+	if controllerPacketAllowed(&table, connector, client, packet) {
+		t.Fatal("endpoint return handling overrode an explicit deny")
 	}
 }
 

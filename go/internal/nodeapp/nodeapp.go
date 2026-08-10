@@ -431,7 +431,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	if cfg.Controller.Endpoint != "" {
 		policyTable = new(policy.Table)
 		packetPolicy = nodeservice.PacketPolicyFunc(func(source, destination identity.NodeID, packet []byte) bool {
-			return controllerPacketAllowed(policyTable, local.NodeID, userspaceConnector != nil, source, destination, packet)
+			return controllerPacketAllowed(policyTable, source, destination, packet)
 		})
 	}
 	var tcpFallbackConfig *tcpfallback.Config
@@ -838,15 +838,15 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	return err
 }
 
-func controllerPacketAllowed(table *policy.Table, local identity.NodeID, userspaceConnector bool, source, destination identity.NodeID, packet []byte) bool {
+func controllerPacketAllowed(table *policy.Table, source, destination identity.NodeID, packet []byte) bool {
 	result := table.Evaluate(source, destination, packet)
 	if result.Action == policy.Accept {
 		return true
 	}
-	// The userspace Connector emits only packets produced by its TCP/UDP stack
-	// in response to an admitted inbound flow. Preserve an explicit rule match,
-	// but let an unmatched default denial consult the initiating ACL in reverse.
-	if !userspaceConnector || source != local || result.Matched {
+	// Preserve an explicit rule match, but let an unmatched default denial
+	// consult the initiating ACL in reverse. Both the Connector that emits a
+	// reply and the client endpoint that receives it enforce this policy.
+	if result.Matched {
 		return false
 	}
 	return table.EvaluateReturn(source, destination, packet).Action == policy.Accept
