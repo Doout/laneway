@@ -191,6 +191,13 @@ and approves the route, and creates the destination-scoped ACCEPT rule. Omit
 `--allow` to authorize every enrolled user to that destination. Use a CIDR such
 as `10.240.64.0/24` with `--to` to route a subnet.
 
+Use `sudo laneway control status` for the control-plane health check and a
+joined inventory of non-revoked, non-expired users, Nodes, Connectors, overlay
+addresses, and approved subnets forwarded by each Connector. The controller
+does not infer live dataplane reachability from enrollment state; runtime path
+details remain in `laneway node status` and `laneway node peers` on the
+individual host.
+
 Get the public Laneway domain and a durable Node invite from your administrator.
 Save the one-time code in a protected file. One command authenticates discovery,
 binds enrollment to the discovered network and durable-node class, discovers
@@ -201,8 +208,8 @@ enables the hardened systemd service. Direct P2P is enabled by default.
 install -m 0600 enrollment-code.txt ./laneway.code
 sudo laneway node install lane.example.com --token-file ./laneway.code
 
-sudo laneway up
-sudo laneway status
+sudo laneway node up
+sudo laneway node status
 ```
 
 Use `--no-direct` only for a deliberate operator opt-out and `--no-start` when
@@ -210,7 +217,7 @@ activation is managed separately. Re-running the same command is idempotent and
 does not consume another invite. Remove only command-owned Node credentials and
 state with `sudo laneway node uninstall` (or preserve state with `--keep-state`).
 
-`laneway up` is a readiness check; systemd starts and supervises the daemon.
+`laneway node up` is a readiness check; systemd starts and supervises the daemon.
 The local management socket is intentionally restricted, so packaged service
 commands normally require `sudo`.
 

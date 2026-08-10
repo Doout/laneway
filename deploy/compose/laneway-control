@@ -189,7 +189,8 @@ run_status() {
   [ "$#" -eq 0 ] || die "status accepts no arguments"
   compose --profile exit-node ps
   failed=false
-  service_health controller true || failed=true
+  controller_healthy=true
+  service_health controller true || { controller_healthy=false; failed=true; }
   service_health relay true || failed=true
   relay_config=$base_dir/generated/config/relay.toml
   if [ -f "$relay_config" ] && [ ! -L "$relay_config" ]; then
@@ -220,7 +221,19 @@ run_status() {
     echo "exit-node=not-configured"
     echo "exit-direct-path=not-configured"
   fi
-  [ "$failed" = false ] || die "one or more configured services are unhealthy"
+  if [ "$controller_healthy" = true ]; then
+    network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+    controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
+    server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
+    admin controller overview --network-id "$network_id" \
+      --controller "$(local_controller_endpoint)" \
+      --ca "$base_dir/generated/pki/ca.crt" --server-name "$server_name" \
+      --controller-network-id "$network_id" --controller-service-id "$controller_id" \
+      --admin-token-file "$base_dir/generated/secrets/admin.token" || failed=true
+  else
+    echo "network-inventory=unavailable controller-unhealthy"
+  fi
+  [ "$failed" = false ] || die "one or more health or inventory checks failed"
 }
 
 emit_docker_connector_command() {
@@ -328,7 +341,7 @@ run_invite() {
     set -- "$@" --session-lifetime "$session"
   fi
   if [ "$docker_install" = true ]; then
-    result=$(admin "$@" --exit-node)
+    result=$(admin "$@" --connector)
     enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
     [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
     emit_docker_connector_command "$enrollment_token" "$name"
