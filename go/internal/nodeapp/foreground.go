@@ -109,3 +109,11 @@ type secureWireGuardRuntime interface {
 	PathAvailable(identity.NodeID) bool
 	Close() error
 }
+
+type noOpRouteManager struct{}
+
+func (noOpRouteManager) Apply(_ context.Context, plan platform.RoutePlan) error {
+	return platform.ValidateRoutePlan(plan)
+}
+func (noOpRouteManager) Restore(context.Context) error { return nil }
+func (noOpRouteManager) Close() error                  { return nil }

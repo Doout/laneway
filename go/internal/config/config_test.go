@@ -110,6 +110,37 @@ func TestDecodeDirectConnectivityCanBeExplicitlyDisabled(t *testing.T) {
 	}
 }
 
+func TestUserspaceConnectorRejectsPrivilegedDataplanes(t *testing.T) {
+	source := validNode + "\n[direct]\nenabled = false\n[connector]\nuserspace = true\n"
+	base, err := Decode(strings.NewReader(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !base.Connector.Userspace {
+		t.Fatal("userspace Connector setting was ignored")
+	}
+	tests := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"WireGuard", func(c *Config) { c.WireGuard.Enabled = true }},
+		{"direct paths", func(c *Config) { c.Direct.Enabled = true }},
+		{"host routing", func(c *Config) { c.Routing.OutputInterface = "eth0" }},
+		{"route advertisement", func(c *Config) { c.Routing.Advertise = []string{"10.0.0.0/8"} }},
+		{"Exit client", func(c *Config) { c.Exit.Enabled = true }},
+		{"Exit server", func(c *Config) { c.Exit.Serve = true }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			test.edit(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("userspace Connector accepted a privileged dataplane setting")
+			}
+		})
+	}
+}
+
 func TestDecodeWireGuardIdentityBoundary(t *testing.T) {
 	cfg, err := Decode(strings.NewReader(validNode + `
 [wireguard]

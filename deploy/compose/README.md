@@ -82,27 +82,38 @@ generated deployment secret. Explicit environment variables override it.
 
 ## One-command Docker Connector
 
-Generate a capability-bound, single-use Docker command from the control plane:
+Generate a role-bound, single-use Docker command from the control plane:
 
 ```sh
-sudo laneway control invite --name egress-one --ephemeral --docker --connector
+sudo laneway-control invite --name egress-one --docker --connector
 ```
 
-Copy the resulting `docker run` command through a trusted administrative channel
-and run it as root on a Linux Docker host. The token grants only the Connector
-role and an approved IPv4 default route; the command does not contain the
-control-plane admin token. The digest-pinned Connector runs non-root with only
-`NET_ADMIN` and `/dev/net/tun`. Its durable identity is stored in a named Docker
-volume, so replacing the container during an image upgrade does not enroll it
-again. The first-run token remains visible in Docker metadata after it is
-consumed; treat Docker access as root-equivalent. Allow UDP 4434 on the Connector
-host when external direct-path reachability is required.
+Invitation issuance uses the signed Laneway CLI already installed on the host;
+it does not pull or start the optional administrative container. Copy the
+resulting `docker run` command through a trusted administrative channel and run
+it as root on a Linux Docker host. The command exposes only one `SETUP_TOKEN`
+environment variable. That versioned capsule carries public endpoint and
+identity pins plus a short-lived, one-time enrollment code; it is compact, not
+encrypted from a Docker administrator. It grants only the Connector role and
+an approved IPv4 default route and never contains the control-plane admin token.
+
+The digest-pinned Connector runs as UID/GID 65532 with every Linux capability
+dropped, container-level `no-new-privileges`, a read-only root filesystem, no
+TUN device, no forwarding sysctl, and no published port. It proxies only
+controller-authorized TCP and UDP flows using ordinary outbound host sockets,
+so it requires no inbound firewall opening. Use the separate full Exit Node
+profile for raw IP forwarding, ICMP, or full-tunnel egress.
+
+The durable Connector identity is stored in a named Docker volume, so replacing
+the container during an image upgrade does not enroll it again. `SETUP_TOKEN`
+remains visible in Docker metadata, but its enrollment code is invalid after
+successful first use. Treat Docker access as root-equivalent regardless.
 
 To upgrade, pull the new digest-pinned Connector image, remove only the old
 container, and rerun the generated `docker run` command with the new image
 reference and the same `laneway-connector-NAME-state` volume. The entrypoint
-finds the complete identity in that volume and does not read or consume another
-enrollment token. Never remove the named volume during an ordinary upgrade.
+finds the complete identity in that volume and ignores `SETUP_TOKEN`; no new
+enrollment occurs. Never remove the named volume during an ordinary upgrade.
 
 ## Local-user login tokens
 
@@ -237,18 +248,20 @@ sudo chown 65532:65532 generated/backups
 sudo ./bootstrap.sh
 ```
 
-The `laneway control` command is the normal operator entry point. It delegates to
-the packaged `laneway-control` compatibility wrapper. `laneway control init`
-performs idempotent validation/bootstrap. `laneway control status` reports controller,
-relay, limiter, optional Exit Node, and live Exit direct-path health, and exits
-nonzero for an unhealthy required service. `laneway control invite --name DEVICE` issues a single-use token
-through the isolated admin container. `sudo laneway control backup [NAME.age]` creates a
-complete encrypted recovery bundle, and `sudo laneway control restore BUNDLE.age
---identity FILE` performs a guarded fresh-state restore as documented below.
+The `laneway-control` command is the normal operator entry point.
+`laneway-control init` performs idempotent validation/bootstrap.
+`laneway-control status` reports controller, relay, limiter, optional Exit Node,
+and live Exit direct-path health, and exits nonzero for an unhealthy required
+service. `laneway-control invite --name DEVICE` uses the installed CLI to issue
+a single-use token without starting an administrative container.
+`sudo laneway-control backup [NAME.age]` creates a complete encrypted recovery
+bundle, and `sudo laneway-control restore BUNDLE.age --identity FILE` performs a
+guarded fresh-state restore as documented below.
 
 For an upgrade, prepare a complete candidate environment file with the new
 semantic version and four signed manifest digests, leaving deployment identity
-and endpoint values unchanged, then run `sudo laneway control upgrade CANDIDATE.env`.
+and endpoint values unchanged, then run
+`sudo laneway-control upgrade CANDIDATE.env`.
 The wrapper validates Compose, verifies every image with Cosign against the
 tagged release workflow identity, pulls all images, takes a database backup,
 and only then gracefully stops and recreates the stack. If readiness fails, it

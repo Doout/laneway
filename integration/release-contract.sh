@@ -131,6 +131,10 @@ require 'connector-entrypoint.sh' "$exit_dockerfile"
 require '--inh-caps=+net_admin --ambient-caps=+net_admin --no-new-privs' "$connector_entrypoint"
 require "if [ \"\$identity_count\" -ne 5 ]" "$connector_entrypoint"
 require 'persistent volume contains an incomplete Connector identity' "$connector_entrypoint"
+# shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
+require 'required SETUP_TOKEN "${SETUP_TOKEN:-}"' "$connector_entrypoint"
+# shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
+require 'exec /sbin/tini -- /usr/local/bin/laneway node run -config "$config_file"' "$connector_entrypoint"
 require './integration/connector-upgrade.sh laneway-connector:ci' "$repo_dir/.github/workflows/ci.yml"
 
 echo "Release signing, provenance, SBOM, scan, and multi-architecture contract is valid"

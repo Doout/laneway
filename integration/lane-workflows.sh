@@ -40,7 +40,6 @@ printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
 if [ "${1:-} ${2:-}" = "version --format" ]; then printf '26.1.0\n'; exit 0; fi
 case " $* " in
-  *" enrollment-token issue "*) printf '%s\n' '{' '  "token_id": "000102030405060708090a0b0c0d0e0f",' '  "enrollment_token": "single_use_secret",' '  "expires_at_unix_seconds": 2000000000' '}' ;;
   *" ps --all --quiet "*) [ "${LANE_TEST_OWNED_STACK:-0}" = 0 ] || printf 'owned-id\n' ;;
   *" ps --status running -q controller "*) [ "${LANE_TEST_CONTROLLER_RUNNING:-0}" = 0 ] || printf 'controller-id\n' ;;
   *" ps --status running -q exit-node "*) [ "${LANE_TEST_EXIT_RUNNING:-0}" = 0 ] || printf 'exit-id\n' ;;
@@ -50,6 +49,16 @@ case " $* " in
   *" inspect --format "*) printf '%s\n' "${LANE_TEST_HEALTH:-healthy}" ;;
   *" exec -T --user 65532:65532 exit-node "*) printf 'carrier=direct-wireguard limiter=healthy\n' ;;
   *" up -d --wait controller relay "*) [ "${LANE_TEST_FAIL_UP:-0}" = 0 ] || exit 1 ;;
+esac
+EOF
+cat > "$fake_bin/laneway" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'laneway' >> "$LANE_TEST_LOG"
+printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
+printf '\n' >> "$LANE_TEST_LOG"
+case " $* " in
+  *" controller enrollment-token issue "*) printf '%s\n' '{' '  "token_id": "000102030405060708090a0b0c0d0e0f",' '  "enrollment_token": "single_use_secret",' '  "expires_at_unix_seconds": 2000000000' '}' ;;
 esac
 EOF
 cat > "$fake_bin/getent" <<'EOF'
@@ -72,7 +81,7 @@ cat > "$fake_bin/age" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$compose_dir/recovery.sh" "$fake_bin/docker" "$fake_bin/cosign" "$fake_bin/getent" "$fake_bin/ss" "$fake_bin/age"
+chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$compose_dir/recovery.sh" "$fake_bin/docker" "$fake_bin/laneway" "$fake_bin/cosign" "$fake_bin/getent" "$fake_bin/ss" "$fake_bin/age"
 
 write_env() {
   path=$1; version=$2; digit=$3
@@ -103,7 +112,7 @@ EOF
 write_env "$compose_dir/.env" 1.0.0 1
 candidate=$test_dir/candidate.env
 write_env "$candidate" 1.1.0 2
-export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log"
+export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log" LANEWAY_COMMAND="$fake_bin/laneway"
 
 "$compose_dir/laneway-control" init
 [ "$(grep -c '^cosign ' "$log")" -eq 4 ]
@@ -163,27 +172,42 @@ if "$compose_dir/laneway-control" backup locked.age >/dev/null 2>&1; then
 fi
 rmdir "$compose_dir/generated/lifecycle/operator.lock"
 
+mkdir -p "$compose_dir/generated/pki" "$compose_dir/generated/secrets"
+printf '%s\n' '-----BEGIN CERTIFICATE-----' 'fixture' '-----END CERTIFICATE-----' > "$compose_dir/generated/pki/ca.crt"
+printf '%s\n' 'fixture-admin-token' > "$compose_dir/generated/secrets/admin.token"
+
 "$compose_dir/laneway-control" invite --name laptop --ephemeral --session-lifetime 2h
 grep -F '<--class> <ephemeral>' "$log" >/dev/null
-grep -F '<--admin-token-file> </run/laneway-secrets/admin.token>' "$log" >/dev/null
+grep -F "<--controller> <https://127.0.0.1:8443>" "$log" >/dev/null
+grep -F "<--admin-token-file> <$compose_dir/generated/secrets/admin.token>" "$log" >/dev/null
+if grep -F '<--profile> <tools>' "$log" >/dev/null; then
+  echo "invite used the Docker admin image" >&2
+  exit 1
+fi
 
 "$compose_dir/laneway-control" user-token --name remembered-laptop
 grep -F '<--requested-name> <remembered-laptop>' "$log" >/dev/null
 grep -F '<--class> <remembered>' "$log" >/dev/null
 
-mkdir -p "$compose_dir/generated/pki"
-printf '%s\n' '-----BEGIN CERTIFICATE-----' 'fixture' '-----END CERTIFICATE-----' > "$compose_dir/generated/pki/ca.crt"
 connector_command=$test_dir/connector-command.sh
 "$compose_dir/laneway-control" invite --name egress-one --ephemeral --session-lifetime 2h --docker --connector > "$connector_command"
 sh -n "$connector_command"
 grep -F 'docker run -d' "$connector_command" >/dev/null
 grep -F -- "--name 'laneway-connector-egress-one'" "$connector_command" >/dev/null
 grep -F -- "--volume 'laneway-connector-egress-one-state:/var/lib/laneway'" "$connector_command" >/dev/null
-grep -F -- "--env 'LANEWAY_ENROLLMENT_TOKEN=single_use_secret'" "$connector_command" >/dev/null
+setup_token=$(sed -n "s/.*--env 'SETUP_TOKEN=\(st1\.[A-Za-z0-9+\/=]*\)'.*/\1/p" "$connector_command")
+[ -n "$setup_token" ] || { echo "Connector command has no setup token" >&2; exit 1; }
+printf '%s' "${setup_token#st1.}" | base64 -d > "$test_dir/setup-token.txt"
+grep -Fx 'egress-one' "$test_dir/setup-token.txt" >/dev/null
+grep -Fx 'single_use_secret' "$test_dir/setup-token.txt" >/dev/null
+grep -Fx 'https://lane.example.test:8443' "$test_dir/setup-token.txt" >/dev/null
 grep -F 'ghcr.io/doout/laneway-connector:1.0.0@sha256:' "$connector_command" >/dev/null
 grep -F -- '--cap-drop ALL' "$connector_command" >/dev/null
-grep -F -- '--cap-add NET_ADMIN' "$connector_command" >/dev/null
-grep -F -- '--device /dev/net/tun:/dev/net/tun' "$connector_command" >/dev/null
+grep -F -- '--security-opt no-new-privileges:true' "$connector_command" >/dev/null
+if grep -E -- '--cap-add|--device|--sysctl|--publish|LANEWAY_(ENROLLMENT|NETWORK|CONTROLLER|RELAY|CA_)' "$connector_command" >/dev/null; then
+  echo "userspace Connector command exposed privileged networking or expanded bootstrap metadata" >&2
+  exit 1
+fi
 grep -F '<--exit-node>' "$log" >/dev/null
 grep -F '<--requested-name> <egress-one>' "$log" >/dev/null
 

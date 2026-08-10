@@ -9,9 +9,11 @@ controller's `admin_token_file` must contain an independently
 generated bearer secret of at least 32 characters and should be readable only
 by the service account.
 
-The node service requires `/dev/net/tun` and `CAP_NET_ADMIN`. Relay and
-controller services deliberately run without network-administration
-capabilities. Production certificate and key files are never included here.
+Host nodes and the full Exit Node service require `/dev/net/tun` and
+`CAP_NET_ADMIN`. The userspace Docker Connector proxies approved TCP/UDP flows
+without either one. Relay and controller services deliberately run without
+network-administration capabilities. Production certificate and key files are
+never included here.
 After installing the package, the supported managed Node path is
 `sudo laneway node install DOMAIN`. It authenticates public bootstrap metadata,
 requires a durable Node invite, derives controller and relay identity pins, and
@@ -56,8 +58,9 @@ after exact relay identity validation and registration.
 
 Managed Go node configurations enable authenticated direct paths unless
 `direct.enabled = false` is set explicitly; the Rust node always enables its
-direct manager. Host Node/User examples bind an ephemeral UDP port, while the
-isolated Docker Connector publishes a fixed port. `laneway peers` reports each
+direct manager. Host Node/User examples bind an ephemeral UDP port. The
+userspace Docker Connector is outbound-only and publishes no port; the isolated
+full Exit Node profile is the TUN-based alternative. `laneway peers` reports each
 peer as `direct`, `relay-quic`, `tcp-fallback`, or `disconnected`.
 Both relay implementations
 derive each candidate from the source address of the node's QUIC session,
