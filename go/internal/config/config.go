@@ -359,8 +359,8 @@ func (c Config) Validate() error {
 		if c.WireGuard.Enabled && (c.WireGuard.PrivateKeyFile == "" || c.WireGuard.InterfaceName == "" || c.WireGuard.MTU != 1280) {
 			return errors.New("wireguard.private_key, interface, and MTU 1280 are required when WireGuard is enabled")
 		}
-		if c.Connector.Userspace && (c.WireGuard.Enabled || c.Direct.Enabled || c.Routing.OutputInterface != "" || len(c.Routing.Advertise) != 0 || c.Exit.Enabled || c.Exit.Serve) {
-			return errors.New("userspace Connector mode cannot use WireGuard, direct paths, native routing, or full packet Exit mode")
+		if c.Connector.Userspace && (c.WireGuard.Enabled || c.Routing.OutputInterface != "" || len(c.Routing.Advertise) != 0 || c.Exit.Enabled || c.Exit.Serve) {
+			return errors.New("userspace Connector mode cannot use WireGuard, native routing, or full packet Exit mode")
 		}
 	case ModeRelay:
 		if c.Direct.Enabled || c.WireGuard.Enabled {

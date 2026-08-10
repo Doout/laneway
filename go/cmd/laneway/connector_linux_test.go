@@ -95,7 +95,7 @@ func TestConfigureConnectorMigratesLegacyIdentityWithoutReenrollment(t *testing.
 		RelayEndpoint: "lane.example.test:4433", RelayServiceID: "33333333333333333333333333333333",
 	}
 	stateDir := t.TempDir()
-	legacy := strings.Replace(connectorConfig(stateDir, setup), "[direct]\nenabled = false\n\n[connector]\nuserspace = true\n", `[direct]
+	legacy := strings.Replace(connectorConfig(stateDir, setup), "[direct]\nenabled = true\nlisten = \":0\"\n\n[connector]\nuserspace = true\n", `[direct]
 enabled = true
 listen = "0.0.0.0:4434"
 
@@ -129,7 +129,7 @@ failure_mode = "closed"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Connector.Userspace || cfg.Direct.Enabled || cfg.Routing.OutputInterface != "" || cfg.Exit.Serve {
+	if !cfg.Connector.Userspace || !cfg.Direct.Enabled || cfg.Direct.Listen != ":0" || cfg.Routing.OutputInterface != "" || cfg.Exit.Serve {
 		t.Fatalf("legacy configuration was not migrated safely: %#v", cfg)
 	}
 	for name, want := range map[string]string{"node.crt": "cert", "node.key": "key", "wireguard.key": "wg"} {
@@ -140,6 +140,37 @@ failure_mode = "closed"
 	}
 	if err := configureConnector(stateDir); err != nil {
 		t.Fatalf("userspace configuration is not idempotent: %v", err)
+	}
+}
+
+func TestConfigureConnectorEnablesDirectTraversalForExistingUserspaceIdentity(t *testing.T) {
+	setup := connectorSetup{
+		Name: "ibmcloud", ControllerEndpoint: "https://lane.example.test:8443", ControllerQUIC: "lane.example.test:8443", ServerName: "lane.example.test",
+		NetworkID: "11111111111111111111111111111111", ControllerServiceID: "22222222222222222222222222222222",
+		RelayEndpoint: "lane.example.test:4433", RelayServiceID: "33333333333333333333333333333333",
+	}
+	stateDir := t.TempDir()
+	oldConfig := strings.Replace(connectorConfig(stateDir, setup), "enabled = true\nlisten = \":0\"", "enabled = false", 1)
+	for name, contents := range map[string]string{
+		"connector.toml": oldConfig, "ca.crt": "ca", "node.crt": "cert", "node.key": "key", "wireguard.key": "wg",
+	} {
+		if err := os.WriteFile(filepath.Join(stateDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := configureConnector(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(stateDir, "connector.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Decode(strings.NewReader(string(contents)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Connector.Userspace || !cfg.Direct.Enabled || cfg.Direct.Listen != ":0" {
+		t.Fatalf("existing userspace Connector did not enable direct traversal: %#v", cfg)
 	}
 }
 
@@ -164,12 +195,12 @@ func TestConnectorConfigSelectsUnprivilegedUserspaceMode(t *testing.T) {
 	if !decoded.Connector.Userspace {
 		t.Fatal("generated configuration did not select userspace Connector mode")
 	}
-	for _, expected := range []string{"[connector]\nuserspace = true", "[direct]\nenabled = false", `name = "ibmcloud"`} {
+	for _, expected := range []string{"[connector]\nuserspace = true", "[direct]\nenabled = true\nlisten = \":0\"", `name = "ibmcloud"`} {
 		if !strings.Contains(configuration, expected) {
 			t.Fatalf("configuration lacks %q:\n%s", expected, configuration)
 		}
 	}
-	for _, forbidden := range []string{"output_interface", "serve = true", "enabled = true"} {
+	for _, forbidden := range []string{"output_interface", "serve = true"} {
 		if strings.Contains(configuration, forbidden) {
 			t.Fatalf("configuration contains privileged setting %q", forbidden)
 		}
