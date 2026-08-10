@@ -32,5 +32,7 @@ if [ "$identity_count" -ne 5 ]; then
   /usr/local/bin/laneway connector activate --setup-token "$SETUP_TOKEN" --state-dir "$state_dir"
 fi
 
+/usr/local/bin/laneway connector configure --state-dir "$state_dir"
+
 unset SETUP_TOKEN
 exec /sbin/tini -- /usr/local/bin/laneway node run -config "$config_file"

@@ -88,6 +88,61 @@ func TestActivateConnectorPublishesIdentityAtomically(t *testing.T) {
 	}
 }
 
+func TestConfigureConnectorMigratesLegacyIdentityWithoutReenrollment(t *testing.T) {
+	setup := connectorSetup{
+		Name: "ibmcloud", ControllerEndpoint: "https://lane.example.test:8443", ControllerQUIC: "lane.example.test:8443", ServerName: "lane.example.test",
+		NetworkID: "11111111111111111111111111111111", ControllerServiceID: "22222222222222222222222222222222",
+		RelayEndpoint: "lane.example.test:4433", RelayServiceID: "33333333333333333333333333333333",
+	}
+	stateDir := t.TempDir()
+	legacy := strings.Replace(connectorConfig(stateDir, setup), "[direct]\nenabled = false\n\n[connector]\nuserspace = true\n", `[direct]
+enabled = true
+listen = "0.0.0.0:4434"
+
+[routing]
+output_interface = "eth0"
+nat = true
+
+[exit]
+enabled = false
+serve = true
+failure_mode = "closed"
+`, 1)
+	if legacy == connectorConfig(stateDir, setup) {
+		t.Fatal("legacy configuration fixture was not produced")
+	}
+	for name, contents := range map[string]string{
+		"connector.toml": legacy, "ca.crt": "ca", "node.crt": "cert", "node.key": "key", "wireguard.key": "wg",
+	} {
+		if err := os.WriteFile(filepath.Join(stateDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := configureConnector(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(filepath.Join(stateDir, "connector.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Decode(strings.NewReader(string(contents)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Connector.Userspace || cfg.Direct.Enabled || cfg.Routing.OutputInterface != "" || cfg.Exit.Serve {
+		t.Fatalf("legacy configuration was not migrated safely: %#v", cfg)
+	}
+	for name, want := range map[string]string{"node.crt": "cert", "node.key": "key", "wireguard.key": "wg"} {
+		got, err := os.ReadFile(filepath.Join(stateDir, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("identity %s changed during migration: %q, %v", name, got, err)
+		}
+	}
+	if err := configureConnector(stateDir); err != nil {
+		t.Fatalf("userspace configuration is not idempotent: %v", err)
+	}
+}
+
 func infoMode(info os.FileInfo) os.FileMode {
 	if info == nil {
 		return 0

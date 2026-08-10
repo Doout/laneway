@@ -22,8 +22,22 @@ type connectorSetup struct {
 }
 
 func runConnector(args []string) error {
-	if len(args) == 0 || args[0] != "activate" {
-		return errors.New("usage: laneway connector activate --setup-token TOKEN [--state-dir DIR]")
+	if len(args) == 0 {
+		return errors.New("usage: laneway connector <activate|configure>")
+	}
+	if args[0] == "configure" {
+		fs := flag.NewFlagSet("connector configure", flag.ContinueOnError)
+		stateDir := fs.String("state-dir", "/var/lib/laneway/connector", "persistent Connector state directory")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 || !filepath.IsAbs(*stateDir) {
+			return errors.New("usage: laneway connector configure [--state-dir DIR]")
+		}
+		return configureConnector(*stateDir)
+	}
+	if args[0] != "activate" {
+		return errors.New("usage: laneway connector <activate|configure>")
 	}
 	fs := flag.NewFlagSet("connector activate", flag.ContinueOnError)
 	setupToken := fs.String("setup-token", "", "single-use Connector setup token")
@@ -39,6 +53,72 @@ func runConnector(args []string) error {
 		return err
 	}
 	return activateConnector(*stateDir, setup)
+}
+
+func configureConnector(stateDir string) error {
+	paths := []string{"connector.toml", "ca.crt", "node.crt", "node.key", "wireguard.key"}
+	for _, name := range paths {
+		info, err := os.Lstat(filepath.Join(stateDir, name))
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("Connector identity is incomplete or unsafe: %s", name)
+		}
+	}
+	configFile := filepath.Join(stateDir, "connector.toml")
+	file, err := os.Open(configFile)
+	if err != nil {
+		return err
+	}
+	cfg, decodeErr := config.Decode(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("decode existing Connector configuration: %w", decodeErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if cfg.Connector.Userspace {
+		return nil
+	}
+	if cfg.Mode != config.ModeNode || !cfg.Direct.Enabled || cfg.Routing.OutputInterface == "" || !cfg.Routing.NAT ||
+		cfg.Exit.Enabled || !cfg.Exit.Serve || cfg.WireGuard.Enabled || cfg.Controller.Endpoint == "" ||
+		cfg.Controller.QUICEndpoint == "" || cfg.Controller.ServerName == "" {
+		return errors.New("existing configuration is not a recognized legacy Docker Connector; refusing automatic migration")
+	}
+	setup := connectorSetup{
+		Name: cfg.Node.Name, ControllerEndpoint: cfg.Controller.Endpoint, ControllerQUIC: cfg.Controller.QUICEndpoint,
+		ServerName: cfg.Controller.ServerName, NetworkID: cfg.Controller.NetworkID, ControllerServiceID: cfg.Controller.ServiceID,
+		RelayEndpoint: cfg.Node.RelayAddress, RelayServiceID: cfg.Node.RelayServiceID,
+	}
+	configuration := connectorConfig(stateDir, setup)
+	if _, err := config.Decode(strings.NewReader(configuration)); err != nil {
+		return fmt.Errorf("validate migrated Connector configuration: %w", err)
+	}
+	temporary, err := os.CreateTemp(stateDir, ".connector.toml-")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	defer func() { _ = os.Remove(temporaryName) }()
+	if _, err := temporary.WriteString(configuration); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Chmod(0o444); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryName, configFile); err != nil {
+		return fmt.Errorf("publish migrated Connector configuration: %w", err)
+	}
+	fmt.Printf("Connector %s configuration migrated to unprivileged userspace mode\n", cfg.Node.Name)
+	return nil
 }
 
 func activateConnector(stateDir string, setup connectorSetup) error {
