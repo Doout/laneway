@@ -54,9 +54,33 @@ jobs:
           cache-dependency-path: go/go.sum
       - name: Fuzz ${{ matrix.target }} for 30 seconds
         working-directory: go
-        run: >-
-          go test '${{ matrix.package }}' -run '^$'
-          -fuzz '^${{ matrix.target }}$' -fuzztime 30s
+        env:
+          FUZZ_PACKAGE: ${{ matrix.package }}
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          fuzz_log="$(mktemp)"
+          trap 'rm -f "$fuzz_log"' EXIT
+
+          run_fuzz() {
+            go test "$FUZZ_PACKAGE" -run '^$' \
+              -fuzz "^${FUZZ_TARGET}$" -fuzztime 30s 2>&1 | tee "$fuzz_log"
+          }
+
+          if run_fuzz; then
+            exit 0
+          fi
+
+          # Go 1.26 can leak the normal fuzz deadline as a test failure.
+          # Retry only that exact shutdown race; crashes and reproducers stay red.
+          if grep -Fq -- "--- FAIL: ${FUZZ_TARGET} (" "$fuzz_log" \
+            && grep -Eq '^[[:space:]]+context deadline exceeded$' "$fuzz_log" \
+            && ! grep -Eq 'panic:|Failing input written to' "$fuzz_log"; then
+            echo "::warning::Retrying ${FUZZ_TARGET} after the Go fuzz deadline race"
+            : > "$fuzz_log"
+            run_fuzz
+          else
+            exit 1
+          fi
 
   rust-fuzz:
     name: rust/${{ matrix.target }}
