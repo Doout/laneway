@@ -22,8 +22,7 @@ leaf_validity = "720h"
 
 # Optional public discovery listener. This certificate MUST chain to public
 # Web PKI and is deliberately separate from the Laneway-CA controller identity.
-# Linux artifacts support host enrollment. Add both Darwin artifacts to enable
-# controller-approved macOS self-update.
+# Platform artifacts support verified bootstrap downloads and host enrollment.
 # [bootstrap]
 # Omit listen/certificate/private_key when a relay terminates automatic public
 # Web-PKI HTTPS and fetches this document over the private controller channel.

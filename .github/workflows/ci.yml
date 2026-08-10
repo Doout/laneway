@@ -51,7 +51,7 @@ jobs:
         working-directory: go
         run: |
           go test ./cmd/laneway -run '^TestMacOS'
-          go test ./internal/nethelper
+          go test ./internal/nethelper ./internal/platform ./internal/releaseupdate
 
   protobuf:
     name: Protobuf lint and generated code

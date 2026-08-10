@@ -23,6 +23,7 @@ type daemonSubnetManager struct {
 	fixedForwardPrefixes []netip.Prefix
 	setRelayPrefixes     func([]netip.Prefix) error
 	setDirectPrefixes    func([]netip.Prefix) error
+	userspace            bool
 	serveExit            bool
 	published            []netip.Prefix
 }
@@ -43,6 +44,9 @@ func (m *daemonSubnetManager) RequiredIPForwardFamilies(configuration *lanewayv1
 	routes, err := approvedLocalSubnetRoutes(configuration, local)
 	if err != nil {
 		return ipForwardFamilies{}, err
+	}
+	if m.userspace {
+		return ipForwardFamilies{}, nil
 	}
 	var result ipForwardFamilies
 	for _, route := range routes {
@@ -109,10 +113,13 @@ func (m *daemonSubnetManager) Prepare(configuration *lanewayv1.NodeConfiguration
 	if err != nil {
 		return subnet.ForwardingPlan{}, nil, err
 	}
-	if len(routes) != 0 && m.forwarding == nil {
+	if len(routes) != 0 && m.forwarding == nil && !m.userspace {
 		return subnet.ForwardingPlan{}, nil, errors.New("approved local subnet route requires routing.output_interface")
 	}
-	plan := subnet.ForwardingPlan{Routes: routes}
+	plan := subnet.ForwardingPlan{}
+	if !m.userspace {
+		plan.Routes = routes
+	}
 	if err := subnet.ValidateForwardingPlan(plan); err != nil {
 		return subnet.ForwardingPlan{}, nil, err
 	}
