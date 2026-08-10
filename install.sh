@@ -7,6 +7,7 @@ install_control_plane=false
 prepare_control_plane=false
 upgrade_control_plane=false
 production_mode=false
+quick_control_plane=false
 cosign_bin=
 cosign_is_fallback=false
 
@@ -67,7 +68,13 @@ select_cosign() {
 }
 
 case "${1:-}" in
-  '') ;;
+  '')
+    if [ -n "${LANEWAY_DOMAIN:-}" ] && [ "$(uname -s)" = Linux ]; then
+      install_control_plane=true
+      quick_control_plane=true
+    fi
+    ;;
+  --client) shift ;;
   --control-plane)
     install_control_plane=true; shift
     if [ "${1:-}" = --production ]; then production_mode=true; shift; fi
@@ -79,9 +86,11 @@ case "${1:-}" in
     ;;
   -h|--help)
     cat <<'EOF'
-usage: sh install.sh [--control-plane [--production] | --prepare-control-plane | --upgrade-control-plane [--production]]
+usage: sh install.sh [--client | --control-plane [--production] | --prepare-control-plane | --upgrade-control-plane [--production]]
 
-Without options, install the latest Laneway binaries and packaged files.
+Without options, install the latest Laneway client and packaged files on Linux
+or macOS. On Linux, setting LANEWAY_DOMAIN runs the control-plane quick setup
+with non-interactive defaults. Use --client to force a client-only install.
 With --control-plane, select a stable release tag, verify its signed release,
 install it, and start the interactive hardened control-plane installer.
 The default quick profile warns on unavailable signature services and writes a
@@ -123,14 +132,24 @@ esac
 missing=
 checksum_command=sha256sum
 if [ "$operating_system" = darwin ]; then checksum_command=shasum; fi
-for command in awk base64 curl find grep mktemp readlink sed "$checksum_command" tar; do
+for command in awk base64 curl date find grep mktemp readlink sed "$checksum_command" tar wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
+
+if [ "$operating_system" = darwin ] && \
+  [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
+  [ "$(id -u)" -ne 0 ] || add_missing "a normal macOS user (do not run the client installer with sudo)"
+  command -v sudo >/dev/null 2>&1 || add_missing sudo
+fi
+if [ "$operating_system" = linux ] && [ -z "${DESTDIR:-}" ] && [ "$(id -u)" -ne 0 ] && \
+  [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
+  command -v sudo >/dev/null 2>&1 || add_missing sudo
+fi
 
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   [ -z "${DESTDIR:-}" ] || { echo "control-plane modes cannot be combined with DESTDIR" >&2; exit 1; }
   [ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"
-  for command in age chmod chown date dirname install stat sync wc; do
+  for command in age chmod chown dirname install stat sync; do
     command -v "$command" >/dev/null 2>&1 || add_missing "$command"
   done
 fi
@@ -161,24 +180,37 @@ if [ -n "$missing" ]; then
   echo "Install the listed prerequisites and rerun; no deployment changes were made." >&2
   exit 1
 fi
+if [ "$release" = latest ]; then
+  latest_url=$(curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    --header 'Cache-Control: no-cache' --header 'Pragma: no-cache' \
+    --output /dev/null \
+    --write-out '%{url_effective}' \
+    "https://github.com/$repository/releases/latest?laneway_cache_bust=$(date +%s)")
+  default_tag=${latest_url##*/}
+else
+  default_tag=$release
+fi
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   echo "Laneway pre-check: required host prerequisites are available." >&2
-  if [ "$release" = latest ]; then
-    latest_url=$(curl --fail --location --silent --show-error --output /dev/null \
-      --write-out '%{url_effective}' "https://github.com/$repository/releases/latest")
-    default_tag=${latest_url##*/}
+  if [ "$quick_control_plane" = true ] || [ "${LANEWAY_NONINTERACTIVE:-false}" = true ]; then
+    selected_tag=$default_tag
   else
-    default_tag=$release
+    printf 'Stable release tag [%s]: ' "$default_tag" >&2
+    IFS= read -r selected_tag || { echo "input ended while reading the release tag" >&2; exit 1; }
+    [ -n "$selected_tag" ] || selected_tag=$default_tag
   fi
-  printf 'Stable release tag [%s]: ' "$default_tag" >&2
-  IFS= read -r selected_tag || { echo "input ended while reading the release tag" >&2; exit 1; }
-  [ -n "$selected_tag" ] || selected_tag=$default_tag
   case "$selected_tag" in v*) ;; *) selected_tag=v$selected_tag ;; esac
   printf '%s\n' "$selected_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
     echo "control-plane release must be a stable vMAJOR.MINOR.PATCH tag" >&2
     exit 1
   }
   release=$selected_tag
+else
+  case "$default_tag" in v*) release=$default_tag ;; *) release=v$default_tag ;; esac
+  printf '%s\n' "$release" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || {
+    echo "release must be latest or a stable vMAJOR.MINOR.PATCH tag" >&2
+    exit 1
+  }
 fi
 
 asset="laneway_${operating_system}_${architecture}.tar.gz"
@@ -199,9 +231,9 @@ if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] ||
   fi
 fi
 
-curl --fail --location --silent --show-error \
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$base_url/$asset" -o "$download_dir/$asset"
-curl --fail --location --silent --show-error \
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$base_url/checksums.txt" -o "$download_dir/checksums.txt"
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   curl --fail --location --silent --show-error \
@@ -233,7 +265,7 @@ fi
 (
   cd "$download_dir"
   grep "  $asset\$" checksums.txt > selected-checksum.txt
-  test -s selected-checksum.txt
+  test "$(wc -l < selected-checksum.txt)" -eq 1
   if [ "$operating_system" = darwin ]; then
     shasum -a 256 -c selected-checksum.txt
   else
@@ -252,8 +284,21 @@ if [ "$upgrade_control_plane" = true ] && \
   echo "release $release predates control-plane upgrades; select a newer stable tag" >&2
   exit 1
 fi
-env DESTDIR="${DESTDIR:-}" PREFIX="/usr/local" \
-  sh "$download_dir/laneway/install.sh"
+if [ "$operating_system" = darwin ]; then
+  "$download_dir/laneway/bin/laneway" configure --yes
+  "$download_dir/laneway/bin/laneway" configure --check
+  echo "Laneway $release is ready."
+  echo "Next: ask your administrator for a user token, then run:"
+  echo "  laneway login ${LANEWAY_DOMAIN:-YOUR_DOMAIN}"
+  echo "  laneway connect ${LANEWAY_DOMAIN:-YOUR_DOMAIN}"
+  exit 0
+fi
+
+if [ -z "${DESTDIR:-}" ] && [ "$(id -u)" -ne 0 ]; then
+  sudo env DESTDIR= PREFIX=/usr/local sh "$download_dir/laneway/install.sh"
+else
+  env DESTDIR="${DESTDIR:-}" PREFIX=/usr/local sh "$download_dir/laneway/install.sh"
+fi
 
 if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ]; then
   install -D -m 0755 -o 0 -g 0 "$cosign_bin" /usr/local/libexec/laneway/cosign-v3.1.3
@@ -261,10 +306,19 @@ if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ]; then
 fi
 
 if [ "$install_control_plane" = true ]; then
+  control_noninteractive=${LANEWAY_NONINTERACTIVE:-false}
+  control_confirmation=${LANEWAY_CONFIRM:-}
+  if [ "$quick_control_plane" = true ]; then
+    control_noninteractive=true
+    control_confirmation=deploy
+  fi
   exec env LANEWAY_VERSION="${release#v}" LANEWAY_COSIGN_BIN="$cosign_bin" \
     LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$download_dir/bootstrap-artifacts.toml" \
     LANEWAY_PRODUCTION_MODE="$production_mode" \
     LANEWAY_CHECKSUM_SIGNATURE_VERIFIED="${checksum_signature_verified:-false}" \
+    LANEWAY_NONINTERACTIVE="$control_noninteractive" \
+    LANEWAY_CONFIRM="$control_confirmation" \
+    LANEWAY_DOMAIN="${LANEWAY_DOMAIN:-}" \
     sh /usr/local/share/laneway/deploy/compose/install-control-plane.sh
 fi
 if [ "$prepare_control_plane" = true ]; then
