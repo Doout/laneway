@@ -302,8 +302,8 @@ func Serve(ctx context.Context, conn *net.UnixConn, config ServiceConfig) error 
 	if inspectErr != nil {
 		return fmt.Errorf("inspect network helper peer: %w", inspectErr)
 	}
-	if socketType != unix.SOCK_SEQPACKET {
-		return errors.New("network helper requires an authenticated Unix SOCK_SEQPACKET peer")
+	if socketType != helperSocketProtocol() {
+		return errors.New("network helper requires an authenticated message-oriented Unix socket peer")
 	}
 
 	packet := &unixPacketConn{conn: conn}
