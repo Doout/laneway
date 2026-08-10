@@ -132,8 +132,8 @@ func (m Metadata) Validate(now time.Time) error {
 	if m.Protocol.ControlMajor != protocol.ProtocolMajor1 || m.Protocol.Packet == nil || !slices.Contains(m.Protocol.Packet, uint32(protocol.PacketVersion1)) || protocol.Capability(m.Protocol.Capabilities).Unknown() != 0 {
 		return errors.New("bootstrap: unsupported or invalid protocol declaration")
 	}
-	if len(m.Artifacts) == 0 || len(m.Artifacts) > 16 {
-		return errors.New("bootstrap: artifact set is empty or unbounded")
+	if len(m.Artifacts) > 16 {
+		return errors.New("bootstrap: artifact set is unbounded")
 	}
 	seenArtifacts := make(map[string]struct{}, len(m.Artifacts))
 	for _, artifact := range m.Artifacts {

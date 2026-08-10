@@ -14,7 +14,7 @@ destination=${LANEWAY_DEPLOY_DIR:-/opt/laneway}
 case "$destination" in /*) ;; *) die "LANEWAY_DEPLOY_DIR must be absolute" ;; esac
 [ "$destination" != / ] || die "deployment directory cannot be /"
 
-for command in awk curl docker find grep install ln mktemp mv readlink sed wc; do
+for command in awk curl docker find grep install ln mktemp mv readlink sed sleep wc; do
   command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
 done
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
@@ -34,7 +34,16 @@ repository=${LANEWAY_REPOSITORY:-Doout/laneway}
 base_url=${LANEWAY_RELEASE_BASE_URL:-https://github.com/$repository/releases/download/$tag}
 
 work_dir=$(mktemp -d)
-cleanup() { [ ! -e "$work_dir" ] || find "$work_dir" -depth -delete; }
+migration_active=false
+cleanup() {
+  if [ "$migration_active" = true ]; then
+    install -m 0644 -o 0 -g 0 "$work_dir/compose.yaml.previous" "$destination/compose.yaml"
+    install -m 0444 -o 0 -g 0 "$work_dir/controller.toml.previous" "$destination/generated/config/controller.toml"
+    install -m 0444 -o 0 -g 0 "$work_dir/relay.toml.previous" "$destination/generated/config/relay.toml"
+    (cd "$destination" && docker compose --env-file .env -f compose.yaml up -d --remove-orphans) >/dev/null 2>&1 || true
+  fi
+  [ ! -e "$work_dir" ] || find "$work_dir" -depth -delete
+}
 trap cleanup EXIT HUP INT TERM
 curl --fail --location --silent --show-error "$base_url/image-digests.txt" -o "$work_dir/image-digests.txt"
 
@@ -119,8 +128,55 @@ if [ "$current_version" = "$package_version" ]; then
   exit 0
 fi
 
+for path in "$source_dir/compose.yaml" "$destination/generated/config/controller.toml" "$destination/generated/config/relay.toml"; do
+  [ -f "$path" ] && [ ! -L "$path" ] || die "public HTTPS migration input is missing or unsafe: $path"
+done
+cp "$destination/compose.yaml" "$work_dir/compose.yaml.previous"
+cp "$destination/generated/config/controller.toml" "$work_dir/controller.toml.previous"
+cp "$destination/generated/config/relay.toml" "$work_dir/relay.toml.previous"
+server_name=$(sed -n 's/^LANEWAY_CONTROLLER_SERVER_NAME=//p' "$destination/.env")
+network_id=$(sed -n 's/^LANEWAY_NETWORK_ID=//p' "$destination/.env")
+controller_port=$(sed -n 's/^LANEWAY_CONTROLLER_PORT=//p' "$destination/.env")
+[ -n "$controller_port" ] || controller_port=8443
+cp "$work_dir/controller.toml.previous" "$work_dir/controller.toml"
+if ! grep -Eq '^\[bootstrap\][[:space:]]*$' "$work_dir/controller.toml"; then
+  printf '\n[bootstrap]\nnetwork_id = "%s"\ncontroller_endpoint = "https://%s:%s"\ncontroller_quic_endpoint = "%s:%s"\ncontroller_server_name = "%s"\n' \
+    "$network_id" "$server_name" "$controller_port" "$server_name" "$controller_port" "$server_name" >> "$work_dir/controller.toml"
+fi
+cp "$work_dir/relay.toml.previous" "$work_dir/relay.toml"
+if ! grep -Eq '^\[public_https\][[:space:]]*$' "$work_dir/relay.toml"; then
+  printf '\n[public_https]\nserver_name = "%s"\ncache_dir = "/var/lib/laneway-public"\n' "$server_name" >> "$work_dir/relay.toml"
+fi
+install -m 0644 -o 0 -g 0 "$source_dir/compose.yaml" "$destination/compose.yaml"
+install -m 0444 -o 0 -g 0 "$work_dir/controller.toml" "$destination/generated/config/controller.toml"
+install -m 0444 -o 0 -g 0 "$work_dir/relay.toml" "$destination/generated/config/relay.toml"
+migration_active=true
+
 echo "Upgrading Laneway control plane from v$current_version to $tag."
 echo "Deployment identity, PKI, state, ports, firewall, and host networking are unchanged."
-(cd "$destination" && ./laneway-control upgrade "$candidate")
+if ! (cd "$destination" && ./laneway-control upgrade "$candidate"); then
+  die "upgrade failed; restoring the previous deployment files and containers"
+fi
+public_ready=false
+attempt=0
+while [ "$attempt" -lt 30 ]; do
+  if curl --fail --silent --show-error --max-time 10 --tlsv1.3 \
+    "https://$server_name/.well-known/laneway/bootstrap.json" > "$work_dir/bootstrap.json" 2>/dev/null &&
+    grep -F "\"network_id\":\"$network_id\"" "$work_dir/bootstrap.json" >/dev/null; then
+    public_ready=true
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+[ "$public_ready" = true ] || die "public HTTPS bootstrap did not become ready; restoring the previous deployment"
+migration_active=false
+for name in compose.yaml validate.sh preflight.sh recovery.sh bootstrap.sh README.md; do
+  [ ! -f "$source_dir/$name" ] || case "$name" in
+    *.sh) install -m 0755 -o 0 -g 0 "$source_dir/$name" "$destination/$name" ;;
+    *) install -m 0644 -o 0 -g 0 "$source_dir/$name" "$destination/$name" ;;
+  esac
+done
 echo "Laneway control plane upgraded to $tag."
+echo "Public HTTPS certificates for $server_name are issued and renewed automatically on TCP 443."
 echo "Run: sudo laneway-control status"

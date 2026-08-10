@@ -179,7 +179,8 @@ func run(path, diagnostics string) error {
 	var bootstrapServer *http.Server
 	var bootstrapListener net.Listener
 	var bootstrapServeErr <-chan error
-	if cfg.Bootstrap.Listen != "" {
+	var bootstrapHandler http.Handler
+	if cfg.Bootstrap.NetworkID != "" {
 		networkID, parseErr := identity.ParseNetworkID(cfg.Bootstrap.NetworkID)
 		if parseErr != nil {
 			return parseErr
@@ -212,26 +213,39 @@ func run(path, diagnostics string) error {
 		if bootstrapErr != nil {
 			return bootstrapErr
 		}
-		publicCertificate, certificateErr := tls.LoadX509KeyPair(cfg.Bootstrap.CertificateFile, cfg.Bootstrap.PrivateKeyFile)
-		if certificateErr != nil {
-			return fmt.Errorf("load bootstrap Web PKI certificate and key: %w", certificateErr)
+		bootstrapHandler = bootstrapMetadata.Handler()
+		if cfg.Bootstrap.Listen != "" {
+			publicCertificate, certificateErr := tls.LoadX509KeyPair(cfg.Bootstrap.CertificateFile, cfg.Bootstrap.PrivateKeyFile)
+			if certificateErr != nil {
+				return fmt.Errorf("load bootstrap Web PKI certificate and key: %w", certificateErr)
+			}
+			bootstrapServer = &http.Server{
+				Addr: cfg.Bootstrap.Listen, Handler: bootstrapHandler,
+				TLSConfig:         &tls.Config{Certificates: []tls.Certificate{publicCertificate}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
+				ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+				WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
+			}
+			bootstrapListener, err = net.Listen("tcp", cfg.Bootstrap.Listen)
+			if err != nil {
+				return fmt.Errorf("listen for public bootstrap metadata: %w", err)
+			}
+			defer bootstrapListener.Close()
+			bootstrapErrors := make(chan error, 1)
+			bootstrapServeErr = bootstrapErrors
+			go func() { bootstrapErrors <- bootstrapServer.ServeTLS(bootstrapListener, "", "") }()
 		}
-		bootstrapServer = &http.Server{
-			Addr: cfg.Bootstrap.Listen, Handler: bootstrapMetadata.Handler(),
-			TLSConfig:         &tls.Config{Certificates: []tls.Certificate{publicCertificate}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
-			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
-			WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
-		}
-		bootstrapListener, err = net.Listen("tcp", cfg.Bootstrap.Listen)
-		if err != nil {
-			return fmt.Errorf("listen for public bootstrap metadata: %w", err)
-		}
-		defer bootstrapListener.Close()
-		bootstrapErrors := make(chan error, 1)
-		bootstrapServeErr = bootstrapErrors
-		go func() { bootstrapErrors <- bootstrapServer.ServeTLS(bootstrapListener, "", "") }()
 	}
 	server := service.NewHTTPServer(cfg.Controller.Listen, tlsConfig)
+	if bootstrapHandler != nil {
+		privateHandler := server.Handler
+		server.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			if request.URL.Path == bootstrap.WellKnownPath {
+				bootstrapHandler.ServeHTTP(writer, request)
+				return
+			}
+			privateHandler.ServeHTTP(writer, request)
+		})
+	}
 	quicServer, err := service.ListenQUIC(cfg.Controller.QUICListen, tlsConfig)
 	if err != nil {
 		return err

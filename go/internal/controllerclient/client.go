@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/identity"
 )
 
@@ -56,6 +57,32 @@ type Options struct {
 	DialAddress    string
 	AdminTokenFile string
 	Timeout        time.Duration
+}
+
+// BootstrapMetadata fetches the non-secret discovery document over the
+// relay's already pinned, mutually authenticated controller connection.
+func (c *Client) BootstrapMetadata(ctx context.Context) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+bootstrap.WellKnownPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("controller bootstrap request: %w", err)
+	}
+	defer response.Body.Close()
+	contents, err := io.ReadAll(io.LimitReader(response.Body, bootstrap.MaxDocumentBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read controller bootstrap response: %w", err)
+	}
+	if len(contents) > bootstrap.MaxDocumentBytes {
+		return nil, errors.New("controller bootstrap response exceeds limit")
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("controller bootstrap returned %s", response.Status)
+	}
+	return contents, nil
 }
 
 type Client struct {

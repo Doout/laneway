@@ -9,9 +9,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -55,6 +57,7 @@ type Config struct {
 	Relay       Relay            `toml:"relay"`
 	Controller  Controller       `toml:"controller"`
 	Bootstrap   Bootstrap        `toml:"bootstrap"`
+	PublicHTTPS PublicHTTPS      `toml:"public_https"`
 	Routing     Routing          `toml:"routing"`
 	Connector   Connector        `toml:"connector"`
 	Exit        Exit             `toml:"exit"`
@@ -160,6 +163,14 @@ type Bootstrap struct {
 	ControllerQUICEndpoint string              `toml:"controller_quic_endpoint"`
 	ControllerServerName   string              `toml:"controller_server_name"`
 	Artifacts              []BootstrapArtifact `toml:"artifacts"`
+}
+
+// PublicHTTPS enables Web-PKI HTTPS on a relay's existing TCP fallback
+// listener. TLS ALPN keeps ordinary HTTPS and Laneway fallback isolated while
+// sharing one externally reachable port.
+type PublicHTTPS struct {
+	ServerName string `toml:"server_name"`
+	CacheDir   string `toml:"cache_dir"`
 }
 
 type BootstrapArtifact struct {
@@ -371,6 +382,20 @@ func (c Config) Validate() error {
 		if c.TCPFallback.Address != "" {
 			return errors.New("tcp_fallback.address is only valid in node mode")
 		}
+		if (c.PublicHTTPS.ServerName == "") != (c.PublicHTTPS.CacheDir == "") {
+			return errors.New("public_https requires server_name and cache_dir together")
+		}
+		if c.PublicHTTPS.ServerName != "" {
+			if c.TCPFallback.Listen == "" || c.Controller.Endpoint == "" {
+				return errors.New("public_https requires tcp_fallback.listen and controller.endpoint")
+			}
+			if err := validateBootstrapDNSName(c.PublicHTTPS.ServerName); err != nil {
+				return fmt.Errorf("public_https.server_name: %w", err)
+			}
+			if !filepath.IsAbs(c.PublicHTTPS.CacheDir) || filepath.Clean(c.PublicHTTPS.CacheDir) != c.PublicHTTPS.CacheDir {
+				return errors.New("public_https.cache_dir must be a clean absolute path")
+			}
+		}
 	case ModeController:
 		if c.Direct.Enabled || c.WireGuard.Enabled {
 			return errors.New("direct connectivity and WireGuard are only valid in node mode")
@@ -390,6 +415,9 @@ func (c Config) Validate() error {
 	}
 	if c.Mode != ModeController && bootstrapConfigured(c.Bootstrap) {
 		return errors.New("bootstrap listener is valid only in controller mode")
+	}
+	if c.Mode != ModeRelay && (c.PublicHTTPS.ServerName != "" || c.PublicHTTPS.CacheDir != "") {
+		return errors.New("public_https is valid only in relay mode")
 	}
 	if c.Mode != ModeNode && c.Connector.Userspace {
 		return errors.New("userspace Connector mode is valid only in node mode")
@@ -478,9 +506,15 @@ func validateBootstrap(value Bootstrap) error {
 	if !bootstrapConfigured(value) {
 		return nil
 	}
-	if value.Listen == "" || value.CertificateFile == "" || value.PrivateKeyFile == "" || value.NetworkID == "" ||
+	if value.NetworkID == "" ||
 		value.ControllerEndpoint == "" || value.ControllerQUICEndpoint == "" || value.ControllerServerName == "" {
-		return errors.New("bootstrap requires listen, certificate, private_key, network_id, controller_endpoint, controller_quic_endpoint, and controller_server_name")
+		return errors.New("bootstrap requires network_id, controller_endpoint, controller_quic_endpoint, and controller_server_name")
+	}
+	if value.Listen != "" && (value.CertificateFile == "" || value.PrivateKeyFile == "") {
+		return errors.New("bootstrap listener requires certificate and private_key")
+	}
+	if value.Listen == "" && (value.CertificateFile != "" || value.PrivateKeyFile != "") {
+		return errors.New("bootstrap certificate and private_key require listen")
 	}
 	if _, err := identity.ParseNetworkID(value.NetworkID); err != nil {
 		return fmt.Errorf("bootstrap.network_id: %w", err)
@@ -492,8 +526,8 @@ func validateBootstrap(value Bootstrap) error {
 	if _, err := netvalidate.CanonicalHostPort(value.ControllerQUICEndpoint); err != nil {
 		return errors.New("bootstrap.controller_quic_endpoint must be a canonical host:port")
 	}
-	if value.ControllerServerName != strings.ToLower(value.ControllerServerName) || strings.HasSuffix(value.ControllerServerName, ".") || len(value.ControllerServerName) > 253 {
-		return errors.New("bootstrap.controller_server_name must be a canonical lowercase DNS name")
+	if err := validateBootstrapDNSName(value.ControllerServerName); err != nil {
+		return fmt.Errorf("bootstrap.controller_server_name: %w", err)
 	}
 	platforms := make(map[string]struct{}, len(value.Artifacts))
 	for i, artifact := range value.Artifacts {
@@ -517,9 +551,21 @@ func validateBootstrap(value Bootstrap) error {
 		}
 		platforms[key] = struct{}{}
 	}
-	for _, required := range []string{"linux/amd64", "linux/arm64"} {
-		if _, exists := platforms[required]; !exists {
-			return fmt.Errorf("bootstrap artifact metadata is missing %s", required)
+	return nil
+}
+
+func validateBootstrapDNSName(value string) error {
+	if value == "" || value != strings.ToLower(value) || strings.HasSuffix(value, ".") || net.ParseIP(value) != nil || len(value) > 253 {
+		return errors.New("must be a canonical lowercase DNS name")
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return errors.New("must be a canonical lowercase DNS name")
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return errors.New("must be a canonical lowercase DNS name")
+			}
 		}
 	}
 	return nil

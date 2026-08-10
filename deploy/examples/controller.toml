@@ -25,6 +25,8 @@ leaf_validity = "720h"
 # Linux artifacts support host enrollment. Add both Darwin artifacts to enable
 # controller-approved macOS self-update.
 # [bootstrap]
+# Omit listen/certificate/private_key when a relay terminates automatic public
+# Web-PKI HTTPS and fetches this document over the private controller channel.
 # listen = ":443"
 # certificate = "/etc/letsencrypt/live/lane.example.com/fullchain.pem"
 # private_key = "/etc/letsencrypt/live/lane.example.com/privkey.pem"

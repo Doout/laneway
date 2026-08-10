@@ -38,13 +38,22 @@ process arguments, source control, or logs.
 ### Public bootstrap and short invite codes
 
 A fresh user client must authenticate discovery before it accepts the private
-network CA. Enable the controller's optional `[bootstrap]` listener with a
-certificate issued by public Web PKI. This listener is separate from the
-controller HTTPS/QUIC listener: it serves only
-`/.well-known/laneway/bootstrap.json`, while the controller listener retains
-its Laneway service certificate and immutable NetworkID/ServiceID identity.
-Never reuse a self-signed or private-network certificate on the public
-bootstrap listener.
+network CA. The standard Compose deployment enables `[bootstrap]` on the
+controller and `[public_https]` on the relay. TLS ALPN shares relay TCP 443:
+normal HTTPS receives an automatically issued public Web-PKI certificate,
+while `laneway-fallback/1` retains the private Laneway mutual-TLS identity.
+The public handler serves only `/.well-known/laneway/bootstrap.json`; controller
+HTTPS/QUIC on 8443 and relay QUIC on 4433 keep their private certificates.
+ACME certificate state is stored in the private `laneway-relay-public-certs`
+volume and renews automatically. Never copy a public private key into `.env`.
+
+Public HTTP requests have a global ceiling and bounded token buckets by IPv4
+/24 or IPv6 /64. A source IP receives a temporary higher allowance only after
+it completes a valid Laneway mutual-TLS fallback connection. Promotion cannot
+be requested with an HTTP header or public token, expires after one hour, and
+the in-memory source tables are size-bounded. Rate-limited requests receive
+HTTP 429 with `Retry-After`; unauthenticated clients retain enough baseline
+capacity to perform first login.
 
 Bootstrap configuration pins one network, the internal controller HTTPS and
 QUIC endpoints, its DNS name, the configured Linux and macOS release artifacts,

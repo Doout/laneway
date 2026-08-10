@@ -54,6 +54,7 @@ services:
       - ./generated/pki/ca.crt:/run/laneway-secrets/ca.crt:ro
       - ./generated/pki/relay.crt:/run/laneway-secrets/relay.crt:ro
       - ./generated/pki/relay.key:/run/laneway-secrets/relay.key:ro
+      - relay-public-certs:/var/lib/laneway-public
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
       - /var/lib/laneway-relay:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532
@@ -135,5 +136,7 @@ networks:
 volumes:
   controller-state:
     name: laneway-controller-state
+  relay-public-certs:
+    name: laneway-relay-public-certs
   exit-node-state:
     name: laneway-exit-node-state
