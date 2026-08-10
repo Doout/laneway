@@ -47,6 +47,37 @@ func TestTableFailClosedAndReplace(t *testing.T) {
 	}
 }
 
+func TestEvaluateReturnMatchesInitiatingSelectorInReverse(t *testing.T) {
+	network, client, connector := id(1), identity.NodeID(id(2)), identity.NodeID(id(3))
+	ruleID := id(8)
+	engine, err := Compile(&lanewayv1.PolicySnapshot{
+		NetworkId: network[:], DefaultAction: lanewayv1.PolicyAction_POLICY_ACTION_DENY,
+		Rules: []*lanewayv1.PolicyRule{{
+			RuleId: ruleID[:], Priority: 100, Action: lanewayv1.PolicyAction_POLICY_ACTION_ACCEPT,
+			Selector: &lanewayv1.TrafficSelector{
+				SourceNodeIds:       [][]byte{client[:]},
+				DestinationPrefixes: []*lanewayv1.IpPrefix{{Address: []byte{10, 240, 64, 6}, PrefixLength: 32}},
+				IpProtocol:          lanewayv1.IpProtocol_IP_PROTOCOL_TCP,
+				DestinationPorts:    []*lanewayv1.PortRange{{First: 22, Last: 22}},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := tcpPacketPorts(t, "10.240.64.6", "100.96.0.2", 22, 49152)
+	if result := engine.Evaluate(connector, client, packet); result.Action != Deny || result.Matched {
+		t.Fatalf("ordinary return evaluation = %#v", result)
+	}
+	if result := engine.EvaluateReturn(connector, client, packet); result.Action != Accept || !result.Matched || result.RuleID != ruleID {
+		t.Fatalf("reverse evaluation = %#v", result)
+	}
+	wrongPort := tcpPacketPorts(t, "10.240.64.6", "100.96.0.2", 23, 49152)
+	if result := engine.EvaluateReturn(connector, client, wrongPort); result.Action != Deny || result.Matched {
+		t.Fatalf("wrong source port matched return selector: %#v", result)
+	}
+}
+
 func TestCompileRejectsUnsafeZeroValues(t *testing.T) {
 	network := id(1)
 	for _, snapshot := range []*lanewayv1.PolicySnapshot{
@@ -71,13 +102,18 @@ func selector(source, destination identity.NodeID, port uint32) *lanewayv1.Traff
 }
 
 func tcpPacket(t *testing.T, source, destination string, port uint16) []byte {
+	return tcpPacketPorts(t, source, destination, 49152, port)
+}
+
+func tcpPacketPorts(t *testing.T, source, destination string, sourcePort, destinationPort uint16) []byte {
 	t.Helper()
 	packet, err := nodeservice.IPv4Packet(netip.MustParseAddr(source), netip.MustParseAddr(destination), make([]byte, 20))
 	if err != nil {
 		t.Fatal(err)
 	}
 	packet[9] = 6
-	binary.BigEndian.PutUint16(packet[22:24], port)
+	binary.BigEndian.PutUint16(packet[20:22], sourcePort)
+	binary.BigEndian.PutUint16(packet[22:24], destinationPort)
 	return packet
 }
 
