@@ -1,113 +1,27 @@
-# Deployment assets
+# Deployment files
 
-`systemd/` contains hardened service units for nodes, relays, and the
-controller. `containers/Dockerfile` builds a selected command with
-`--build-arg BINARY=<command>`. Static and controller-backed examples live in
-`examples/`. `compose/` contains the hardened container-first
-controller/relay/admin stack; see [compose/README.md](compose/README.md). The
-controller's `admin_token_file` must contain an independently
-generated bearer secret of at least 32 characters and should be readable only
-by the service account.
+Release packages install these files under `/usr/local/share/laneway/deploy`:
 
-Host nodes and the full Exit Node service require `/dev/net/tun` and
-`CAP_NET_ADMIN`. The userspace Docker Connector proxies approved TCP/UDP flows
-without either one. Relay and controller services deliberately run without
-network-administration capabilities. Production certificate and key files are
-never included here.
-After installing the package, the supported managed Node path is
-`sudo laneway node install DOMAIN`. It authenticates public bootstrap metadata,
-requires a durable Node invite, derives controller and relay identity pins, and
-enables direct paths without copying identifiers into a shell command.
-Node units leave the non-process `/proc` APIs visible (`ProcSubset=all`) because
-subnet and exit roles must transactionally read, update, and restore their
-owned forwarding sysctls; `ProtectProc=invisible` still restricts visibility
-of other users' process details.
-Both node implementations default their protected management socket to
-`/run/laneway/lanewayd.sock`. The Rust node stores its crash-safe explicit exit
-choice at `/var/lib/laneway/exit-intent-v1.json`; the systemd runtime/state
-directories make both paths writable under `ProtectSystem=strict`, and both
-objects are created mode `0600`.
-The relay and controller units use a locked, fixed `laneway` account so
-root-owned `0640 root:laneway` credentials remain readable without becoming
-world-readable; create that account before enabling either unit. The relay's
-only ambient capability is `CAP_NET_BIND_SERVICE`, required when the optional
-TCP fallback listener uses port 443.
-The supplied scratch container is for the unprivileged relay/controller path,
-not `lanewayd`. It runs as UID/GID `65532`, so read-only configuration and
-credential mounts must be readable by that container identity or its rootless
-runtime mapping. See [`../docs/operations.md`](../docs/operations.md) for the
-rootless and node-container boundaries.
+| Directory | Contents |
+| --- | --- |
+| `compose/` | Control plane, Connector, and isolated Exit Node |
+| `systemd/` | Controller, relay, and Node units |
+| `examples/` | Go and Rust configuration examples |
+| `nftables/` | Host firewall example and recovery notes |
+| `containers/` | Container definitions and Connector updater |
 
-For the Rust relay, use `examples/relay-rust.toml` (static authorization) or
-the shared `examples/relay-controller.toml` (leased controller authorization)
-and build `containers/Dockerfile.rust-relay`. The controller-backed example is
-also accepted by the Go relay. The Rust relay serves QUIC and an optional bounded
-`laneway-fallback/1` TLS/TCP listener using the same credentials and policy.
-Controller mode requires the exact controller SPIFFE `service_id` in addition
-to normal CA and hostname validation.
-The matching hardened host unit is
-`systemd/laneway-relay-rs.service`.
+Use the [Compose guide](compose/README.md) for a new control plane. Install a
+managed Linux Node with `sudo laneway node install DOMAIN` instead of assembling
+its controller configuration by hand.
 
-The relay example listens on UDP/4433 for the preferred QUIC carrier and
-TCP/443 for fallback; both ports must reach the same relay process. Nodes need
-only outbound access. TCP fallback uses the same certificate identities,
-authorization, route handles, and packet policy after QUIC fails. While TCP is
-healthy, the Rust node keeps one packet pump active and performs bounded QUIC
-recovery handshakes at `relay.quic_recovery_interval`; promotion occurs only
-after exact relay identity validation and registration.
+Controllers and relays need no network-administration capability. Connectors
+need no capability, TUN device, or published port; their ephemeral UDP socket
+and outbound relay mapping support synchronized NAT traversal. Host Nodes and
+full Exit Nodes require `/dev/net/tun` and `NET_ADMIN` in the namespace they
+manage. Host firewalls must allow reply and peer traffic on ephemeral
+direct-path sockets.
 
-Managed Go node configurations enable authenticated direct paths unless
-`direct.enabled = false` is set explicitly; the Rust node always enables its
-direct manager. Host Node/User examples bind an ephemeral UDP port. The
-userspace Docker Connector also binds an ephemeral container UDP socket and
-uses its outbound relay mapping for synchronized NAT traversal; it requires no
-published static port. The isolated full Exit Node profile is the TUN-based
-alternative. `laneway node peers` reports each
-peer as `direct`, `relay-quic`, `tcp-fallback`, or `disconnected`.
-Both relay implementations
-derive each candidate from the source address of the node's QUIC session,
-coordinate a short-lived UDP probe exchange, and remain available as fallback.
-Nodes reuse one UDP socket for the relay, probes, and peer QUIC, so host firewalls must
-allow replies and peer traffic on that socket. Do not set `allow_loopback` or
-`allow_link_local` outside a deliberately isolated test deployment. Candidate
-addresses are relay-observed and each rendezvous uses a fresh bounded token and
-coordinated start time; failure leaves the authenticated relay carrier active.
-Rust nodes refresh candidates on `direct.candidate_refresh_interval`; configure
-that above the Rust relay's `relay.candidate_republish_floor` so long-lived
-sessions retry failed direct paths without triggering the publication limit.
-
-`relay-controller.toml` uses the relay's mTLS service credential to fetch an
-initial complete peer-authorization and ACL snapshot before opening listeners.
-The controller port must be exposed on both TCP (HTTPS enrollment/management)
-and UDP (`laneway-control/1` mTLS QUIC). Authenticated node and relay control
-requires `controller.quic_endpoint`; it does not silently fall back to HTTPS.
-Before starting it, register the exact service ID encoded in that credential
-with `laneway controller relay register`; an unknown, disabled, or legacy
-unbound relay identity is rejected. The relay then polls by configuration
-epoch. Do not add `[[peers]]` entries to that file: static peers and
-controller-managed authorization are intentionally mutually exclusive.
-Replace `controller.network_id` and `controller.service_id` with the exact
-identity encoded in the controller certificate.
-
-`node-controller.toml` is the matching controller-authoritative node example,
-started with `laneway node run -config /etc/laneway/laneway.toml`.
-It deliberately contains neither `node.overlay_addresses` nor `[[peers]]`:
-The node runtime fetches a complete leased snapshot before opening `lane0`, validates
-the assigned address against its certificate identity and self-owned host
-route, and fails startup closed when that bootstrap is unavailable.
-For a managed install, those controller and relay pins are generated from the
-authenticated discovery and controller snapshots. Existing hand-written
-installations may continue using this example; migrate by backing up the four
-files in `/etc/laneway`, stopping `lanewayd`, moving those files out of the way,
-and running `laneway node install DOMAIN` with a fresh durable invite. Do not
-mix manual files with the managed ownership manifest.
-
-`nftables/` contains an operator-reviewed host firewall example and guidance
-for the runtime-owned subnet table. The full deployment, diagnostics,
-troubleshooting, crash-recovery, and upgrade procedure is in the operations
-runbook. Go node, relay, and controller diagnostics are opt-in via
-`-diagnostics 127.0.0.1:PORT`. The native Rust node instead uses
-`[diagnostics] listen = "127.0.0.1:PORT"` in its strict TOML and serves only
-Prometheus `GET /metrics`; the native Rust relay uses
-`[relay] metrics_listen = "127.0.0.1:PORT"` for the same restricted HTTP
-surface. Every implementation rejects non-loopback binds.
+For the supplied systemd units, install credentials as `root:laneway` mode
+`0640`. Container mounts must be readable by UID/GID `65532` without making
+credentials world-readable. See the [operations runbook](../docs/operations.md)
+for ports, diagnostics, and recovery.

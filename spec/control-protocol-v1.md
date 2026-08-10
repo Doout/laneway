@@ -6,7 +6,10 @@ Normative terms have the meaning defined in BCP 14.
 
 ## 1. Transport and encoding
 
-Control messages use Protobuf schemas in `api/proto/laneway/v1/` over a reliable ordered QUIC stream. Every control payload is one serialized `ControlEnvelope`; relay-specific payloads use `RelayEnvelope` under the same framing rule. Every message is framed as:
+Control messages use Protobuf schemas in `api/proto/laneway/v1/` over reliable
+ordered QUIC streams. Relay sessions carry `ControlEnvelope` and
+`RelayEnvelope`; controller request streams carry `ControllerEnvelope`. Every
+envelope is framed as:
 
 ```text
 uint32 payload_length   big-endian
@@ -15,7 +18,14 @@ byte[payload_length]    serialized protobuf message
 
 The length counts only the Protobuf payload. A receiver MUST read exactly four bytes, decode the unsigned length, validate it, and only then read or allocate for the payload. The v1 maximum control payload is 1,048,576 bytes. Length zero and lengths above that maximum are protocol errors. Deployments MAY configure a smaller limit but MUST fail explicitly rather than truncate.
 
-An envelope MUST set `schema_version` to `1` and exactly one `oneof body` member. A receiver MUST reject a different schema version, a missing body, or a body invalid in the current session state. `sequence` starts at 1 independently in each direction and increases by exactly one for each envelope on that stream. Duplicate, zero, or skipped sequence values are protocol errors. Sequence numbers detect state-machine mistakes; they are not cryptographic replay protection and MUST NOT persist across sessions.
+A `ControlEnvelope` or `RelayEnvelope` MUST set `schema_version` to `1` and
+exactly one `oneof body` member. A receiver MUST reject a different schema
+version, a missing body, or a body invalid in the current session state.
+`sequence` starts at 1 independently in each direction and increases by exactly
+one for each envelope on that stream. Duplicate, zero, or skipped sequence
+values are protocol errors. Sequence numbers detect state-machine mistakes;
+they are not cryptographic replay protection and MUST NOT persist across
+sessions.
 
 Protobuf parsers MUST reject malformed encodings. Unknown fields MUST be preserved when a message is decoded and re-encoded by a component acting as a transparent intermediary; ordinary endpoints MUST ignore unknown fields as Protobuf requires. Unknown enum numeric values MUST NOT be treated as a known authorization or capability value.
 
@@ -23,42 +33,61 @@ The first client-initiated bidirectional QUIC stream is the connection's sole co
 
 After `Welcome`, the same stream changes to `RelayEnvelope` frames with an independent sequence starting at 1. Its first relay body MUST be `RelayRegister`, whose `session_id` MUST equal the current `Welcome.session_id`; the relay rejects a duplicate registration or a request above its configured route limit. The relay uses `RouteHandleBinding` and `RouteHandleRelease` bodies to manage handles. `EndpointCandidate` MUST NOT be sent unless `LANEWAY_DIRECT_PEER_V1` has been negotiated. Further QUIC streams are reserved unless a future capability defines them.
 
-Controller connections are a separate use of the same bounded framing. They
-MUST negotiate TLS 1.3 mutual authentication with ALPN `laneway-control/1` and
-MUST NOT use 0-RTT. A client maintains one persistent connection and opens one
-bidirectional stream for each `ControllerEnvelope` request/response pair.
-Clients MUST serialize requests; servers MUST admit at most one concurrent
-bidirectional request stream per connection and process streams in order.
-There is no `LWC1` preface on controller request streams.
+### Controller connections
+
+Controller traffic reuses the bounded frame format on a separate QUIC
+connection. It MUST use TLS 1.3 mutual authentication with ALPN
+`laneway-control/1` and MUST NOT use 0-RTT. The UDP listener MAY share a
+numeric port with the HTTPS TCP listener.
+
+A client maintains one persistent connection and opens one bidirectional
+stream for each `ControllerEnvelope` request/response pair. Clients MUST
+serialize requests; servers MUST admit at most one concurrent request stream
+per connection and process streams in order. There is no `LWC1` preface. Each
+direction carries exactly one envelope, then the sender MUST finish its write
+half. The receiver MUST consume that FIN and reject any trailing byte.
 
 A controller envelope MUST have `schema_version = 1`, exactly one body, and a
-nonzero `request_id`. The response MUST echo the exact request ID. A mismatch,
-duplicate in-flight ID, unexpected body direction, malformed frame, or frame
-above 1,048,576 bytes is a connection-fatal protocol error. Node credentials
-permit `ConfigurationRequest` and `RenewalRequest`; relay credentials permit
-only `RelayConfigurationRequest`. The corresponding successful response is
-`NodeConfiguration`, `RenewalResponse`, or `RelayConfiguration`, respectively;
-an unchanged configuration uses `ConfigurationLease`, and failures use
-`ProtocolError`.
+nonzero `request_id`; the response MUST echo that ID. Node credentials permit
+`ConfigurationRequest` and `RenewalRequest`; relay credentials permit only
+`RelayConfigurationRequest`. Successful responses are `NodeConfiguration`,
+`RenewalResponse`, or `RelayConfiguration`, respectively. An unchanged
+configuration uses `ConfigurationLease`; failures use `ProtocolError`. An ID
+mismatch, duplicate in-flight ID, unexpected body direction, malformed frame,
+or invalid frame length is connection-fatal.
 
-The controller server certificate MUST contain exactly one controller-role
-Laneway URI SAN. A client MUST verify its CA chain and the exact configured
-NetworkID and controller ServiceID, in addition to the configured DNS name
-when present. A server MUST verify a client chain, exact node or relay role,
-and equality with the controller certificate NetworkID. It MUST re-check the
-client certificate validity interval and current authorization on every
-request, because a persistent connection can outlive certificate expiry or a
-relay disable operation. Implementations MUST use finite complete-request
-deadlines, connection limits, handshake limits, idle timeouts, and bounded
-reconnect backoff.
+The server certificate MUST contain exactly one controller-role Laneway URI
+SAN. A client MUST verify its CA chain, exact NetworkID and controller
+ServiceID, and the configured DNS name when present. A server MUST verify that
+the client chain is rooted in the configured network CA and contains exactly
+one Laneway URI SAN with the exact node or relay role and the controller's
+NetworkID. A relay certificate MUST also match its registered ServiceID. The
+server MUST re-check certificate validity, durable serial revocation state, and
+current authorization on every request; a disabled relay registration
+therefore loses access on its next request.
 
-Initial enrollment and administrative operations are the only normative HTTPS
-exception. A joining node cannot perform mTLS before the controller issues its
-first certificate, so it sends the one-time token and signed PKCS#10 CSR over
-TLS 1.3 HTTPS. The private key MUST remain local. All authenticated ongoing
-control MUST use QUIC; production controller-backed node and relay
-configuration MUST require `controller.quic_endpoint`. HTTPS polling MAY be
-retained only as an explicitly selected legacy compatibility mechanism.
+Complete-request deadlines MUST be finite, default to 15 seconds, and be
+client-configurable. Servers MUST cap concurrent connections at 256 and use
+bounded handshake and idle timeouts. After a failed connection, a client MUST
+discard it, MUST NOT replay an in-flight renewal, and MUST reconnect with
+bounded exponential backoff.
+
+### Enrollment
+
+Initial enrollment and administrative operations are the normative HTTPS
+exceptions. A joining node sends its one-time token and signed PKCS#10 CSR over
+server-authenticated TLS 1.3 HTTPS because it does not yet have a client
+certificate; its private key MUST remain local. After issuance, configuration,
+lease renewal, and certificate renewal MUST use mTLS QUIC when
+`controller.quic_endpoint` is set. Production controller-backed node and relay
+configuration MUST require that endpoint. HTTPS polling MAY remain only as an
+explicitly selected legacy compatibility mechanism.
+
+Hybrid enrollment and renewal MUST follow the key binding and rotation rules in
+[wireguard-hybrid-v1.md](wireguard-hybrid-v1.md). Those rules cover the raw
+X25519 public-key field, authenticated expected NetworkID and enrollment class,
+response echo, atomic certificate and key rotation, and the fail-closed meaning
+of an absent key.
 
 ## 2. Session establishment
 
@@ -123,6 +152,13 @@ legacy raw-IP relay packets alone is insufficient.
 
 ## 5. Configuration epochs
 
+`NodeConfiguration` is the complete authoritative snapshot for discovery,
+routes, ACL policy, relay-assisted candidate policy, approved exit gateways,
+WireGuard public keys, revocation state, and certificate health.
+`RelayConfiguration` contains packet authorization, ACL policy, revocation,
+lease, and certificate health. Endpoint candidates remain on the authenticated
+relay rendezvous channel and MUST NOT be persisted by the controller.
+
 `configuration_epoch` is an unsigned 64-bit monotonically increasing value scoped to one NetworkID and one controller authority. Zero means no controller-issued configuration has been applied and is permitted only in manual static deployments.
 
 Configuration objects belonging to an epoch form a coherent snapshot. A node MUST apply a snapshot atomically and MUST NOT combine route or policy objects from different epochs unless a later incremental-update specification explicitly permits it. A node MUST reject an epoch lower than its currently committed epoch, except after explicit administrative reset or full resynchronization with a newly trusted authority.
@@ -138,6 +174,19 @@ that deadline; it does not alter
 routes, policy, identities, or capabilities. Nodes and relays MUST fail closed
 at the last accepted deadline even while the controller is unreachable. A
 renewed lease for the same epoch may reactivate the retained complete snapshot.
+
+An enrollment token selects exactly one controller-chosen class: `DURABLE_NODE`,
+`EPHEMERAL_USER`, or `REMEMBERED_USER`. A request MUST NOT upgrade that class.
+An ephemeral token fixes an identity lifetime from five minutes through 24
+hours. Its certificate, configuration lease, addresses, route and peer
+authorization, and renewal share the same UTC deadline. Every node and relay
+snapshot is capped by the earliest active ephemeral lease in its network, so
+established direct and relayed paths fail closed at expiry. The controller MUST
+then revoke the certificate, release addresses, withdraw routes, advance the
+epoch, and write an audit event in one transaction. It retains expired records
+for seven days, then prunes them in bounded batches without removing audit
+events. `REMEMBERED_USER` is a separate durable class; reconnecting MUST NOT
+convert an ephemeral identity into it.
 
 Fresh node and relay configurations carry the complete
 `revoked_certificate_serials` set for revoked, unexpired credentials in the

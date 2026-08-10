@@ -28,7 +28,7 @@ jobs:
           go test ./...
           go vet ./...
       - name: Check scripts
-        run: shellcheck install.sh install-client.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
+        run: shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
       - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
@@ -237,7 +237,7 @@ jobs:
       - name: Create deterministic checksums and image manifest
         working-directory: dist
         run: |
-          install -m 0755 ../install-client.sh install-client.sh
+          install -m 0755 ../install.sh install.sh
           : > bootstrap-artifacts.toml
           for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
             os=${platform%_*}
@@ -256,7 +256,7 @@ jobs:
           done
           LC_ALL=C sort -o image-digests.txt -- *.digest.txt
           rm -- *.digest.txt
-          LC_ALL=C sha256sum -- bootstrap-artifacts.toml image-digests.txt install-client.sh laneway_*.tar.gz laneway_darwin_amd64 laneway_darwin_arm64 *.spdx.json | sort -k2 > checksums.txt
+          LC_ALL=C sha256sum -- bootstrap-artifacts.toml image-digests.txt install.sh laneway_*.tar.gz laneway_darwin_amd64 laneway_darwin_arm64 *.spdx.json | sort -k2 > checksums.txt
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.1.3
@@ -268,7 +268,7 @@ jobs:
         with:
           subject-path: |
             dist/bootstrap-artifacts.toml
-            dist/install-client.sh
+            dist/install.sh
             dist/laneway_*.tar.gz
             dist/laneway_darwin_amd64
             dist/laneway_darwin_arm64

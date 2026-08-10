@@ -1,59 +1,57 @@
-# Laneway authenticated bootstrap v1
+# Laneway Bootstrap v1
 
-## 1. Trust transition
+## Discovery
 
-The discovery authority is a canonical DNS HTTPS origin. A client MUST fetch
-`/.well-known/laneway/bootstrap.json` using TLS 1.3, hostname validation, and
-the host's public Web PKI roots before trusting any field in the document. It
+A client MUST fetch `/.well-known/laneway/bootstrap.json` from a canonical DNS
+HTTPS origin using TLS 1.3, hostname validation, and public Web PKI roots. It
 MUST reject IP authorities, redirects, credentials, alternate paths, unknown
 JSON fields, trailing JSON, non-JSON content, and documents larger than 256
-KiB. The public listener MUST serve no enrollment, administration, or node
-control operation.
+KiB. The public listener MUST NOT expose enrollment, administration, or node
+control operations.
 
 The authenticated document pins the private controller HTTPS origin, QUIC
-host:port, DNS name, NetworkID, controller ServiceID, CA bundle, enabled relay
-host:ports and ServiceIDs, stable protocol versions/capabilities, and release
-artifacts. A private controller connection MUST validate its chain through the
-discovered CA, its optional DNS name, controller role, NetworkID, and ServiceID.
-Transport DNS resolution never replaces these identity checks.
+endpoint, optional DNS name, NetworkID, controller ServiceID, CA bundle,
+enabled relay endpoints and ServiceIDs, protocol versions, capabilities, and
+release artifacts. Private controller connections MUST validate the discovered
+CA, configured DNS name when present, controller role, NetworkID, and ServiceID.
+DNS resolution does not establish identity.
 
-## 2. Freshness and bounds
+## Freshness and bounds
 
-`schema_version` is exactly 1. `generated_at_unix_seconds` and
-`valid_until_unix_seconds` define a UTC validity interval no longer than ten
-minutes; a client allows at most two minutes of positive clock skew and rejects
-an expired document. There are 1..32 unique enabled relays and 1..16 unique
-artifact platforms. All IDs are canonical nonzero 128-bit lowercase hex.
+- `schema_version` MUST equal `1`.
+- The interval from `generated_at_unix_seconds` to
+  `valid_until_unix_seconds` MUST NOT exceed ten minutes.
+- Clients MUST allow no more than two minutes of positive clock skew and MUST
+  reject expired documents.
+- A document contains 1..32 unique enabled relays and 1..16 unique artifact
+  platforms.
+- IDs are canonical, nonzero, 128-bit lowercase hexadecimal values.
 
-Release artifacts identify `os`, `arch`, an HTTPS URL, exact positive byte
-size no greater than 512 MiB, and canonical lowercase SHA-256. Stable v1
-requires Linux AMD64 and ARM64 records and MAY additionally advertise macOS
-AMD64 and ARM64 client records. A downloader MUST reject excess or
-short bytes and a digest mismatch before extraction or any privileged action.
-Authenticated bytes MUST never be piped into a shell.
+Each artifact specifies `os`, `arch`, an HTTPS URL, an exact size from 1 byte
+through 512 MiB, and a canonical lowercase SHA-256 digest. Stable v1 requires
+Linux AMD64 and ARM64 artifacts and MAY include macOS AMD64 and ARM64 clients.
+A downloader consuming this metadata MUST reject short or excess data and
+digest mismatches before extraction or privileged use.
 
-## 3. Invitations and enrollment
+## Enrollment
 
-An invitation is the existing cryptographically random enrollment secret. Its
-stored record is immutable with respect to NetworkID, enrollment class, token
-expiry, optional operator-selected device name, and (for ephemeral users)
-session lifetime. The controller stores only
-SHA-256 of the random secret and consumes it atomically with node identity,
-address, and certificate creation. Token lifetime is bounded; product invites
-default to ten minutes and MUST NOT exceed one hour.
+An invitation is a cryptographically random enrollment secret. Its NetworkID,
+enrollment class, expiry, optional device name, and ephemeral session lifetime
+are immutable. The controller stores only its SHA-256 hash and consumes it
+atomically with node identity, address, and certificate creation. Product
+invitations default to ten minutes and MUST NOT exceed one hour.
 
-Interactive clients read the code from a controlling terminal with echo
-disabled. They MUST NOT accept it in argv, a URL, bootstrap metadata, logs, or
-diagnostics. A protected regular token file is permitted for automation. The
-client sends `expected_network_id` from authenticated bootstrap metadata; the
-controller compares it with the token's network before consumption. A
-mismatch returns a clear permission error and leaves the code unconsumed.
-Product invites also bind `requested_name`; the client MAY omit the name, in
-which case the controller uses the bound value. Any supplied different name is
-rejected before consumption. Advanced tokens MAY remain name-unbound.
+Interactive clients MUST read invitations from a controlling terminal with
+echo disabled. They MUST NOT accept them in argv, URLs, bootstrap metadata,
+logs, or diagnostics. Automation MAY use a protected regular file.
 
-The unauthenticated enrollment endpoint applies a bounded per-source rate
-limit based on the transport peer address, never an untrusted forwarding
-header. Invalid, expired, replayed, wrong-network, and throttled requests fail
-without issuing credentials. The enrollment token alone cannot select or
-upgrade its durable, ephemeral, or remembered class.
+The client sends `expected_network_id` from the bootstrap document. The
+controller MUST compare it with the invitation's NetworkID; a mismatch fails
+before consumption with a permission error. A product invitation binds
+`requested_name`: omission selects the bound name, while a different name fails
+before consumption. Advanced tokens MAY be name-unbound.
+
+The enrollment endpoint MUST apply a bounded per-source rate limit using the
+transport peer address, not forwarding headers. Invalid, expired, replayed,
+wrong-network, and throttled requests MUST NOT issue credentials. A request
+MUST NOT select or upgrade the token's durable, ephemeral, or remembered class.

@@ -2,181 +2,129 @@
 
 Status: Design-stable normative deployment contract.
 
-The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD
-NOT**, and **MAY** are to be interpreted as described by BCP 14 when, and only
-when, they appear in all capitals.
+Normative terms have the meaning defined in BCP 14.
 
-## 1. Scope and terminology
+## 1. Actors
 
-This document defines the supported product actors, their privilege boundaries,
-and ownership of host and container state. It complements the language-neutral
-wire architecture in [architecture.md](architecture.md).
-
-- A **User** is a foreground, temporary Laneway client on a host. Its overlay
-  identity and network changes have bounded lifetimes and are not a durable Node.
-- A **Node** is a persistent host agent. It exposes that host and MAY advertise
+- A **User** is a foreground client whose identity and host-network changes have
+  bounded lifetimes.
+- A **Node** is a persistent host agent. It MAY advertise
   controller-approved private subnets.
-- An **Exit Node** is a controller-authorized agent that can forward selected
-  IPv4 or IPv6 default-route traffic. The default deployment is an isolated
-  Docker container, not a privileged host agent.
-- The **controller** is the durable authority for identities, leases, routes,
-  ACLs, and relay authorization. It never carries user packets.
-- A **relay** is an unprivileged packet-path fallback and direct-path rendezvous
-  service. It is not a controller and does not grant authorization.
+- An **Exit Node** forwards explicitly selected default-route traffic. The
+  default deployment is an isolated container.
+- The **controller** owns identities, leases, addresses, routes, ACLs, and relay
+  authorization. It never carries user packets.
+- A **relay** provides rendezvous and an unprivileged fallback packet path. It
+  does not grant authorization.
 
-User, Node, and Exit Node are product actors. On the wire they are authenticated
-Laneway endpoint identities with controller-granted capabilities. An identity
-MUST NOT acquire a role merely by selecting a local configuration option.
+Roles are controller-granted capabilities. An endpoint MUST NOT acquire a role
+by selecting a local option. The wire model is defined in
+[architecture.md](architecture.md).
 
-## 2. Supported path matrix
+## 2. Supported paths
 
-| Source | Destination | Preferred path | Fallback | Required destination role |
+| Source | Destination | Preferred | Fallback | Destination authorization |
 | --- | --- | --- | --- | --- |
-| Node | Node | authenticated direct QUIC | relay QUIC, then relay TLS/TCP | ordinary endpoint |
-| User | Node | authenticated direct QUIC | relay QUIC, then relay TLS/TCP | ordinary endpoint |
-| User | Exit Node | authenticated direct QUIC | relay QUIC, then relay TLS/TCP | approved exit |
-| Node | Exit Node | authenticated direct QUIC | relay QUIC, then relay TLS/TCP | approved exit |
+| Node | Node | direct authenticated QUIC | relay QUIC, then relay TLS/TCP | ordinary endpoint |
+| User | Node | direct authenticated QUIC | relay QUIC, then relay TLS/TCP | ordinary endpoint |
+| User | Exit Node | direct authenticated QUIC | relay QUIC, then relay TLS/TCP | approved exit |
+| Node | Exit Node | direct authenticated QUIC | relay QUIC, then relay TLS/TCP | approved exit |
 
-Direct authenticated QUIC MUST be enabled in generated managed configurations
-unless controller policy or an explicit operator choice disables it. Negotiation
-MUST retain a healthy relay path until the direct path is authenticated and
-usable. Failure of a direct path MUST NOT silently broaden routing or policy.
+Generated managed configurations MUST enable direct authenticated QUIC unless
+controller policy or an explicit operator choice disables it. A healthy relay
+path remains available until the direct path is authenticated and usable.
+Direct-path failure MUST NOT broaden routing or policy.
 
-## 3. Packet flows
-
-The arrows below show packet flow, not control traffic. Every carrier is mutually
-authenticated. `lane0` exists in the source and destination actor's network
-namespace.
-
-### 3.1 Node to Node
+All packet paths follow the same shape:
 
 ```text
-application -> host route -> host lane0 -> Node agent
-  -> direct QUIC ---------------------------------> Node agent -> host lane0 -> application
-  `-> relay QUIC/TCP -> unprivileged relay ------'  (fallback)
+application -> actor-owned route -> lane0 -> source endpoint
+  |-> direct authenticated carrier ---------------------------.
+  `-> relay QUIC/TCP -> unprivileged relay (fallback) ---------'
+                                  -> destination endpoint -> lane0
+                                  -> application, subnet, or exit forwarding
 ```
 
-### 3.2 User to Node
+`lane0` belongs to the actor's network namespace: temporary host state for a
+User, persistent host state for a Node, and container state for an Exit Node.
+Controller traffic, relay carriers, direct peer endpoints, required gateways,
+and selected local-LAN prefixes MUST bypass an active exit route to prevent
+recursion.
 
-```text
-application -> temporary owned host route -> temporary lane0 -> User process
-  -> direct QUIC ---------------------------------> Node agent -> host lane0 -> application
-  `-> relay QUIC/TCP -> unprivileged relay ------'  (fallback)
-```
+## 3. State ownership
 
-### 3.3 User to Exit Node
-
-```text
-application -> temporary selected exit routes -> temporary lane0 -> User process
-  -> direct QUIC ----------------------------------------------.
-  `-> relay QUIC/TCP -> unprivileged relay -> Exit Node agent -'
-       -> container lane0 -> container forwarding/NAT
-       -> Docker bridge/veth -> host forwarding/NAT -> Internet
-```
-
-### 3.4 Node to Exit Node
-
-```text
-application -> explicitly selected host exit routes -> host lane0 -> Node agent
-  -> direct QUIC ----------------------------------------------.
-  `-> relay QUIC/TCP -> unprivileged relay -> Exit Node agent -'
-       -> container lane0 -> container forwarding/NAT
-       -> Docker bridge/veth -> host forwarding/NAT -> Internet
-```
-
-Controller HTTPS/QUIC traffic, relay carriers, direct peer endpoints, required
-local gateways, and operator-selected local-LAN prefixes MUST remain outside an
-active exit route to prevent recursion through `lane0`.
-
-## 4. Namespace and state ownership
-
-| State | Owner and namespace | Persistence and cleanup |
+| State | Owner and namespace | Lifetime and cleanup |
 | --- | --- | --- |
-| User TUN, addresses, routes, rules, DNS | narrowly scoped helper in the User's host network namespace | session journal; exact restoration on clean exit; validated reconciliation after a crash |
-| Node TUN, addresses, routes, rules | Node service in the host network namespace | persistent service intent; transactional rollback on failed start or removal |
-| Exit TUN, routes, nftables, forwarding sysctls | Exit Node container network namespace | recreated from declared configuration; cleaned on graceful stop; container namespace deletion is the crash boundary |
-| Host Docker bridge and host NAT | Docker Engine | Docker-owned; Laneway MUST NOT edit or remove it |
-| Controller database | controller state volume | durable; included in consistent backup and restore |
-| Controller online issuer key | controller read-only secret mount | durable secret; offline root key MUST NOT be present on the VPS |
-| Endpoint and service private keys | the process that authenticates with them | durable for Nodes/services, lease-bounded for Users; never sent to the relay |
-| Relay sessions, handles, rendezvous tokens | relay memory | bounded and ephemeral; invalid after disconnect/expiry |
-| Exit intent | invoking User for a temporary User; Node state for a persistent Node | never persisted for a temporary User |
+| User TUN, addresses, routes, rules, and DNS | User helper in the host network namespace | session journal; exact restoration on exit; validated crash reconciliation |
+| Node TUN, addresses, routes, and rules | Node service in the host network namespace | persistent intent; rollback after failed start or removal |
+| Exit TUN, routes, nftables, and forwarding sysctls | Exit container network namespace | recreated from configuration; namespace deletion is the crash boundary |
+| Docker bridge and host NAT | Docker Engine | Docker-owned; Laneway MUST NOT edit or remove it |
+| Controller database and online issuer | controller volumes and read-only secret mounts | consistent backup and restore; offline root MUST NOT be present |
+| Endpoint and service private keys | authenticating process | durable for services/Nodes and lease-bounded for Users; never sent to a relay |
+| Relay sessions, handles, and rendezvous tokens | relay memory | bounded; invalid after disconnect or expiry |
+| Exit selection | invoking User or persistent Node state | MUST NOT be persisted for a temporary User |
 
-An actor MUST change only state it owns. Cleanup MUST first verify the exact
-shape and ownership marker of an object. A conflicting foreign route, rule,
-nftables object, DNS state, file, or container MUST cause a fail-closed error;
-Laneway MUST NOT delete or overwrite it.
+An actor MUST change only state it owns. Cleanup MUST verify an object's exact
+shape and ownership marker. A conflicting foreign object causes a fail-closed
+error; Laneway MUST NOT delete or overwrite it.
 
-## 5. Process privilege and mount contract
+## 4. Privilege boundary
 
-| Process | UID | Capabilities/devices | Writable storage | Read-only inputs |
-| --- | --- | --- | --- | --- |
-| controller container | dedicated non-root | none; `no-new-privileges` | controller database volume only | configuration, trust bundle, TLS identity, online intermediate identity/key, admin secret |
-| relay container | dedicated non-root | none; `no-new-privileges` | bounded runtime tmpfs only | configuration, trust bundle, TLS identity |
-| administrative CLI | invoking operator | none by default | explicit backup/output path | configuration and trust material as required |
-| foreground User process | invoking user | none | user-owned bounded session state | downloaded trust/bootstrap metadata |
-| User network helper | separately invoked as root, then bounded to `CAP_NET_ADMIN` | inherited peer-authenticated socket; allowlisted TUN/route operations now, rule/bypass/DNS operations only as their foreground modes require; `no_new_privs` after setup | in-process ownership transaction bound to requester socket EOF | versioned structured request; no enrollment token or private key |
-| Node host service | locked service identity | `CAP_NET_ADMIN` and `/dev/net/tun` | Node state/runtime directories | configuration, trust bundle, Node TLS identity |
-| Exit Node container | dedicated non-root where supported | `NET_ADMIN` and `/dev/net/tun`; never `privileged` by default | bounded state/runtime volumes | configuration, trust bundle, Exit TLS identity |
+| Process | Required boundary | Forbidden by default |
+| --- | --- | --- |
+| Controller container | dedicated non-root UID; no capabilities; read-only root; database as its only writable durable volume | offline root key, endpoint keys, broad writable mounts |
+| Relay container | dedicated non-root UID; no capabilities; read-only root; bounded runtime tmpfs | durable packet state or control-plane authority |
+| User process | invoking user; no elevated privilege | direct network administration |
+| User helper | root setup narrowed to `CAP_NET_ADMIN`; `no_new_privs`; requester-bound private channel; allowlisted network operations | listening control socket, commands, enrollment tokens, endpoint keys |
+| Node service | locked service identity; `CAP_NET_ADMIN`; `/dev/net/tun` | unrelated host capabilities or state |
+| Exit Node container | dedicated non-root UID where supported; `NET_ADMIN`; `/dev/net/tun` | `privileged`, host networking, Docker socket, host network-state mounts |
 
-Container roots MUST be read-only. Controller and relay containers MUST drop all
-capabilities and set `no-new-privileges`. Secret mounts MUST be read-only and
-MUST NOT be baked into images or committed to generated configuration.
+Controller and relay containers MUST drop all capabilities and set
+`no-new-privileges`. Secret mounts MUST be read-only and MUST NOT be baked into
+images or generated configuration.
 
-The Exit Node MAY need a small init to reap processes and forward signals. It
-MUST NOT mount the Docker socket, the host network namespace, host `/proc`, host
-`/sys`, or host nftables state in the default deployment. Host networking is an
-advanced, explicitly selected mode with a separately documented threat model.
+The User helper accepts versioned structured requests, rejects unknown or
+unsafe operations, and binds one ownership transaction to one requester. It
+MUST NOT execute caller-supplied commands or receive credentials. A non-root
+launcher MUST elevate only a resolved, root-owned executable whose path cannot
+be modified by an unprivileged user. Requester death triggers bounded cleanup
+or leaves an exact, recoverable journal.
 
-## 6. Exit Node bridge behavior
+## 5. Exit Node network boundary
 
-The default Exit Node attaches to a dedicated Docker bridge. Its direct-path UDP
-listener uses a fixed container port published on the host; Users and Nodes may
-use ephemeral local UDP ports. The relay remains reachable through an ordinary
-outbound container connection.
+The default Exit Node uses a dedicated Docker bridge and a fixed published UDP
+port for direct paths. Relay access remains an ordinary outbound connection.
+IPv4 traffic normally crosses Laneway-owned source NAT in the container and
+Docker-owned masquerade on the host. Source-preserving routing requires a
+separately reviewed topology.
 
-IPv4 Internet traffic normally crosses two translation boundaries: Laneway-owned
-source NAT inside the Exit Node namespace and Docker-owned masquerade on the
-host. This double NAT is deliberate isolation, but it obscures original overlay
-sources beyond the container and adds conntrack/state overhead. Operators needing
-routed source preservation must use a separately reviewed advanced topology.
+The configured MTU MUST cover Laneway and carrier overhead across the bridge.
+Deployment MUST fail clearly when required IPv6 forwarding or NAT is
+unavailable; IPv6 MUST NOT leak through an IPv4-only exit policy.
 
-MTU MUST account for the application's IP packet, Laneway framing and encrypted
-carrier overhead, and the Docker bridge path. Generated configuration MUST use a
-conservative MTU or a measured path value and MUST fail clearly when required
-IPv6 forwarding/NAT semantics are unavailable. IPv6 MUST NOT silently leak
-outside an IPv4-only exit policy.
+## 6. Shutdown and recovery
 
-## 7. Shutdown and crash recovery
+On SIGINT or SIGTERM, packet-path actors MUST stop new work, stop the TUN pump,
+drain only bounded in-flight work, remove owned network state, flush durable
+state where applicable, and exit within a documented timeout.
 
-On SIGINT or SIGTERM, packet-path actors MUST stop accepting new work, stop the
-TUN packet pump, drain only bounded in-flight work, remove owned network state,
-flush durable state where applicable, and exit within a documented timeout.
-
-- A User clean exit restores its exact previous routes, rules, and DNS state.
-  SIGKILL leaves an ownership journal which the next invocation validates and
-  reconciles before creating new state.
-- A Node failed start or uninstall transaction restores only Node-owned host
-  state. Reboot recovery validates prior state before replacement.
-- Exit Node graceful shutdown removes its in-namespace objects. Abrupt container
-  deletion destroys that namespace; durable intent is reapplied on recreation.
-- Relay disconnect invalidates session handles and rendezvous tokens.
-- Controller shutdown completes or rolls back a database transaction before
-  stopping. Backups MUST use a database-consistent snapshot.
+| Actor | Recovery rule |
+| --- | --- |
+| User | restore previous routes, rules, and DNS; validate and reconcile its journal after a crash |
+| Node | roll back only Node-owned state after failed start or removal; validate state before reboot recovery |
+| Exit Node | remove in-namespace objects on graceful stop; reapply declared intent after recreation |
+| Relay | invalidate handles and rendezvous tokens on disconnect |
+| Controller | complete or roll back transactions; back up from a consistent snapshot |
 
 No recovery path may infer ownership from a name alone.
 
-## 8. Security invariants
+## 7. Deployment invariants
 
-- The offline root private key MUST remain offline. Only a constrained online
-  intermediate issuer and its chain may be mounted on the controller.
-- Enrollment codes MUST be single-use, short-lived, rate-limited, network- and
-  class-bound, and absent from argv, URLs, logs, and shell history.
-- Direct paths and both relay transports enforce the same certificate identity,
-  lease expiry, route authorization, ACL, and source-validation decisions.
-- Relay packet data MUST have an aggregate bounded rate independent of control
-  and rendezvous progress. Host `tc` MAY add a wire-overhead ceiling.
-- Diagnostics bind locally by default and MUST NOT expose secrets or packet
-  contents.
-- Published images and binaries MUST be pinned to a version or immutable digest;
-  `latest` is not an acceptable deployment input.
+- Direct and relay carriers enforce the same identity, lease, route, ACL, and
+  source-validation decisions defined by the protocol specifications.
+- Relay packet traffic MUST have a bounded aggregate rate independent of
+  control and rendezvous progress.
+- Diagnostics follow [observability-v1.md](observability-v1.md) and remain local
+  by default.
+- Runtime images and binaries MUST be pinned to a version or immutable digest;
+  a mutable `latest` tag is not a deployment input.

@@ -1,29 +1,18 @@
 # Benchmarks
 
-Laneway keeps benchmarks bounded and explicit about which part of the system
-they measure. Shared CI runner results are useful for regressions, not as
-hardware-independent performance claims.
+Use results to track regressions on comparable hardware, not as portable
+performance claims.
 
-## Quick matrix
+Run the quick matrix and Go/Rust relay comparison from the repository root:
 
-```bash
+```sh
 make benchmark-matrix
 make benchmark-relay-comparison
 ```
 
-The quick matrix covers native UDP and QUIC baselines plus authenticated direct
-QUIC, relay QUIC, relay TCP fallback, subnet forwarding, and exit forwarding.
-The relay comparison runs equivalent Go and Rust QUIC/TCP relay workloads.
+For a custom matrix:
 
-Each row reports packet and byte throughput, drops, latency percentiles, CPU,
-RSS, allocations, garbage collection, and queue depth. Scenario `scope` fields
-distinguish loopback baselines, authenticated paths, and TUN-less forwarding
-tests. Kernel TUN, routing, NAT, and nftables evidence is collected separately
-by the privileged integration workflow.
-
-## Custom matrix
-
-```bash
+```sh
 cd go
 go run ./cmd/laneway-bench matrix \
   -duration 2s -flows 1,10,100 -sizes small,mtu \
@@ -31,31 +20,21 @@ go run ./cmd/laneway-bench matrix \
   -loss 0.5 -burst-loss 2 -seed 1
 ```
 
-`small` is 64 bytes and `mtu` is 1200 bytes. LAN adds no artificial delay;
-WAN adds 25 ms one-way delay. Loss and burst injection use a deterministic
-seed. Flow counts are logical packet flows multiplexed over an authenticated
-carrier, not separate connections.
+`small` is 64 bytes, `mtu` is 1200 bytes, and `wan` adds 25 ms one-way
+latency. Loss is deterministic for a fixed seed. Rows include throughput, loss,
+latency, CPU, memory, allocations, and queue depth.
 
-## Release evidence
+Run the standalone Rust Node benchmark from the repository root:
 
-```bash
-make benchmark-full-matrix
-make benchmark-arch-smoke
+```sh
+cargo run --manifest-path rust/Cargo.toml -p laneway-bench --release -- \
+  --mode node --flows 10 --packet-size 1400 --duration-secs 10 --json
 ```
 
-The full matrix exercises Go and Rust relays across flow counts, sizes, network
-profiles, and deterministic loss. GitHub workflows retain raw output, validated
-JSONL, checksums, tool versions, and architecture classification. ARM64 QEMU
-smoke results prove architecture compatibility only and must not be compared
-with native AMD64 performance.
+Use `--mode relay-forward` for Rust relay forwarding.
 
-The privileged integration artifact adds production-kernel comparisons for the
-native Laneway QUIC dataplane and the same application workload over direct
-WireGuard, WireGuard-over-relay QUIC, and WireGuard-over-relay TCP. It also
-records direct↔relay and QUIC↔TCP carrier transition time without recreating the
-stable WireGuard interface. Those rows include throughput, loss, latency,
-client CPU/RSS/allocations, and exact packet accounting; they are the
-authoritative hybrid-carrier evidence rather than the TUN-less quick matrix.
-
-Privileged kernel benchmarks and complete reproduction notes live in
-[`integration/README.md`](../integration/README.md).
+Release jobs run `make benchmark-full-matrix` and
+`make benchmark-arch-smoke`. QEMU architecture smoke results prove
+compatibility only and are not comparable with native results. Kernel
+dataplane benchmarks are documented in the
+[integration test guide](../integration/README.md).
