@@ -144,7 +144,7 @@ For an intentionally temporary session that stores no identity, use
 `laneway logout lane.example.com`; revoke its printed NodeID at the controller
 as well when retiring or losing a device.
 
-To provision a capability-bound Docker Connector, generate a single-use
+To provision a role-bound Docker Connector, generate a single-use
 `docker run` command on the control plane, copy it to the Docker host over your
 trusted administrative channel, and run it as root:
 
@@ -153,21 +153,26 @@ sudo laneway-control invite --name egress-one --docker --connector
 ```
 
 The control-plane command uses the locally installed, signed Laneway CLI and
-does not pull or start an administrative container. Its output contains a
-short-lived one-time enrollment token, the public network
-CA, a pinned `ghcr.io/doout/laneway-connector` image, and endpoint configuration.
-It never contains the control-plane admin token. Connector identity is retained
-in a named Docker volume across image upgrades without re-enrollment. Open UDP
-4434 on the Connector host if direct paths should be reachable through its
-external firewall.
+does not pull or start an administrative container. Its output has one opaque
+`SETUP_TOKEN`, a digest-pinned `ghcr.io/doout/laneway-connector` image, and no
+expanded endpoint or identity variables. The capsule carries public network
+metadata plus a short-lived, single-use enrollment code; it is not encryption
+from the Docker administrator. After first start the controller invalidates the
+code and the container retains its certificate and private keys in a named
+Docker volume, so image upgrades do not re-enroll it. It never contains the
+control-plane admin token.
 
-The image starts as UID/GID 65532. Its file-capability launcher acquires only
-the Docker-bounded `NET_ADMIN` capability and enables `no-new-privileges` before
-starting the long-running Laneway process. Do not add Docker's container-level
-`no-new-privileges` option because it would block that one-time transition.
+This Connector terminates approved TCP and UDP flows in userspace and makes
+ordinary outbound sockets to their private destinations. It starts as UID/GID
+65532 with all Linux capabilities dropped, `no-new-privileges`, a read-only root
+filesystem, no `/dev/net/tun`, no host sysctls, and no published port. No inbound
+firewall rule is required. Use the separate full Exit Node deployment when raw
+IP forwarding, ICMP, or a full-tunnel default route is required; that role still
+needs a TUN device and `NET_ADMIN` inside its isolated container namespace.
 
-For a long-running Exit Node, omit `--ephemeral`; ephemeral enrollment is best
-for testing or intentionally short-lived egress capacity.
+The default invitation is durable. Add `--ephemeral` only for testing or
+intentionally short-lived Connector capacity; durable identity is the normal
+choice when the container will be upgraded in place.
 
 Get the public Laneway domain and a durable Node invite from your administrator.
 Save the one-time code in a protected file. One command authenticates discovery,

@@ -195,13 +195,17 @@ sh -n "$connector_command"
 grep -F 'docker run -d' "$connector_command" >/dev/null
 grep -F -- "--name 'laneway-connector-egress-one'" "$connector_command" >/dev/null
 grep -F -- "--volume 'laneway-connector-egress-one-state:/var/lib/laneway'" "$connector_command" >/dev/null
-grep -F -- "--env 'LANEWAY_ENROLLMENT_TOKEN=single_use_secret'" "$connector_command" >/dev/null
+setup_token=$(sed -n "s/.*--env 'SETUP_TOKEN=\(st1\.[A-Za-z0-9+\/=]*\)'.*/\1/p" "$connector_command")
+[ -n "$setup_token" ] || { echo "Connector command has no setup token" >&2; exit 1; }
+printf '%s' "${setup_token#st1.}" | base64 -d > "$test_dir/setup-token.txt"
+grep -Fx 'egress-one' "$test_dir/setup-token.txt" >/dev/null
+grep -Fx 'single_use_secret' "$test_dir/setup-token.txt" >/dev/null
+grep -Fx 'https://lane.example.test:8443' "$test_dir/setup-token.txt" >/dev/null
 grep -F 'ghcr.io/doout/laneway-connector:1.0.0@sha256:' "$connector_command" >/dev/null
 grep -F -- '--cap-drop ALL' "$connector_command" >/dev/null
-grep -F -- '--cap-add NET_ADMIN' "$connector_command" >/dev/null
-grep -F -- '--device /dev/net/tun:/dev/net/tun' "$connector_command" >/dev/null
-if grep -F -- '--security-opt no-new-privileges' "$connector_command" >/dev/null; then
-  echo "Connector command blocked its non-root capability launcher" >&2
+grep -F -- '--security-opt no-new-privileges:true' "$connector_command" >/dev/null
+if grep -E -- '--cap-add|--device|--sysctl|--publish|LANEWAY_(ENROLLMENT|NETWORK|CONTROLLER|RELAY|CA_)' "$connector_command" >/dev/null; then
+  echo "userspace Connector command exposed privileged networking or expanded bootstrap metadata" >&2
   exit 1
 fi
 grep -F '<--exit-node>' "$log" >/dev/null

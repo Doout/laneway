@@ -9,7 +9,9 @@ paths, interfaces, ports, and address pools for the site.
 Run the controller and relay as separate unprivileged services. Only a node
 that creates `lane0`, installs routes, serves a subnet, or provides an exit
 needs `CAP_NET_ADMIN` and `/dev/net/tun`. Do not grant that capability to the
-relay or controller.
+relay or controller. The userspace Docker Connector is also unprivileged: it
+proxies controller-authorized TCP/UDP flows with outbound sockets and does not
+create `lane0`, mutate routes, or provide raw-IP Exit service.
 
 The default port plan is:
 
@@ -753,6 +755,12 @@ long-running `laneway node run` process to UID 65532 plus `NET_ADMIN`, exposes
 only `/dev/net/tun`, and keeps routes and nftables state in the container
 network namespace. Rootless containers cannot provide that kernel contract.
 Ordinary host nodes use the hardened systemd unit.
+
+The same release also provides a public userspace Connector entrypoint. With no
+explicit config argument it consumes a single `SETUP_TOKEN` on first start,
+stores its durable identity in the mounted volume, drops every capability, and
+needs neither `/dev/net/tun` nor an inbound port. It supports approved TCP/UDP
+resource access, not ICMP or raw-IP/full-tunnel Exit behavior.
 
 ## Unified node command and compatibility
 

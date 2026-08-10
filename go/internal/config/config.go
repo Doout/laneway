@@ -56,6 +56,7 @@ type Config struct {
 	Controller  Controller       `toml:"controller"`
 	Bootstrap   Bootstrap        `toml:"bootstrap"`
 	Routing     Routing          `toml:"routing"`
+	Connector   Connector        `toml:"connector"`
 	Exit        Exit             `toml:"exit"`
 	TCPFallback TCPFallback      `toml:"tcp_fallback"`
 	Direct      Direct           `toml:"direct"`
@@ -173,6 +174,12 @@ type Routing struct {
 	Advertise       []string `toml:"advertise"`
 	NAT             bool     `toml:"nat"`
 	OutputInterface string   `toml:"output_interface"`
+}
+
+// Connector selects the unprivileged userspace TCP/UDP forwarding dataplane.
+// It is mutually exclusive with native host routing and full packet Exit mode.
+type Connector struct {
+	Userspace bool `toml:"userspace"`
 }
 
 type Exit struct {
@@ -341,6 +348,9 @@ func (c Config) Validate() error {
 		if c.WireGuard.Enabled && (c.WireGuard.PrivateKeyFile == "" || c.WireGuard.InterfaceName == "" || c.WireGuard.MTU != 1280) {
 			return errors.New("wireguard.private_key, interface, and MTU 1280 are required when WireGuard is enabled")
 		}
+		if c.Connector.Userspace && (c.WireGuard.Enabled || c.Direct.Enabled || c.Routing.OutputInterface != "" || len(c.Routing.Advertise) != 0 || c.Exit.Enabled || c.Exit.Serve) {
+			return errors.New("userspace Connector mode cannot use WireGuard, direct paths, native routing, or full packet Exit mode")
+		}
 	case ModeRelay:
 		if c.Direct.Enabled || c.WireGuard.Enabled {
 			return errors.New("direct connectivity and WireGuard are only valid in node mode")
@@ -380,6 +390,9 @@ func (c Config) Validate() error {
 	}
 	if c.Mode != ModeController && bootstrapConfigured(c.Bootstrap) {
 		return errors.New("bootstrap listener is valid only in controller mode")
+	}
+	if c.Mode != ModeNode && c.Connector.Userspace {
+		return errors.New("userspace Connector mode is valid only in node mode")
 	}
 	if c.Controller.Endpoint != "" {
 		if _, err := identity.ParseNetworkID(c.Controller.NetworkID); err != nil {

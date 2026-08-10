@@ -18,7 +18,7 @@ docker run --rm --user 0:0 -v "$volume:/state" "$fixture_image" sh -eu -c '
 '
 
 set +e
-output=$(docker run --rm --cap-add NET_ADMIN --security-opt no-new-privileges:true \
+output=$(docker run --rm --cap-drop ALL --security-opt no-new-privileges:true \
   -v "$volume:/var/lib/laneway" "$image" 2>&1)
 status=$?
 set -e

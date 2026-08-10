@@ -208,18 +208,24 @@ run_status() {
 emit_docker_connector_command() {
   enrollment_token=$1; node_name=$2
   version=$(read_setting "$env_file" LANEWAY_VERSION)
-  network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
-  controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
   controller_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
   controller_port=$(read_setting "$env_file" LANEWAY_CONTROLLER_PORT)
-  relay_id=$(read_setting "$env_file" LANEWAY_RELAY_SERVICE_ID)
+  network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+  controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
   relay_endpoint=$(read_setting "$env_file" LANEWAY_RELAY_PUBLIC_ENDPOINT)
+  relay_id=$(read_setting "$env_file" LANEWAY_RELAY_SERVICE_ID)
   exit_digest=$(read_setting "$env_file" LANEWAY_EXIT_NODE_IMAGE_DIGEST)
   ca_file=$base_dir/generated/pki/ca.crt
   if [ ! -f "$ca_file" ] || [ -L "$ca_file" ]; then
     die "control-plane CA certificate is missing"
   fi
   ca_b64=$(base64 "$ca_file" | awk '{printf "%s", $0}')
+  setup_payload=$({
+    printf '%s\n' "$node_name" "$enrollment_token" "https://$controller_name:$controller_port" \
+      "$controller_name:$controller_port" "$controller_name" "$network_id" "$controller_id" \
+      "$relay_endpoint" "$relay_id" "$ca_b64"
+  } | base64 | awk '{printf "%s", $0}')
+  setup_token=st1.$setup_payload
   cat <<EOF
 docker run -d \\
   --name 'laneway-connector-$node_name' \\
@@ -229,28 +235,16 @@ docker run -d \\
   --user 65532:65532 \\
   --read-only \\
   --cap-drop ALL \\
-  --cap-add NET_ADMIN \\
-  --device /dev/net/tun:/dev/net/tun \\
-  --sysctl net.ipv4.ip_forward=1 \\
-  --sysctl net.ipv6.conf.all.forwarding=1 \\
+  --security-opt no-new-privileges:true \\
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
   --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \\
   --volume 'laneway-connector-$node_name-state:/var/lib/laneway' \\
-  --publish 4434:4434/udp \\
   --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \\
   --health-interval 10s \\
   --health-timeout 3s \\
   --health-retries 6 \\
   --health-start-period 15s \\
-  --env 'LANEWAY_ENROLLMENT_TOKEN=$enrollment_token' \\
-  --env 'LANEWAY_NODE_NAME=$node_name' \\
-  --env 'LANEWAY_CONTROLLER_SERVER_NAME=$controller_name' \\
-  --env 'LANEWAY_CONTROLLER_PORT=$controller_port' \\
-  --env 'LANEWAY_NETWORK_ID=$network_id' \\
-  --env 'LANEWAY_CONTROLLER_SERVICE_ID=$controller_id' \\
-  --env 'LANEWAY_RELAY_ENDPOINT=$relay_endpoint' \\
-  --env 'LANEWAY_RELAY_SERVICE_ID=$relay_id' \\
-  --env 'LANEWAY_CA_B64=$ca_b64' \\
+  --env 'SETUP_TOKEN=$setup_token' \\
   'ghcr.io/doout/laneway-connector:$version@$exit_digest'
 EOF
 }
@@ -293,7 +287,8 @@ run_invite() {
       --expires-in) [ "$#" -ge 2 ] || die "--expires-in requires a value"; expires=$2; shift 2 ;;
       --session-lifetime) [ "$#" -ge 2 ] || die "--session-lifetime requires a value"; session=$2; shift 2 ;;
       --docker) docker_install=true; shift ;;
-      --connector|--exit-node|--exit) exit_node=true; shift ;;
+      --connector) exit_node=true; shift ;;
+      --exit-node|--exit) die "full Exit Nodes use the privileged exit-node deployment; use --connector for the unprivileged Docker Connector" ;;
       *) die "unknown invite option: $1" ;;
     esac
   done

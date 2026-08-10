@@ -39,6 +39,7 @@ import (
 	"laneway.dev/laneway/internal/subnet"
 	"laneway.dev/laneway/internal/tcpfallback"
 	"laneway.dev/laneway/internal/transport"
+	"laneway.dev/laneway/internal/userspaceproxy"
 	"laneway.dev/laneway/internal/wireguard"
 )
 
@@ -284,8 +285,16 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 
 	initialRoutePlan := platform.RoutePlan{Routes: osRoutes, TransportBypass: bypass}
 	var secureWireGuard secureWireGuardRuntime
+	var userspaceConnector *userspaceproxy.Proxy
 	var hostNetwork HostNetwork
-	if cfg.WireGuard.Enabled {
+	if cfg.Connector.Userspace {
+		userspaceConnector, err = userspaceproxy.New(userspaceproxy.Config{MTU: laneMTU})
+		if err != nil {
+			return err
+		}
+		routes := noOpRouteManager{}
+		hostNetwork = HostNetwork{Routes: routes, Close: userspaceConnector.Close}
+	} else if cfg.WireGuard.Enabled {
 		if options.networkOpener != nil {
 			return errors.New("foreground network helpers do not yet support the WireGuard device")
 		}
@@ -328,7 +337,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			return err
 		}
 	}
-	if (hostNetwork.TUN == nil && secureWireGuard == nil) || hostNetwork.Routes == nil || hostNetwork.Close == nil {
+	if (hostNetwork.TUN == nil && secureWireGuard == nil && userspaceConnector == nil) || hostNetwork.Routes == nil || hostNetwork.Close == nil {
 		if hostNetwork.Close != nil {
 			_ = hostNetwork.Close()
 		}
@@ -340,7 +349,9 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	tun, routeManager := hostNetwork.TUN, hostNetwork.Routes
 	var interfaceName string
 	var interfaceMTU int
-	if secureWireGuard != nil {
+	if userspaceConnector != nil {
+		interfaceName, interfaceMTU = "userspace", laneMTU
+	} else if secureWireGuard != nil {
 		interfaceName, interfaceMTU = secureWireGuard.Name(), secureWireGuard.MTU()
 	} else {
 		interfaceName, interfaceMTU = tun.Name(), tun.MTU()
@@ -393,7 +404,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	}
 
 	var exitManagers *daemonExitManagers
-	if cfg.Controller.Endpoint != "" || cfg.Exit.Serve {
+	if !cfg.Connector.Userspace && (cfg.Controller.Endpoint != "" || cfg.Exit.Serve) {
 		exitManagers, err = newDaemonExitManagers(cfg, local, interfaceName, staticBypass, routeTable, exitIntentStore, exitIntentPersisted,
 			hostNetwork.ExitRoutes, hostNetwork.DNS)
 		if err != nil {
@@ -411,7 +422,9 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	}
 	var packetPolicy nodeservice.PacketPolicy
 	var packetIO nodeservice.PacketIO
-	if tun != nil {
+	if userspaceConnector != nil {
+		packetIO = userspaceConnector
+	} else if tun != nil {
 		packetIO = tunPacketIO{tun}
 	}
 	var policyTable *policy.Table
