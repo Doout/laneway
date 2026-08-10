@@ -92,6 +92,10 @@ grep -F 'rename laneway-connector-test laneway-connector-test-previous-' "$work_
 grep -F -- '--volume laneway-connector-test-state:/var/lib/laneway' "$work_dir/docker.log" >/dev/null
 grep -F 'ghcr.io/doout/laneway-connector:9.8.7@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
   "$work_dir/docker.log" >/dev/null
+if grep -F 'config-backup' "$work_dir/docker.log" >/dev/null; then
+  echo "Connector updater created a redundant configuration backup volume" >&2
+  exit 1
+fi
 if grep -F 'SETUP_TOKEN' "$work_dir/docker.log" >/dev/null; then
   echo "Connector updater reused an enrollment token" >&2
   exit 1

@@ -155,7 +155,7 @@ for value in \
   'image-digests.txt' \
   'Connector image signature verification failed' \
   'container must mount the named volume' \
-  'config_backup_volume' \
+  'docker rename' \
   'previous Connector restored'
 do
   require "$value" "$connector_updater"
