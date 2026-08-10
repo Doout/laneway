@@ -33,7 +33,7 @@ func validatePlatformArtifact(metadata bootstrap.Metadata) error {
 }
 
 func connectUsage() error {
-	return errors.New("usage: laneway connect lane.example.com [--route PREFIX] [--exit NAME_OR_NODE_ID] [--dns ADDRESS] [--ephemeral [--token-file PATH]]")
+	return errors.New("usage: laneway connect [DOMAIN] [--route PREFIX] [--exit NAME_OR_NODE_ID] [--dns ADDRESS] [--ephemeral [--token-file PATH]]")
 }
 
 func platformNetworkHelperOptions() nethelper.StartOptions { return nethelper.StartOptions{} }

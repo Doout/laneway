@@ -2,6 +2,7 @@ package controllerservice
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -303,6 +304,45 @@ func TestNodeRouteLifecycleOwnershipAdminApprovalAndReads(t *testing.T) {
 	decodeJSONResponse(t, audit, &auditList)
 	if len(auditList.Events) < 8 {
 		t.Fatalf("too few audit events: %d", len(auditList.Events))
+	}
+}
+
+func TestAdminAssignRouteIsIdempotentAndPreservesCapabilities(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	response, enrolled := enroll(t, f, issueToken(t, f, time.Now().Add(time.Hour)), csrDER(t, ""), "ibmcloud")
+	if enrolled.Code != http.StatusCreated {
+		t.Fatalf("enroll status=%d body=%s", enrolled.Code, enrolled.Body.String())
+	}
+	var nodeID identity.NodeID
+	copy(nodeID[:], response.NodeId)
+	if _, err := f.store.SetNodeCapabilities(context.Background(), nodeID, protocol.CapabilityExitNodeV1); err != nil {
+		t.Fatal(err)
+	}
+	request := assignRouteRequest{NetworkID: f.network.ID.String(), NodeID: nodeID.String(), Prefix: "10.240.64.6/32", Mode: "nat"}
+	assigned := jsonRequest(t, f.service.Handler(), http.MethodPost, "/v1/admin/routes/assign", request)
+	if assigned.Code != http.StatusCreated {
+		t.Fatalf("assign status=%d body=%s", assigned.Code, assigned.Body.String())
+	}
+	var route routeResponse
+	decodeJSONResponse(t, assigned, &route)
+	if route.Prefix != request.Prefix || route.NodeID != request.NodeID || route.State != "approved" {
+		t.Fatalf("assigned route=%+v", route)
+	}
+	node, err := f.store.Node(context.Background(), nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := uint64(protocol.CapabilityExitNodeV1 | protocol.CapabilitySubnetRouterV1)
+	if node.EnabledCapabilities != want {
+		t.Fatalf("capabilities=%d want=%d", node.EnabledCapabilities, want)
+	}
+	again := jsonRequest(t, f.service.Handler(), http.MethodPost, "/v1/admin/routes/assign", request)
+	if again.Code != http.StatusOK {
+		t.Fatalf("repeat assign status=%d body=%s", again.Code, again.Body.String())
+	}
+	routes, err := f.store.NetworkRoutes(context.Background(), f.network.ID, 1000)
+	if err != nil || len(routes) != 1 {
+		t.Fatalf("routes=%v err=%v", routes, err)
 	}
 }
 

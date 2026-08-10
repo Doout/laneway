@@ -76,6 +76,24 @@ func TestRouteAdvertiseAcceptsPositionalPrefix(t *testing.T) {
 	}
 }
 
+func TestAssignedRoutePrefixAcceptsAddressOrPrefix(t *testing.T) {
+	for input, want := range map[string]string{
+		"10.240.64.6":    "10.240.64.6/32",
+		"10.240.64.0/24": "10.240.64.0/24",
+		"2001:db8::1":    "2001:db8::1/128",
+	} {
+		got, err := assignedRoutePrefix(input)
+		if err != nil || got.String() != want {
+			t.Fatalf("assignedRoutePrefix(%q)=%s,%v want %s", input, got, err, want)
+		}
+	}
+	for _, input := range []string{"", "10.240.64.1/24", "0.0.0.0/0"} {
+		if _, err := assignedRoutePrefix(input); err == nil {
+			t.Fatalf("assignedRoutePrefix(%q) accepted", input)
+		}
+	}
+}
+
 func TestReadBounded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "selector.json")
 	if err := os.WriteFile(path, []byte(`{"ip_protocol":"IP_PROTOCOL_ANY"}`), 0o600); err != nil {

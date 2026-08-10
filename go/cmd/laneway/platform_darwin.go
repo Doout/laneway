@@ -25,7 +25,7 @@ func addPlatformConnectFlags(*flag.FlagSet, *connectPlatformOptions) {}
 func validatePlatformArtifact(bootstrap.Metadata) error { return nil }
 
 func connectUsage() error {
-	return errors.New("usage: laneway connect lane.example.com [--route PREFIX] [--ephemeral [--token-file PATH]]")
+	return errors.New("usage: laneway connect [DOMAIN] [--route PREFIX] [--ephemeral [--token-file PATH]]")
 }
 
 func platformNetworkHelperOptions() nethelper.StartOptions {

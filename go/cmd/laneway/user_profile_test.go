@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,5 +54,31 @@ func TestUserProfileRejectsSymlinkedDirectory(t *testing.T) {
 	}
 	if _, _, err := loadUserProfile("lane.example.com"); err == nil {
 		t.Fatal("accepted symlinked saved-login directory")
+	}
+}
+
+func TestDefaultUserProfileAuthority(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LANEWAY_PROFILE_DIR", root)
+	if _, err := defaultUserProfileAuthority(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty profile root error = %v", err)
+	}
+	profile := userProfile{
+		Version: userProfileVersion, Authority: "lane.example.com",
+		NetworkID: "101112131415161718191a1b1c1d1e1f", ControllerServiceID: "202122232425262728292a2b2c2d2e2f",
+		NodeID: "303132333435363738393a3b3c3d3e3f", Name: "laptop", CreatedAt: time.Now().UTC(),
+	}
+	if err := saveUserProfile(profile, []byte("ca"), []byte("certificate"), []byte("private"), make([]byte, wireguard.KeySize)); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := defaultUserProfileAuthority(); err != nil || got != profile.Authority {
+		t.Fatalf("default authority = %q, %v", got, err)
+	}
+	profile.Authority = "other.example.com"
+	if err := saveUserProfile(profile, []byte("ca"), []byte("certificate"), []byte("private"), make([]byte, wireguard.KeySize)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := defaultUserProfileAuthority(); err == nil || !strings.Contains(err.Error(), "multiple saved logins") {
+		t.Fatalf("multiple profile error = %v", err)
 	}
 }

@@ -445,6 +445,103 @@ func (s *Service) advertiseRoute(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusCreated, routeJSON(route))
 }
 
+type assignRouteRequest struct {
+	NetworkID string `json:"network_id"`
+	NodeID    string `json:"node_id"`
+	Prefix    string `json:"prefix"`
+	Mode      string `json:"mode"`
+	Metric    uint32 `json:"metric"`
+}
+
+func (s *Service) assignRoute(w http.ResponseWriter, r *http.Request) {
+	if err := s.authorizeAdm(r); err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	var req assignRouteRequest
+	if err := s.decodeJSON(w, r, &req); err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	networkID, err := identity.ParseNetworkID(req.NetworkID)
+	if err != nil {
+		s.writeError(w, malformed("network_id is invalid"), false)
+		return
+	}
+	nodeID, err := identity.ParseNodeID(req.NodeID)
+	if err != nil {
+		s.writeError(w, malformed("node_id is invalid"), false)
+		return
+	}
+	prefix, err := netip.ParsePrefix(req.Prefix)
+	if err != nil || prefix != prefix.Masked() || prefix.Bits() == 0 {
+		s.writeError(w, malformed("prefix must be a canonical non-default CIDR prefix"), false)
+		return
+	}
+	mode := controller.RouteMode(req.Mode)
+	if mode != controller.RouteModeNAT && mode != controller.RouteModeRouted {
+		s.writeError(w, malformed("mode must be nat or routed"), false)
+		return
+	}
+	node, err := s.store.Node(r.Context(), nodeID)
+	if err != nil || node.NetworkID != networkID || node.RevokedAt != nil {
+		if err == nil {
+			err = controller.ErrNotFound
+		}
+		s.writeError(w, err, false)
+		return
+	}
+	routes, err := s.store.NetworkRoutes(r.Context(), networkID, 1000)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	var existing *controller.Route
+	for i := range routes {
+		route := routes[i]
+		if route.Prefix != prefix || (route.State != controller.RouteStateAdvertised && route.State != controller.RouteStateApproved) {
+			continue
+		}
+		if route.NodeID != nodeID || route.Kind != controller.RouteKindSubnet || route.Mode != mode || route.Metric != req.Metric {
+			s.writeError(w, fmt.Errorf("%w: destination already has a different active route", controller.ErrConflict), false)
+			return
+		}
+		existing = &routes[i]
+	}
+	required := uint64(protocol.CapabilitySubnetRouterV1)
+	if node.EnabledCapabilities&required == 0 {
+		if _, err := s.store.SetNodeCapabilities(r.Context(), nodeID, protocol.Capability(node.EnabledCapabilities|required)); err != nil {
+			s.writeError(w, err, false)
+			return
+		}
+	}
+	if existing != nil {
+		if existing.State == controller.RouteStateAdvertised {
+			if _, err := s.store.ApproveRoute(r.Context(), existing.ID); err != nil {
+				s.writeError(w, err, false)
+				return
+			}
+			existing.State = controller.RouteStateApproved
+			now := time.Now().UTC()
+			existing.ApprovedAt = &now
+		}
+		s.writeJSON(w, http.StatusOK, routeJSON(*existing))
+		return
+	}
+	route, err := s.store.AdvertiseRoute(r.Context(), nodeID, prefix, controller.RouteKindSubnet, mode, req.Metric, nil)
+	if err == nil {
+		_, err = s.store.ApproveRoute(r.Context(), route.ID)
+	}
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	route.State = controller.RouteStateApproved
+	now := time.Now().UTC()
+	route.ApprovedAt = &now
+	s.writeJSON(w, http.StatusCreated, routeJSON(route))
+}
+
 type epochResponse struct {
 	ConfigurationEpoch uint64 `json:"configuration_epoch"`
 }

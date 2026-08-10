@@ -43,7 +43,7 @@ func newRootCommand() *cobra.Command {
 	}))
 	root.AddCommand(
 		command("login DOMAIN", "Save a renewable user login", runLogin),
-		command("connect DOMAIN", "Connect using a saved login", runConnect),
+		command("connect [DOMAIN]", "Connect using a saved login", runConnect),
 		command("logout DOMAIN", "Remove a saved user login", runLogout),
 	)
 	root.AddCommand(group("bootstrap", "Inspect bootstrap metadata or download a verified release", runBootstrap,
@@ -100,6 +100,7 @@ func runNodeDispatch(args []string) error { return runNode(args) }
 func routeCommand(use, summary string) *cobra.Command {
 	return group(use, summary, runControllerRoute,
 		forwarded("advertise PREFIX", "Advertise a subnet or exit route", "advertise", runControllerRoute),
+		forwarded("assign", "Assign and authorize a destination through a Connector", "assign", runControllerRoute),
 		forwarded("withdraw", "Withdraw a route advertisement", "withdraw", runControllerRoute),
 		forwarded("approve", "Approve a route advertisement", "approve", runControllerRoute),
 		forwarded("list", "List route advertisements", "list", runControllerRoute),
@@ -153,6 +154,7 @@ func controlCommand() *cobra.Command {
 		{"init", "Initialize or validate the control plane"},
 		{"user-token", "Create a one-time local-user login token"},
 		{"invite", "Create a single-use enrollment command"},
+		{"route", "Assign an approved destination to a Connector"},
 		{"status", "Show control-plane service health"},
 		{"update", "Update to the latest stable release"},
 		{"production-check", "Run fail-closed production checks"},
@@ -162,7 +164,11 @@ func controlCommand() *cobra.Command {
 		{"rollback", "Roll back to the previous release selection"},
 	} {
 		name := item.name
-		control.AddCommand(command(name, item.summary, func(args []string) error {
+		use := name
+		if name == "route" {
+			use = "route add --connector NAME --to IP_OR_PREFIX"
+		}
+		control.AddCommand(command(use, item.summary, func(args []string) error {
 			return runControl(append([]string{name}, args...))
 		}))
 	}

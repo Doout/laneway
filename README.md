@@ -119,7 +119,7 @@ On the laptop, exchange that token once and then connect:
 
 ```bash
 laneway login lane.example.com
-laneway connect lane.example.com
+laneway connect
 ```
 
 Linux and macOS (Intel and Apple Silicon) are supported. On macOS the client
@@ -140,8 +140,10 @@ requires an explicit controller-authorized `--exit NAME` on Linux. The macOS
 package is user-client-only: it has no Connector, route-advertisement,
 control-plane, or Exit Node commands and supports private split routes only.
 
-For an intentionally temporary session that stores no identity, use
-`laneway connect lane.example.com --ephemeral`. Remove a saved local login with
+With exactly one saved login, `connect` remembers its domain. If more than one
+login is saved, select one explicitly with `laneway connect DOMAIN`. For an
+intentionally temporary session that stores no identity, use `laneway connect
+lane.example.com --ephemeral`. Remove a saved local login with
 `laneway logout lane.example.com`; revoke its printed NodeID at the controller
 as well when retiring or losing a device.
 
@@ -174,6 +176,19 @@ needs a TUN device and `NET_ADMIN` inside its isolated container namespace.
 The default invitation is durable. Add `--ephemeral` only for testing or
 intentionally short-lived Connector capacity; durable identity is the normal
 choice when the container will be upgraded in place.
+
+Assign a private IP or subnet to an enrolled Connector from the control-plane
+host with one idempotent command:
+
+```bash
+sudo laneway control route add --connector ibmcloud --to 10.240.64.6 --allow laptop
+```
+
+An address becomes a `/32` or `/128` host route automatically. The command
+resolves both node names, preserves existing Connector capabilities, assigns
+and approves the route, and creates the destination-scoped ACCEPT rule. Omit
+`--allow` to authorize every enrolled user to that destination. Use a CIDR such
+as `10.240.64.0/24` with `--to` to route a subnet.
 
 Get the public Laneway domain and a durable Node invite from your administrator.
 Save the one-time code in a protected file. One command authenticates discovery,

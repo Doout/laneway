@@ -557,6 +557,21 @@ func (c *Client) ApproveRoute(ctx context.Context, routeID identity.ID) (*Epoch,
 	return response, err
 }
 
+func (c *Client) AssignRoute(ctx context.Context, networkID identity.NetworkID, nodeID identity.NodeID, prefix netip.Prefix, mode string, metric uint32) (*Route, error) {
+	if networkID.IsZero() || nodeID.IsZero() || !prefix.IsValid() || prefix != prefix.Masked() || prefix.Bits() == 0 || (mode != "nat" && mode != "routed") {
+		return nil, errors.New("controller client: assigned route requires network, node, canonical non-default prefix, and valid mode")
+	}
+	response := new(Route)
+	err := c.json(ctx, http.MethodPost, "/v1/admin/routes/assign", struct {
+		NetworkID string `json:"network_id"`
+		NodeID    string `json:"node_id"`
+		Prefix    string `json:"prefix"`
+		Mode      string `json:"mode"`
+		Metric    uint32 `json:"metric"`
+	}{networkID.String(), nodeID.String(), prefix.String(), mode, metric}, response, true)
+	return response, err
+}
+
 func (c *Client) SetNodeCapabilities(ctx context.Context, nodeID identity.NodeID, capabilities uint64) (*Epoch, error) {
 	if nodeID.IsZero() {
 		return nil, errors.New("controller client: node ID is required")

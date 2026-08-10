@@ -191,6 +191,13 @@ fi
 grep -F '<--requested-name> <remembered-laptop>' "$log" >/dev/null
 grep -F '<--class> <remembered>' "$log" >/dev/null
 
+"$compose_dir/laneway-control" route add --connector ibmcloud --to 10.240.64.6 --allow remembered-laptop
+grep -F '<controller> <route> <assign>' "$log" >/dev/null
+grep -F '<--connector> <ibmcloud>' "$log" >/dev/null
+grep -F '<--to> <10.240.64.6>' "$log" >/dev/null
+grep -F '<--allow> <remembered-laptop>' "$log" >/dev/null
+grep -F "<--admin-token-file> <$compose_dir/generated/secrets/admin.token>" "$log" >/dev/null
+
 connector_command=$test_dir/connector-command.sh
 "$compose_dir/laneway-control" invite --name egress-one --ephemeral --session-lifetime 2h --docker --connector > "$connector_command"
 sh -n "$connector_command"
