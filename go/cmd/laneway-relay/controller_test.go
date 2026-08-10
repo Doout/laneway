@@ -12,8 +12,55 @@ import (
 
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/identity"
+	"laneway.dev/laneway/internal/policy"
 	"laneway.dev/laneway/internal/revocation"
 )
+
+func TestRelayPacketPolicyAllowsAuthorizedReturnTraffic(t *testing.T) {
+	network := identity.NetworkID(relayTestID(1))
+	client := identity.NodeID(relayTestID(2))
+	connector := identity.NodeID(relayTestID(3))
+	acceptID := relayTestID(4)
+	denyID := relayTestID(5)
+	acceptRule := &lanewayv1.PolicyRule{
+		RuleId: acceptID[:], Priority: 100, Action: lanewayv1.PolicyAction_POLICY_ACTION_ACCEPT,
+		Selector: &lanewayv1.TrafficSelector{
+			SourceNodeIds:       [][]byte{client[:]},
+			DestinationPrefixes: []*lanewayv1.IpPrefix{{Address: []byte{10, 240, 64, 6}, PrefixLength: 32}},
+			IpProtocol:          lanewayv1.IpProtocol_IP_PROTOCOL_ANY,
+		},
+	}
+	engine, err := policy.Compile(&lanewayv1.PolicySnapshot{
+		NetworkId: network[:], DefaultAction: lanewayv1.PolicyAction_POLICY_ACTION_DENY,
+		Rules: []*lanewayv1.PolicyRule{acceptRule},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := relayIPv4Packet(netip.MustParseAddr("100.96.0.2"), netip.MustParseAddr("10.240.64.6"))
+	reply := relayIPv4Packet(netip.MustParseAddr("10.240.64.6"), netip.MustParseAddr("100.96.0.2"))
+	if !relayPacketAllowed(engine, client, connector, forward) {
+		t.Fatal("relay denied authorized initiating traffic")
+	}
+	if !relayPacketAllowed(engine, connector, client, reply) {
+		t.Fatal("relay denied authorized Connector return traffic")
+	}
+
+	engine, err = policy.Compile(&lanewayv1.PolicySnapshot{
+		NetworkId: network[:], DefaultAction: lanewayv1.PolicyAction_POLICY_ACTION_DENY,
+		Rules: []*lanewayv1.PolicyRule{
+			{RuleId: denyID[:], Priority: 50, Action: lanewayv1.PolicyAction_POLICY_ACTION_DENY,
+				Selector: &lanewayv1.TrafficSelector{SourceNodeIds: [][]byte{connector[:]}, DestinationNodeIds: [][]byte{client[:]}, IpProtocol: lanewayv1.IpProtocol_IP_PROTOCOL_ANY}},
+			acceptRule,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relayPacketAllowed(engine, connector, client, reply) {
+		t.Fatal("relay return handling overrode an explicit deny")
+	}
+}
 
 func TestControllerRelayStatePublishesCompleteSnapshots(t *testing.T) {
 	network := identity.NetworkID(relayTestID(1))

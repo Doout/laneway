@@ -110,7 +110,23 @@ func (s *controllerRelayState) Allow(source, destination identity.NodeIdentity, 
 		return false
 	}
 	snapshot := s.current.Load()
-	return snapshot != nil && time.Now().Unix() < snapshot.validUntil && snapshot.policy.Evaluate(source.NodeID, destination.NodeID, packet).Action == policy.Accept
+	return snapshot != nil && time.Now().Unix() < snapshot.validUntil &&
+		relayPacketAllowed(snapshot.policy, source.NodeID, destination.NodeID, packet)
+}
+
+func relayPacketAllowed(engine *policy.Engine, source, destination identity.NodeID, packet []byte) bool {
+	result := engine.Evaluate(source, destination, packet)
+	if result.Action == policy.Accept {
+		return true
+	}
+	// Source-prefix validation has already bound this packet to the
+	// authenticated sender. Preserve explicit direction-specific rules, but
+	// allow an unmatched default denial to consult the initiating ACL in
+	// reverse so replies from an authorized Connector can cross the relay.
+	if result.Matched {
+		return false
+	}
+	return engine.EvaluateReturn(source, destination, packet).Action == policy.Accept
 }
 
 func (s *controllerRelayState) Renew(validUntil uint64) error {
