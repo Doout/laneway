@@ -129,7 +129,9 @@ if [ "$current_version" = "$package_version" ]; then
 fi
 
 for path in "$source_dir/compose.yaml" "$destination/generated/config/controller.toml" "$destination/generated/config/relay.toml"; do
-  [ -f "$path" ] && [ ! -L "$path" ] || die "public HTTPS migration input is missing or unsafe: $path"
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
+    die "public HTTPS migration input is missing or unsafe: $path"
+  fi
 done
 cp "$destination/compose.yaml" "$work_dir/compose.yaml.previous"
 cp "$destination/generated/config/controller.toml" "$work_dir/controller.toml.previous"
