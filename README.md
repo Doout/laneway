@@ -149,15 +149,22 @@ To provision a capability-bound Docker Connector, generate a single-use
 trusted administrative channel, and run it as root:
 
 ```bash
-sudo laneway control invite --name egress-one --docker --connector
+sudo laneway-control invite --name egress-one --docker --connector
 ```
 
-The command contains a short-lived one-time enrollment token, the public network
+The control-plane command uses the locally installed, signed Laneway CLI and
+does not pull or start an administrative container. Its output contains a
+short-lived one-time enrollment token, the public network
 CA, a pinned `ghcr.io/doout/laneway-connector` image, and endpoint configuration.
 It never contains the control-plane admin token. Connector identity is retained
 in a named Docker volume across image upgrades without re-enrollment. Open UDP
 4434 on the Connector host if direct paths should be reachable through its
 external firewall.
+
+The image starts as UID/GID 65532. Its file-capability launcher acquires only
+the Docker-bounded `NET_ADMIN` capability and enables `no-new-privileges` before
+starting the long-running Laneway process. Do not add Docker's container-level
+`no-new-privileges` option because it would block that one-time transition.
 
 For a long-running Exit Node, omit `--ephemeral`; ephemeral enrollment is best
 for testing or intentionally short-lived egress capacity.

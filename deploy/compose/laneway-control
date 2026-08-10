@@ -134,7 +134,22 @@ cosign_verifier() {
 }
 
 backup_recovery() { "$base_dir/recovery.sh" backup "$1"; }
-admin() { compose --profile tools run --rm --no-deps admin "$@"; }
+
+admin() {
+  laneway_command=${LANEWAY_COMMAND:-/usr/local/bin/laneway}
+  case "$laneway_command" in /*) ;; *) die "LANEWAY_COMMAND must be absolute" ;; esac
+  if [ ! -f "$laneway_command" ] || [ -L "$laneway_command" ] || [ ! -x "$laneway_command" ]; then
+    die "installed Laneway command is missing or unsafe: $laneway_command"
+  fi
+  "$laneway_command" "$@"
+}
+
+local_controller_endpoint() {
+  bind_address=$(read_setting "$env_file" LANEWAY_BIND_ADDRESS)
+  controller_port=$(read_setting "$env_file" LANEWAY_CONTROLLER_PORT)
+  [ "$bind_address" != 0.0.0.0 ] || bind_address=127.0.0.1
+  printf 'https://%s:%s' "$bind_address" "$controller_port"
+}
 
 service_health() {
   service=$1; required=$2
@@ -215,7 +230,6 @@ docker run -d \\
   --read-only \\
   --cap-drop ALL \\
   --cap-add NET_ADMIN \\
-  --security-opt no-new-privileges:true \\
   --device /dev/net/tun:/dev/net/tun \\
   --sysctl net.ipv4.ip_forward=1 \\
   --sysctl net.ipv6.conf.all.forwarding=1 \\
@@ -291,9 +305,10 @@ run_invite() {
   network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
   controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
   server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
-  set -- --controller https://controller:8443 --ca /run/laneway-secrets/ca.crt \
+  set -- --controller "$(local_controller_endpoint)" --ca "$base_dir/generated/pki/ca.crt" \
     --server-name "$server_name" --controller-network-id "$network_id" \
-    --controller-service-id "$controller_id" --admin-token-file /run/laneway-secrets/admin.token
+    --controller-service-id "$controller_id" \
+    --admin-token-file "$base_dir/generated/secrets/admin.token"
   set -- controller enrollment-token issue --network-id "$network_id" --label "$name" --requested-name "$name" \
     --class "$class" --expires-in "$expires" "$@"
   if [ "$class" = ephemeral ]; then
