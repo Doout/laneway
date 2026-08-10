@@ -134,6 +134,8 @@ require 'persistent volume contains an incomplete Connector identity' "$connecto
 # shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
 require 'required SETUP_TOKEN "${SETUP_TOKEN:-}"' "$connector_entrypoint"
 # shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
+require '/usr/local/bin/laneway connector configure --state-dir "$state_dir"' "$connector_entrypoint"
+# shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
 require 'exec /sbin/tini -- /usr/local/bin/laneway node run -config "$config_file"' "$connector_entrypoint"
 require './integration/connector-upgrade.sh laneway-connector:ci' "$repo_dir/.github/workflows/ci.yml"
 

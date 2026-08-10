@@ -35,7 +35,8 @@ func addPlatformCommands(root *cobra.Command) {
 		command("invite", "Issue an invite using a controller configuration", runInvite),
 		command("renew", "Renew this node's controller-issued certificate", runRenew),
 		group("connector", "Activate and run an unprivileged Connector", runConnector,
-			forwarded("activate", "Activate from a single-use setup token", "activate", runConnector)),
+			forwarded("activate", "Activate from a single-use setup token", "activate", runConnector),
+			forwarded("configure", "Validate or migrate persistent Connector configuration", "configure", runConnector)),
 	)
 
 	root.AddCommand(group("node", "Install and operate a persistent host node", runNode,
