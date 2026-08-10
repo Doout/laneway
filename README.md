@@ -89,18 +89,19 @@ sudo ./laneway/install.sh
 The native Rust implementations remain available as
 [source builds](https://github.com/Doout/laneway/tree/main/rust).
 
-The macOS release also publishes the standalone client binary. After verifying
-it against the signed release checksum, configure it directly; no install
-script is required (`ARCH` is `arm64` for Apple Silicon or `amd64` for Intel):
+Install the latest stable macOS user client with one command (Apple Silicon and
+Intel are detected automatically):
 
 ```bash
-curl -fLO https://github.com/Doout/laneway/releases/download/vX.Y.Z/laneway_darwin_ARCH
-chmod +x laneway_darwin_ARCH
-./laneway_darwin_ARCH configure
+curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install-client.sh | sh
 ```
 
-`configure` completes all read-only checks before asking once for `sudo`, then
-installs and verifies the client and its root-owned, credential-free helper.
+The installer must run as the normal Mac user. It performs all read-only
+pre-checks, detects the architecture, resolves a stable tagged release,
+downloads and verifies the release checksum, and only then allows `configure`
+to ask once for `sudo`. It installs and verifies the client and its root-owned,
+credential-free helper. To pin a release, use
+`curl -fsSL URL | LANEWAY_VERSION=vX.Y.Z sh` with the same URL above.
 `laneway configure --check` is non-mutating. A controller-approved upgrade is
 `laneway update lane.example.com`; it downloads and verifies as the normal user
 before reusing the same configure transaction. Run `login`, `connect`, and
