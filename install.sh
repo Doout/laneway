@@ -218,6 +218,17 @@ if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] ||
   else
     echo "WARNING: checksum signature could not be verified; archive checksum validation will still run." >&2
   fi
+  curl --fail --location --silent --show-error \
+    "$base_url/bootstrap-artifacts.toml" -o "$download_dir/bootstrap-artifacts.toml"
+  (
+    cd "$download_dir"
+    grep '  bootstrap-artifacts.toml$' checksums.txt > bootstrap-artifacts-checksum.txt
+    test "$(wc -l < bootstrap-artifacts-checksum.txt)" -eq 1
+    sha256sum -c bootstrap-artifacts-checksum.txt >/dev/null
+  ) || {
+    echo "Laneway verification: signed bootstrap artifact manifest is missing or invalid." >&2
+    exit 1
+  }
 fi
 (
   cd "$download_dir"
@@ -251,6 +262,7 @@ fi
 
 if [ "$install_control_plane" = true ]; then
   exec env LANEWAY_VERSION="${release#v}" LANEWAY_COSIGN_BIN="$cosign_bin" \
+    LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$download_dir/bootstrap-artifacts.toml" \
     LANEWAY_PRODUCTION_MODE="$production_mode" \
     LANEWAY_CHECKSUM_SIGNATURE_VERIFIED="${checksum_signature_verified:-false}" \
     sh /usr/local/share/laneway/deploy/compose/install-control-plane.sh
@@ -262,5 +274,6 @@ if [ "$prepare_control_plane" = true ]; then
 fi
 if [ "$upgrade_control_plane" = true ]; then
   exec env LANEWAY_COSIGN_BIN="$cosign_bin" \
+    LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$download_dir/bootstrap-artifacts.toml" \
     sh /usr/local/share/laneway/deploy/compose/upgrade-control-plane.sh
 fi

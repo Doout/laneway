@@ -23,6 +23,13 @@ for path in "$destination/.env" "$destination/compose.yaml"; do
     die "existing deployment file is missing or unsafe: $path"
   fi
 done
+artifacts_file=${LANEWAY_BOOTSTRAP_ARTIFACTS_FILE:-}
+if [ -z "$artifacts_file" ] || [ ! -f "$artifacts_file" ] || [ -L "$artifacts_file" ]; then
+  die "signed bootstrap artifact manifest is missing or unsafe"
+fi
+if [ "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$artifacts_file")" -ne 4 ]; then
+  die "signed bootstrap artifact manifest must contain four platform artifacts"
+fi
 
 package_version=
 [ -f "$source_dir/../../VERSION" ] && [ ! -L "$source_dir/../../VERSION" ] && \
@@ -133,10 +140,19 @@ network_id=$(sed -n 's/^LANEWAY_NETWORK_ID=//p' "$destination/.env")
 controller_port=$(sed -n 's/^LANEWAY_CONTROLLER_PORT=//p' "$destination/.env")
 [ -n "$controller_port" ] || controller_port=8443
 cp "$work_dir/controller.toml.previous" "$work_dir/controller.toml"
+# Release artifacts are versioned update metadata. Remove the old array blocks
+# before installing the signed manifest for this release.
+awk '
+  /^\[\[bootstrap\.artifacts\]\]$/ { dropping=1; next }
+  /^\[/ && dropping { dropping=0 }
+  !dropping { print }
+' "$work_dir/controller.toml" > "$work_dir/controller.without-artifacts.toml"
+mv "$work_dir/controller.without-artifacts.toml" "$work_dir/controller.toml"
 if ! grep -Eq '^\[bootstrap\][[:space:]]*$' "$work_dir/controller.toml"; then
   printf '\n[bootstrap]\nnetwork_id = "%s"\ncontroller_endpoint = "https://%s:%s"\ncontroller_quic_endpoint = "%s:%s"\ncontroller_server_name = "%s"\n' \
     "$network_id" "$server_name" "$controller_port" "$server_name" "$controller_port" "$server_name" >> "$work_dir/controller.toml"
 fi
+cat "$artifacts_file" >> "$work_dir/controller.toml"
 cp "$work_dir/relay.toml.previous" "$work_dir/relay.toml"
 if ! grep -Eq '^\[public_https\][[:space:]]*$' "$work_dir/relay.toml"; then
   printf '\n[public_https]\nserver_name = "%s"\ncache_dir = "/var/lib/laneway-public"\n' "$server_name" >> "$work_dir/relay.toml"
@@ -157,7 +173,8 @@ attempt=0
 while [ "$attempt" -lt 30 ]; do
   if curl --fail --silent --show-error --max-time 10 --tlsv1.3 \
     "https://$server_name/.well-known/laneway/bootstrap.json" > "$work_dir/bootstrap.json" 2>/dev/null &&
-    grep -F "\"network_id\":\"$network_id\"" "$work_dir/bootstrap.json" >/dev/null; then
+    grep -F "\"network_id\":\"$network_id\"" "$work_dir/bootstrap.json" >/dev/null &&
+    grep -F "releases/download/$tag/laneway_" "$work_dir/bootstrap.json" >/dev/null; then
     public_ready=true
     break
   fi

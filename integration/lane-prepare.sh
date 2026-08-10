@@ -18,6 +18,32 @@ printf '%s\n' root-public > "$issuer_dir/ca.crt"
 printf '%s\n' issuer-chain > "$issuer_dir/intermediate-chain.crt"
 printf '%s\n' issuer-private > "$issuer_dir/intermediate.key"
 chmod 0400 "$issuer_dir/intermediate.key"
+cat > "$test_dir/bootstrap-artifacts.toml" <<'EOF'
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "amd64"
+url = "https://downloads.example.test/laneway_linux_amd64.tar.gz"
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+size_bytes = 1
+[[bootstrap.artifacts]]
+os = "linux"
+arch = "arm64"
+url = "https://downloads.example.test/laneway_linux_arm64.tar.gz"
+sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+size_bytes = 1
+[[bootstrap.artifacts]]
+os = "darwin"
+arch = "amd64"
+url = "https://downloads.example.test/laneway_darwin_amd64.tar.gz"
+sha256 = "3333333333333333333333333333333333333333333333333333333333333333"
+size_bytes = 1
+[[bootstrap.artifacts]]
+os = "darwin"
+arch = "arm64"
+url = "https://downloads.example.test/laneway_darwin_arm64.tar.gz"
+sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
+size_bytes = 1
+EOF
 
 cat > "$compose_dir/validate.sh" <<'EOF'
 #!/bin/sh
@@ -103,7 +129,8 @@ LANEWAY_RELAY_PUBLIC_ENDPOINT=relay.example.test:4433
 LANEWAY_BACKUP_RECIPIENT=age1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
 chmod 0600 "$compose_dir/.env"
-export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log"
+export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log" \
+  LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$test_dir/bootstrap-artifacts.toml"
 
 "$compose_dir/laneway-control" init --issuer "$issuer_dir"
 for path in \
@@ -125,6 +152,7 @@ for path in generated/config/controller.toml generated/config/relay.toml generat
 done
 grep -F 'network_id = "11111111111111111111111111111111"' "$compose_dir/generated/config/relay.toml" >/dev/null
 grep -F 'server_name = "lane.example.test"' "$compose_dir/generated/config/relay.toml" >/dev/null
+test "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$compose_dir/generated/config/controller.toml")" -eq 4
 [ ! -e "$compose_dir/generated/pki/ca.key" ]
 [ "$(grep -c 'pki controller' "$log")" -eq 1 ]
 [ "$(grep -c 'pki relay' "$log")" -eq 1 ]

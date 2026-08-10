@@ -40,6 +40,13 @@ require_regular() {
 [ "$#" -eq 1 ] || die "usage: prepare.sh ISSUER_DIRECTORY"
 [ "$(id -u)" -eq 0 ] || die "run as root so fixed container ownership can be installed safely"
 command -v laneway >/dev/null 2>&1 || die "the signed laneway binary must be installed"
+artifacts_file=${LANEWAY_BOOTSTRAP_ARTIFACTS_FILE:-}
+if [ -z "$artifacts_file" ] || [ ! -f "$artifacts_file" ] || [ -L "$artifacts_file" ]; then
+  die "signed bootstrap artifact manifest is missing or unsafe"
+fi
+if [ "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$artifacts_file")" -ne 4 ]; then
+  die "signed bootstrap artifact manifest must contain four platform artifacts"
+fi
 if [ ! -f "$env_file" ] || [ -L "$env_file" ]; then
   die ".env must be a regular, non-symlink file"
 fi
@@ -149,6 +156,7 @@ controller_endpoint = "https://$server_name:${LANEWAY_CONTROLLER_PORT:-8443}"
 controller_quic_endpoint = "$server_name:${LANEWAY_CONTROLLER_PORT:-8443}"
 controller_server_name = "$server_name"
 EOF
+cat "$artifacts_file" >> "$staging/controller.toml"
 cat > "$staging/relay.toml" <<EOF
 mode = "relay"
 state_dir = "/var/lib/laneway-relay"

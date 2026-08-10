@@ -237,7 +237,23 @@ jobs:
         working-directory: dist
         run: |
           install -m 0755 ../install-client.sh install-client.sh
-          LC_ALL=C sha256sum -- install-client.sh laneway_*.tar.gz laneway_darwin_amd64 laneway_darwin_arm64 *.spdx.json | sort -k2 > checksums.txt
+          : > bootstrap-artifacts.toml
+          for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
+            os=${platform%_*}
+            arch=${platform#*_}
+            asset=laneway_${platform}.tar.gz
+            digest=$(sha256sum -- "$asset" | awk '{print $1}')
+            size=$(stat -c %s -- "$asset")
+            cat >> bootstrap-artifacts.toml <<EOF
+          [[bootstrap.artifacts]]
+          os = "$os"
+          arch = "$arch"
+          url = "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/$asset"
+          sha256 = "$digest"
+          size_bytes = $size
+          EOF
+          done
+          LC_ALL=C sha256sum -- bootstrap-artifacts.toml install-client.sh laneway_*.tar.gz laneway_darwin_amd64 laneway_darwin_arm64 *.spdx.json | sort -k2 > checksums.txt
           LC_ALL=C sort -o image-digests.txt -- *.digest.txt
           rm -- *.digest.txt
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -250,6 +266,7 @@ jobs:
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: |
+            dist/bootstrap-artifacts.toml
             dist/install-client.sh
             dist/laneway_*.tar.gz
             dist/laneway_darwin_amd64
