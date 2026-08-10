@@ -9,17 +9,21 @@ import (
 )
 
 func authenticateHelperPeer(fd int) error {
-	cred, err := unix.GetsockoptXucred(fd, unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
+	pid, err := unix.GetsockoptInt(fd, unix.SOL_LOCAL, unix.LOCAL_PEERPID)
 	if err != nil {
 		return err
 	}
-	if cred == nil {
-		return errors.New("network helper peer has no credentials")
+	if pid <= 0 {
+		return errors.New("network helper peer has no process identity")
 	}
 	return nil
 }
 
-func helperSocketType() int { return unix.SOCK_SEQPACKET }
+// Darwin does not implement SOCK_SEQPACKET for AF_UNIX socket pairs. A
+// connected SOCK_DGRAM pair preserves message boundaries and descriptor
+// passing while LOCAL_PEERPID still authenticates the inherited peer.
+func helperSocketType() int     { return unix.SOCK_DGRAM }
+func helperSocketProtocol() int { return unix.SOCK_DGRAM }
 
 // macOS has no Linux-style capability set. The helper remains a separate,
 // credential-free root process reachable only through its inherited socket;

@@ -20,7 +20,8 @@ func authenticateHelperPeer(fd int) error {
 	return nil
 }
 
-func helperSocketType() int { return unix.SOCK_SEQPACKET | unix.SOCK_CLOEXEC }
+func helperSocketType() int     { return unix.SOCK_SEQPACKET | unix.SOCK_CLOEXEC }
+func helperSocketProtocol() int { return unix.SOCK_SEQPACKET }
 
 func hardenProcess() error {
 	for capability := 0; capability <= 63; capability++ {
