@@ -203,13 +203,11 @@ func (c *DirectController) HandleCandidate(_ context.Context, message *lanewayv1
 	c.peers[peer] = record
 	c.mu.Unlock()
 	if request != nil {
-		// A relay-coordinated rendezvous is also an authenticated peer-session
-		// epoch boundary. Retaining the previous datagram path here can silently
-		// black-hole replies after a peer restart: QUIC datagram writes may
-		// succeed until keepalive detects that the old process disappeared.
-		// Remove it before probing so traffic immediately uses the relay until
-		// the replacement direct session is authenticated and attached.
-		c.detachDirect(peer)
+		// Periodic rendezvous refreshes the NAT mapping and direct session. Keep
+		// the current authenticated path carrying traffic while that happens;
+		// replaceDirect performs the swap only after the new QUIC session has
+		// authenticated. A genuinely stale path is still removed by its receive
+		// loop when QUIC keepalive declares the connection failed.
 		select {
 		case c.requests <- *request:
 		default:

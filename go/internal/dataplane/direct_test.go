@@ -169,7 +169,7 @@ func TestDirectControllerAppliesDynamicCandidateAuthority(t *testing.T) {
 	}
 }
 
-func TestDirectControllerFreshRendezvousDetachesStalePath(t *testing.T) {
+func TestDirectControllerFreshRendezvousKeepsActivePathUntilReplacement(t *testing.T) {
 	authority := newDirectTestAuthority(t)
 	network := networkID(1)
 	local := identity.NodeIdentity{NetworkID: network, NodeID: nodeID(1)}
@@ -223,8 +223,8 @@ func TestDirectControllerFreshRendezvousDetachesStalePath(t *testing.T) {
 	if err := controller.HandleCandidate(context.Background(), message); err != nil {
 		t.Fatal(err)
 	}
-	if manager.BestPath(peerIdentity.NodeID) != nil {
-		t.Fatal("stale direct path survived a fresh rendezvous epoch")
+	if got := manager.BestPath(peerIdentity.NodeID); got != path {
+		t.Fatal("active direct path was removed before its replacement authenticated")
 	}
 }
 
