@@ -102,6 +102,7 @@ for value in \
 do
   require "$value" "$workflow"
 done
+require 'bootstrap-artifacts.toml image-digests.txt install-client.sh' "$workflow"
 
 for value in \
   'LANEWAY_CONTROLLER_IMAGE_DIGEST' \
