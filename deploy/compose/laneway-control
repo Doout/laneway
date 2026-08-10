@@ -359,7 +359,9 @@ run_route() {
       *) die "unknown route option: $1" ;;
     esac
   done
-  [ -n "$connector" ] && [ -n "$destination" ] || die "route add requires --connector and --to"
+  if [ -z "$connector" ] || [ -z "$destination" ]; then
+    die "route add requires --connector and --to"
+  fi
   case "$connector" in *[!A-Za-z0-9._-]*) die "--connector contains an unsafe character" ;; esac
   case "$allowed_user" in *[!A-Za-z0-9._-]*) die "--allow contains an unsafe character" ;; esac
   case "$destination" in *[!A-Fa-f0-9.:/]*) die "--to must be an IP address or prefix" ;; esac
