@@ -50,6 +50,10 @@ exit 0
 EOF
 cat > "$deployment/recovery.sh" <<'EOF'
 #!/bin/sh
+if grep -Eq '^\[bootstrap\]' "$LANEWAY_DEPLOY_DIR/generated/config/controller.toml"; then
+  echo "new controller configuration was installed before the old-controller backup" >&2
+  exit 1
+fi
 printf 'recovery <%s> <%s>\n' "$1" "$2" >> "$LANEWAY_TEST_LOG"
 EOF
 cat > "$deployment/validate.sh" <<'EOF'
@@ -122,5 +126,7 @@ grep -F 'recovery <backup> <pre-upgrade-' "$log" >/dev/null
 grep -F 'docker <compose>' "$log" >/dev/null
 grep -F 'cosign <verify>' "$log" >/dev/null
 grep -F 'host networking are unchanged' "$test_root/output" >/dev/null
+grep -Fx '[bootstrap]' "$deployment/generated/config/controller.toml" >/dev/null
+grep -Fx '[public_https]' "$deployment/generated/config/relay.toml" >/dev/null
 
 echo "control-plane upgrade integration test passed"

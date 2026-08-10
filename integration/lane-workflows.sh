@@ -7,12 +7,14 @@ trap 'find "$test_dir" -depth -delete' EXIT HUP INT TERM
 compose_dir=$test_dir/compose
 fake_bin=$test_dir/bin
 log=$test_dir/calls.log
-mkdir -p "$compose_dir/generated/backups" "$fake_bin"
+mkdir -p "$compose_dir/generated/backups" "$compose_dir/generated/config" "$fake_bin"
 cp "$repo_dir/deploy/compose/laneway-control" "$repo_dir/deploy/compose/preflight.sh" "$compose_dir/"
 chmod 0755 "$compose_dir/laneway-control"
 chmod 0755 "$compose_dir/preflight.sh"
 ln -s "$compose_dir/laneway-control" "$test_dir/laneway-control"
 : > "$compose_dir/compose.yaml"
+: > "$compose_dir/generated/config/controller.toml"
+: > "$compose_dir/generated/config/relay.toml"
 : > "$log"
 
 cat > "$compose_dir/validate.sh" <<'EOF'
