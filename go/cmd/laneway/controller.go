@@ -10,11 +10,13 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/protocol"
@@ -69,7 +71,7 @@ func (f remoteFlags) client() (*controllerclient.Client, error) {
 
 func runController(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: laneway controller <overview|network|enrollment-token|route|acl|node|certificate|relay|audit> ...")
+		return errors.New("usage: laneway controller <overview|network|enrollment-token|bootstrap-bundle|route|acl|node|certificate|relay|audit> ...")
 	}
 	switch args[0] {
 	case "overview":
@@ -78,6 +80,8 @@ func runController(args []string) error {
 		return runControllerNetwork(args[1:])
 	case "enrollment-token":
 		return runControllerEnrollmentToken(args[1:])
+	case "bootstrap-bundle":
+		return runControllerBootstrapBundle(args[1:])
 	case "route":
 		return runControllerRoute(args[1:])
 	case "acl":
@@ -93,6 +97,45 @@ func runController(args []string) error {
 	default:
 		return fmt.Errorf("unknown controller command %q", args[0])
 	}
+}
+
+func runControllerBootstrapBundle(args []string) error {
+	if len(args) == 0 || args[0] != "create" {
+		return errors.New("usage: laneway controller bootstrap-bundle create --payload-file PATH --expires-at UNIX [controller options]")
+	}
+	fs := flag.NewFlagSet("controller bootstrap-bundle create", flag.ContinueOnError)
+	payloadFile := fs.String("payload-file", "", "protected file containing the encrypted bootstrap wrapper")
+	expiresAtUnix := fs.Int64("expires-at", 0, "absolute bootstrap expiry as Unix seconds")
+	remote := addRemoteFlags(fs, false, true)
+	if err := parseNoArgs(fs, args[1:]); err != nil {
+		return err
+	}
+	if *payloadFile == "" || !filepath.IsAbs(*payloadFile) || *expiresAtUnix <= 0 {
+		return errors.New("bootstrap-bundle create requires an absolute --payload-file and --expires-at")
+	}
+	info, err := os.Lstat(*payloadFile)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > bootstrap.MaxBundleBytes {
+		return errors.New("--payload-file must be a nonempty regular file within the bootstrap size limit")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return errors.New("--payload-file must not be accessible by group or other users")
+	}
+	payload, err := os.ReadFile(*payloadFile)
+	if err != nil {
+		return fmt.Errorf("read bootstrap payload: %w", err)
+	}
+	defer clear(payload)
+	client, err := remote.client()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := commandContext()
+	defer cancel()
+	bundle, err := client.CreateBootstrapBundle(ctx, payload, time.Unix(*expiresAtUnix, 0).UTC())
+	if err != nil {
+		return err
+	}
+	return printJSON(bundle)
 }
 
 func runControllerCertificate(args []string) error {

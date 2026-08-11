@@ -85,6 +85,36 @@ func (c *Client) BootstrapMetadata(ctx context.Context) ([]byte, error) {
 	return contents, nil
 }
 
+// BootstrapBundle fetches and consumes one encrypted bootstrap wrapper over
+// the relay's pinned controller connection. The decryption key is never sent
+// to this API.
+func (c *Client) BootstrapBundle(ctx context.Context, id string) ([]byte, error) {
+	if _, valid := bootstrap.BundleIDFromPath(bootstrap.BundlePathPrefix + id); !valid {
+		return nil, errors.New("controller bootstrap bundle ID is invalid")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/v1/bootstrap-bundles/"+id, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "text/x-shellscript")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("controller bootstrap bundle request: %w", err)
+	}
+	defer response.Body.Close()
+	contents, err := io.ReadAll(io.LimitReader(response.Body, bootstrap.MaxBundleBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read controller bootstrap bundle response: %w", err)
+	}
+	if len(contents) > bootstrap.MaxBundleBytes {
+		return nil, errors.New("controller bootstrap bundle response exceeds limit")
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("controller bootstrap bundle returned %s", response.Status)
+	}
+	return contents, nil
+}
+
 type Client struct {
 	endpoint    string
 	http        *http.Client
@@ -524,6 +554,30 @@ func (c *Client) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID 
 		EnabledCapabilities    uint64 `json:"enabled_capabilities,omitempty"`
 	}{networkID.String(), label, expiresAt.Unix(), options.Class, int64(options.SessionLifetime / time.Second), options.RequestedName, options.EnabledCapabilities}, response, true)
 	return response, err
+}
+
+type BootstrapBundle struct {
+	BundleID      string `json:"bundle_id"`
+	PublicPath    string `json:"public_path"`
+	ExpiresAtUnix int64  `json:"expires_at_unix_seconds"`
+}
+
+func (c *Client) CreateBootstrapBundle(ctx context.Context, payload []byte, expiresAt time.Time) (*BootstrapBundle, error) {
+	if len(payload) == 0 || len(payload) > bootstrap.MaxBundleBytes || expiresAt.IsZero() {
+		return nil, errors.New("controller client: bounded bootstrap payload and expiry are required")
+	}
+	response := new(BootstrapBundle)
+	err := c.json(ctx, http.MethodPost, "/v1/admin/bootstrap-bundles", struct {
+		Payload       string `json:"payload"`
+		ExpiresAtUnix int64  `json:"expires_at_unix_seconds"`
+	}{string(payload), expiresAt.Unix()}, response, true)
+	if err != nil {
+		return nil, err
+	}
+	if response.BundleID == "" || response.PublicPath != bootstrap.BundlePathPrefix+response.BundleID || response.ExpiresAtUnix != expiresAt.Unix() {
+		return nil, errors.New("controller client: invalid bootstrap bundle response")
+	}
+	return response, nil
 }
 
 func (c *Client) AdvertiseRoute(ctx context.Context, prefix netip.Prefix, kind, mode string, metric uint32, validUntil *time.Time) (*Route, error) {

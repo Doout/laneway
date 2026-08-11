@@ -131,6 +131,7 @@ func controllerCommand() *cobra.Command {
 		command("overview", "Show active nodes and their approved forwarding", runControllerOverview),
 		resourceCommand("network", "Manage networks", runControllerNetwork, "create", "get", "list"),
 		resourceCommand("enrollment-token", "Issue enrollment tokens", runControllerEnrollmentToken, "issue"),
+		resourceCommand("bootstrap-bundle", "Manage short-lived Connector bootstrap bundles", runControllerBootstrapBundle, "create"),
 		routeCommand("route", "Manage controller routes"),
 		resourceCommand("acl", "Manage access-control rules", runControllerACL, "add", "delete", "list"),
 		resourceCommand("node", "Manage enrolled nodes", runControllerNode, "revoke", "capabilities", "list"),

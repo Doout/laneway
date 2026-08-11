@@ -12,12 +12,14 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
 )
@@ -324,6 +326,49 @@ func TestJSONAdminRequiredErrorsAndLimits(t *testing.T) {
 		Value string `json:"value"`
 	}{strings.Repeat("x", MaxJSONRequestBytes)}, new(Epoch), false); err == nil || !strings.Contains(err.Error(), "request exceeds") {
 		t.Fatalf("request limit error = %v", err)
+	}
+}
+
+func TestBootstrapBundleClientKeepsDecryptionKeyOutOfControllerRequests(t *testing.T) {
+	id := strings.Repeat("A", bootstrap.BundleIDLength)
+	expiresAt := time.Unix(2_000_000_600, 0).UTC()
+	wrapper := []byte("#!/bin/bash\necho encrypted-envelope\n")
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/admin/bootstrap-bundles":
+			if r.Header.Get("Authorization") != "Bearer admin-secret" {
+				t.Errorf("admin request authorization = %q", r.Header.Get("Authorization"))
+			}
+			body, _ := io.ReadAll(r.Body)
+			if !bytes.Contains(body, []byte("encrypted-envelope")) || bytes.Contains(body, []byte("decryption-key")) {
+				t.Errorf("bootstrap request body = %s", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"bundle_id":"`+id+`","public_path":"`+bootstrap.BundlePathPrefix+id+`","expires_at_unix_seconds":`+strconv.FormatInt(expiresAt.Unix(), 10)+`}`)
+		case "GET /v1/bootstrap-bundles/" + id:
+			if r.Header.Get("Authorization") != "" {
+				t.Errorf("capability request leaked admin authorization")
+			}
+			w.Header().Set("Content-Type", "text/x-shellscript")
+			_, _ = w.Write(wrapper)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer admin-secret"}
+	bundle, err := client.CreateBootstrapBundle(context.Background(), wrapper, expiresAt)
+	if err != nil || bundle.BundleID != id {
+		t.Fatalf("create bundle=%+v err=%v", bundle, err)
+	}
+	downloaded, err := client.BootstrapBundle(context.Background(), id)
+	if err != nil || !bytes.Equal(downloaded, wrapper) {
+		t.Fatalf("downloaded=%q err=%v", downloaded, err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d, want 2", requests)
 	}
 }
 

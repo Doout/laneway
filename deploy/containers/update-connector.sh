@@ -2,7 +2,7 @@
 set -eu
 
 repository=Doout/laneway
-image=ghcr.io/doout/laneway-connector
+image=ghcr.io/doout/lane-edge
 container=${1:-}
 
 die() { echo "laneway Connector update: $*" >&2; exit 1; }
@@ -98,7 +98,7 @@ identity="https://github.com/$repository/.github/workflows/release.yml@refs/tags
 ) || die "image digest manifest checksum verification failed"
 
 connector_digest=$(sed -n \
-  's|^ghcr.io/doout/laneway-connector@\(sha256:[0-9a-f]*\)$|\1|p' \
+  's|^ghcr.io/doout/lane-edge@\(sha256:[0-9a-f]*\)$|\1|p' \
   "$update_dir/image-digests.txt")
 [ "$(printf '%s\n' "$connector_digest" | wc -l)" -eq 1 ] || \
   die "release contains multiple Connector digests"
@@ -134,12 +134,8 @@ docker run --rm --pull never \
   --user 65532:65532 --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --volume "$state_volume:/var/lib/laneway:ro" \
-  --entrypoint /bin/sh "$target" -eu -c '
-    state=/var/lib/laneway/connector
-    for file in connector.toml ca.crt node.crt node.key wireguard.key; do
-      [ -f "$state/$file" ] || exit 1
-    done
-  ' || die "durable Connector identity is incomplete; existing container was not changed"
+  "$target" connector validate --state-dir /var/lib/laneway/connector \
+  >/dev/null || die "durable Connector identity is incomplete; existing container was not changed"
 
 previous=$container-previous-$$
 docker stop "$container" >/dev/null || die "could not stop $container"

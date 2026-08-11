@@ -7,7 +7,7 @@ trap 'find "$work_dir" -depth -delete' EXIT HUP INT TERM
 mkdir -p "$work_dir/bin" "$work_dir/fixture" "$work_dir/locks"
 
 digest=sha256:1111111111111111111111111111111111111111111111111111111111111111
-printf 'ghcr.io/doout/laneway-connector@%s\n' "$digest" > "$work_dir/fixture/image-digests.txt"
+printf 'ghcr.io/doout/lane-edge@%s\n' "$digest" > "$work_dir/fixture/image-digests.txt"
 (
   cd "$work_dir/fixture"
   sha256sum image-digests.txt > checksums.txt
@@ -60,6 +60,7 @@ case "$command" in
     if [ "${1:-}" != --format ]; then exit 0; fi
     format=$2
     case "$format" in
+      # Exercise replacement of the pre-split shared Connector/Exit image.
       *Config.Image*) echo 'ghcr.io/doout/laneway-connector:0.2.29' ;;
       *Mounts*) echo 'volume laneway-connector-test-state' ;;
       *Config.Hostname*) echo 'laneway-connector-test' ;;
@@ -90,8 +91,13 @@ printf '%s\n' "$output" | grep -F 'updated successfully to v9.8.7' >/dev/null
 grep -F 'stop laneway-connector-test' "$work_dir/docker.log" >/dev/null
 grep -F 'rename laneway-connector-test laneway-connector-test-previous-' "$work_dir/docker.log" >/dev/null
 grep -F -- '--volume laneway-connector-test-state:/var/lib/laneway' "$work_dir/docker.log" >/dev/null
-grep -F 'ghcr.io/doout/laneway-connector:9.8.7@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
+grep -F 'ghcr.io/doout/lane-edge:9.8.7@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
   "$work_dir/docker.log" >/dev/null
+grep -F 'connector validate --state-dir /var/lib/laneway/connector' "$work_dir/docker.log" >/dev/null
+if grep -F -- '--entrypoint /bin/sh' "$work_dir/docker.log" >/dev/null; then
+  echo "Connector updater still requires a shell in the target image" >&2
+  exit 1
+fi
 if grep -F 'config-backup' "$work_dir/docker.log" >/dev/null; then
   echo "Connector updater created a redundant configuration backup volume" >&2
   exit 1

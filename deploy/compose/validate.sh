@@ -16,11 +16,11 @@ if ! printf '%s\n' "$version" | grep -E '^(dev|[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-
   exit 1
 fi
 
-for key in \
-  LANEWAY_CONTROLLER_IMAGE_DIGEST \
-  LANEWAY_RELAY_IMAGE_DIGEST \
-  LANEWAY_ADMIN_IMAGE_DIGEST \
-  LANEWAY_EXIT_NODE_IMAGE_DIGEST
+digest_keys="LANEWAY_CONTROLLER_IMAGE_DIGEST LANEWAY_RELAY_IMAGE_DIGEST LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+if grep -F 'image: ghcr.io/doout/laneway-exit-node:' "$base_dir/compose.yaml" >/dev/null; then
+  digest_keys="$digest_keys LANEWAY_CONNECTOR_IMAGE_DIGEST"
+fi
+for key in $digest_keys
 do
   digest=$(printenv "$key" 2>/dev/null || true)
   if [ -z "$digest" ]; then

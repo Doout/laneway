@@ -287,7 +287,19 @@ func run(path, diagnostics string) error {
 	return err
 }
 
+type publicBootstrapSource interface {
+	BootstrapMetadata(context.Context) ([]byte, error)
+	BootstrapBundle(context.Context, string) ([]byte, error)
+}
+
 func publicBootstrapHandler(client *controllerclient.Client, limiter *publicRateLimiter) http.Handler {
+	if client == nil {
+		return publicBootstrapHandlerFromSource(nil, limiter)
+	}
+	return publicBootstrapHandlerFromSource(client, limiter)
+}
+
+func publicBootstrapHandlerFromSource(client publicBootstrapSource, limiter *publicRateLimiter) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -297,7 +309,8 @@ func publicBootstrapHandler(client *controllerclient.Client, limiter *publicRate
 			http.Error(writer, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
-		if request.Method != http.MethodGet || request.URL.Path != bootstrap.WellKnownPath || request.URL.RawQuery != "" {
+		bundleID, bundlePath := bootstrap.BundleIDFromPath(request.URL.Path)
+		if request.Method != http.MethodGet || (request.URL.Path != bootstrap.WellKnownPath && !bundlePath) || request.URL.RawQuery != "" {
 			http.NotFound(writer, request)
 			return
 		}
@@ -305,14 +318,29 @@ func publicBootstrapHandler(client *controllerclient.Client, limiter *publicRate
 			http.Error(writer, "bootstrap metadata temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		contents, err := client.BootstrapMetadata(request.Context())
+		var contents []byte
+		var err error
+		if bundlePath {
+			contents, err = client.BootstrapBundle(request.Context(), bundleID)
+		} else {
+			contents, err = client.BootstrapMetadata(request.Context())
+		}
 		if err != nil {
+			if bundlePath {
+				http.NotFound(writer, request)
+				return
+			}
 			http.Error(writer, "bootstrap metadata temporarily unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		writer.Header().Set("Content-Type", "application/json")
+		if bundlePath {
+			writer.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+		} else {
+			writer.Header().Set("Content-Type", "application/json")
+		}
 		writer.WriteHeader(http.StatusOK)
 		_, _ = writer.Write(contents)
+		clear(contents)
 	})
 }
 

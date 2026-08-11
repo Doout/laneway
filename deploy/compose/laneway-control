@@ -27,7 +27,7 @@ usage: laneway-control <init|user-token|invite|route|status|update|production-ch
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
-  invite --name NAME [--ephemeral|--remembered] [--docker --connector]
+  invite --name NAME [--ephemeral|--remembered] [--docker --connector [--bootstrap]]
   route add --connector NAME --to IP_OR_PREFIX [--allow USER] [--mode nat|routed] [--metric NUMBER]
   update
   backup [NAME.age]
@@ -79,12 +79,25 @@ compose_with_env() {
   candidate=$1; shift
   docker compose --project-directory "$base_dir" --env-file "$candidate" -f "$base_dir/compose.yaml" "$@"
 }
+compose_file_with_env() {
+  candidate=$1; compose_file=$2; shift 2
+  docker compose --project-directory "$base_dir" --env-file "$candidate" -f "$compose_file" "$@"
+}
 
 read_setting() {
   file=$1; key=$2
   value=$(sed -n "s/^${key}=//p" "$file")
   [ -n "$value" ] || die "missing $key in $file"
   [ "$(printf '%s\n' "$value" | wc -l)" -eq 1 ] || die "duplicate $key in $file"
+  case "$value" in *[!A-Za-z0-9._:/+-]*) die "$key contains an unsafe character" ;; esac
+  printf '%s' "$value"
+}
+
+optional_setting() {
+  file=$1; key=$2
+  value=$(sed -n "s/^${key}=//p" "$file")
+  [ "$(printf '%s\n' "$value" | sed '/^$/d' | wc -l)" -le 1 ] || die "duplicate $key in $file"
+  [ -n "$value" ] || return 1
   case "$value" in *[!A-Za-z0-9._:/+-]*) die "$key contains an unsafe character" ;; esac
   printf '%s' "$value"
 }
@@ -101,6 +114,10 @@ validate_release_env() {
     printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$key is not an immutable digest"
     [ "$digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || die "$key is a placeholder"
   done
+  if connector_digest=$(optional_setting "$file" LANEWAY_CONNECTOR_IMAGE_DIGEST); then
+    printf '%s\n' "$connector_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "LANEWAY_CONNECTOR_IMAGE_DIGEST is not an immutable digest"
+    [ "$connector_digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || die "LANEWAY_CONNECTOR_IMAGE_DIGEST is a placeholder"
+  fi
   for key in LANEWAY_NETWORK_ID LANEWAY_CONTROLLER_SERVICE_ID LANEWAY_RELAY_SERVICE_ID LANEWAY_CONTROLLER_SERVER_NAME LANEWAY_NETWORK_NAME LANEWAY_IPV4_POOL LANEWAY_RELAY_PUBLIC_ENDPOINT; do
     read_setting "$file" "$key" >/dev/null
   done
@@ -126,11 +143,23 @@ verify_release_images() {
   cosign_command=$(cosign_verifier)
   version=$(read_setting "$file" LANEWAY_VERSION)
   identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v$version"
-  for item in \
-    "ghcr.io/doout/laneway-controller:LANEWAY_CONTROLLER_IMAGE_DIGEST" \
-    "ghcr.io/doout/laneway-relay:LANEWAY_RELAY_IMAGE_DIGEST" \
-    "ghcr.io/doout/laneway-admin:LANEWAY_ADMIN_IMAGE_DIGEST" \
-    "ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+  if optional_setting "$file" LANEWAY_CONNECTOR_IMAGE_DIGEST >/dev/null; then
+    set -- \
+      "ghcr.io/doout/laneway-controller:LANEWAY_CONTROLLER_IMAGE_DIGEST" \
+      "ghcr.io/doout/laneway-relay:LANEWAY_RELAY_IMAGE_DIGEST" \
+      "ghcr.io/doout/laneway-admin:LANEWAY_ADMIN_IMAGE_DIGEST" \
+      "ghcr.io/doout/lane-edge:LANEWAY_CONNECTOR_IMAGE_DIGEST" \
+      "ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+  else
+    # Releases before the dedicated scratch Connector used one shared image for
+    # both Connector and Exit Node. Retain signed rollback across that boundary.
+    set -- \
+      "ghcr.io/doout/laneway-controller:LANEWAY_CONTROLLER_IMAGE_DIGEST" \
+      "ghcr.io/doout/laneway-relay:LANEWAY_RELAY_IMAGE_DIGEST" \
+      "ghcr.io/doout/laneway-admin:LANEWAY_ADMIN_IMAGE_DIGEST" \
+      "ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+  fi
+  for item
   do
     image=${item%%:*}; key=${item#*:}; digest=$(read_setting "$file" "$key")
     "$cosign_command" verify --certificate-identity "$identity" \
@@ -236,16 +265,22 @@ run_status() {
   [ "$failed" = false ] || die "one or more health or inventory checks failed"
 }
 
-emit_docker_connector_command() {
-  enrollment_token=$1; node_name=$2
+connector_image_reference() {
   version=$(read_setting "$env_file" LANEWAY_VERSION)
+	if ! connector_digest=$(optional_setting "$env_file" LANEWAY_CONNECTOR_IMAGE_DIGEST); then
+		connector_digest=$(read_setting "$env_file" LANEWAY_EXIT_NODE_IMAGE_DIGEST)
+	fi
+	printf 'ghcr.io/doout/lane-edge:%s@%s' "$version" "$connector_digest"
+}
+
+connector_setup_token() {
+  enrollment_token=$1; node_name=$2
   controller_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
   controller_port=$(read_setting "$env_file" LANEWAY_CONTROLLER_PORT)
   network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
   controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
   relay_endpoint=$(read_setting "$env_file" LANEWAY_RELAY_PUBLIC_ENDPOINT)
   relay_id=$(read_setting "$env_file" LANEWAY_RELAY_SERVICE_ID)
-  exit_digest=$(read_setting "$env_file" LANEWAY_EXIT_NODE_IMAGE_DIGEST)
   ca_file=$base_dir/generated/pki/ca.crt
   if [ ! -f "$ca_file" ] || [ -L "$ca_file" ]; then
     die "control-plane CA certificate is missing"
@@ -256,7 +291,13 @@ emit_docker_connector_command() {
       "$controller_name:$controller_port" "$controller_name" "$network_id" "$controller_id" \
       "$relay_endpoint" "$relay_id" "$ca_b64"
   } | base64 | awk '{printf "%s", $0}')
-  setup_token=st1.$setup_payload
+	printf 'st1.%s' "$setup_payload"
+}
+
+emit_docker_connector_command() {
+  enrollment_token=$1; node_name=$2
+	setup_token=$(connector_setup_token "$enrollment_token" "$node_name")
+	image=$(connector_image_reference)
   cat <<EOF
 docker run -d \\
   --name 'laneway-connector-$node_name' \\
@@ -276,8 +317,122 @@ docker run -d \\
   --health-retries 6 \\
   --health-start-period 15s \\
   --env 'SETUP_TOKEN=$setup_token' \\
-  'ghcr.io/doout/laneway-connector:$version@$exit_digest'
+  '$image'
 EOF
+}
+
+render_docker_connector_bootstrap() {
+	node_name=$1; image=$2; envelope=$3; destination=$4
+	cat > "$destination" <<EOF
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+die() { echo "lane-edge bootstrap: \$*" >&2; exit 1; }
+[ "\$#" -eq 1 ] || die "one decryption key argument is required"
+key=\$1
+shift
+[[ \$key =~ ^[A-Za-z0-9_-]{43}\$ ]] || die "the decryption key is invalid"
+command -v docker >/dev/null 2>&1 || die "Docker Engine is required"
+command -v find >/dev/null 2>&1 || die "find is required for protected cleanup"
+docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "Docker Engine is not running"
+
+container_name='laneway-connector-$node_name'
+volume_name='laneway-connector-$node_name-state'
+image='$image'
+if docker container inspect "\$container_name" >/dev/null 2>&1; then
+  die "container \$container_name already exists"
+fi
+
+temporary_parent=\${TMPDIR:-/tmp}
+case \$temporary_parent in /*) ;; *) die "TMPDIR must be absolute" ;; esac
+[ -d "\$temporary_parent" ] && [ ! -L "\$temporary_parent" ] || die "TMPDIR must be a real directory"
+bootstrap_dir=\$(mktemp -d "\$temporary_parent/lane-edge-bootstrap.XXXXXX")
+chmod 0700 "\$bootstrap_dir"
+cleanup() {
+  unset key
+  [ ! -e "\$bootstrap_dir" ] || find "\$bootstrap_dir" -depth -delete
+}
+trap cleanup EXIT HUP INT TERM
+envelope_file=\$bootstrap_dir/envelope
+printf '%s\n' '$envelope' > "\$envelope_file"
+chmod 0644 "\$envelope_file"
+
+docker pull --quiet "\$image" >/dev/null
+printf '%s\n' "\$key" | docker run --rm -i \\
+  --user 65532:65532 \\
+  --read-only \\
+  --cap-drop ALL \\
+  --security-opt no-new-privileges:true \\
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
+  --volume "\$volume_name:/var/lib/laneway" \\
+  --volume "\$envelope_file:/run/laneway-bootstrap/envelope:ro" \\
+  --entrypoint /usr/local/bin/laneway \\
+  "\$image" connector bootstrap-activate --envelope-file /run/laneway-bootstrap/envelope
+unset key
+cleanup
+trap - EXIT HUP INT TERM
+
+docker run -d \\
+  --name "\$container_name" \\
+  --hostname "\$container_name" \\
+  --restart unless-stopped \\
+  --pull never \\
+  --user 65532:65532 \\
+  --read-only \\
+  --cap-drop ALL \\
+  --security-opt no-new-privileges:true \\
+  --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
+  --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \\
+  --volume "\$volume_name:/var/lib/laneway" \\
+  --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \\
+  --health-interval 10s \\
+  --health-timeout 3s \\
+  --health-retries 6 \\
+  --health-start-period 15s \\
+  "\$image"
+EOF
+	chmod 0600 "$destination"
+}
+
+emit_docker_connector_bootstrap() {
+	enrollment_token=$1; node_name=$2
+	setup_token=$(connector_setup_token "$enrollment_token" "$node_name")
+	image=$(connector_image_reference)
+	expires_at=$(($(date +%s) + 600))
+	install -d -m 0700 "$state_dir"
+	bootstrap_dir=$(mktemp -d "$state_dir/.connector-bootstrap.XXXXXX") || die "could not create protected bootstrap workspace"
+	chmod 0700 "$bootstrap_dir"
+	cleanup_bootstrap() { [ ! -e "$bootstrap_dir" ] || find "$bootstrap_dir" -depth -delete; }
+	trap cleanup_bootstrap EXIT HUP INT TERM
+	envelope_file=$bootstrap_dir/envelope
+	key=$(printf '%s\n' "$setup_token" | admin connector bootstrap-seal --out "$envelope_file" --expires-at "$expires_at")
+	unset setup_token enrollment_token
+	printf '%s\n' "$key" | grep -Eq '^[A-Za-z0-9_-]{43}$' || die "bootstrap sealer returned an invalid decryption key"
+	bootstrap_script=$bootstrap_dir/bootstrap.sh
+	envelope=$(sed -n '1p' "$envelope_file")
+	printf '%s\n' "$envelope" | grep -Eq '^[A-Za-z0-9_-]+$' || die "bootstrap sealer returned an invalid envelope"
+	render_docker_connector_bootstrap "$node_name" "$image" "$envelope" "$bootstrap_script"
+
+	network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+	controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
+	server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
+	result=$(admin controller bootstrap-bundle create --payload-file "$bootstrap_script" --expires-at "$expires_at" \
+		--controller "$(local_controller_endpoint)" --ca "$base_dir/generated/pki/ca.crt" \
+		--server-name "$server_name" --controller-network-id "$network_id" \
+		--controller-service-id "$controller_id" \
+		--admin-token-file "$base_dir/generated/secrets/admin.token")
+	public_path=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"public_path":[[:space:]]*"\([^"]*\)"[,]*$/\1/p')
+	printf '%s\n' "$public_path" | grep -Eq '^/\.well-known/laneway/bootstrap/[A-Za-z0-9_-]{43}$' || die "controller returned no valid bootstrap path"
+	cleanup_bootstrap
+	trap - EXIT HUP INT TERM
+
+	public_port=$(read_setting "$env_file" LANEWAY_RELAY_TCP_PORT)
+	public_authority=$server_name
+	[ "$public_port" = 443 ] || public_authority=$server_name:$public_port
+	printf 'curl --fail --silent --show-error --proto '\''=https'\'' --tlsv1.3 '\''https://%s%s'\'' | sudo bash -s -- '\''%s'\''\n' \
+		"$public_authority" "$public_path" "$key"
+	printf 'One-time encrypted Connector bootstrap; expires in 10 minutes and is consumed by the first download.\n' >&2
 }
 
 run_production_check() {
@@ -309,16 +464,17 @@ run_production_check() {
 }
 
 run_invite() {
-  name=; class=durable; expires=10m; session=; docker_install=false; exit_node=false
+  name=; class=durable; expires=10m; expires_set=false; session=; docker_install=false; exit_node=false; bootstrap_install=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --name) [ "$#" -ge 2 ] || die "--name requires a value"; name=$2; shift 2 ;;
       --ephemeral) [ "$class" = durable ] || die "choose one class"; class=ephemeral; session=8h; shift ;;
       --remembered) [ "$class" = durable ] || die "choose one class"; class=remembered; shift ;;
-      --expires-in) [ "$#" -ge 2 ] || die "--expires-in requires a value"; expires=$2; shift 2 ;;
+      --expires-in) [ "$#" -ge 2 ] || die "--expires-in requires a value"; expires=$2; expires_set=true; shift 2 ;;
       --session-lifetime) [ "$#" -ge 2 ] || die "--session-lifetime requires a value"; session=$2; shift 2 ;;
       --docker) docker_install=true; shift ;;
       --connector) exit_node=true; shift ;;
+			--bootstrap) bootstrap_install=true; shift ;;
       --exit-node|--exit) die "full Exit Nodes use the privileged exit-node deployment; use --connector for the unprivileged Docker Connector" ;;
       *) die "unknown invite option: $1" ;;
     esac
@@ -328,6 +484,12 @@ run_invite() {
   if [ "$docker_install" != "$exit_node" ]; then
     die "--docker and --connector must be used together"
   fi
+	if [ "$bootstrap_install" = true ]; then
+		[ "$docker_install" = true ] || die "--bootstrap requires --docker --connector"
+		[ "$class" = durable ] || die "--bootstrap supports durable Connectors only"
+		[ "$expires_set" = false ] || die "--bootstrap uses a fixed 10-minute lifetime; omit --expires-in"
+		expires=10m
+	fi
   network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
   controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
   server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
@@ -344,7 +506,11 @@ run_invite() {
     result=$(admin "$@" --connector)
     enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
     [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
-    emit_docker_connector_command "$enrollment_token" "$name"
+		if [ "$bootstrap_install" = true ]; then
+			emit_docker_connector_bootstrap "$enrollment_token" "$name"
+		else
+			emit_docker_connector_command "$enrollment_token" "$name"
+		fi
   else
     admin "$@"
   fi
@@ -524,7 +690,11 @@ activate_release() {
   fi
   run_step "Validate release configuration" validate_release_env "$candidate" || die "$operation configuration validation failed"
   run_step "Verify signed container images" verify_release_images "$candidate" || die "$operation image verification failed"
-  run_step "Pull release images" compose_with_env "$candidate" pull || die "$operation image pull failed"
+  if [ -n "$migration_dir" ]; then
+    run_step "Pull release images" compose_file_with_env "$candidate" "$migration_dir/compose.yaml" pull || die "$operation image pull failed"
+  else
+    run_step "Pull release images" compose_with_env "$candidate" pull || die "$operation image pull failed"
+  fi
   backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).age"
   run_step "Create encrypted recovery backup" backup_recovery "$backup_name" || die "$operation recovery backup failed"
   if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then

@@ -213,6 +213,10 @@ func run(path, diagnostics string) error {
 		if bootstrapErr != nil {
 			return bootstrapErr
 		}
+		// Keep the optional direct public listener metadata-only. One-time
+		// Connector bundles are exposed through the relay's public HTTPS
+		// listener, which rate-limits the request before fetching the bundle
+		// over the authenticated controller connection.
 		bootstrapHandler = bootstrapMetadata.Handler()
 		if cfg.Bootstrap.Listen != "" {
 			publicCertificate, certificateErr := tls.LoadX509KeyPair(cfg.Bootstrap.CertificateFile, cfg.Bootstrap.PrivateKeyFile)
