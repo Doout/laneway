@@ -33,15 +33,17 @@ sysctls.
 
 ### 2. Add a private network
 
-Create a Connector invitation:
+Create a one-time Connector invitation:
 
 ```sh
-sudo laneway control invite --name office --docker --connector
+sudo laneway control invite --name office --docker --connector --bootstrap
 ```
 
-Run the generated `docker run` command as root on a Linux Docker host that can
-reach the private network. The Connector needs no inbound port, TUN device, or
-Linux capability.
+Run the generated `curl | sudo bash` command within ten minutes on a Linux
+Docker host that can reach the private network. Its encrypted payload is
+single-use; enrollment starts a clean scratch `lane-edge` container with no
+setup token or key. The Connector needs no inbound port, TUN device, or Linux
+capability.
 
 ### 3. Enroll a client
 

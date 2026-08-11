@@ -56,7 +56,7 @@ exit 0
 EOF
 cat > "$deployment/recovery.sh" <<'EOF'
 #!/bin/sh
-if grep -Eq '^\[bootstrap\]' "$LANEWAY_DEPLOY_DIR/generated/config/controller.toml"; then
+if [ "${LANEWAY_TEST_ALLOW_NEW_BACKUP:-0}" = 0 ] && grep -Eq '^\[bootstrap\]' "$LANEWAY_DEPLOY_DIR/generated/config/controller.toml"; then
   echo "new controller configuration was installed before the old-controller backup" >&2
   exit 1
 fi
@@ -72,7 +72,8 @@ cat > "$test_root/image-digests.txt" <<'EOF'
 ghcr.io/doout/laneway-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ghcr.io/doout/laneway-relay@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ghcr.io/doout/laneway-admin@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-ghcr.io/doout/laneway-connector@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ghcr.io/doout/lane-edge@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ghcr.io/doout/laneway-exit-node@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 EOF
 cat > "$test_root/bootstrap-artifacts.toml" <<'EOF'
 [[bootstrap.artifacts]]
@@ -162,6 +163,8 @@ env PATH="$fake_bin:$PATH" \
 
 grep -Fx 'LANEWAY_VERSION=0.2.15' "$deployment/.env" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$deployment/.env" >/dev/null
+grep -Fx 'LANEWAY_CONNECTOR_IMAGE_DIGEST=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' "$deployment/.env" >/dev/null
+grep -Fx 'LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' "$deployment/.env" >/dev/null
 test -x "$deployment/laneway-control"
 test -L "$deployment/lane"
 test "$(readlink "$deployment/lane")" = laneway-control
@@ -170,6 +173,7 @@ test -L "$system_command"
 test "$(readlink "$system_command")" = "$deployment/laneway-control"
 grep -F 'recovery <backup> <pre-upgrade-' "$log" >/dev/null
 grep -F 'docker <compose>' "$log" >/dev/null
+grep -E '<-f> <.*/migration/compose.yaml> <pull>' "$log" >/dev/null
 grep -F 'cosign <verify>' "$log" >/dev/null
 grep -F 'host networking remain unchanged' "$test_root/output" >/dev/null
 grep -F '✓ Verify signed container images' "$test_root/output" >/dev/null
@@ -182,4 +186,20 @@ if grep -F 'downloads.example.test/old.tar.gz' "$deployment/generated/config/con
 fi
 grep -Fx '[public_https]' "$deployment/generated/config/relay.toml" >/dev/null
 
-echo "control-plane upgrade integration test passed"
+: > "$log"
+env PATH="$fake_bin:$PATH" \
+  LANEWAY_DEPLOY_DIR="$deployment" \
+  LANEWAY_COSIGN_BIN="$fake_bin/cosign" \
+  LANEWAY_TEST_ALLOW_NEW_BACKUP=1 \
+  LANEWAY_TEST_LOG="$log" \
+  "$deployment/laneway-control" rollback > "$test_root/rollback-output"
+grep -Fx 'LANEWAY_VERSION=0.2.14' "$deployment/.env" >/dev/null
+if grep -q '^LANEWAY_CONNECTOR_IMAGE_DIGEST=' "$deployment/.env"; then
+  echo "legacy rollback unexpectedly rewrote the old four-image release environment" >&2
+  exit 1
+fi
+test "$(grep -c '^cosign <verify>' "$log")" -eq 4
+grep -F "<-f> <$deployment/generated/lifecycle/previous-files/compose.yaml> <pull>" "$log" >/dev/null
+grep -F 'control-plane rollback complete' "$test_root/rollback-output" >/dev/null
+
+echo "control-plane upgrade and cross-image-set rollback integration test passed"

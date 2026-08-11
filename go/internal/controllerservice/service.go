@@ -71,6 +71,7 @@ type Service struct {
 	now                   func() time.Time
 	snapshotValidity      time.Duration
 	enrollmentLimiter     *enrollmentRateLimiter
+	bootstrapBundles      *bootstrapBundleStore
 	handler               http.Handler
 	metrics               serviceMetrics
 }
@@ -144,10 +145,13 @@ func New(opts Options) (*Service, error) {
 		authorizeNode: opts.NodeAuthorizer, verifyPeerCertificate: verifyPeerCertificate, now: opts.Now,
 		snapshotValidity:  opts.SnapshotValidity,
 		enrollmentLimiter: newEnrollmentRateLimiter(),
+		bootstrapBundles:  newBootstrapBundleStore(opts.Now),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
 	mux.HandleFunc("POST /v1/admin/enrollment-tokens", s.issueToken)
+	mux.HandleFunc("POST /v1/admin/bootstrap-bundles", s.createBootstrapBundle)
+	mux.HandleFunc("GET /v1/bootstrap-bundles/{bundle_id}", s.servePrivateBootstrapBundle)
 	mux.HandleFunc("POST /v1/enroll", s.enroll)
 	mux.HandleFunc("POST /v1/renew", s.renew)
 	mux.HandleFunc("POST /v1/configuration", s.configuration)

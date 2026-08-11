@@ -88,11 +88,16 @@ jobs:
           docker build --file deploy/containers/Dockerfile \
             --build-arg BINARY=laneway --build-arg VERSION=ci \
             --tag laneway-admin:ci .
+          docker build --file deploy/containers/Dockerfile.connector \
+            --build-arg VERSION=ci --tag lane-edge:ci .
           docker build --file deploy/containers/Dockerfile.exit-node \
-            --build-arg VERSION=ci --tag laneway-connector:ci .
+            --build-arg VERSION=ci --tag laneway-exit-node:ci .
           test "$(docker run --rm --network none laneway-admin:ci version)" = ci
-          test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-connector:ci version)" = ci
-          ./integration/connector-upgrade.sh laneway-connector:ci
+          test "$(docker run --rm --network none lane-edge:ci version)" = ci
+          test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = ci
+          ! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true
+          ./integration/connector-bootstrap.sh lane-edge:ci
+          ./integration/connector-upgrade.sh lane-edge:ci
 
   rust:
     name: Rust workspace and Go interoperability

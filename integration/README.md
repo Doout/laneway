@@ -40,6 +40,17 @@ sudo env LANEWAY_RUN_PRIVILEGED=1 \
   ./integration/linux-netns.sh
 ```
 
+## Docker Connector
+
+```sh
+docker build --file deploy/containers/Dockerfile.connector \
+  --build-arg VERSION=ci --tag lane-edge:ci .
+./integration/connector-bootstrap.sh lane-edge:ci
+./integration/connector-upgrade.sh lane-edge:ci
+```
+
+These gates cover the scratch image, encrypted bootstrap, and replacement flow.
+
 ## Docker Exit Node
 
 This gate also requires Docker, `jq`, and OpenSSL. It creates and removes

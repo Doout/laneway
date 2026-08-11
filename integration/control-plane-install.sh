@@ -118,7 +118,8 @@ chmod 0755 "$mock_bin"/*
 cat > "$test_root/image-digests.txt" <<'EOF'
 ghcr.io/doout/laneway-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ghcr.io/doout/laneway-controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-ghcr.io/doout/laneway-connector@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ghcr.io/doout/lane-edge@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ghcr.io/doout/laneway-exit-node@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 ghcr.io/doout/laneway-relay@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 EOF
 printf '0\n' > "$counter_file"
@@ -145,10 +146,12 @@ test "$(stat -c %a "$destination/.env")" = 600
 grep -Fx 'LANEWAY_VERSION=0.2.8' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_INSTALL_PROFILE=quick' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_CONNECTOR_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_SERVER_NAME=lane.example.test' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_NETWORK_ID=000102030405060708090a0b0c0d0e0f' "$destination/.env" >/dev/null
-test "$(grep -c '^cosign verify ' "$log_file")" -eq 4
+test "$(grep -c '^cosign verify ' "$log_file")" -eq 5
 grep -Fx "lane init --issuer $issuer_dir" "$log_file" >/dev/null
 grep -E '^lane backup initial-recovery-[0-9]{8}T[0-9]{6}Z\.age$' "$log_file" >/dev/null
 test "$(stat -c %a "$answers_file")" = 600

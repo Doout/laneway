@@ -155,6 +155,23 @@ func TestDiscoveryURLRequiresWebPKIDNSOrigin(t *testing.T) {
 	}
 }
 
+func TestBundleIDFromPathIsExact(t *testing.T) {
+	id := strings.Repeat("A", BundleIDLength)
+	if got, ok := BundleIDFromPath(BundlePathPrefix + id); !ok || got != id {
+		t.Fatalf("bundle path parsed as %q, %v", got, ok)
+	}
+	for _, path := range []string{
+		BundlePathPrefix + strings.Repeat("A", BundleIDLength-1),
+		BundlePathPrefix + strings.Repeat("A", BundleIDLength) + "/more",
+		BundlePathPrefix + strings.Repeat("A", BundleIDLength-1) + ".",
+		"/other/" + id,
+	} {
+		if _, ok := BundleIDFromPath(path); ok {
+			t.Fatalf("invalid bundle path %q accepted", path)
+		}
+	}
+}
+
 type relayFixture struct {
 	relays []controller.Relay
 	err    error

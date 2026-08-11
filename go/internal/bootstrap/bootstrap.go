@@ -29,11 +29,34 @@ import (
 const (
 	SchemaVersion       = uint32(1)
 	WellKnownPath       = "/.well-known/laneway/bootstrap.json"
+	BundlePathPrefix    = "/.well-known/laneway/bootstrap/"
+	BundleIDLength      = 43 // 32 bytes in unpadded base64url.
+	MaxBundleBytes      = 96 << 10
+	MaxBundleLifetime   = 10 * time.Minute
 	MaxDocumentBytes    = 256 << 10
 	MaxArtifactBytes    = int64(512 << 20)
 	MaxDocumentLifetime = 10 * time.Minute
 	MaxClockSkew        = 2 * time.Minute
 )
+
+// BundleIDFromPath recognizes the deliberately narrow public capability path.
+// The separate decryption key is never part of this path or sent to the host.
+func BundleIDFromPath(path string) (string, bool) {
+	if !strings.HasPrefix(path, BundlePathPrefix) {
+		return "", false
+	}
+	id := strings.TrimPrefix(path, BundlePathPrefix)
+	if len(id) != BundleIDLength {
+		return "", false
+	}
+	for _, character := range id {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') && character != '_' && character != '-' {
+			return "", false
+		}
+	}
+	return id, true
+}
 
 type Metadata struct {
 	SchemaVersion uint32     `json:"schema_version"`

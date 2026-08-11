@@ -42,7 +42,11 @@ func addPlatformCommands(root *cobra.Command) {
 		command("renew", "Renew this node's controller-issued certificate", runRenew),
 		group("connector", "Activate and run an unprivileged Connector", runConnector,
 			forwarded("activate", "Activate from a single-use setup token", "activate", runConnector),
-			forwarded("configure", "Validate or migrate persistent Connector configuration", "configure", runConnector)),
+			forwarded("bootstrap-seal", "Seal a short-lived Connector bootstrap payload", "bootstrap-seal", runConnector),
+			forwarded("bootstrap-activate", "Activate from an encrypted bootstrap payload", "bootstrap-activate", runConnector),
+			forwarded("configure", "Validate or migrate persistent Connector configuration", "configure", runConnector),
+			forwarded("run", "Activate if needed and run the Connector", "run", runConnector),
+			forwarded("validate", "Validate persistent Connector identity", "validate", runConnector)),
 	} {
 		hidden.Hidden = true
 		root.AddCommand(hidden)

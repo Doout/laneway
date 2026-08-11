@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-image=${1:-laneway-connector:ci}
+image=${1:-lane-edge:ci}
 volume=laneway-connector-upgrade-test-$$
 fixture_image=alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 cleanup() { docker volume rm "$volume" >/dev/null 2>&1 || true; }

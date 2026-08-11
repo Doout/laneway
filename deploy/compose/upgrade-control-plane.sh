@@ -78,17 +78,19 @@ image_digest() {
 controller_digest=$(image_digest ghcr.io/doout/laneway-controller)
 relay_digest=$(image_digest ghcr.io/doout/laneway-relay)
 admin_digest=$(image_digest ghcr.io/doout/laneway-admin)
-exit_digest=$(image_digest ghcr.io/doout/laneway-connector)
+connector_digest=$(image_digest ghcr.io/doout/lane-edge)
+exit_digest=$(image_digest ghcr.io/doout/laneway-exit-node)
 
 install -d -m 0700 -o 0 -g 0 "$destination/generated/lifecycle"
 candidate=$destination/generated/lifecycle/upgrade-$package_version.env
 awk -v version="$package_version" -v controller="$controller_digest" -v relay="$relay_digest" \
-  -v admin="$admin_digest" -v exit_node="$exit_digest" '
+  -v admin="$admin_digest" -v connector="$connector_digest" -v exit_node="$exit_digest" '
   BEGIN {
     replacement["LANEWAY_VERSION"] = version
     replacement["LANEWAY_CONTROLLER_IMAGE_DIGEST"] = controller
     replacement["LANEWAY_RELAY_IMAGE_DIGEST"] = relay
     replacement["LANEWAY_ADMIN_IMAGE_DIGEST"] = admin
+    replacement["LANEWAY_CONNECTOR_IMAGE_DIGEST"] = connector
     replacement["LANEWAY_EXIT_NODE_IMAGE_DIGEST"] = exit_node
   }
   {
@@ -102,7 +104,13 @@ awk -v version="$package_version" -v controller="$controller_digest" -v relay="$
     }
   }
   END {
-    for (key in replacement) if (seen[key] != 1) exit 1
+    for (key in replacement) {
+      if (key == "LANEWAY_CONNECTOR_IMAGE_DIGEST" && seen[key] == 0) {
+        print key "=" replacement[key]
+        seen[key] = 1
+      }
+      if (seen[key] != 1) exit 1
+    }
   }
 ' "$destination/.env" > "$work_dir/candidate.env" || die "existing release environment is incomplete"
 install -m 0600 -o 0 -g 0 "$work_dir/candidate.env" "$candidate"

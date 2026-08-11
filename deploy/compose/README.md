@@ -45,6 +45,17 @@ containers with health checks, and restores the prior selection if startup
 fails. Deployment identity, PKI, state, endpoints, and host networking remain
 unchanged.
 
+## Docker Connector
+
+```sh
+sudo laneway control invite --name office --docker --connector --bootstrap
+```
+
+Run the generated command within ten minutes. Its rate-limited URL is consumed
+by the first download; later requests return `404`. A one-shot container enrolls
+the digest-pinned scratch `lane-edge` image, then a clean runtime container starts
+without the setup token, bootstrap key, or temporary mount.
+
 ## Backup and restore
 
 Create a recovery bundle and copy it off-host:

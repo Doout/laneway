@@ -111,7 +111,11 @@ jobs:
             dockerfile: deploy/containers/Dockerfile
             binary: laneway
           - name: connector
-            image: ghcr.io/doout/laneway-connector
+            image: ghcr.io/doout/lane-edge
+            dockerfile: deploy/containers/Dockerfile.connector
+            binary: laneway
+          - name: exit-node
+            image: ghcr.io/doout/laneway-exit-node
             dockerfile: deploy/containers/Dockerfile.exit-node
             binary: laneway
     steps:

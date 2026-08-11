@@ -4,8 +4,8 @@ set -eu
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 workflow=$repo_dir/.github/workflows/release.yml
 dockerfile=$repo_dir/deploy/containers/Dockerfile
+connector_dockerfile=$repo_dir/deploy/containers/Dockerfile.connector
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
-connector_entrypoint=$repo_dir/deploy/containers/connector-entrypoint.sh
 connector_updater=$repo_dir/deploy/containers/update-connector.sh
 compose_file=$repo_dir/deploy/compose/compose.yaml
 lane_workflow=$repo_dir/deploy/compose/laneway-control
@@ -39,12 +39,13 @@ for image in \
   ghcr.io/doout/laneway-controller \
   ghcr.io/doout/laneway-relay \
   ghcr.io/doout/laneway-admin \
-  ghcr.io/doout/laneway-connector
+  ghcr.io/doout/lane-edge \
+  ghcr.io/doout/laneway-exit-node
 do
   require "image: $image" "$workflow"
 done
 
-for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'backup_recovery' 'database was not rolled back' 'run_update' 'releases/latest' 'verify-blob'; do
+for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'compose_file_with_env' 'backup_recovery' 'database was not rolled back' 'run_update' 'releases/latest' 'verify-blob'; do
   require "$value" "$lane_workflow"
 done
 for value in 'pki verify-authority' 'offline root private key ca.key must never' 'chown 65532:65532'; do
@@ -118,7 +119,7 @@ if grep -E '(^|[[:space:]:@])latest([[:space:]]|$)' "$workflow" >/dev/null; then
   exit 1
 fi
 
-for path in "$dockerfile" "$exit_dockerfile"; do
+for path in "$dockerfile" "$connector_dockerfile" "$exit_dockerfile"; do
   require '# syntax=docker/dockerfile:1.9@sha256:' "$path"
   require "FROM --platform=\$BUILDPLATFORM golang:1.26-alpine@sha256:" "$path"
   require 'ARG VERSION=dev' "$path"
@@ -127,6 +128,13 @@ for path in "$dockerfile" "$exit_dockerfile"; do
   require "CGO_ENABLED=0 GOOS=\${TARGETOS} GOARCH=\${TARGETARCH}" "$path"
   require "laneway.dev/laneway/internal/buildinfo.Version=\${VERSION}" "$path"
 done
+require 'FROM scratch' "$connector_dockerfile"
+require 'ENTRYPOINT ["/usr/local/bin/laneway"]' "$connector_dockerfile"
+require 'CMD ["connector", "run"]' "$connector_dockerfile"
+if grep -E '^RUN apk|/bin/sh|/sbin/tini|/bin/setpriv' "$connector_dockerfile" >/dev/null; then
+  echo "scratch Connector image contains an OS package or interactive runtime tool" >&2
+  exit 1
+fi
 require 'FROM alpine:3.23@sha256:' "$exit_dockerfile"
 for package in ca-certificates iproute2-minimal nftables procps-ng setpriv tini; do
   if ! grep -E "^[[:space:]]+${package}=[0-9]" "$exit_dockerfile" >/dev/null; then
@@ -136,17 +144,16 @@ for package in ca-certificates iproute2-minimal nftables procps-ng setpriv tini;
 done
 require 'libcap-setcap=2.78-r0' "$exit_dockerfile"
 require 'setcap cap_net_admin=ep /bin/setpriv' "$exit_dockerfile"
-require 'connector-entrypoint.sh' "$exit_dockerfile"
-require '--inh-caps=+net_admin --ambient-caps=+net_admin --no-new-privs' "$connector_entrypoint"
-require "if [ \"\$identity_count\" -ne 5 ]" "$connector_entrypoint"
-require 'persistent volume contains an incomplete Connector identity' "$connector_entrypoint"
-# shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
-require 'required SETUP_TOKEN "${SETUP_TOKEN:-}"' "$connector_entrypoint"
-# shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
-require '/usr/local/bin/laneway connector configure --state-dir "$state_dir"' "$connector_entrypoint"
-# shellcheck disable=SC2016 # The required text is a literal entrypoint contract.
-require 'exec /sbin/tini -- /usr/local/bin/laneway node run -config "$config_file"' "$connector_entrypoint"
-require './integration/connector-upgrade.sh laneway-connector:ci' "$repo_dir/.github/workflows/ci.yml"
+require 'ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]' "$exit_dockerfile"
+require 'CMD ["-config", "/etc/laneway/exit-node.toml"]' "$exit_dockerfile"
+require 'LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
+require 'ghcr.io/doout/lane-edge:LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
+require 'ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST' "$lane_workflow"
+require 'ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST' "$lane_workflow"
+require 'deploy/containers/Dockerfile.connector' "$repo_dir/.github/workflows/ci.yml"
+require '! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true' "$repo_dir/.github/workflows/ci.yml"
+require './integration/connector-bootstrap.sh lane-edge:ci' "$repo_dir/.github/workflows/ci.yml"
+require './integration/connector-upgrade.sh lane-edge:ci' "$repo_dir/.github/workflows/ci.yml"
 require './integration/connector-updater.sh' "$repo_dir/.github/workflows/ci.yml"
 for value in \
   'releases/latest' \
@@ -154,6 +161,7 @@ for value in \
   'verify-blob' \
   'image-digests.txt' \
   'Connector image signature verification failed' \
+  'connector validate --state-dir /var/lib/laneway/connector' \
   'container must mount the named volume' \
   'docker rename' \
   'previous Connector restored'

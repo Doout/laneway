@@ -3,18 +3,25 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
+	"laneway.dev/laneway/internal/bootstrapsecret"
 	"laneway.dev/laneway/internal/config"
 )
 
 const connectorSetupPrefix = "st1."
+
+var connectorIdentityFiles = []string{"connector.toml", "ca.crt", "node.crt", "node.key", "wireguard.key"}
 
 type connectorSetup struct {
 	Name, Code, ControllerEndpoint, ControllerQUIC, ServerName           string
@@ -23,9 +30,10 @@ type connectorSetup struct {
 
 func runConnector(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: laneway connector <activate|configure>")
+		return errors.New("usage: laneway connector <activate|bootstrap-seal|bootstrap-activate|configure|run|validate>")
 	}
-	if args[0] == "configure" {
+	switch args[0] {
+	case "configure":
 		fs := flag.NewFlagSet("connector configure", flag.ContinueOnError)
 		stateDir := fs.String("state-dir", "/var/lib/laneway/connector", "persistent Connector state directory")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -35,14 +43,136 @@ func runConnector(args []string) error {
 			return errors.New("usage: laneway connector configure [--state-dir DIR]")
 		}
 		return configureConnector(*stateDir)
+	case "run":
+		return runConnectorService(args[1:], activateConnector, execConnectorNode)
+	case "validate":
+		fs := flag.NewFlagSet("connector validate", flag.ContinueOnError)
+		stateDir := fs.String("state-dir", "/var/lib/laneway/connector", "persistent Connector state directory")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 || !filepath.IsAbs(*stateDir) {
+			return errors.New("usage: laneway connector validate [--state-dir DIR]")
+		}
+		return validateConnectorIdentity(*stateDir)
+	case "activate":
+		return runConnectorActivate(args[1:])
+	case "bootstrap-seal":
+		return runConnectorBootstrapSeal(args[1:])
+	case "bootstrap-activate":
+		return runConnectorBootstrapActivate(args[1:])
+	default:
+		return errors.New("usage: laneway connector <activate|bootstrap-seal|bootstrap-activate|configure|run|validate>")
 	}
-	if args[0] != "activate" {
-		return errors.New("usage: laneway connector <activate|configure>")
+}
+
+func runConnectorBootstrapSeal(args []string) (resultErr error) {
+	fs := flag.NewFlagSet("connector bootstrap-seal", flag.ContinueOnError)
+	out := fs.String("out", "", "exclusive output path for the encrypted envelope")
+	expiresAtUnix := fs.Int64("expires-at", 0, "absolute payload expiry as Unix seconds")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
+	if fs.NArg() != 0 || *out == "" || !filepath.IsAbs(*out) || *expiresAtUnix <= 0 {
+		return errors.New("usage: laneway connector bootstrap-seal --out FILE --expires-at UNIX < setup-token")
+	}
+	contents, err := io.ReadAll(io.LimitReader(os.Stdin, bootstrapsecret.MaxTokenSize+2))
+	if err != nil {
+		return fmt.Errorf("read Connector setup token: %w", err)
+	}
+	defer clear(contents)
+	if len(contents) > bootstrapsecret.MaxTokenSize+1 {
+		return errors.New("Connector setup token exceeds the bootstrap limit")
+	}
+	tokenBytes := bytes.TrimSuffix(contents, []byte("\n"))
+	token := string(tokenBytes)
+	if _, err := parseConnectorSetupToken(token); err != nil {
+		return err
+	}
+	key, envelope, err := bootstrapsecret.Seal(tokenBytes, time.Now().UTC(), time.Unix(*expiresAtUnix, 0).UTC())
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create bootstrap envelope: %w", err)
+	}
+	defer func() {
+		if resultErr != nil {
+			_ = os.Remove(*out)
+		}
+	}()
+	if _, err := file.WriteString(envelope + "\n"); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stdout, key)
+	return nil
+}
+
+func runConnectorBootstrapActivate(args []string) error {
+	fs := flag.NewFlagSet("connector bootstrap-activate", flag.ContinueOnError)
+	envelopeFile := fs.String("envelope-file", "", "file containing the encrypted bootstrap envelope")
+	stateDir := fs.String("state-dir", "/var/lib/laneway/connector", "persistent Connector state directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || *envelopeFile == "" || !filepath.IsAbs(*envelopeFile) || !filepath.IsAbs(*stateDir) {
+		return errors.New("usage: laneway connector bootstrap-activate --envelope-file FILE [--state-dir DIR] < decryption-key")
+	}
+	info, err := os.Lstat(*envelopeFile)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 128<<10 {
+		return errors.New("--envelope-file must be a bounded regular file")
+	}
+	envelopeBytes, err := os.ReadFile(*envelopeFile)
+	if err != nil {
+		return fmt.Errorf("read bootstrap envelope: %w", err)
+	}
+	defer clear(envelopeBytes)
+	keyBytes, err := io.ReadAll(io.LimitReader(os.Stdin, 256))
+	if err != nil {
+		return fmt.Errorf("read bootstrap decryption key: %w", err)
+	}
+	defer clear(keyBytes)
+	key := strings.TrimSpace(string(keyBytes))
+	envelope := strings.TrimSpace(string(envelopeBytes))
+	setup, err := openConnectorBootstrap(key, envelope, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	return activateConnector(*stateDir, setup)
+}
+
+func openConnectorBootstrap(key, envelope string, now time.Time) (connectorSetup, error) {
+	plaintext, err := bootstrapsecret.Open(key, envelope, now)
+	if err != nil {
+		return connectorSetup{}, err
+	}
+	defer clear(plaintext)
+	return parseConnectorSetupToken(string(plaintext))
+}
+
+func execConnectorNode(args []string) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve Connector executable: %w", err)
+	}
+	argv := append([]string{executable, "node", "run"}, args...)
+	return syscall.Exec(executable, argv, os.Environ())
+}
+
+func runConnectorActivate(args []string) error {
 	fs := flag.NewFlagSet("connector activate", flag.ContinueOnError)
 	setupToken := fs.String("setup-token", "", "single-use Connector setup token")
 	stateDir := fs.String("state-dir", "/var/lib/laneway/connector", "persistent Connector state directory")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || *setupToken == "" || !filepath.IsAbs(*stateDir) {
@@ -55,13 +185,123 @@ func runConnector(args []string) error {
 	return activateConnector(*stateDir, setup)
 }
 
-func configureConnector(stateDir string) error {
-	paths := []string{"connector.toml", "ca.crt", "node.crt", "node.key", "wireguard.key"}
-	for _, name := range paths {
+func runConnectorService(args []string, activate func(string, connectorSetup) error, start func([]string) error) error {
+	fs := flag.NewFlagSet("connector run", flag.ContinueOnError)
+	stateDir := fs.String("state-dir", "/var/lib/laneway/connector", "persistent Connector state directory")
+	setupTokenFile := fs.String("setup-token-file", "", "protected file containing the single-use setup token")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 || !filepath.IsAbs(*stateDir) || (*setupTokenFile != "" && !filepath.IsAbs(*setupTokenFile)) {
+		return errors.New("usage: laneway connector run [--state-dir DIR] [--setup-token-file PATH]")
+	}
+
+	tokenFromEnvironment := os.Getenv("SETUP_TOKEN")
+	tokenFileFromEnvironment := os.Getenv("SETUP_TOKEN_FILE")
+	_ = os.Unsetenv("SETUP_TOKEN")
+	_ = os.Unsetenv("SETUP_TOKEN_FILE")
+
+	identityCount, err := connectorIdentityCount(*stateDir)
+	if err != nil {
+		return err
+	}
+	if identityCount != len(connectorIdentityFiles) {
+		if identityCount != 0 {
+			return errors.New("persistent volume contains an incomplete Connector identity")
+		}
+		if *setupTokenFile != "" && tokenFileFromEnvironment != "" {
+			return errors.New("Connector setup token file was specified more than once")
+		}
+		if *setupTokenFile == "" {
+			*setupTokenFile = tokenFileFromEnvironment
+		}
+		if *setupTokenFile != "" && !filepath.IsAbs(*setupTokenFile) {
+			return errors.New("Connector setup token file path must be absolute")
+		}
+		if tokenFromEnvironment != "" && *setupTokenFile != "" {
+			return errors.New("Connector accepts either SETUP_TOKEN or a setup token file, not both")
+		}
+		rawToken := tokenFromEnvironment
+		if *setupTokenFile != "" {
+			rawToken, err = readConnectorSetupTokenFile(*setupTokenFile)
+			if err != nil {
+				return err
+			}
+		}
+		if rawToken == "" {
+			return errors.New("SETUP_TOKEN or --setup-token-file is required for first start")
+		}
+		setup, parseErr := parseConnectorSetupToken(rawToken)
+		if parseErr != nil {
+			return parseErr
+		}
+		if err := activate(*stateDir, setup); err != nil {
+			return err
+		}
+	}
+	if err := configureConnector(*stateDir); err != nil {
+		return err
+	}
+	return start([]string{"-config", filepath.Join(*stateDir, "connector.toml")})
+}
+
+func connectorIdentityCount(stateDir string) (int, error) {
+	count := 0
+	for _, name := range connectorIdentityFiles {
+		_, err := os.Lstat(filepath.Join(stateDir, name))
+		switch {
+		case err == nil:
+			count++
+		case errors.Is(err, os.ErrNotExist):
+			continue
+		default:
+			return 0, fmt.Errorf("inspect Connector identity %s: %w", name, err)
+		}
+	}
+	return count, nil
+}
+
+func readConnectorSetupTokenFile(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() <= 0 || info.Size() > 64<<10 {
+		return "", errors.New("--setup-token-file must be a nonempty regular file no larger than 64 KiB")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", errors.New("--setup-token-file must not be accessible by group or other users")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read --setup-token-file: %w", err)
+	}
+	token := strings.TrimSpace(string(contents))
+	if token == "" || strings.ContainsAny(token, " \t\r\n") {
+		return "", errors.New("--setup-token-file contains an invalid setup token")
+	}
+	return token, nil
+}
+
+func validateConnectorIdentity(stateDir string) error {
+	for _, name := range connectorIdentityFiles {
 		info, err := os.Lstat(filepath.Join(stateDir, name))
 		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("Connector identity is incomplete or unsafe: %s", name)
 		}
+	}
+	file, err := os.Open(filepath.Join(stateDir, "connector.toml"))
+	if err != nil {
+		return err
+	}
+	_, decodeErr := config.Decode(file)
+	closeErr := file.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("decode Connector configuration: %w", decodeErr)
+	}
+	return closeErr
+}
+
+func configureConnector(stateDir string) error {
+	if err := validateConnectorIdentity(stateDir); err != nil {
+		return err
 	}
 	configFile := filepath.Join(stateDir, "connector.toml")
 	file, err := os.Open(configFile)
@@ -155,11 +395,24 @@ func activateConnectorWithJoin(stateDir string, setup connectorSetup, join func(
 	if err := os.Chmod(staging, 0o700); err != nil {
 		return err
 	}
-	tokenFile := filepath.Join(staging, "setup.token")
-	caFile := filepath.Join(staging, "ca.crt")
-	if err := os.WriteFile(tokenFile, []byte(setup.Code+"\n"), 0o600); err != nil {
+	tokenTemporary, err := os.CreateTemp("/tmp", ".laneway-connector-setup-")
+	if err != nil {
+		return fmt.Errorf("create transient Connector setup token: %w", err)
+	}
+	tokenFile := tokenTemporary.Name()
+	defer func() { _ = os.Remove(tokenFile) }()
+	if err := tokenTemporary.Chmod(0o600); err != nil {
+		_ = tokenTemporary.Close()
 		return err
 	}
+	if _, err := tokenTemporary.WriteString(setup.Code + "\n"); err != nil {
+		_ = tokenTemporary.Close()
+		return err
+	}
+	if err := tokenTemporary.Close(); err != nil {
+		return err
+	}
+	caFile := filepath.Join(staging, "ca.crt")
 	if err := os.WriteFile(caFile, []byte(setup.CAPEM), 0o444); err != nil {
 		return err
 	}

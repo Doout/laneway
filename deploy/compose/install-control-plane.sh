@@ -274,14 +274,16 @@ image_digest() {
 controller_digest=$(image_digest ghcr.io/doout/laneway-controller)
 relay_digest=$(image_digest ghcr.io/doout/laneway-relay)
 admin_digest=$(image_digest ghcr.io/doout/laneway-admin)
-exit_node_digest=$(image_digest ghcr.io/doout/laneway-connector)
+connector_digest=$(image_digest ghcr.io/doout/lane-edge)
+exit_node_digest=$(image_digest ghcr.io/doout/laneway-exit-node)
 identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag"
 image_signatures_verified=true
 for reference in \
   "ghcr.io/doout/laneway-controller@$controller_digest" \
   "ghcr.io/doout/laneway-relay@$relay_digest" \
   "ghcr.io/doout/laneway-admin@$admin_digest" \
-  "ghcr.io/doout/laneway-connector@$exit_node_digest"
+  "ghcr.io/doout/lane-edge@$connector_digest" \
+  "ghcr.io/doout/laneway-exit-node@$exit_node_digest"
 do
   if [ -n "$cosign_bin" ] && command -v "$cosign_bin" >/dev/null 2>&1 && \
     "$cosign_bin" verify --certificate-identity "$identity" \
@@ -392,6 +394,7 @@ env_tmp=$(mktemp "$destination/.env.XXXXXX")
   printf 'LANEWAY_CONTROLLER_IMAGE_DIGEST=%s\n' "$controller_digest"
   printf 'LANEWAY_RELAY_IMAGE_DIGEST=%s\n' "$relay_digest"
   printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\n' "$admin_digest"
+  printf 'LANEWAY_CONNECTOR_IMAGE_DIGEST=%s\n' "$connector_digest"
   printf 'LANEWAY_EXIT_NODE_IMAGE_DIGEST=%s\n' "$exit_node_digest"
   printf 'LANEWAY_BIND_ADDRESS=%s\n' "$bind_address"
   printf 'LANEWAY_CONTROLLER_PORT=%s\n' "$controller_port"

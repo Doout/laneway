@@ -41,7 +41,9 @@ printf 'docker' >> "$LANE_TEST_LOG"
 printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
 if [ "${1:-} ${2:-}" = "version --format" ]; then printf '26.1.0\n'; exit 0; fi
+if [ "${1:-} ${2:-}" = "container inspect" ]; then exit 1; fi
 case " $* " in
+  *" connector bootstrap-activate "*) cat >/dev/null ;;
   *" ps --all --quiet "*) [ "${LANE_TEST_OWNED_STACK:-0}" = 0 ] || printf 'owned-id\n' ;;
   *" ps --status running -q controller "*) [ "${LANE_TEST_CONTROLLER_RUNNING:-0}" = 0 ] || printf 'controller-id\n' ;;
   *" ps --status running -q exit-node "*) [ "${LANE_TEST_EXIT_RUNNING:-0}" = 0 ] || printf 'exit-id\n' ;;
@@ -60,6 +62,35 @@ printf 'laneway' >> "$LANE_TEST_LOG"
 printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
 case " $* " in
+  *" connector bootstrap-seal "*)
+    envelope_file=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --out) envelope_file=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    test -n "$envelope_file"
+    cat >/dev/null
+    printf '%s\n' 'encrypted_bootstrap_envelope' > "$envelope_file"
+    chmod 0600 "$envelope_file"
+    printf '%s\n' 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk'
+    ;;
+  *" controller bootstrap-bundle create "*)
+    payload_file=
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --payload-file) payload_file=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    test -n "$payload_file"
+    cp "$payload_file" "$LANE_TEST_BOOTSTRAP_CAPTURE"
+    printf '%s\n' '{' \
+      '  "bundle_id": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",' \
+      '  "public_path": "/.well-known/laneway/bootstrap/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",' \
+      '  "expires_at_unix_seconds": 2000000000' '}'
+    ;;
   *" controller enrollment-token issue "*) printf '%s\n' '{' '  "token_id": "000102030405060708090a0b0c0d0e0f",' '  "enrollment_token": "single_use_secret",' '  "expires_at_unix_seconds": 2000000000' '}' ;;
   *" controller overview "*) printf '%s\n' '' 'Active enrollment inventory (11111111111111111111111111111111)' 'NAME       ROLE       OVERLAY       FORWARDING' 'ibmcloud   connector  100.96.0.12  10.240.64.6/32 (nat)' ;;
 esac
@@ -94,6 +125,7 @@ LANEWAY_INSTALL_PROFILE=quick
 LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
 LANEWAY_RELAY_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
 LANEWAY_ADMIN_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
+LANEWAY_CONNECTOR_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
 LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:$(printf "%064d" "$digit")
 LANEWAY_BIND_ADDRESS=127.0.0.1
 LANEWAY_CONTROLLER_PORT=8443
@@ -116,9 +148,10 @@ write_env "$compose_dir/.env" 1.0.0 1
 candidate=$test_dir/candidate.env
 write_env "$candidate" 1.1.0 2
 export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log" LANEWAY_COMMAND="$fake_bin/laneway"
+export LANE_TEST_BOOTSTRAP_CAPTURE="$test_dir/bootstrap-payload.sh"
 
 "$compose_dir/laneway-control" init
-[ "$(grep -c '^cosign ' "$log")" -eq 4 ]
+[ "$(grep -c '^cosign ' "$log")" -eq 5 ]
 pull_line=$(grep -n '<pull>' "$log" | tail -1 | cut -d: -f1)
 bootstrap_line=$(grep -n '^bootstrap$' "$log" | tail -1 | cut -d: -f1)
 [ "$pull_line" -lt "$bootstrap_line" ] || { echo "init bootstrapped before verified pull" >&2; exit 1; }
@@ -213,7 +246,7 @@ printf '%s' "${setup_token#st1.}" | base64 -d > "$test_dir/setup-token.txt"
 grep -Fx 'egress-one' "$test_dir/setup-token.txt" >/dev/null
 grep -Fx 'single_use_secret' "$test_dir/setup-token.txt" >/dev/null
 grep -Fx 'https://lane.example.test:8443' "$test_dir/setup-token.txt" >/dev/null
-grep -F 'ghcr.io/doout/laneway-connector:1.0.0@sha256:' "$connector_command" >/dev/null
+grep -F 'ghcr.io/doout/lane-edge:1.0.0@sha256:' "$connector_command" >/dev/null
 grep -F -- '--cap-drop ALL' "$connector_command" >/dev/null
 grep -F -- '--security-opt no-new-privileges:true' "$connector_command" >/dev/null
 if grep -E -- '--cap-add|--device|--sysctl|--publish|LANEWAY_(ENROLLMENT|NETWORK|CONTROLLER|RELAY|CA_)' "$connector_command" >/dev/null; then
@@ -222,6 +255,47 @@ if grep -E -- '--cap-add|--device|--sysctl|--publish|LANEWAY_(ENROLLMENT|NETWORK
 fi
 grep -F '<--connector>' "$log" >/dev/null
 grep -F '<--requested-name> <egress-one>' "$log" >/dev/null
+
+bootstrap_command=$test_dir/bootstrap-command.sh
+bootstrap_stderr=$test_dir/bootstrap-command.err
+"$compose_dir/laneway-control" invite --name office --docker --connector --bootstrap > "$bootstrap_command" 2> "$bootstrap_stderr"
+grep -F "curl --fail --silent --show-error --proto '=https' --tlsv1.3 'https://lane.example.test/.well-known/laneway/bootstrap/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'" "$bootstrap_command" >/dev/null
+grep -F "| sudo bash -s -- 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk'" "$bootstrap_command" >/dev/null
+grep -F 'expires in 10 minutes and is consumed by the first download' "$bootstrap_stderr" >/dev/null
+bash -n "$LANE_TEST_BOOTSTRAP_CAPTURE"
+grep -F 'connector bootstrap-activate --envelope-file /run/laneway-bootstrap/envelope' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
+grep -F 'docker run -d' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
+grep -F -- '--pull never' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
+grep -F -- '--cap-drop ALL' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
+grep -F -- '--security-opt no-new-privileges:true' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
+grep -F 'encrypted_bootstrap_envelope' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
+if grep -E 'single_use_secret|SETUP_TOKEN|kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null; then
+  echo "encrypted bootstrap wrapper exposed its enrollment token or decryption key" >&2
+  exit 1
+fi
+if grep -F 'single_use_secret' "$bootstrap_command" >/dev/null; then
+  echo "bootstrap curl command exposed its enrollment token" >&2
+  exit 1
+fi
+bootstrap_runtime_log=$test_dir/bootstrap-runtime.log
+: > "$bootstrap_runtime_log"
+env PATH="$fake_bin:$PATH" LANE_TEST_LOG="$bootstrap_runtime_log" \
+  bash "$LANE_TEST_BOOTSTRAP_CAPTURE" kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk >/dev/null
+[ "$(grep -c '^docker <run>' "$bootstrap_runtime_log")" -eq 2 ]
+grep -F '<connector> <bootstrap-activate>' "$bootstrap_runtime_log" >/dev/null
+final_run=$(grep '^docker <run>' "$bootstrap_runtime_log" | tail -1)
+if printf '%s\n' "$final_run" | grep -E 'SETUP_TOKEN|bootstrap|envelope|--env' >/dev/null; then
+  echo "final Connector redeployment retained bootstrap metadata" >&2
+  exit 1
+fi
+if grep -E 'single_use_secret|kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk' "$bootstrap_runtime_log" >/dev/null; then
+  echo "bootstrap execution exposed the enrollment token or key in Docker arguments" >&2
+  exit 1
+fi
+if "$compose_dir/laneway-control" invite --name invalid --docker --connector --bootstrap --expires-in 20m >/dev/null 2>&1; then
+  echo "bootstrap accepted a caller-controlled lifetime" >&2
+  exit 1
+fi
 
 identity=$test_dir/identity.txt
 bundle=$test_dir/recovery.age
@@ -233,7 +307,7 @@ grep -F "recovery <restore> <$bundle> <$identity>" "$log" >/dev/null
 "$compose_dir/laneway-control" upgrade "$candidate"
 grep -F 'LANEWAY_VERSION=1.1.0' "$compose_dir/.env" >/dev/null
 grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/generated/lifecycle/previous.env" >/dev/null
-[ "$(grep -c '^cosign ' "$log")" -eq 4 ]
+[ "$(grep -c '^cosign ' "$log")" -eq 5 ]
 pull_line=$(grep -n '<pull>' "$log" | tail -1 | cut -d: -f1)
 stop_line=$(grep -n '<stop>' "$log" | tail -1 | cut -d: -f1)
 [ "$pull_line" -lt "$stop_line" ] || { echo "upgrade stopped services before pull" >&2; exit 1; }

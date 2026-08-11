@@ -178,7 +178,7 @@ If startup refuses recovery, stop every Laneway process, inspect the conflicting
 objects, remove only confirmed Laneway residue, and restore the site's recorded
 baseline.
 
-Controller, relay, and Connector containers run non-root with read-only roots.
-The full Exit Node alone needs `NET_ADMIN` and `/dev/net/tun`, inside its own
-container namespace. Do not give it host networking, the Docker socket, or
-privileged mode.
+Controller, relay, and `lane-edge` Connector containers run non-root with
+read-only scratch roots. The full Exit Node alone needs `NET_ADMIN` and
+`/dev/net/tun`, inside its own container namespace. Do not give it host
+networking, the Docker socket, or privileged mode.
