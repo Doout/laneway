@@ -136,6 +136,8 @@ type administratorSessionMetadataWriter struct {
 	wroteHeader bool
 }
 
+func (w *administratorSessionMetadataWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *administratorSessionMetadataWriter) WriteHeader(status int) {
 	if w.wroteHeader {
 		return

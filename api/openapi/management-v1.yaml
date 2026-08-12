@@ -1,0 +1,836 @@
+openapi: 3.1.0
+info:
+  title: Laneway Management API
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  summary: Versioned administrator management and browser-session contract.
+  description: >-
+    The current v1 administrator surface. It intentionally documents bounded
+    list snapshots and current mutation semantics without claiming cursors,
+    totals, entity tags, preconditions, or idempotency keys that are not yet
+    implemented. JSON request objects are strict and reject unknown fields.
+tags:
+  - name: Authentication
+    description: Browser administrator authentication and root automation probes.
+  - name: Administrators
+    description: Administrator principals, credentials, grants, and sessions.
+  - name: Networks
+    description: Network inventory and creation.
+  - name: Enrollment
+    description: One-time enrollment credentials and bootstrap bundles.
+  - name: Nodes
+    description: Node inventory and administrative state.
+  - name: Routes
+    description: Managed route inventory and state transitions.
+  - name: ACL
+    description: Network ACL rules using strict TrafficSelector protobuf JSON.
+  - name: Relays
+    description: Relay inventory and state.
+  - name: Certificates
+    description: Certificate inventory and revocation.
+  - name: Audit
+    description: Global and network-scoped audit snapshots.
+
+paths:
+  /v1/admin/auth/state:
+    get:
+      operationId: getAdministratorAuthState
+      tags: [Authentication]
+      summary: Read the authentication entry state.
+      description: Unauthenticated and direct-peer rate limited. Supplied credentials are ignored.
+      security: []
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AuthState'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/login:
+    post:
+      operationId: loginAdministrator
+      tags: [Authentication]
+      summary: Create an administrator browser session.
+      description: >-
+        Requires an HTTPS same-origin Origin and no active administrator or root
+        credential. A stale or expired session cookie may be replaced. No CSRF
+        header is required before a session exists.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/AdministratorLoginRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AdministratorSessionView'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/session:
+    get:
+      operationId: getAdministratorSession
+      tags: [Authentication]
+      summary: Read and touch the current browser session.
+      description: Requires both the session and CSRF cookies. It does not require an Origin or CSRF header.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AdministratorSessionView'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/session/rotate:
+    post:
+      operationId: rotateAdministratorSession
+      tags: [Authentication]
+      summary: Rotate the browser session family.
+      description: Atomically replaces the current session and CSRF secrets.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AdministratorSessionView'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/logout:
+    post:
+      operationId: logoutAdministrator
+      tags: [Authentication]
+      summary: Revoke the browser session family.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/SessionNoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/root:
+    get:
+      operationId: probeRootAdministratorCredential
+      tags: [Authentication]
+      summary: Validate the root automation credential.
+      description: >-
+        Automation-only. Any Origin or Sec-Fetch-* header causes authentication
+        failure, so this operation is unavailable to browser contexts.
+      security:
+        - rootBearer: []
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/bootstrap:
+    post:
+      operationId: bootstrapAdministrator
+      tags: [Authentication]
+      summary: Consume a grant to create the initial owner.
+      description: Requires an HTTPS same-origin Origin and rejects all supplied administrator credentials.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/AdministratorBootstrapRequest'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/recover:
+    post:
+      operationId: recoverAdministrator
+      tags: [Authentication]
+      summary: Consume a grant to recover its owner.
+      description: Requires an HTTPS same-origin Origin and rejects all supplied administrator credentials.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/AdministratorRecoveryRequest'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/bootstrap-grants:
+    post:
+      operationId: issueAdministratorBootstrapGrant
+      tags: [Authentication]
+      summary: Issue a one-time initial-owner bootstrap grant.
+      description: Root automation only. Reissue supersedes an unconsumed grant.
+      security:
+        - rootBearer: []
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/RecoveryGrant'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/root-token-rotations/{rotation_id}/begin:
+    post:
+      operationId: beginRootAdministratorTokenRotation
+      tags: [Authentication]
+      summary: Journal the beginning of a root-token rotation.
+      description: Root automation only. Repeating the same begin operation is idempotent.
+      security:
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RotationID'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/auth/root-token-rotations/{rotation_id}/complete:
+    post:
+      operationId: completeRootAdministratorTokenRotation
+      tags: [Authentication]
+      summary: Journal completion of a root-token rotation.
+      description: Root automation only. Repeating completion is idempotent; completion before begin conflicts.
+      security:
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RotationID'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+
+  /v1/admin/administrators:
+    post:
+      operationId: createAdministrator
+      tags: [Administrators]
+      summary: Create an administrator principal.
+      description: Owner session or root automation. Session requests require same-origin CSRF protection.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAdministratorRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AdministratorCreated'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    get:
+      operationId: listAdministrators
+      tags: [Administrators]
+      summary: Read a bounded administrator snapshot.
+      description: >-
+        Owner session or root automation. An exact username filter is accepted
+        only with root automation and cannot be combined with limit.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/Limit'
+        - name: username
+          in: query
+          required: false
+          description: Root-only exact canonical username filter.
+          schema:
+            $ref: './components.yaml#/components/schemas/Username'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Administrators'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/administrators/{principal_id}:
+    get:
+      operationId: getAdministrator
+      tags: [Administrators]
+      summary: Read an administrator principal.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Administrator'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    patch:
+      operationId: updateAdministrator
+      tags: [Administrators]
+      summary: Replace administrator access and/or enabled state.
+      description: Owner session or root automation. Access changes revoke the target's active sessions.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/AdministratorUpdateRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Administrator'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/administrators/{principal_id}/password:
+    post:
+      operationId: replaceAdministratorPassword
+      tags: [Administrators]
+      summary: Replace an administrator password.
+      description: Owner session or root automation. Replacing the caller's password revokes that session.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/PasswordReplacementRequest'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/SessionNoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/administrators/{principal_id}/recovery-grants:
+    post:
+      operationId: issueAdministratorRecoveryGrant
+      tags: [Administrators]
+      summary: Issue a recovery grant for an owner.
+      description: Root automation only.
+      security:
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/RecoveryGrant'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/administrators/{principal_id}/sessions:
+    get:
+      operationId: listAdministratorSessions
+      tags: [Administrators]
+      summary: Read a bounded session snapshot for an administrator.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AdministratorSessions'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/sessions/{session_id}/revoke:
+    post:
+      operationId: revokeAdministratorSession
+      tags: [Administrators]
+      summary: Revoke an administrator session.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/SessionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/SessionRevocationRequest'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/SessionNoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/audit:
+    get:
+      operationId: listGlobalAuditEvents
+      tags: [Audit]
+      summary: Read a bounded global audit snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AuditEvents'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+
+  /v1/admin/enrollment-tokens:
+    post:
+      operationId: issueEnrollmentToken
+      tags: [Enrollment]
+      summary: Issue a one-time node enrollment token.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/EnrollmentTokenRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/EnrollmentToken'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/bootstrap-bundles:
+    post:
+      operationId: createBootstrapBundle
+      tags: [Enrollment]
+      summary: Store an ephemeral, one-use bootstrap script.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/BootstrapBundleRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/BootstrapBundle'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+
+  /v1/admin/networks:
+    post:
+      operationId: createNetwork
+      tags: [Networks]
+      summary: Create a network.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/NetworkRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/Network'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    get:
+      operationId: listNetworks
+      tags: [Networks]
+      summary: Read a bounded, authorization-filtered network snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Networks'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}:
+    get:
+      operationId: getNetwork
+      tags: [Networks]
+      summary: Read a network.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Network'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/nodes:
+    get:
+      operationId: listNetworkNodes
+      tags: [Nodes]
+      summary: Read a bounded network node snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Nodes'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/relays:
+    get:
+      operationId: listNetworkRelays
+      tags: [Relays]
+      summary: Read a bounded network relay snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Relays'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    post:
+      operationId: registerNetworkRelay
+      tags: [Relays]
+      summary: Register a relay in a network.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/RegisterRelayRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/Relay'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/acl-rules:
+    get:
+      operationId: listNetworkACLRules
+      tags: [ACL]
+      summary: Read a bounded network ACL-rule snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/ACLRules'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    post:
+      operationId: createNetworkACLRule
+      tags: [ACL]
+      summary: Create a network ACL rule.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateACLRuleRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/ACLRule'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/certificates:
+    get:
+      operationId: listNetworkCertificates
+      tags: [Certificates]
+      summary: Read a bounded network certificate snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Certificates'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/routes:
+    get:
+      operationId: listNetworkRoutes
+      tags: [Routes]
+      summary: Read a bounded network route snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Routes'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/audit:
+    get:
+      operationId: listNetworkAuditEvents
+      tags: [Audit]
+      summary: Read a bounded network audit snapshot.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AuditEvents'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/certificates/{serial}/revoke:
+    post:
+      operationId: revokeNetworkCertificate
+      tags: [Certificates]
+      summary: Revoke a certificate by serial number.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/CertificateSerial'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/RevocationRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+
+  /v1/admin/routes/assign:
+    post:
+      operationId: assignRoute
+      tags: [Routes]
+      summary: Create or reuse an immediately approved subnet route.
+      description: Returns 201 for creation and 200 when the exact active route already exists.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/AssignRouteRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Route'
+        '201':
+          $ref: './components.yaml#/components/responses/Route'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/routes/{route_id}/approve:
+    post:
+      operationId: approveRoute
+      tags: [Routes]
+      summary: Approve an advertised route.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RouteID'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/routes/{route_id}/withdraw:
+    post:
+      operationId: withdrawRoute
+      tags: [Routes]
+      summary: Withdraw a route.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RouteID'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/acl-rules/{rule_id}:
+    put:
+      operationId: updateACLRule
+      tags: [ACL]
+      summary: Replace an ACL rule.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RuleID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/UpdateACLRuleRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/ACLRule'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    delete:
+      operationId: deleteACLRule
+      tags: [ACL]
+      summary: Delete an ACL rule.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RuleID'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/nodes/{node_id}/revoke:
+    post:
+      operationId: revokeNode
+      tags: [Nodes]
+      summary: Revoke a node.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NodeID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/RevocationRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/nodes/{node_id}/capabilities:
+    put:
+      operationId: setNodeCapabilities
+      tags: [Nodes]
+      summary: Replace a node's managed capability mask.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NodeID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/NodeCapabilitiesRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/relays/{relay_id}/disable:
+    post:
+      operationId: disableRelay
+      tags: [Relays]
+      summary: Disable a relay.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RelayID'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/relays/{relay_id}:
+    put:
+      operationId: updateRelay
+      tags: [Relays]
+      summary: Replace relay presentation and enabled state.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/RelayID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/UpdateRelayRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Relay'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+
+components:
+  securitySchemes:
+    administratorSession:
+      $ref: './components.yaml#/components/securitySchemes/administratorSession'
+    administratorCsrfCookie:
+      $ref: './components.yaml#/components/securitySchemes/administratorCsrfCookie'
+    administratorCsrfHeader:
+      $ref: './components.yaml#/components/securitySchemes/administratorCsrfHeader'
+    rootBearer:
+      $ref: './components.yaml#/components/securitySchemes/rootBearer'

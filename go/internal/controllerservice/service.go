@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -37,11 +38,12 @@ import (
 )
 
 const (
-	DefaultMaxBodyBytes     int64 = 128 << 10
-	maxCSRBytes                   = 64 << 10
-	DefaultSnapshotValidity       = 5 * time.Minute
-	MaxSnapshotValidity           = 24 * time.Hour
-	SnapshotValidityHeader        = "X-Laneway-Configuration-Valid-Until"
+	DefaultMaxBodyBytes          int64 = 128 << 10
+	maxCSRBytes                        = 64 << 10
+	DefaultSnapshotValidity            = 5 * time.Minute
+	MaxSnapshotValidity                = 24 * time.Hour
+	SnapshotValidityHeader             = "X-Laneway-Configuration-Valid-Until"
+	AdministratorRequestIDHeader       = "X-Laneway-Request-ID"
 )
 
 type Options struct {
@@ -81,6 +83,7 @@ type Service struct {
 	snapshotValidity      time.Duration
 	enrollmentLimiter     *enrollmentRateLimiter
 	bootstrapBundles      *bootstrapBundleStore
+	requestIDGenerator    func() (string, error)
 	handler               http.Handler
 	metrics               serviceMetrics
 }
@@ -176,9 +179,10 @@ func New(opts Options) (*Service, error) {
 		}, passwordWorkSlots: make(chan struct{}, adminauth.DefaultConcurrentPasswordVerifications),
 		loginLimiter: loginLimiter, recoveryLimiter: recoveryLimiter, authStateLimiter: authStateLimiter,
 		authorizeNode: opts.NodeAuthorizer, verifyPeerCertificate: verifyPeerCertificate, now: opts.Now,
-		snapshotValidity:  opts.SnapshotValidity,
-		enrollmentLimiter: newEnrollmentRateLimiter(),
-		bootstrapBundles:  newBootstrapBundleStore(opts.Now),
+		snapshotValidity:   opts.SnapshotValidity,
+		enrollmentLimiter:  newEnrollmentRateLimiter(),
+		bootstrapBundles:   newBootstrapBundleStore(opts.Now),
+		requestIDGenerator: generateAdministratorRequestID,
 	}
 	if s.access == nil {
 		s.access = &storeAccessController{store: s.store, rootBearer: func(request *http.Request) (adminauth.Actor, error) {
@@ -238,7 +242,7 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/relays", s.registerRelay)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/relays/{relay_id}/disable", s.disableRelay)
 	s.registerManagementRoute(mux, http.MethodPut, "/v1/admin/relays/{relay_id}", s.updateRelay)
-	s.handler = s.observe(securityHeaders(mux))
+	s.handler = s.observe(securityHeaders(s.administratorHTTPContract(mux)))
 	return s, nil
 }
 
@@ -307,6 +311,143 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+type administratorContractWriter struct {
+	http.ResponseWriter
+	requestID    string
+	wroteHeader  bool
+	suppressBody bool
+}
+
+func (w *administratorContractWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *administratorContractWriter) administratorRequestID() string {
+	return w.requestID
+}
+
+func (w *administratorContractWriter) WriteHeader(status int) {
+	if w.wroteHeader {
+		return
+	}
+	w.wroteHeader = true
+	if status >= http.StatusBadRequest && !responseIsJSON(w.Header().Get("Content-Type")) {
+		code, detail, retryable := fallbackAdministratorError(status)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Del("Content-Length")
+		w.ResponseWriter.WriteHeader(status)
+		_ = json.NewEncoder(w.ResponseWriter).Encode(map[string]any{
+			"code": code.String(), "detail": detail, "retryable": retryable, "request_id": w.requestID,
+		})
+		w.suppressBody = true
+		return
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *administratorContractWriter) Write(payload []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.suppressBody {
+		return len(payload), nil
+	}
+	return w.ResponseWriter.Write(payload)
+}
+
+func (s *Service) administratorHTTPContract(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cleanPath := path.Clean(r.URL.Path)
+		if !administratorPath(r.URL.Path) && !administratorPath(cleanPath) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		requestID, err := s.requestIDGenerator()
+		if err != nil {
+			requestID = fallbackAdministratorRequestID()
+		}
+		w.Header().Set(AdministratorRequestIDHeader, requestID)
+		contractWriter := &administratorContractWriter{ResponseWriter: w, requestID: requestID}
+		r = r.WithContext(context.WithValue(r.Context(), administratorRequestIDContextKey{}, requestID))
+		if err != nil {
+			s.writeError(contractWriter, &requestError{status: http.StatusInternalServerError,
+				code: lanewayv1.ErrorCode_ERROR_CODE_INTERNAL, detail: "internal controller error", retryable: true}, false)
+			return
+		}
+		if r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path || cleanPath != r.URL.Path {
+			s.writeError(contractWriter, malformed("administrator path must be canonical"), false)
+			return
+		}
+		next.ServeHTTP(contractWriter, r)
+	})
+}
+
+func administratorPath(value string) bool {
+	return value == "/v1/admin" || strings.HasPrefix(value, "/v1/admin/")
+}
+
+type administratorRequestIDContextKey struct{}
+
+func administratorRequestID(ctx context.Context) string {
+	requestID, _ := ctx.Value(administratorRequestIDContextKey{}).(string)
+	return requestID
+}
+
+var administratorRequestIDFallback atomic.Uint64
+
+func fallbackAdministratorRequestID() string {
+	// The fallback is used only for the 500 response produced when the system
+	// random source fails. It is process-local, independent of request input,
+	// and remains unique until the 64-bit counter wraps.
+	return fmt.Sprintf("%032x", administratorRequestIDFallback.Add(1))
+}
+
+func generateAdministratorRequestID() (string, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(random), nil
+}
+
+func responseIsJSON(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && mediaType == "application/json"
+}
+
+func fallbackAdministratorError(status int) (lanewayv1.ErrorCode, string, bool) {
+	switch status {
+	case http.StatusUnauthorized:
+		return lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "authentication failed", false
+	case http.StatusForbidden:
+		return lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied", false
+	case http.StatusNotFound:
+		return lanewayv1.ErrorCode_ERROR_CODE_MALFORMED, "route not found", false
+	case http.StatusMethodNotAllowed:
+		return lanewayv1.ErrorCode_ERROR_CODE_MALFORMED, "method not allowed", false
+	case http.StatusRequestEntityTooLarge:
+		return lanewayv1.ErrorCode_ERROR_CODE_RESOURCE_EXHAUSTED, "request body exceeds limit", false
+	case http.StatusTooManyRequests:
+		return lanewayv1.ErrorCode_ERROR_CODE_RESOURCE_EXHAUSTED, "request rate limit exceeded", true
+	default:
+		if status >= http.StatusInternalServerError {
+			return lanewayv1.ErrorCode_ERROR_CODE_INTERNAL, "internal controller error", true
+		}
+		return lanewayv1.ErrorCode_ERROR_CODE_MALFORMED, "invalid request", false
+	}
+}
+
+func responseWriterAdministratorRequestID(w http.ResponseWriter) string {
+	for w != nil {
+		if source, ok := w.(interface{ administratorRequestID() string }); ok {
+			return source.administratorRequestID()
+		}
+		unwrapper, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		w = unwrapper.Unwrap()
+	}
+	return ""
 }
 
 func (s *Service) health(w http.ResponseWriter, _ *http.Request) {
@@ -1097,6 +1238,17 @@ func (s *Service) writeProto(w http.ResponseWriter, status int, message proto.Me
 }
 
 func (s *Service) writeJSON(w http.ResponseWriter, status int, value any) {
+	if requestID := responseWriterAdministratorRequestID(w); status >= http.StatusBadRequest && requestID != "" {
+		data, err := json.Marshal(value)
+		var envelope map[string]any
+		if err != nil || json.Unmarshal(data, &envelope) != nil || envelope == nil {
+			envelope = map[string]any{
+				"code": lanewayv1.ErrorCode_ERROR_CODE_INTERNAL.String(), "detail": "internal controller error", "retryable": true,
+			}
+		}
+		envelope["request_id"] = requestID
+		value = envelope
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)

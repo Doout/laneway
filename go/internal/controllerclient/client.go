@@ -455,6 +455,8 @@ type ACLRule struct {
 type AuditEvent struct {
 	EventID              string          `json:"event_id"`
 	NetworkID            string          `json:"network_id"`
+	ActorKind            string          `json:"actor_kind"`
+	ActorID              *string         `json:"actor_id,omitempty"`
 	ActorNodeID          *string         `json:"actor_node_id,omitempty"`
 	Action               string          `json:"action"`
 	TargetType           string          `json:"target_type"`

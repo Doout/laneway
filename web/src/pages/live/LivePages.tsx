@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Ban, KeyRound, MonitorDot, Network, Plus, RadioTower, Route as RouteIcon, ShieldCheck, TriangleAlert, Users } from 'lucide-react'
 import { Button, Callout, DataTable, DetailLayout, EmptyState, EntityTitle, Field, FormStack, IdentityBlock, PageHeader, Section, Status, TokenBox, type DataColumn } from '../../components/ui'
-import { controllerOrigin, useControlPlane, type ControllerACLRule, type ControllerAuditEvent, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
+import { controllerOrigin, useControlPlane, type ControllerACLRule, type ControllerAuditEvent, type ControllerCertificate, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
 import { durableNodeEnrollmentCommand, userEnrollmentCommand } from '../../lib/enrollment-commands'
 
 function time(seconds?: number) {
@@ -40,6 +40,16 @@ export function liveRouteState(route: ControllerRoute) {
   if (route.state === 'approved') return { label: 'Approved', tone: 'positive' as const, actionable: true }
   if (route.state === 'withdrawn') return { label: 'Withdrawn', tone: 'muted' as const, actionable: false }
   return { label: 'Rejected', tone: 'danger' as const, actionable: false }
+}
+
+export function liveCertificateState(
+  certificate: Pick<ControllerCertificate, 'not_before_unix_seconds' | 'not_after_unix_seconds' | 'revoked_at_unix_seconds'>,
+  nowUnixSeconds = Math.floor(Date.now() / 1000),
+) {
+  if (certificate.revoked_at_unix_seconds !== undefined) return { label: 'Revoked', tone: 'danger' as const }
+  if (nowUnixSeconds < certificate.not_before_unix_seconds) return { label: 'Not yet valid', tone: 'warning' as const }
+  if (nowUnixSeconds >= certificate.not_after_unix_seconds) return { label: 'Expired', tone: 'muted' as const }
+  return { label: 'Valid', tone: 'positive' as const }
 }
 
 export function liveACLRuleLabel(rule: ControllerACLRule) {
@@ -243,7 +253,7 @@ export function LiveRoutesPage() {
     { key: 'state', label: 'State', render: (route) => { const state = liveRouteState(route); return <Status tone={state.tone}>{state.label}</Status> } },
     { key: 'open', label: '', render: (route) => <Button to={`/routes/${route.route_id}`} variant="quiet">View</Button> },
   ]
-  return <><PageHeader title="Routes" action={networkId && hasPermission('route.manage', networkId) ? <Button to="/routes/new" variant="primary"><RouteIcon size={16} />Create route</Button> : undefined} /><DataTable columns={columns} rows={inventory?.routes ?? []} rowKey={(route) => route.route_id} empty={<p>No routes.</p>} /></>
+  return <><PageHeader title="Routes" action={networkId && hasPermission('route.manage', networkId) ? <Button to="/routes/new" variant="primary"><RouteIcon size={16} />Assign route</Button> : undefined} /><DataTable columns={columns} rows={inventory?.routes ?? []} rowKey={(route) => route.route_id} empty={<p>No routes.</p>} /></>
 }
 
 export function LiveRouteDetailPage() {
@@ -271,9 +281,9 @@ export function LiveCreateRoutePage() {
   useEffect(() => { if (!nodeId && eligibleNodes[0]) setNodeId(eligibleNodes[0].node_id) }, [eligibleNodes, nodeId])
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!inventory?.network || !prefix || !nodeId) return setError('Enter a prefix and choose a node.')
-    try { const created = await request<ControllerRoute>('/v1/admin/routes/assign', { method: 'POST', body: { network_id: inventory.network.network_id, node_id: nodeId, prefix: prefix.trim(), mode, metric: Number(metric) } }); await refresh(); navigate(`/routes/${created.route_id}/approve`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Route creation failed.') }
+    try { const assigned = await request<ControllerRoute>('/v1/admin/routes/assign', { method: 'POST', body: { network_id: inventory.network.network_id, node_id: nodeId, prefix: prefix.trim(), mode, metric: Number(metric) } }); await refresh(); navigate(`/routes/${assigned.route_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Route assignment failed.') }
   }
-  return <><PageHeader title="Create route" /><FormStack onSubmit={submit}><Field label="Destination prefix"><input value={prefix} onChange={(event) => setPrefix(event.target.value)} /></Field><Field label="Forwarding node"><select value={nodeId} onChange={(event) => setNodeId(event.target.value)}>{eligibleNodes.map((node) => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</select></Field><Field label="Mode"><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="nat">NAT</option><option value="routed">Routed</option></select></Field><Field label="Metric"><input type="number" min="0" value={metric} onChange={(event) => setMetric(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Create route</Button></FormStack></>
+  return <><PageHeader title="Assign route" /><FormStack onSubmit={submit}><Field label="Destination prefix"><input value={prefix} onChange={(event) => setPrefix(event.target.value)} /></Field><Field label="Forwarding node"><select value={nodeId} onChange={(event) => setNodeId(event.target.value)}>{eligibleNodes.map((node) => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</select></Field><Field label="Mode"><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="nat">NAT</option><option value="routed">Routed</option></select></Field><Field label="Metric"><input type="number" min="0" value={metric} onChange={(event) => setMetric(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Assign route</Button></FormStack></>
 }
 
 export function LiveApproveRoutePage() {
@@ -374,7 +384,7 @@ export function LiveSecurityPage() {
   const { inventory, hasPermission, request, refresh } = useControlPlane()
   const [error, setError] = useState('')
   async function revoke(networkId: string, serial: string) { const reason = window.prompt('Revocation reason'); if (!reason) return; try { await request(`/v1/admin/networks/${networkId}/certificates/${serial}/revoke`, { method: 'POST', body: { reason } }); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Certificate revocation failed.') } }
-  return <><PageHeader title="Security" /><ErrorMessage value={error} /><section aria-label="Certificate inventory">{inventory?.certificates.length ? inventory.certificates.map((certificate) => <div key={certificate.certificate_id} className="section"><h2>{certificate.serial}</h2><dl><div><dt>Certificate ID</dt><dd><code>{certificate.certificate_id}</code></dd></div><div><dt>Node ID</dt><dd><code>{certificate.node_id}</code></dd></div><div><dt>Valid until</dt><dd>{time(certificate.not_after_unix_seconds)}</dd></div></dl>{certificate.revoked_at_unix_seconds ? <Status tone="danger">Revoked</Status> : hasPermission('certificate.revoke', certificate.network_id) ? <Button variant="danger" onClick={() => void revoke(certificate.network_id, certificate.serial)}><Ban size={16} />Revoke certificate</Button> : <Status>Valid</Status>}</div>) : <p>No certificate records.</p>}</section></>
+  return <><PageHeader title="Security" /><ErrorMessage value={error} /><section aria-label="Certificate inventory">{inventory?.certificates.length ? inventory.certificates.map((certificate) => { const state = liveCertificateState(certificate); return <div key={certificate.certificate_id} className="section"><h2>{certificate.serial}</h2><dl><div><dt>Certificate ID</dt><dd><code>{certificate.certificate_id}</code></dd></div><div><dt>Node ID</dt><dd><code>{certificate.node_id}</code></dd></div><div><dt>Valid from</dt><dd>{time(certificate.not_before_unix_seconds)}</dd></div><div><dt>Valid until</dt><dd>{time(certificate.not_after_unix_seconds)}</dd></div></dl><Status tone={state.tone}>{state.label}</Status>{state.label !== 'Revoked' && hasPermission('certificate.revoke', certificate.network_id) ? <Button variant="danger" onClick={() => void revoke(certificate.network_id, certificate.serial)}><Ban size={16} />Revoke certificate</Button> : null}</div> }) : <p>No certificate records.</p>}</section></>
 }
 
 export function auditActor(event: Pick<ControllerAuditEvent, 'actor_kind' | 'actor_id'>) {

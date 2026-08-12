@@ -1,0 +1,11 @@
+apis:
+  management-v1:
+    root: ../api/openapi/management-v1.yaml
+
+extends:
+  - recommended-strict
+
+rules:
+  no-server-example.com: off
+  no-empty-servers: off
+  operation-4xx-response: off
