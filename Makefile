@@ -1,4 +1,4 @@
-.PHONY: build package test race vet benchmark benchmark-matrix benchmark-relay-comparison benchmark-full-matrix benchmark-quic benchmark-unit benchmark-arch-smoke integration privileged-integration docker-exit-integration rust-test rust-interop rust-node-interop fmt-check proto proto-lint proto-check management-api-check
+.PHONY: build package test race vet benchmark benchmark-matrix benchmark-relay-comparison benchmark-full-matrix benchmark-quic benchmark-unit benchmark-arch-smoke integration privileged-integration docker-exit-integration docker-plugin-integration docker-plugin-rootfs rust-test rust-interop rust-node-interop fmt-check proto proto-lint proto-check management-api-check
 
 VERSION ?= dev
 PACKAGE_GOOS ?= $(shell cd go && go env GOOS)
@@ -76,6 +76,12 @@ privileged-integration:
 
 docker-exit-integration:
 	LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-exit-node.sh
+
+docker-plugin-integration:
+	LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-plugin.sh
+
+docker-plugin-rootfs:
+	VERSION="$(VERSION)" ./deploy/docker-plugin/build-rootfs.sh
 
 rust-test:
 	cargo test --manifest-path rust/Cargo.toml --locked
