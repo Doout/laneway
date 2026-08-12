@@ -1,0 +1,23 @@
+{
+  "Description": "Policy-driven Laneway Docker network driver",
+  "Documentation": "https://github.com/Doout/laneway/blob/main/spec/docker-network-plugin-v1.md",
+  "Entrypoint": [
+    "/usr/bin/laneway-docker-plugin",
+    "-state=/data/state-v1.json",
+    "-authorization=/data/controller-authorization-v1.json"
+  ],
+  "Interface": {
+    "Socket": "laneway.sock",
+    "Types": ["docker.networkdriver/1.0"]
+  },
+  "Network": {"Type": "host"},
+  "Linux": {
+    "Capabilities": ["CAP_NET_ADMIN", "CAP_NET_RAW"],
+    "AllowAllDevices": false,
+    "Devices": [{"Name": "tun", "Description": "Laneway tunnel device", "Path": "/dev/net/tun", "Settable": ["path"]}]
+  },
+  "Mounts": [],
+  "PropagatedMount": "/data",
+  "Env": [],
+  "Args": {"Name": "args", "Description": "Laneway Docker plugin arguments", "Settable": ["value"], "Value": []}
+}
