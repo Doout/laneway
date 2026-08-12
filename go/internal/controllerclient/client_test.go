@@ -318,6 +318,33 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestAuditDecodesDurableActorFieldsWithStrictJSON(t *testing.T) {
+	networkID, _ := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")
+	actorID, _ := identity.ParseID("101112131415161718191a1b1c1d1e1f")
+	targetID, _ := identity.ParseID("202122232425262728292a2b2c2d2e2f")
+	eventID, _ := identity.ParseID("303132333435363738393a3b3c3d3e3f")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.RequestURI() != "/v1/admin/networks/"+networkID.String()+"/audit?limit=1" {
+			t.Errorf("unexpected audit request %s %s", r.Method, r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"events":[{"event_id":"`+eventID.String()+`","network_id":"`+networkID.String()+`","actor_kind":"administrator","actor_id":"`+actorID.String()+`","action":"route.assign","target_type":"route","target_id":"`+targetID.String()+`","details":{"created":true},"created_at_unix_seconds":1700000000}]}`)
+	}))
+	defer server.Close()
+
+	client := &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer test-admin-token"}
+	events, err := client.Audit(context.Background(), networkID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].ActorKind != "administrator" || events[0].ActorID == nil || *events[0].ActorID != actorID.String() {
+		t.Fatalf("audit events=%+v", events)
+	}
+	if events[0].TargetID == nil || *events[0].TargetID != targetID.String() || string(events[0].Details) != `{"created":true}` {
+		t.Fatalf("audit target/details=%+v", events[0])
+	}
+}
+
 func TestJSONAdminRequiredErrorsAndLimits(t *testing.T) {
 	client := &Client{endpoint: "https://unused.invalid", http: http.DefaultClient}
 	if _, err := client.Network(context.Background(), identity.NetworkID{}); err == nil || !strings.Contains(err.Error(), "admin token") {

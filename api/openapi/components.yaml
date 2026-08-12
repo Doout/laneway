@@ -1,0 +1,1643 @@
+components:
+  securitySchemes:
+    administratorSession:
+      type: apiKey
+      in: cookie
+      name: __Host-laneway_admin_session
+      description: >-
+        Secure, HttpOnly, SameSite=Strict administrator session cookie. Browsers
+        receive it from the controller and must never expose it to JavaScript.
+    administratorCsrfCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-laneway_admin_csrf
+      description: >-
+        Secure, HttpOnly, SameSite=Strict CSRF cookie required together with
+        administratorCsrfHeader for session-authenticated mutations.
+    administratorCsrfHeader:
+      type: apiKey
+      in: header
+      name: X-Laneway-CSRF
+      description: >-
+        CSRF token returned in the authenticated session view. It must match the
+        CSRF cookie and durable session digest. Same-origin browser code supplies
+        this value through the hardened console transport.
+    rootBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque root automation token
+      description: >-
+        Static root service-principal credential for local file-based automation
+        only. The controller rejects this credential when Origin or Sec-Fetch-*
+        headers indicate a browser context. It is never a console credential.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: >-
+        Maximum number of records in the bounded snapshot. The current API has no
+        cursor or total count. Omission or an empty value uses 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 100
+    PrincipalID:
+      name: principal_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    SessionID:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    RotationID:
+      name: rotation_id
+      in: path
+      required: true
+      description: Caller-generated correlation identifier for the rotation journal.
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    NetworkID:
+      name: network_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    RouteID:
+      name: route_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    RuleID:
+      name: rule_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    NodeID:
+      name: node_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    RelayID:
+      name: relay_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    CertificateSerial:
+      name: serial
+      in: path
+      required: true
+      description: Canonical lowercase, even-length hexadecimal without a leading zero byte.
+      schema:
+        type: string
+        pattern: '^(?!00)[0-9a-f]{2}(?:[0-9a-f]{2}){0,31}$'
+
+  headers:
+    RequestID:
+      required: true
+      description: Server-generated request identifier. Client-supplied values are ignored.
+      schema:
+        $ref: '#/components/schemas/RequestID'
+    RetryAfter:
+      required: false
+      description: Whole seconds before a rate-limited request should be retried.
+      schema:
+        type: integer
+        minimum: 1
+    SessionID:
+      required: true
+      description: Current durable administrator session identifier.
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    SessionIdleExpiresAt:
+      required: true
+      description: Current sliding idle deadline as Unix seconds.
+      schema:
+        $ref: '#/components/schemas/UnixSeconds'
+    SessionAbsoluteExpiresAt:
+      required: true
+      description: Non-sliding absolute deadline as Unix seconds.
+      schema:
+        $ref: '#/components/schemas/UnixSeconds'
+    SessionIDOptional:
+      required: false
+      description: >-
+        Current durable administrator session identifier. Present on protected
+        successes authenticated by a browser session; omitted for root bearer
+        automation and may be omitted after self-revocation.
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    SessionIdleExpiresAtOptional:
+      required: false
+      description: >-
+        Current sliding idle deadline as Unix seconds. Present with the
+        session identifier on protected browser-session successes.
+      schema:
+        $ref: '#/components/schemas/UnixSeconds'
+    SessionAbsoluteExpiresAtOptional:
+      required: false
+      description: >-
+        Non-sliding absolute deadline as Unix seconds. Present with the
+        session identifier on protected browser-session successes.
+      schema:
+        $ref: '#/components/schemas/UnixSeconds'
+
+  responses:
+    Error:
+      description: Stable JSON error envelope.
+      headers:
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NoContent:
+      description: Operation completed with no response body.
+      headers:
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+    SessionNoContent:
+      description: Session operation completed with no response body.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+    AuthState:
+      description: Current administrator authentication entry state.
+      headers:
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AuthState'
+    AdministratorSessionView:
+      description: Authenticated administrator session and browser CSRF state.
+      headers:
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionID'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAt'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAt'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AdministratorSessionView'
+    RecoveryGrant:
+      description: One-time administrator recovery grant.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RecoveryGrant'
+    Administrator:
+      description: Administrator principal.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Administrator'
+    AdministratorCreated:
+      description: Newly created administrator principal.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Location:
+          required: true
+          description: Same-origin path of the created administrator resource.
+          schema:
+            type: string
+            pattern: '^/v1/admin/administrators/(?!0{32}$)[0-9a-f]{32}$'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Administrator'
+    Administrators:
+      description: Bounded administrator snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Administrators'
+    AdministratorSessions:
+      description: Bounded administrator-session snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AdministratorSessions'
+    AuditEvents:
+      description: Bounded audit-event snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AuditEvents'
+    EnrollmentToken:
+      description: Newly issued one-time enrollment token.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EnrollmentToken'
+    BootstrapBundle:
+      description: Ephemeral one-use bootstrap bundle reference.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BootstrapBundle'
+    Network:
+      description: Network resource.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Network'
+    Networks:
+      description: Bounded network snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Networks'
+    Nodes:
+      description: Bounded node snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Nodes'
+    Relays:
+      description: Bounded relay snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Relays'
+    Relay:
+      description: Relay resource.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Relay'
+    ACLRules:
+      description: Bounded ACL-rule snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ACLRules'
+    ACLRule:
+      description: ACL rule.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ACLRule'
+    Certificates:
+      description: Bounded certificate snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Certificates'
+    Routes:
+      description: Bounded route snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Routes'
+    Route:
+      description: Route resource.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Route'
+    Epoch:
+      description: Updated network configuration epoch.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Epoch'
+
+  schemas:
+    Identifier:
+      type: string
+      description: Canonical nonzero 128-bit identifier in lowercase hexadecimal.
+      pattern: '^(?!0{32}$)[0-9a-f]{32}$'
+    RequestID:
+      type: string
+      description: Server-generated opaque identifier of exactly 32 lowercase hexadecimal characters.
+      pattern: '^[0-9a-f]{32}$'
+    Secret:
+      type: string
+      description: Opaque 32-byte secret encoded as unpadded base64url.
+      pattern: '^[A-Za-z0-9_-]{43}$'
+    UnixSeconds:
+      type: integer
+      minimum: -9007199254740991
+      maximum: 9007199254740991
+      description: >-
+        Whole seconds since the Unix epoch, transported as a JSON number. The
+        browser boundary rejects values outside JavaScript's safe-integer range.
+    Uint32:
+      type: integer
+      minimum: 0
+      maximum: 4294967295
+    Uint64:
+      type: integer
+      minimum: 0
+      maximum: 9007199254740991
+      description: >-
+        Unsigned value currently encoded as a JSON number. The browser boundary
+        rejects values outside JavaScript's safe-integer range rather than rounding.
+    ErrorCode:
+      type: string
+      enum:
+        - ERROR_CODE_UNSPECIFIED
+        - ERROR_CODE_MALFORMED
+        - ERROR_CODE_UNSUPPORTED_VERSION
+        - ERROR_CODE_UNAUTHENTICATED
+        - ERROR_CODE_PERMISSION_DENIED
+        - ERROR_CODE_STALE_EPOCH
+        - ERROR_CODE_RESOURCE_EXHAUSTED
+        - ERROR_CODE_INTERNAL
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [request_id, code, detail, retryable]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestID'
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        detail:
+          type: string
+        retryable:
+          type: boolean
+    AuthState:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [bootstrap_required, sign_in]
+    Role:
+      type: string
+      enum: [owner, operator, auditor]
+    Permission:
+      type: string
+      enum:
+        - network.list
+        - network.read
+        - network.create
+        - enrollment.issue
+        - bootstrap_bundle.create
+        - node.read
+        - node.manage
+        - route.read
+        - route.manage
+        - acl.read
+        - acl.manage
+        - relay.read
+        - relay.manage
+        - certificate.read
+        - certificate.revoke
+        - audit.read
+        - audit.read_global
+        - principal.manage
+        - session.manage_others
+        - recovery.manage
+        - root_token.rotate
+    Username:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: '^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$'
+    Password:
+      type: string
+      format: password
+      description: Administrator password; the controller requires 15..1024 UTF-8 bytes.
+    AdministratorLoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          $ref: '#/components/schemas/Username'
+        password:
+          $ref: '#/components/schemas/Password'
+    AdministratorBootstrapRequest:
+      type: object
+      additionalProperties: false
+      required: [grant, username, password]
+      properties:
+        grant:
+          $ref: '#/components/schemas/Secret'
+        username:
+          $ref: '#/components/schemas/Username'
+        password:
+          $ref: '#/components/schemas/Password'
+    AdministratorRecoveryRequest:
+      type: object
+      additionalProperties: false
+      required: [grant, password]
+      properties:
+        grant:
+          $ref: '#/components/schemas/Secret'
+        password:
+          $ref: '#/components/schemas/Password'
+    AdministratorSessionView:
+      type: object
+      additionalProperties: false
+      required:
+        - principal_id
+        - username
+        - role
+        - permissions
+        - all_networks
+        - network_ids
+        - session_id
+        - idle_lifetime_seconds
+        - idle_expires_at_unix_seconds
+        - absolute_expires_at_unix_seconds
+        - csrf_token
+      properties:
+        principal_id:
+          $ref: '#/components/schemas/Identifier'
+        username:
+          $ref: '#/components/schemas/Username'
+        role:
+          $ref: '#/components/schemas/Role'
+        permissions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Permission'
+        all_networks:
+          type: boolean
+        network_ids:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Identifier'
+        session_id:
+          $ref: '#/components/schemas/Identifier'
+        idle_lifetime_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        idle_expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        absolute_expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        csrf_token:
+          $ref: '#/components/schemas/Secret'
+    RecoveryGrant:
+      type: object
+      additionalProperties: false
+      required: [grant, expires_at_unix_seconds]
+      properties:
+        grant:
+          $ref: '#/components/schemas/Secret'
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    CreateAdministratorRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password, role]
+      properties:
+        username:
+          $ref: '#/components/schemas/Username'
+        password:
+          $ref: '#/components/schemas/Password'
+        role:
+          $ref: '#/components/schemas/Role'
+        all_networks:
+          type: [boolean, 'null']
+          default: false
+          description: Omission or null uses false.
+        network_ids:
+          oneOf:
+            - type: array
+              uniqueItems: true
+              items:
+                $ref: '#/components/schemas/Identifier'
+            - type: 'null'
+          description: Omission or null is normalized to an empty array.
+      allOf:
+        - if:
+            required: [role]
+            properties:
+              role:
+                const: owner
+          then:
+            required: [all_networks]
+            properties:
+              all_networks:
+                const: true
+        - if:
+            required: [all_networks]
+            properties:
+              all_networks:
+                const: true
+          then:
+            properties:
+              network_ids:
+                oneOf:
+                  - type: array
+                    maxItems: 0
+                  - type: 'null'
+    AdministratorAccessPatch:
+      type: object
+      additionalProperties: false
+      required: [role, all_networks, network_ids]
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+        all_networks:
+          type: boolean
+        network_ids:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Identifier'
+      allOf:
+        - if:
+            properties:
+              role:
+                const: owner
+          then:
+            properties:
+              all_networks:
+                const: true
+        - if:
+            properties:
+              all_networks:
+                const: true
+          then:
+            properties:
+              network_ids:
+                maxItems: 0
+    AdministratorUpdateRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        access:
+          oneOf:
+            - $ref: '#/components/schemas/AdministratorAccessPatch'
+            - type: 'null'
+        enabled:
+          type: [boolean, 'null']
+      anyOf:
+        - required: [access]
+          properties:
+            access:
+              not:
+                type: 'null'
+        - required: [enabled]
+          properties:
+            enabled:
+              not:
+                type: 'null'
+      description: At least one non-null member is required by the controller.
+    PasswordReplacementRequest:
+      type: object
+      additionalProperties: false
+      required: [password]
+      properties:
+        password:
+          $ref: '#/components/schemas/Password'
+    SessionRevocationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: The controller requires 1..256 UTF-8 bytes.
+    Administrator:
+      type: object
+      additionalProperties: false
+      required:
+        - principal_id
+        - username
+        - role
+        - enabled
+        - all_networks
+        - network_ids
+        - created_at_unix_seconds
+        - updated_at_unix_seconds
+        - password_updated_at_unix_seconds
+      properties:
+        principal_id:
+          $ref: '#/components/schemas/Identifier'
+        username:
+          $ref: '#/components/schemas/Username'
+        role:
+          $ref: '#/components/schemas/Role'
+        enabled:
+          type: boolean
+        all_networks:
+          type: boolean
+        network_ids:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Identifier'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        updated_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        disabled_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        password_updated_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    Administrators:
+      type: object
+      additionalProperties: false
+      required: [administrators]
+      properties:
+        administrators:
+          type: array
+          items:
+            $ref: '#/components/schemas/Administrator'
+    AdministratorSessionState:
+      type: string
+      enum: [active, expired, revoked]
+    AdministratorSession:
+      type: object
+      additionalProperties: false
+      required:
+        - session_id
+        - principal_id
+        - state
+        - current
+        - created_at_unix_seconds
+        - last_seen_at_unix_seconds
+        - idle_lifetime_seconds
+        - maximum_sessions
+        - idle_expires_at_unix_seconds
+        - absolute_expires_at_unix_seconds
+      properties:
+        session_id:
+          $ref: '#/components/schemas/Identifier'
+        principal_id:
+          $ref: '#/components/schemas/Identifier'
+        state:
+          $ref: '#/components/schemas/AdministratorSessionState'
+        current:
+          type: boolean
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        last_seen_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        idle_lifetime_seconds:
+          type: integer
+          minimum: 60
+          maximum: 86400
+        maximum_sessions:
+          type: integer
+          minimum: 1
+          maximum: 20
+        idle_expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        absolute_expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        revoked_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        revocation_reason:
+          type: string
+          description: At most 256 UTF-8 bytes when present.
+    AdministratorSessions:
+      type: object
+      additionalProperties: false
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdministratorSession'
+    EnrollmentClass:
+      type: string
+      enum: [durable, ephemeral, remembered]
+    EnrollmentTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [network_id, expires_at_unix_seconds]
+      properties:
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        label:
+          type: [string, 'null']
+          default: ''
+          description: >-
+            Omission or null means an empty label. The value must be trimmed,
+            contain no NUL byte, and occupy at most 256 UTF-8 bytes.
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+          description: Must be strictly in the future and no more than 30 days after the controller's current time.
+        enrollment_class:
+          oneOf:
+            - $ref: '#/components/schemas/EnrollmentClass'
+            - type: 'null'
+          description: Omission or null uses durable enrollment.
+        session_lifetime_seconds:
+          type: [integer, 'null']
+          description: >-
+            Ephemeral enrollment requires 300..86400 seconds. Other classes
+            accept only omission, null, or zero.
+        requested_name:
+          type: [string, 'null']
+          description: >-
+            Omission, null, or the empty string leaves the enrollment unbound.
+            Other values are trimmed non-empty names of at most 253 UTF-8 bytes
+            with no NUL byte.
+        enabled_capabilities:
+          type: [integer, 'null']
+          enum: [0, 8, 16, 24, null]
+          description: Omission or null clears the capability mask to zero.
+      allOf:
+        - if:
+            required: [enrollment_class]
+            properties:
+              enrollment_class:
+                const: ephemeral
+          then:
+            required: [session_lifetime_seconds]
+            properties:
+              session_lifetime_seconds:
+                type: integer
+                minimum: 300
+                maximum: 86400
+          else:
+            properties:
+              session_lifetime_seconds:
+                enum: [0, null]
+    EnrollmentToken:
+      type: object
+      additionalProperties: false
+      required: [token_id, enrollment_token, expires_at_unix_seconds, enrollment_class]
+      properties:
+        token_id:
+          $ref: '#/components/schemas/Identifier'
+        enrollment_token:
+          $ref: '#/components/schemas/Secret'
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        enrollment_class:
+          $ref: '#/components/schemas/EnrollmentClass'
+        session_lifetime_seconds:
+          type: integer
+          minimum: 300
+          maximum: 86400
+        requested_name:
+          type: string
+          description: Non-empty trimmed name of at most 253 UTF-8 bytes with no NUL byte.
+        enabled_capabilities:
+          type: integer
+          enum: [8, 16, 24]
+    BootstrapBundleRequest:
+      type: object
+      additionalProperties: false
+      required: [payload, expires_at_unix_seconds]
+      properties:
+        payload:
+          type: string
+          pattern: '^#!/bin/bash\n'
+          description: Bash script containing no NUL byte and occupying at most 98304 UTF-8 bytes.
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+          description: Must be strictly in the future and no more than 10 minutes after the controller's current time.
+    BootstrapBundle:
+      type: object
+      additionalProperties: false
+      required: [bundle_id, public_path, expires_at_unix_seconds]
+      properties:
+        bundle_id:
+          $ref: '#/components/schemas/Secret'
+        public_path:
+          type: string
+          pattern: '^/\.well-known/laneway/bootstrap/[A-Za-z0-9_-]{43}$'
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    ResourceName:
+      type: string
+      description: Non-empty trimmed name occupying at most 253 UTF-8 bytes and containing no NUL byte.
+    NetworkRequest:
+      type: object
+      additionalProperties: false
+      required: [name, ipv4_pool]
+      properties:
+        network_id:
+          oneOf:
+            - $ref: '#/components/schemas/Identifier'
+            - type: 'null'
+          description: Omission or null asks the controller to generate the identifier.
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        ipv4_pool:
+          type: string
+          description: Canonical routable IPv4 CIDR with prefix length 8 through 30.
+        ipv6_pool:
+          type: [string, 'null']
+          description: >-
+            Canonical routable IPv6 CIDR with prefix length 64 through 120.
+            Omission, null, or the empty string creates an IPv4-only network.
+    Network:
+      type: object
+      additionalProperties: false
+      required: [network_id, name, ipv4_pool, configuration_epoch, created_at_unix_seconds]
+      properties:
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        ipv4_pool:
+          type: string
+        ipv6_pool:
+          type: string
+        configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    Networks:
+      type: object
+      additionalProperties: false
+      required: [networks]
+      properties:
+        networks:
+          type: array
+          items:
+            $ref: '#/components/schemas/Network'
+    Node:
+      type: object
+      additionalProperties: false
+      required:
+        - node_id
+        - network_id
+        - name
+        - enabled_capabilities
+        - created_at_unix_seconds
+        - enrollment_class
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        enabled_capabilities:
+          $ref: '#/components/schemas/Uint64'
+        ipv4_address:
+          type: string
+          format: ipv4
+        ipv6_address:
+          type: string
+          format: ipv6
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        revoked_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        enrollment_class:
+          $ref: '#/components/schemas/EnrollmentClass'
+        lease_expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    Nodes:
+      type: object
+      additionalProperties: false
+      required: [nodes]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+    RelayEndpoint:
+      type: string
+      description: >-
+        Browser-safe host and nonzero decimal port. DNS input uses ASCII labels
+        and is normalized to lowercase without one trailing root dot; numeric
+        IP addresses must be usable unicast addresses without a zone or an
+        IPv4-mapped address. The controller parser can normalize additional
+        non-ASCII DNS spellings outside this browser subset. Controller
+        responses use canonical ASCII DNS or numeric-IP spelling and therefore
+        round-trip through the browser schema.
+    RegisterRelayRequest:
+      type: object
+      additionalProperties: false
+      required: [service_id, name, endpoint]
+      properties:
+        service_id:
+          $ref: '#/components/schemas/Identifier'
+        node_id:
+          oneOf:
+            - $ref: '#/components/schemas/Identifier'
+            - type: 'null'
+          description: Omission or null leaves the relay unbound to a node.
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        endpoint:
+          $ref: '#/components/schemas/RelayEndpoint'
+    UpdateRelayRequest:
+      type: object
+      additionalProperties: false
+      required: [name, endpoint]
+      description: Full replacement; omission of enabled resets it to false.
+      properties:
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        endpoint:
+          $ref: '#/components/schemas/RelayEndpoint'
+        enabled:
+          type: [boolean, 'null']
+          default: false
+          description: Omission or null resets enabled to false.
+    Relay:
+      type: object
+      additionalProperties: false
+      required:
+        - relay_id
+        - network_id
+        - service_id
+        - name
+        - endpoint
+        - enabled
+        - created_at_unix_seconds
+        - configuration_epoch
+      properties:
+        relay_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        service_id:
+          $ref: '#/components/schemas/Identifier'
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        endpoint:
+          $ref: '#/components/schemas/RelayEndpoint'
+        enabled:
+          type: boolean
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+    Relays:
+      type: object
+      additionalProperties: false
+      required: [relays]
+      properties:
+        relays:
+          type: array
+          items:
+            $ref: '#/components/schemas/Relay'
+    Certificate:
+      type: object
+      additionalProperties: false
+      required:
+        - certificate_id
+        - network_id
+        - node_id
+        - serial
+        - not_before_unix_seconds
+        - not_after_unix_seconds
+        - created_at_unix_seconds
+      properties:
+        certificate_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        serial:
+          type: string
+          pattern: '^(?!00)[0-9a-f]{2}(?:[0-9a-f]{2}){0,31}$'
+        not_before_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        not_after_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        revoked_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        revocation_reason:
+          type: string
+          description: At most 1024 UTF-8 bytes when present.
+    Certificates:
+      type: object
+      additionalProperties: false
+      required: [certificates]
+      properties:
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/Certificate'
+    RouteKind:
+      type: string
+      enum: [overlay, subnet, exit]
+    RouteMode:
+      type: string
+      enum: [none, nat, routed]
+    MutableRouteMode:
+      type: string
+      enum: [nat, routed]
+    RouteState:
+      type: string
+      enum: [advertised, approved, withdrawn, rejected]
+    AssignRouteRequest:
+      type: object
+      additionalProperties: false
+      required: [network_id, node_id, prefix, mode]
+      description: Omission of metric assigns the current zero-value metric.
+      properties:
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        prefix:
+          type: string
+          description: >-
+            Parseable, masked, non-default IPv4 or IPv6 CIDR prefix. The
+            controller accepts equivalent IPv6 text spellings and normalizes
+            them in the stored response.
+        mode:
+          $ref: '#/components/schemas/MutableRouteMode'
+        metric:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 1000000
+          default: 0
+          description: Omission or null assigns the zero-value metric.
+    Route:
+      type: object
+      additionalProperties: false
+      required:
+        - route_id
+        - network_id
+        - node_id
+        - prefix
+        - kind
+        - mode
+        - metric
+        - state
+        - created_at_unix_seconds
+      properties:
+        route_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        prefix:
+          type: string
+        kind:
+          $ref: '#/components/schemas/RouteKind'
+        mode:
+          $ref: '#/components/schemas/RouteMode'
+        metric:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+        state:
+          $ref: '#/components/schemas/RouteState'
+        valid_until_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        approved_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        withdrawn_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    Routes:
+      type: object
+      additionalProperties: false
+      required: [routes]
+      properties:
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Route'
+    ProtoBytes16:
+      type: string
+      description: Canonical padded base64 encoding of exactly 16 bytes.
+      pattern: '^[A-Za-z0-9+/]{22}==$'
+    ProtoBytes16Input:
+      description: >-
+        Browser-safe protobuf JSON bytes value that decodes to exactly 16
+        nonzero bytes. The browser contract uses canonical padded standard
+        base64 so canonical responses round-trip unchanged.
+      type: string
+      pattern: '^[A-Za-z0-9+/]{22}==$'
+    ProtoIPAddress:
+      type: string
+      description: Canonical padded base64 encoding of a 4-byte or 16-byte network address.
+      pattern: '^(?:[A-Za-z0-9+/]{6}==|[A-Za-z0-9+/]{22}==)$'
+    ProtoIPAddressInput:
+      description: >-
+        Browser-safe protobuf JSON bytes value that decodes to a 4-byte or
+        16-byte network address. The browser contract uses canonical padded
+        standard base64 so canonical responses round-trip unchanged.
+      type: string
+      pattern: '^(?:[A-Za-z0-9+/]{6}==|[A-Za-z0-9+/]{22}==)$'
+    IPProtocol:
+      type: string
+      enum:
+        - IP_PROTOCOL_ICMP
+        - IP_PROTOCOL_TCP
+        - IP_PROTOCOL_UDP
+        - IP_PROTOCOL_ICMPV6
+        - IP_PROTOCOL_ANY
+    ProtoIPPrefix:
+      type: object
+      additionalProperties: false
+      required: [address]
+      properties:
+        address:
+          $ref: '#/components/schemas/ProtoIPAddress'
+        prefix_length:
+          type: integer
+          minimum: 0
+          maximum: 128
+    ProtoUint32Input:
+      description: >-
+        Browser-safe protobuf JSON uint32 represented as an integral JSON
+        number or quoted ASCII decimal digits. Quoted values are normalized to
+        numbers; exponent and fractional spellings are outside this browser
+        subset.
+      oneOf:
+        - type: integer
+          minimum: 0
+          maximum: 4294967295
+        - type: string
+          pattern: '^[0-9]+$'
+    ProtoIPPrefixInput:
+      type: object
+      additionalProperties: false
+      required: [address]
+      properties:
+        address:
+          $ref: '#/components/schemas/ProtoIPAddressInput'
+        prefix_length:
+          $ref: '#/components/schemas/ProtoUint32Input'
+    PortRange:
+      type: object
+      additionalProperties: false
+      required: [first, last]
+      properties:
+        first:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        last:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      description: first must be less than or equal to last.
+    PortRangeInput:
+      type: object
+      additionalProperties: false
+      required: [first, last]
+      properties:
+        first:
+          $ref: '#/components/schemas/ProtoUint32Input'
+        last:
+          $ref: '#/components/schemas/ProtoUint32Input'
+      description: Protobuf JSON range; decoded first must be less than or equal to last.
+    TrafficSelector:
+      type: object
+      additionalProperties: false
+      required: [ip_protocol]
+      properties:
+        source_node_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoBytes16'
+        source_prefixes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoIPPrefix'
+        destination_node_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoBytes16'
+        destination_prefixes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoIPPrefix'
+        ip_protocol:
+          $ref: '#/components/schemas/IPProtocol'
+        destination_ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortRange'
+      allOf:
+        - if:
+            required: [destination_ports]
+            properties:
+              destination_ports:
+                minItems: 1
+          then:
+            properties:
+              ip_protocol:
+                enum: [IP_PROTOCOL_TCP, IP_PROTOCOL_UDP]
+      description: >-
+        Canonical TrafficSelector protobuf JSON response. Destination ports are
+        legal only for TCP or UDP. Responses use snake_case field names, named
+        enums, padded standard base64, and numeric uint32 values.
+    TrafficSelectorInput:
+      type: object
+      additionalProperties: false
+      properties:
+        source_node_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoBytes16Input'
+        source_prefixes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoIPPrefixInput'
+        destination_node_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoBytes16Input'
+        destination_prefixes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProtoIPPrefixInput'
+        ip_protocol:
+          $ref: '#/components/schemas/IPProtocol'
+        destination_ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortRangeInput'
+      required: [ip_protocol]
+      allOf:
+        - if:
+            required: [destination_ports]
+            properties:
+              destination_ports:
+                minItems: 1
+          then:
+            properties:
+              ip_protocol:
+                enum: [IP_PROTOCOL_TCP, IP_PROTOCOL_UDP]
+      description: >-
+        Strict canonical browser subset of accepted TrafficSelector protobuf
+        JSON. It uses snake_case field names, named enums, padded standard
+        base64, and numeric or quoted-decimal uint32 values; the browser
+        boundary normalizes quoted integers before sending. The controller's
+        raw HTTP parser additionally accepts lowerCamel aliases, numeric enum
+        values, alternate valid base64 spellings, null optional fields, and
+        other protobuf-JSON number spellings, but those deliberately have no
+        browser SDK input path. Every canonical response selector is accepted
+        losslessly by this request schema.
+    ACLAction:
+      type: string
+      enum: [accept, deny]
+    CreateACLRuleRequest:
+      type: object
+      additionalProperties: false
+      required: [action, selector]
+      properties:
+        priority:
+          oneOf:
+            - $ref: '#/components/schemas/Uint32'
+            - type: 'null'
+          default: 0
+          description: Omission or null uses priority zero.
+        action:
+          $ref: '#/components/schemas/ACLAction'
+        selector:
+          $ref: '#/components/schemas/TrafficSelectorInput'
+        description:
+          type: [string, 'null']
+          description: Omission or null uses empty; otherwise at most 1024 UTF-8 bytes and no NUL byte.
+    UpdateACLRuleRequest:
+      type: object
+      additionalProperties: false
+      required: [action, selector]
+      description: >-
+        Full replacement. Omitted priority, description, and enabled fields
+        reset to 0, the empty string, and false respectively.
+      properties:
+        priority:
+          oneOf:
+            - $ref: '#/components/schemas/Uint32'
+            - type: 'null'
+          default: 0
+          description: Omission or null resets priority to zero.
+        action:
+          $ref: '#/components/schemas/ACLAction'
+        selector:
+          $ref: '#/components/schemas/TrafficSelectorInput'
+        description:
+          type: [string, 'null']
+          default: ''
+          description: Omission or null resets to empty; otherwise at most 1024 UTF-8 bytes and no NUL byte.
+        enabled:
+          type: [boolean, 'null']
+          default: false
+          description: Omission or null resets enabled to false.
+    ACLRule:
+      type: object
+      additionalProperties: false
+      required:
+        - rule_id
+        - network_id
+        - priority
+        - action
+        - selector
+        - description
+        - enabled
+        - configuration_epoch
+      properties:
+        rule_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        priority:
+          $ref: '#/components/schemas/Uint32'
+        action:
+          $ref: '#/components/schemas/ACLAction'
+        selector:
+          $ref: '#/components/schemas/TrafficSelector'
+        description:
+          type: string
+          description: At most 1024 UTF-8 bytes and no NUL byte.
+        enabled:
+          type: boolean
+        configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+    ACLRules:
+      type: object
+      additionalProperties: false
+      required: [acl_rules]
+      properties:
+        acl_rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/ACLRule'
+    RevocationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: Non-empty trimmed reason of at most 1024 UTF-8 bytes.
+    NodeCapabilitiesRequest:
+      type: object
+      additionalProperties: false
+      description: Omission clears the capability mask to zero.
+      properties:
+        enabled_capabilities:
+          type: [integer, 'null']
+          enum: [0, 8, 16, 24, null]
+          default: 0
+          description: Omission or null clears the capability mask to zero.
+    Epoch:
+      type: object
+      additionalProperties: false
+      required: [configuration_epoch]
+      properties:
+        configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+    ActorKind:
+      type: string
+      enum:
+        - system
+        - node
+        - administrator
+        - service_principal
+        - recovery_grant
+        - unauthenticated
+        - legacy_unknown
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, actor_kind, action, target_type, details, created_at_unix_seconds]
+      properties:
+        event_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        actor_kind:
+          $ref: '#/components/schemas/ActorKind'
+        actor_id:
+          $ref: '#/components/schemas/Identifier'
+        actor_node_id:
+          $ref: '#/components/schemas/Identifier'
+        action:
+          type: string
+        target_type:
+          type: string
+        target_id:
+          $ref: '#/components/schemas/Identifier'
+        details: {}
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+      allOf:
+        - if:
+            properties:
+              actor_kind:
+                enum: [node, administrator, service_principal, recovery_grant]
+          then:
+            required: [actor_id]
+            properties:
+              actor_id: {}
+        - if:
+            properties:
+              actor_kind:
+                enum: [system, unauthenticated, legacy_unknown]
+          then:
+            not:
+              required: [actor_id]
+              properties:
+                actor_id: {}
+    AuditEvents:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'

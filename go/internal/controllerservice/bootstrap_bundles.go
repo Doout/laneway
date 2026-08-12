@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/bootstrap"
 )
@@ -118,7 +119,8 @@ func (s *Service) createBootstrapBundle(w http.ResponseWriter, r *http.Request) 
 	id, err := s.bootstrapBundles.create(payload, expiresAt)
 	clear(payload)
 	if err != nil {
-		http.Error(w, "bootstrap service temporarily unavailable", http.StatusServiceUnavailable)
+		s.writeError(w, &requestError{status: http.StatusServiceUnavailable,
+			code: lanewayv1.ErrorCode_ERROR_CODE_INTERNAL, detail: "bootstrap service temporarily unavailable", retryable: true}, false)
 		return
 	}
 	decision, err := s.administratorDecision(r, adminauth.GlobalTarget())

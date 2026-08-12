@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import type { ControllerACLRule, ControllerNode, ControllerRoute } from '../../lib/control-plane'
-import { liveACLRuleLabel, liveNodeState, liveRouteMode, liveRouteState } from './LivePages'
+import type { ControllerACLRule, ControllerCertificate, ControllerNode, ControllerRoute } from '../../lib/control-plane'
+import { liveACLRuleLabel, liveCertificateState, liveNodeState, liveRouteMode, liveRouteState } from './LivePages'
 
 afterEach(() => vi.useRealTimers())
 
@@ -54,4 +54,22 @@ test('ACL fallback labels never overwrite a blank controller description', () =>
   }
   expect(liveACLRuleLabel(rule)).toBe('Allow rule 9')
   expect(rule.description).toBe('')
+})
+
+test('certificate state uses authoritative validity boundaries and revocation', () => {
+  const now = 1_700_000_000
+  const certificate: ControllerCertificate = {
+    certificate_id: '5'.repeat(32),
+    network_id: '2'.repeat(32),
+    node_id: '1'.repeat(32),
+    serial: '01',
+    not_before_unix_seconds: now,
+    not_after_unix_seconds: now + 60,
+    created_at_unix_seconds: now - 60,
+  }
+
+  expect(liveCertificateState({ ...certificate, revoked_at_unix_seconds: now - 1 }, now)).toEqual({ label: 'Revoked', tone: 'danger' })
+  expect(liveCertificateState({ ...certificate, not_before_unix_seconds: now + 1 }, now)).toEqual({ label: 'Not yet valid', tone: 'warning' })
+  expect(liveCertificateState({ ...certificate, not_after_unix_seconds: now }, now)).toEqual({ label: 'Expired', tone: 'muted' })
+  expect(liveCertificateState(certificate, now)).toEqual({ label: 'Valid', tone: 'positive' })
 })

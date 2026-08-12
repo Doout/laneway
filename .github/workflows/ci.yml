@@ -29,6 +29,9 @@ jobs:
       - name: Install dependencies
         working-directory: web
         run: corepack pnpm install --frozen-lockfile
+      - name: Validate management API contract and generated client
+        working-directory: web
+        run: corepack pnpm api:check
       - name: Reject an unscoped console build
         working-directory: web
         run: |

@@ -42,6 +42,37 @@ describe('shipped live application authorization', () => {
     expect(screen.queryByText('foreign-node')).not.toBeInTheDocument()
   })
 
+  it('shows an administrator-assigned route as approved without sending it through approval', async () => {
+    vi.stubEnv('MODE', 'live')
+    const nodeId = '4'.repeat(32)
+    const routeId = '5'.repeat(32)
+    const route = { route_id: routeId, network_id: networkId, node_id: nodeId, prefix: '10.20.0.0/24', kind: 'subnet', mode: 'nat', metric: 100, state: 'approved', created_at_unix_seconds: 1_700_000_000, approved_at_unix_seconds: 1_700_000_000 }
+    let assigned = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list', 'node.read', 'route.read', 'route.manage'])))
+      if (path.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [{ network_id: networkId, name: 'Scoped network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 }] }))
+      if (path.includes('/nodes?')) return Promise.resolve(managementResponse({ nodes: [{ node_id: nodeId, network_id: networkId, name: 'Forwarding node', enabled_capabilities: 16, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' }] }))
+      if (path.includes('/routes?')) return Promise.resolve(managementResponse({ routes: assigned ? [route] : [] }))
+      if (path.endsWith('/routes/assign')) {
+        expect(init?.method).toBe('POST')
+        assigned = true
+        return Promise.resolve(managementResponse(route))
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPath('/routes/new')
+    fireEvent.change(await screen.findByLabelText('Destination prefix'), { target: { value: route.prefix } })
+    fireEvent.click(screen.getByRole('button', { name: 'Assign route' }))
+
+    expect(await screen.findByRole('heading', { name: route.prefix })).toBeVisible()
+    expect(screen.getByText('Approved')).toBeVisible()
+    expect(screen.queryByRole('heading', { name: 'Approve route' })).not.toBeInTheDocument()
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith(`/routes/${routeId}/approve`))).toBe(false)
+  })
+
   it('loads the owner global audit stream once and renders recovery actors without selecting a network', async () => {
     vi.stubEnv('MODE', 'live')
     const secondNetworkId = '5'.repeat(32)

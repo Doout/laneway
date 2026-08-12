@@ -1,4 +1,4 @@
-.PHONY: build package test race vet benchmark benchmark-matrix benchmark-relay-comparison benchmark-full-matrix benchmark-quic benchmark-unit benchmark-arch-smoke integration privileged-integration docker-exit-integration rust-test rust-interop rust-node-interop fmt-check proto proto-lint proto-check
+.PHONY: build package test race vet benchmark benchmark-matrix benchmark-relay-comparison benchmark-full-matrix benchmark-quic benchmark-unit benchmark-arch-smoke integration privileged-integration docker-exit-integration rust-test rust-interop rust-node-interop fmt-check proto proto-lint proto-check management-api-check
 
 VERSION ?= dev
 PACKAGE_GOOS ?= $(shell cd go && go env GOOS)
@@ -105,3 +105,6 @@ proto-lint:
 
 proto-check: proto-lint proto
 	git diff --exit-code -- go/api
+
+management-api-check:
+	cd web && corepack pnpm api:check

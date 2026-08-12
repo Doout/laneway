@@ -5,11 +5,16 @@
   "packageManager": "pnpm@10.14.0",
   "type": "module",
   "scripts": {
+    "api:check": "pnpm api:lint && pnpm api:routes && pnpm api:generate && pnpm api:test && git diff --exit-code -- src/generated/management-v1",
+    "api:generate": "openapi-ts --file openapi-ts.config.ts",
+    "api:lint": "redocly lint management-v1",
+    "api:routes": "node scripts/check-management-contract.mjs",
+    "api:test": "vitest run scripts/management-contract.test.ts",
     "dev": "vite --mode demo",
     "build": "vite build",
     "build:live": "tsc -b && vite build --mode live",
     "build:demo": "tsc -b && vite build --mode demo",
-    "lint": "eslint . --max-warnings 0",
+    "lint": "eslint . --max-warnings 0 --ignore-pattern 'src/generated/management-v1/generated/**'",
     "preview": "vite preview",
     "test": "vitest run",
     "test:e2e": "playwright test",
@@ -28,6 +33,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@hey-api/openapi-ts": "0.99.0",
+    "@redocly/cli": "2.46.1",
     "@axe-core/playwright": "^4.13.0",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
