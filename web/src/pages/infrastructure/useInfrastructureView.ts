@@ -15,11 +15,13 @@ export function useInfrastructureView() {
   const source = control.inventory
   const networks: InfrastructureNetwork[] = (source?.network ? [source.network] : []).map((network) => {
     const nodes = (source?.nodes ?? []).filter((node) => node.network_id === network.network_id)
+    const nodeInactive = (node: typeof nodes[number]) => node.revoked_at_unix_seconds !== undefined ||
+      (node.enrollment_class === 'ephemeral' && node.lease_expires_at_unix_seconds !== undefined && node.lease_expires_at_unix_seconds <= Math.floor(Date.now() / 1000))
     const routes = (source?.routes ?? []).filter((route) => route.network_id === network.network_id
       && route.state !== 'withdrawn'
       && route.state !== 'rejected'
-      && (!route.valid_until_unix_seconds || route.valid_until_unix_seconds > Math.floor(Date.now() / 1000)))
-    const connectors = nodes.filter((node) => !node.revoked_at_unix_seconds && (node.enabled_capabilities & SUBNET_ROUTER) !== 0)
+      && (route.valid_until_unix_seconds === undefined || route.valid_until_unix_seconds > Math.floor(Date.now() / 1000)))
+    const connectors = nodes.filter((node) => !nodeInactive(node) && (node.enabled_capabilities & SUBNET_ROUTER) !== 0)
     const connector = connectors[0]
     return {
       id: network.network_id,
@@ -28,7 +30,7 @@ export function useInfrastructureView() {
       ipv6Pool: network.ipv6_pool || 'Not configured',
       createdAt: dateLabel(network.created_at_unix_seconds),
       nodes: nodes.length,
-      connectedNodes: nodes.filter((node) => !node.revoked_at_unix_seconds).length,
+      connectedNodes: nodes.filter((node) => !nodeInactive(node)).length,
       routes: routes.length,
       healthyRoutes: routes.filter((route) => route.state === 'approved').length,
       userEnrollments: nodes.filter((node) => node.enrollment_class === 'remembered' || node.enrollment_class === 'ephemeral').length,

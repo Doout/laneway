@@ -56,6 +56,7 @@ var (
 	ErrUnsupportedDB     = errors.New("database schema is newer than this controller")
 	ErrBootstrapComplete = errors.New("administrator bootstrap is already complete")
 	ErrCredentialInvalid = errors.New("administrator credential is invalid")
+	ErrPermissionDenied  = errors.New("administrator permission denied")
 	ErrSessionInvalid    = errors.New("administrator session is invalid")
 	ErrSessionExpired    = errors.New("administrator session has expired")
 	ErrRecoveryInvalid   = errors.New("administrator recovery grant is invalid")
@@ -224,6 +225,18 @@ type AdministratorCredential struct {
 	RevocationReason string
 }
 
+// AdministratorPasswordCandidate is the exact immutable credential snapshot
+// subjected to bounded password verification. Unknown, disabled, or otherwise
+// unusable accounts return Usable=false so the caller takes the dummy-hash path.
+// A successful verifier result is not durable authority: session creation must
+// revalidate all three IDs and the active credential inside its transaction.
+type AdministratorPasswordCandidate struct {
+	PrincipalID  identity.ID
+	CredentialID identity.ID
+	PasswordHash string
+	Usable       bool
+}
+
 type AdministratorRecord struct {
 	Principal  adminauth.Principal
 	Credential AdministratorCredential
@@ -242,6 +255,7 @@ type AdministratorSession struct {
 	CreatedAt         time.Time
 	LastSeenAt        time.Time
 	IdleTimeout       time.Duration
+	MaximumSessions   int
 	IdleExpiresAt     time.Time
 	AbsoluteExpiresAt time.Time
 	RevokedAt         *time.Time
@@ -277,6 +291,53 @@ type AdministratorRecoveryGrant struct {
 	ConsumedAt         *time.Time
 	RevokedAt          *time.Time
 	RevocationReason   string
+}
+
+// AdministratorRecoveryCandidate is the opaque preflight result used before
+// hashing a replacement password. It contains no recovery secret or hash and
+// is never sufficient to consume the grant; final bootstrap/recovery rechecks
+// the secret and all durable state in its transaction.
+type AdministratorRecoveryCandidate struct {
+	GrantID            identity.ID
+	Purpose            AdministratorRecoveryPurpose
+	TargetPrincipalID  *identity.ID
+	RecoveryGeneration uint64
+	Usable             bool
+}
+
+type AdministratorAccessSpec struct {
+	Role        adminauth.Role
+	Enabled     bool
+	AllNetworks bool
+	NetworkIDs  []identity.NetworkID
+}
+
+// AdministratorUpdateSpec models the atomic PATCH contract. Access, when
+// present, is the complete role/scope tuple; Enabled is independent. Omitted
+// fields are reloaded and preserved inside the authorized write transaction.
+type AdministratorUpdateSpec struct {
+	Access  *AdministratorAccessSpec
+	Enabled *bool
+}
+
+type CreateAdministratorSpec struct {
+	Username     string
+	PasswordHash string
+	Access       AdministratorAccessSpec
+}
+
+type AdministratorAuthFailure string
+
+const (
+	AdministratorAuthFailureCredential AdministratorAuthFailure = "credential_rejected"
+	AdministratorAuthFailureLimited    AdministratorAuthFailure = "rate_limited"
+	AdministratorAuthFailureBusy       AdministratorAuthFailure = "verification_busy"
+	AdministratorAuthFailureRecovery   AdministratorAuthFailure = "recovery_rejected"
+)
+
+func (f AdministratorAuthFailure) Valid() bool {
+	return f == AdministratorAuthFailureCredential || f == AdministratorAuthFailureLimited ||
+		f == AdministratorAuthFailureBusy || f == AdministratorAuthFailureRecovery
 }
 
 type ACLAction string

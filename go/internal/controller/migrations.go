@@ -361,6 +361,158 @@ CREATE INDEX audit_events_global_time
     ON audit_events(created_at DESC, id DESC);
 CREATE INDEX audit_events_actor_time
     ON audit_events(actor_kind, actor_id, created_at DESC, id DESC);
+`, `
+-- Schema v9 is an explicit upgrade from the published administrator-security
+-- foundation v8. Keep migration 8 byte-for-byte compatible with that branch;
+-- runtime session/RBAC hardening belongs here so stacked deployments migrate.
+
+DELETE FROM administrator_principal_networks
+WHERE principal_id IN (SELECT id FROM administrator_principals WHERE all_networks=1);
+CREATE TRIGGER administrator_scope_requires_scoped_principal
+    BEFORE INSERT ON administrator_principal_networks
+BEGIN
+    SELECT CASE WHEN COALESCE((SELECT all_networks FROM administrator_principals
+        WHERE id=NEW.principal_id), 1) <> 0
+        THEN RAISE(ABORT, 'administrator scope requires a scoped principal') END;
+END;
+CREATE TRIGGER administrator_scope_identity_immutable
+    BEFORE UPDATE OF principal_id, network_id ON administrator_principal_networks
+BEGIN
+    SELECT RAISE(ABORT, 'administrator scope identity is immutable');
+END;
+CREATE TRIGGER administrator_all_networks_requires_no_scopes
+    BEFORE UPDATE OF all_networks ON administrator_principals
+    WHEN NEW.all_networks=1 AND EXISTS(
+        SELECT 1 FROM administrator_principal_networks WHERE principal_id=NEW.id
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'all-network administrator cannot retain network scopes');
+END;
+
+INSERT INTO audit_events
+    (id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
+SELECT randomblob(16),NULL,'system',NULL,'administrator.recovery.invalidate_schema_v9',
+    'administrator_recovery_grant',NULL,'{"reason":"schema v9 static-root boundary"}',unixepoch()
+WHERE EXISTS(SELECT 1 FROM administrator_recovery_grants
+    WHERE consumed_at IS NULL AND revoked_at IS NULL);
+UPDATE administrator_auth_state
+SET recovery_generation=recovery_generation+1
+WHERE singleton=1 AND EXISTS(SELECT 1 FROM administrator_recovery_grants
+    WHERE consumed_at IS NULL AND revoked_at IS NULL);
+UPDATE administrator_recovery_grants
+SET revoked_at=max(created_at,unixepoch()),revocation_reason='schema v9 security upgrade'
+WHERE consumed_at IS NULL AND revoked_at IS NULL;
+
+DROP INDEX administrator_sessions_active_principal;
+DROP INDEX administrator_sessions_active_expiry;
+ALTER TABLE administrator_sessions RENAME TO administrator_sessions_v8;
+CREATE TABLE administrator_sessions (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    principal_id BLOB NOT NULL CHECK(length(principal_id) = 16),
+    credential_id BLOB NOT NULL CHECK(length(credential_id) = 16),
+    token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+    csrf_hash BLOB NOT NULL UNIQUE CHECK(length(csrf_hash) = 32),
+    previous_session_id BLOB REFERENCES administrator_sessions(id) ON DELETE SET NULL
+        CHECK(previous_session_id IS NULL OR length(previous_session_id) = 16),
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    idle_lifetime_seconds INTEGER NOT NULL CHECK(idle_lifetime_seconds BETWEEN 60 AND 86400),
+    maximum_sessions INTEGER NOT NULL CHECK(maximum_sessions BETWEEN 1 AND 20),
+    idle_expires_at INTEGER NOT NULL,
+    absolute_expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(length(revocation_reason) <= 256),
+    FOREIGN KEY(principal_id, credential_id)
+        REFERENCES administrator_credentials(principal_id, id) ON DELETE CASCADE,
+    CHECK(token_hash <> csrf_hash),
+    CHECK(previous_session_id IS NULL OR previous_session_id <> id),
+    CHECK(last_seen_at >= created_at),
+    CHECK(last_seen_at < absolute_expires_at),
+    CHECK(idle_expires_at = min(last_seen_at + idle_lifetime_seconds, absolute_expires_at)),
+    CHECK(absolute_expires_at > created_at),
+    CHECK(
+        (revoked_at IS NULL AND revocation_reason = '') OR
+        (revoked_at IS NOT NULL AND revoked_at >= created_at AND length(revocation_reason) > 0)
+    )
+) STRICT;
+INSERT INTO administrator_sessions
+    (id,principal_id,credential_id,token_hash,csrf_hash,previous_session_id,
+     created_at,last_seen_at,idle_lifetime_seconds,maximum_sessions,
+     idle_expires_at,absolute_expires_at,revoked_at,revocation_reason)
+SELECT id,principal_id,credential_id,token_hash,csrf_hash,
+	NULL,
+    created_at,
+    min(last_seen_at,absolute_expires_at-1),
+    idle_lifetime_seconds,
+    5,
+    min(min(last_seen_at,absolute_expires_at-1)+idle_lifetime_seconds,absolute_expires_at),
+    absolute_expires_at,
+	COALESCE(revoked_at,max(created_at,unixepoch())),
+    CASE WHEN revoked_at IS NULL THEN 'schema v9 security upgrade' ELSE revocation_reason END
+FROM administrator_sessions_v8;
+INSERT INTO audit_events
+    (id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
+SELECT randomblob(16),NULL,'system',NULL,'administrator.sessions.invalidate_schema_v9',
+    'administrator_session',NULL,'{"reason":"schema v9 security upgrade"}',unixepoch()
+WHERE EXISTS(SELECT 1 FROM administrator_sessions_v8 WHERE revoked_at IS NULL);
+DROP TABLE administrator_sessions_v8;
+CREATE INDEX administrator_sessions_active_principal
+    ON administrator_sessions(principal_id, created_at, id)
+    WHERE revoked_at IS NULL;
+CREATE INDEX administrator_sessions_active_expiry
+    ON administrator_sessions(idle_expires_at, absolute_expires_at)
+    WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX one_administrator_session_successor
+    ON administrator_sessions(previous_session_id)
+    WHERE previous_session_id IS NOT NULL;
+
+DROP INDEX audit_events_network_time;
+DROP INDEX audit_events_global_time;
+DROP INDEX audit_events_actor_time;
+ALTER TABLE audit_events RENAME TO audit_events_v8;
+CREATE TABLE audit_events (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB REFERENCES networks(id) ON DELETE SET NULL
+        CHECK(network_id IS NULL OR length(network_id) = 16),
+    actor_kind TEXT NOT NULL CHECK(actor_kind IN (
+        'system','node','administrator','service_principal','recovery_grant','unauthenticated','legacy_unknown'
+    )),
+    actor_id BLOB CHECK(actor_id IS NULL OR (length(actor_id) = 16 AND actor_id <> zeroblob(16))),
+    action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 128),
+    target_type TEXT NOT NULL CHECK(length(target_type) BETWEEN 1 AND 64),
+    target_id BLOB CHECK(target_id IS NULL OR length(target_id) = 16),
+    details_json TEXT NOT NULL DEFAULT '{}' CHECK(length(details_json) BETWEEN 2 AND 16384),
+    created_at INTEGER NOT NULL,
+    CHECK(
+        (actor_kind IN ('system','unauthenticated','legacy_unknown') AND actor_id IS NULL) OR
+        (actor_kind IN ('node','administrator','service_principal','recovery_grant') AND actor_id IS NOT NULL)
+    )
+) STRICT;
+INSERT INTO audit_events
+    (id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
+SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
+FROM audit_events_v8;
+DROP TABLE audit_events_v8;
+CREATE INDEX audit_events_network_time
+    ON audit_events(network_id, created_at DESC, id DESC)
+    WHERE network_id IS NOT NULL;
+CREATE INDEX audit_events_global_time
+    ON audit_events(created_at DESC, id DESC);
+CREATE INDEX audit_events_actor_time
+    ON audit_events(actor_kind, actor_id, created_at DESC, id DESC);
+CREATE TABLE administrator_root_token_rotations (
+    rotation_id BLOB PRIMARY KEY CHECK(length(rotation_id) = 16 AND rotation_id <> zeroblob(16)),
+    begin_audit_event_id BLOB NOT NULL UNIQUE REFERENCES audit_events(id) ON DELETE RESTRICT
+        CHECK(length(begin_audit_event_id) = 16),
+    complete_audit_event_id BLOB UNIQUE REFERENCES audit_events(id) ON DELETE RESTRICT
+        CHECK(complete_audit_event_id IS NULL OR length(complete_audit_event_id) = 16),
+    begun_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    CHECK(
+        (complete_audit_event_id IS NULL AND completed_at IS NULL) OR
+        (complete_audit_event_id IS NOT NULL AND completed_at IS NOT NULL AND completed_at >= begun_at)
+    )
+) STRICT;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -436,15 +588,20 @@ func authorizeAdministratorMutationTx(ctx context.Context, tx *sql.Tx, actor adm
 }
 
 func auditActorTx(ctx context.Context, tx *sql.Tx, networkID *identity.NetworkID, actor adminauth.Actor, action, targetType string, targetID *identity.ID, details string, at time.Time) error {
+	_, err := auditActorIDTx(ctx, tx, networkID, actor, action, targetType, targetID, details, at)
+	return err
+}
+
+func auditActorIDTx(ctx context.Context, tx *sql.Tx, networkID *identity.NetworkID, actor adminauth.Actor, action, targetType string, targetID *identity.ID, details string, at time.Time) (identity.ID, error) {
 	if action == "" || len(action) > 128 || targetType == "" || len(targetType) > 64 || len(details) < 2 || len(details) > MaxAuditDetailLength || !json.Valid([]byte(details)) {
-		return fmt.Errorf("%w: invalid audit event", ErrInvalid)
+		return identity.ID{}, fmt.Errorf("%w: invalid audit event", ErrInvalid)
 	}
 	if !actor.Valid() {
-		return fmt.Errorf("%w: invalid audit actor", ErrInvalid)
+		return identity.ID{}, fmt.Errorf("%w: invalid audit actor", ErrInvalid)
 	}
 	id, err := newID()
 	if err != nil {
-		return err
+		return identity.ID{}, err
 	}
 	var networkBytes, actorBytes, targetBytes any
 	if networkID != nil {
@@ -460,7 +617,7 @@ func auditActorTx(ctx context.Context, tx *sql.Tx, networkID *identity.NetworkID
 		(id, network_id, actor_kind, actor_id, action, target_type, target_id, details_json, created_at)
 		VALUES(?,?,?,?,?,?,?,?,?)`, idBytes(id), networkBytes, string(actor.Kind), actorBytes, action, targetType, targetBytes, details, unix(at))
 	if err != nil {
-		return fmt.Errorf("write audit event: %w", err)
+		return identity.ID{}, fmt.Errorf("write audit event: %w", err)
 	}
-	return nil
+	return id, nil
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Activity, Check, Copy, Download, KeyRound, RadioTower, Route, ServerOff, ShieldCheck } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { auditEvents } from '../../lib/demo-data'
-import { useControlPlane } from '../../lib/control-plane'
+import { useControlPlane, type ControllerAuditEvent } from '../../lib/control-plane'
 import { Button, FilterSelect, PageHeader, SearchField, Status, Toolbar } from '../../components/ui'
 import './audit.css'
 
@@ -48,6 +48,18 @@ function eventIcon(action: string): ReactNode {
   return <Activity aria-hidden="true" size={16} />
 }
 
+export function formatControllerAuditActor(event: Pick<ControllerAuditEvent, 'actor_kind' | 'actor_id'>) {
+  switch (event.actor_kind) {
+    case 'system': return 'System'
+    case 'administrator': return event.actor_id ? `Administrator ${event.actor_id}` : 'Administrator'
+    case 'service_principal': return event.actor_id ? `Service principal ${event.actor_id}` : 'Service principal'
+    case 'recovery_grant': return event.actor_id ? `Recovery grant ${event.actor_id}` : 'Recovery grant'
+    case 'node': return event.actor_id ? `Node ${event.actor_id}` : 'Node'
+    case 'unauthenticated': return 'Unauthenticated'
+    case 'legacy_unknown': return 'Legacy actor'
+  }
+}
+
 export function AuditPage() {
   const { live, inventory, inventoryPending, inventoryError } = useControlPlane()
   const events = useMemo<AuditViewRecord[]>(() => (live
@@ -55,7 +67,7 @@ export function AuditPage() {
       id: event.event_id,
       timestampMs: event.created_at_unix_seconds * 1000,
       time: new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(event.created_at_unix_seconds * 1000)),
-      actor: event.actor_node_id || 'Not recorded',
+      actor: formatControllerAuditActor(event),
       action: event.action.replaceAll('_', ' '),
       actionCode: event.action,
       target: event.target_id || event.target_type,

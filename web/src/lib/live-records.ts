@@ -10,7 +10,7 @@ function expired(timestamp?: number) {
 
 export function isPendingControllerRoute(route: ControllerRoute) {
   return route.state === 'advertised'
-    && (!route.valid_until_unix_seconds || !expired(route.valid_until_unix_seconds))
+    && (route.valid_until_unix_seconds === undefined || !expired(route.valid_until_unix_seconds))
 }
 function nodeClass(node: ControllerNode): NodeRecord['enrollmentClass'] {
   if (node.enrollment_class === 'remembered') return 'Remembered user'
@@ -31,6 +31,7 @@ export function controllerNodes(nodes: ControllerNode[]): NodeRecord[] {
     const leaseExpired = node.enrollment_class === 'ephemeral' && expired(node.lease_expires_at_unix_seconds)
     return {
       id: node.node_id,
+      networkId: node.network_id,
       name: node.name || node.node_id,
       enrollmentClass: nodeClass(node),
       capabilityRoles: nodeCapabilityRoles(node),
@@ -52,6 +53,7 @@ export function controllerUsers(nodes: ControllerNode[], networkName: string): U
         : 'Until revoked'
       return {
         id: node.node_id,
+        networkId: node.network_id,
         subject: node.name || node.node_id,
         enrollment: node.enrollment_class === 'ephemeral' ? 'Ephemeral' : 'Remembered',
         network: networkName,
@@ -67,11 +69,12 @@ export function controllerRoutes(routes: ControllerRoute[], nodes: ControllerNod
   const nodeNames = new Map(nodes.map((node) => [node.node_id, node.name || node.node_id]))
   return routes.map((route) => {
     const routeExpired = (route.state === 'advertised' || route.state === 'approved')
-      && Boolean(route.valid_until_unix_seconds)
+      && route.valid_until_unix_seconds !== undefined
       && expired(route.valid_until_unix_seconds)
     const state = isPendingControllerRoute(route) ? 'Pending approval' : routeExpired ? 'Expired' : route.state === 'approved' ? 'Approved' : route.state === 'withdrawn' ? 'Withdrawn' : 'Rejected'
     return {
       id: route.route_id,
+      networkId: route.network_id,
       name: route.kind === 'exit' ? `Exit via ${nodeNames.get(route.node_id) ?? route.node_id}` : route.prefix,
       destination: route.prefix,
       via: nodeNames.get(route.node_id) ?? route.node_id,
@@ -94,8 +97,10 @@ function selectorSummary(selector: Record<string, unknown>) {
 export function controllerRules(rules: ControllerACLRule[]): AccessRuleRecord[] {
   return rules.map((rule) => ({
     id: rule.rule_id,
+    networkId: rule.network_id,
     priority: rule.priority,
-    name: rule.description || `${rule.action === 'accept' ? 'Allow' : 'Deny'} rule ${rule.priority}`,
+    name: rule.description.trim() || `${rule.action === 'accept' ? 'Allow' : 'Deny'} rule ${rule.priority}`,
+    rawDescription: rule.description,
     action: rule.action === 'accept' ? 'Allow' : 'Deny',
     selector: selectorSummary(rule.selector),
     target: 'Controller-evaluated traffic',

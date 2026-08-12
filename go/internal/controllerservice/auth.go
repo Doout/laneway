@@ -15,9 +15,9 @@ var (
 )
 
 // AdminAuthorizer is the compatibility contract for the static root bearer.
-// It must return only the stable root service-principal actor. Browser
-// administrator sessions use AccessController and are not wired through this
-// legacy management surface yet.
+// It must return only the stable root service-principal actor; the service
+// converts it to an immutable root Subject after credential transport has been
+// classified.
 type AdminAuthorizer func(*http.Request) (adminauth.Actor, error)
 
 // NodeAuthorizer authenticates a request as a node. Returning an identity does

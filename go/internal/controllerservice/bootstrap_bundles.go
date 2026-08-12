@@ -98,11 +98,6 @@ type bootstrapBundleResponse struct {
 }
 
 func (s *Service) createBootstrapBundle(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	var request bootstrapBundleRequest
 	if err := s.decodeJSON(w, r, &request); err != nil {
 		s.writeError(w, err, false)
@@ -126,9 +121,9 @@ func (s *Service) createBootstrapBundle(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "bootstrap service temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationBootstrapCreate, nil)
+	decision, err := s.administratorDecision(r, adminauth.GlobalTarget())
 	if err == nil {
-		err = s.store.AuditAdministratorMutation(mutationContext, "bootstrap_bundle.create", "bootstrap_bundle",
+		err = s.store.AdministratorAuditMutation(r.Context(), decision, "bootstrap_bundle.create", "bootstrap_bundle",
 			`{"storage":"ephemeral"}`)
 	}
 	if err != nil {

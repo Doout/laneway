@@ -278,6 +278,9 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 		requiredTables = append(requiredTables, "administrator_principals", "administrator_principal_networks",
 			"administrator_credentials", "administrator_sessions", "administrator_recovery_grants", "administrator_auth_state")
 	}
+	if version >= 9 {
+		requiredTables = append(requiredTables, "administrator_root_token_rotations")
+	}
 	for _, table := range requiredTables {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
@@ -288,7 +291,7 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 		}
 	}
 	if version >= 8 {
-		if err := validateAdministratorBackupSchema(ctx, db); err != nil {
+		if err := validateAdministratorBackupSchema(ctx, db, version); err != nil {
 			return err
 		}
 	}
@@ -306,8 +309,8 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	return nil
 }
 
-func validateAdministratorBackupSchema(ctx context.Context, db *sql.DB) error {
-	want, wantObjects, err := expectedAdministratorSchemaFingerprint(ctx)
+func validateAdministratorBackupSchema(ctx context.Context, db *sql.DB, version int) error {
+	want, wantObjects, err := expectedAdministratorSchemaFingerprint(ctx, version)
 	if err != nil {
 		return fmt.Errorf("build canonical administrator schema: %w", err)
 	}
@@ -316,7 +319,7 @@ func validateAdministratorBackupSchema(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("fingerprint backup administrator schema: %w", err)
 	}
 	if gotObjects != wantObjects || got != want {
-		return errors.New("backup schema is incomplete: administrator schema does not match the canonical v8 definition")
+		return fmt.Errorf("backup schema is incomplete: administrator schema does not match the canonical v%d definition", version)
 	}
 	var singletonCount int
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_auth_state
@@ -330,17 +333,18 @@ func validateAdministratorBackupSchema(ctx context.Context, db *sql.DB) error {
 }
 
 var administratorSchemaTables = map[string]struct{}{
-	"administrator_principals":         {},
-	"administrator_principal_networks": {},
-	"administrator_credentials":        {},
-	"administrator_sessions":           {},
-	"administrator_recovery_grants":    {},
-	"administrator_auth_state":         {},
-	"audit_events":                     {},
+	"administrator_principals":           {},
+	"administrator_principal_networks":   {},
+	"administrator_credentials":          {},
+	"administrator_sessions":             {},
+	"administrator_recovery_grants":      {},
+	"administrator_auth_state":           {},
+	"administrator_root_token_rotations": {},
+	"audit_events":                       {},
 }
 
 // administratorSchemaFingerprint covers the exact sqlite_schema text and
-// complete object set for every security-critical v8 table. This includes
+// complete object set for every security-critical administrator table. This includes
 // implicit/explicit indexes and triggers, so altered CHECK/FK clauses,
 // partial-index predicates, STRICT declarations, or unexpected triggers all
 // change the fingerprint.
@@ -376,7 +380,10 @@ func administratorSchemaFingerprint(ctx context.Context, db *sql.DB) ([sha256.Si
 	return result, objects, nil
 }
 
-func expectedAdministratorSchemaFingerprint(ctx context.Context) ([sha256.Size]byte, int, error) {
+func expectedAdministratorSchemaFingerprint(ctx context.Context, version int) ([sha256.Size]byte, int, error) {
+	if version < 8 || version > currentSchemaVersion {
+		return [sha256.Size]byte{}, 0, fmt.Errorf("unsupported administrator schema version %d", version)
+	}
 	reference, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		return [sha256.Size]byte{}, 0, err
@@ -386,9 +393,9 @@ func expectedAdministratorSchemaFingerprint(ctx context.Context) ([sha256.Size]b
 	if _, err := reference.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
 		return [sha256.Size]byte{}, 0, err
 	}
-	for version, migration := range migrations {
+	for migrationIndex, migration := range migrations[:version] {
 		if _, err := reference.ExecContext(ctx, migration); err != nil {
-			return [sha256.Size]byte{}, 0, fmt.Errorf("apply reference migration %d: %w", version+1, err)
+			return [sha256.Size]byte{}, 0, fmt.Errorf("apply reference migration %d: %w", migrationIndex+1, err)
 		}
 	}
 	return administratorSchemaFingerprint(ctx, reference)

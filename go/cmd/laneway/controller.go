@@ -71,11 +71,13 @@ func (f remoteFlags) client() (*controllerclient.Client, error) {
 
 func runController(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: laneway controller <overview|network|enrollment-token|bootstrap-bundle|route|acl|node|certificate|relay|audit> ...")
+		return errors.New("usage: laneway controller <overview|administrator|network|enrollment-token|bootstrap-bundle|route|acl|node|certificate|relay|audit> ...")
 	}
 	switch args[0] {
 	case "overview":
 		return runControllerOverview(args[1:])
+	case "administrator":
+		return runControllerAdministrator(args[1:])
 	case "network":
 		return runControllerNetwork(args[1:])
 	case "enrollment-token":

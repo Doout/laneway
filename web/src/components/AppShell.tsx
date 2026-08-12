@@ -11,31 +11,31 @@ import {
 } from 'lucide-react'
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
-import { useControlPlane } from '../lib/control-plane'
+import { isNetworkScopedAdministratorPermission, useControlPlane, type AdministratorPermission } from '../lib/control-plane'
 import { isPendingControllerRoute } from '../lib/live-records'
 
 const navigation = [
   {
     label: 'Control',
     items: [
-      { label: 'Overview', to: '/overview', icon: LayoutDashboard },
-      { label: 'Nodes', to: '/nodes', icon: MonitorDot },
-      { label: 'Users', to: '/users', icon: Users },
+      { label: 'Overview', to: '/overview', icon: LayoutDashboard, permission: 'network.list' },
+      { label: 'Nodes', to: '/nodes', icon: MonitorDot, permission: 'node.read' },
+      { label: 'Users', to: '/users', icon: Users, permission: 'node.read' },
     ],
   },
   {
     label: 'Connectivity',
     items: [
-      { label: 'Routes', to: '/routes', icon: Route },
-      { label: 'Infrastructure', to: '/infrastructure', icon: Network },
+      { label: 'Routes', to: '/routes', icon: Route, permission: 'route.read' },
+      { label: 'Infrastructure', to: '/infrastructure', icon: Network, permission: 'network.list' },
     ],
   },
   {
     label: 'Governance',
     items: [
-      { label: 'Access', to: '/access', icon: ShieldCheck },
-      { label: 'Security', to: '/security', icon: RadioTower },
-      { label: 'Audit', to: '/audit', icon: ScrollText },
+      { label: 'Access', to: '/access', icon: ShieldCheck, permission: 'acl.read' },
+      { label: 'Security', to: '/security', icon: RadioTower, permission: 'certificate.read' },
+      { label: 'Audit', to: '/audit', icon: ScrollText, permission: 'audit.read' },
     ],
   },
 ]
@@ -83,7 +83,7 @@ function Breadcrumbs({ pathname }: { pathname: string }) {
 export function AppShell() {
   const location = useLocation()
   const navigate = useNavigate()
-  const { live, inventory, inventoryError, inventoryPending, refresh, signOut } = useControlPlane()
+  const { live, session, inventory, inventoryError, inventoryPending, authPending, authError, hasPermission, refresh, signOut } = useControlPlane()
   const networkName = inventory?.network?.name
   const epoch = inventory?.network?.configuration_epoch
   const pendingRoutes = live ? inventory?.routes.filter(isPendingControllerRoute).length ?? 0 : 2
@@ -93,18 +93,26 @@ export function AppShell() {
       ? inventoryPending ? 'Refreshing inventory…' : 'Inventory loaded'
       : 'Loading inventory…'
 
-  function handleSignOut() {
-    signOut()
-    navigate('/sign-in', { replace: true })
+  async function handleSignOut() {
+    if (await signOut()) navigate('/sign-in', { replace: true })
   }
 
   return <div className="app-shell">
     <aside className="sidebar">
       <Link to="/overview" className="wordmark" aria-label="Laneway overview"><BrandMark /><span>Laneway</span></Link>
       <nav className="sidebar-nav" aria-label="Primary navigation">
-        {navigation.map(group => <section className="sidebar-nav__group" key={group.label}>
+        {navigation.map(group => {
+          const visibleItems = group.items.filter(item => {
+            const permission = item.permission as AdministratorPermission
+            if (!live) return true
+            if (!isNetworkScopedAdministratorPermission(permission)) return hasPermission(permission)
+            const networkId = inventory?.network?.network_id
+            return Boolean(networkId && hasPermission(permission, networkId))
+          })
+          if (!visibleItems.length) return null
+          return <section className="sidebar-nav__group" key={group.label}>
           <h2>{group.label}</h2>
-          {group.items.map(item => {
+          {visibleItems.map(item => {
             const Icon = item.icon
             const accessibleLabel = item.to === '/routes' && pendingRoutes > 0
               ? `${item.label}, ${pendingRoutes} routes need review`
@@ -115,7 +123,7 @@ export function AppShell() {
               {item.to === '/routes' && pendingRoutes > 0 ? <em aria-label={`${pendingRoutes} routes need review`}>{pendingRoutes}</em> : null}
             </NavLink>
           })}
-        </section>)}
+        </section>})}
       </nav>
       {live && networkName ? <div className="sidebar-environment">
         <span className="sidebar-environment__icon"><Network aria-hidden="true" size={17} /></span>
@@ -128,9 +136,12 @@ export function AppShell() {
         <Breadcrumbs pathname={location.pathname} />
         <div className="command-bar__tools">
           {live ? <button className="refresh-button" type="button" onClick={() => void refresh()} disabled={inventoryPending} aria-label="Refresh controller inventory"><RefreshCw aria-hidden="true" size={15} /></button> : null}
-          {live ? <button className="sign-out-button" type="button" onClick={handleSignOut}>Sign out</button> : null}
+          {live && session ? <div className="administrator-identity" aria-label="Signed in administrator"><strong>{session.username}</strong><span>{session.role}</span></div> : null}
+          {live ? <button className="sign-out-button" type="button" onClick={() => void handleSignOut()} disabled={authPending}>{authPending ? 'Signing out…' : 'Sign out'}</button> : null}
         </div>
       </header>
+
+      {live && authError ? <div className="session-error" role="alert">{authError}</div> : null}
 
       {!live ? <div className="demo-notice" role="note" aria-label="Demo data notice">
         <strong>Demo data</strong>

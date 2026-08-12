@@ -25,7 +25,7 @@ const connectorColumns: DataColumn<ConnectorRecord>[] = [
 export function NetworkDetailPage() {
   const { networkId } = useParams()
   const navigate = useNavigate()
-  const { networks, relays, live, inventory } = useInfrastructureView()
+  const { networks, relays, live, inventory, hasPermission } = useInfrastructureView()
   const network = networks.find((record) => record.id === networkId)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [confirmation, setConfirmation] = useState('')
@@ -44,6 +44,8 @@ export function NetworkDetailPage() {
     : network.connector.id === 'none' ? [] : [{ ...network.connector, routes: network.routes, state: network.connector.state }]
   const visibleConnectorColumns = live ? connectorColumns.filter((column) => column.key !== 'sessions') : connectorColumns
   const deletionImpact = `Deleting ${network.name} withdraws ${network.routes} routes, removes address assignment for ${network.nodes} nodes, and removes access for ${network.userEnrollments} user enrollments. ${networkRelays.length} assigned relay${networkRelays.length === 1 ? '' : 's'} will be changed to All networks. Node and relay records are retained.`
+  const canManageRoutes = !live || hasPermission('route.manage', network.id)
+  const canIssueEnrollment = !live || hasPermission('enrollment.issue', network.id)
 
   function handleDelete() {
     if (confirmation !== selectedNetwork.name) return
@@ -66,7 +68,7 @@ export function NetworkDetailPage() {
       <PageHeader
         title={`${network.name} network`}
         description={`${network.addressPool} · ${network.nodes} nodes`}
-        action={<div className="button-row"><Button to="/routes/new" variant="secondary"><Route aria-hidden="true" size={16} /> Add route</Button><Button to="/nodes/new" variant="primary"><Plus aria-hidden="true" size={16} /> Add node</Button></div>}
+        action={canManageRoutes || canIssueEnrollment ? <div className="button-row">{canManageRoutes ? <Button to="/routes/new" variant="secondary"><Route aria-hidden="true" size={16} /> Add route</Button> : null}{canIssueEnrollment ? <Button to="/nodes/new" variant="primary"><Plus aria-hidden="true" size={16} /> Add node</Button> : null}</div> : undefined}
       />
 
       <div className={`infra-health-strip${live ? ' is-live-network' : ''}`} aria-label={`${network.name} summary`}>
@@ -87,7 +89,7 @@ export function NetworkDetailPage() {
             <div><span className="infra-path-icon is-mint"><Network aria-hidden="true" size={19} /></span><strong>Private services</strong><small>{network.healthyRoutes} healthy · {network.routes - network.healthyRoutes} pending</small></div>
             {networkRelays[0] ? <Link className="infra-fallback-path" to={`/infrastructure/relays/${networkRelays[0].id}`}><RadioTower aria-hidden="true" size={15} /> {networkRelays[0].name} · authenticated fallback</Link> : null}
           </div></> : null}
-          <div className="infra-panel-head infra-connectors-head"><div><h2 id="network-connectors-title">Connectors</h2></div>{live ? !connectorRows.length ? <Button disabled title="Connector onboarding is unavailable in the console." variant="secondary">Onboarding unavailable</Button> : null : network.connector.id === 'none' ? <Button to="/nodes/new" variant="secondary">Add connector</Button> : <Button to={`/nodes/${network.connector.id}`} variant="quiet">Open connector</Button>}</div>
+          <div className="infra-panel-head infra-connectors-head"><div><h2 id="network-connectors-title">Connectors</h2></div>{live ? null : network.connector.id === 'none' ? <Button to="/nodes/new" variant="secondary">Add connector</Button> : <Button to={`/nodes/${network.connector.id}`} variant="quiet">Open connector</Button>}</div>
           <DataTable columns={visibleConnectorColumns} empty={<p className="infra-empty-copy">{live ? 'No node has the connector capability enabled.' : 'No connector is assigned. Add a connector before publishing routes.'}</p>} rowKey={(row) => row.id} rows={connectorRows} />
         </section>
 
@@ -102,7 +104,7 @@ export function NetworkDetailPage() {
             {live ? <div><dt>Configuration epoch</dt><dd>{network.configurationEpoch ?? '—'}</dd></div> : <><div><dt>Last result</dt><dd>{network.lastAction}</dd></div><div><dt>Recorded</dt><dd>{network.updatedAt}</dd></div></>}
           </dl>
           {network.routes > network.healthyRoutes ? <div className="infra-inspector-callout"><TriangleAlert aria-hidden="true" size={17} /><p><strong>Route pending.</strong> It is not distributed until approved.</p></div> : null}
-          <div className="infra-inspector-actions">{network.routes > network.healthyRoutes && pendingRouteId ? <Button to={`/routes/${pendingRouteId}/approve`} variant="primary">Review pending route</Button> : null}<Button disabled={live} onClick={() => setConfirmingDelete(true)} title={live ? 'Network deletion is not supported by the current controller API.' : undefined} variant="quiet">{live ? 'Deletion unavailable in live mode' : 'Delete network'}</Button></div>
+          <div className="infra-inspector-actions">{network.routes > network.healthyRoutes && pendingRouteId ? <Button to={canManageRoutes ? `/routes/${pendingRouteId}/approve` : `/routes/${pendingRouteId}`} variant="primary">Review pending route</Button> : null}{!live ? <Button onClick={() => setConfirmingDelete(true)} variant="quiet">Delete network</Button> : null}</div>
         </aside>
       </div>
     </>

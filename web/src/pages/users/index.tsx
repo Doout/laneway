@@ -31,7 +31,6 @@ import './users.css'
 
 const userToken = 'lnw_user_01J8PLATFORM_7gN2mK6xV4qC'
 type IssuedUserToken = { id?: string; tokenId?: string; subject?: string; enrollment?: string; networkName?: string; leaseHours?: number; token?: string }
-let liveIssuedUserToken: IssuedUserToken | null = null
 
 function userForId(id?: string, records = persistedUsers()) {
   return records.find(user => user.id === id || user.subject.toLowerCase().replace(/[^a-z0-9]+/g, '-') === id)
@@ -42,7 +41,7 @@ function UserNotFound({ id }: { id?: string }) {
 }
 
 export function UsersListPage() {
-  const { live, inventory } = useControlPlane()
+  const { live, inventory, hasPermission } = useControlPlane()
   const records = live ? controllerUsers(inventory?.nodes ?? [], inventory?.network?.name ?? 'Controller network') : persistedUsers()
   const [query, setQuery] = useState('')
   const [kind, setKind] = useState('all')
@@ -59,9 +58,10 @@ export function UsersListPage() {
   const selectedControllerNode = live && selected ? inventory?.nodes.find(node => node.node_id === selected.id) : undefined
   const activeCount = records.filter(user => user.state === 'Active').length
   const ephemeralCount = records.filter(user => user.enrollment === 'Ephemeral').length
+  const canIssueEnrollment = !live || Boolean(inventory?.network && hasPermission('enrollment.issue', inventory.network.network_id))
 
   return <div className="users-page">
-    <PageHeader title="Users" action={<Button to="/users/new" variant="primary"><KeyRound size={17} />Issue access</Button>} />
+    <PageHeader title="Users" action={canIssueEnrollment ? <Button to="/users/new" variant="primary"><KeyRound size={17} />Issue access</Button> : undefined} />
     <div className="users-health-strip" aria-label="User access summary">
       <div><strong>{activeCount}</strong><span>Active enrollments</span></div><div><strong>{live ? records.length : records.reduce((total, user) => total + user.devices, 0)}</strong><span>{live ? 'Enrollment nodes' : 'Enrolled devices'}</span></div><div><strong>{ephemeralCount}</strong><span>{live ? 'Ephemeral enrollment nodes' : 'Ephemeral enrollments'}</span></div>{live ? <div><strong>{records.length - activeCount}</strong><span>Inactive enrollments</span></div> : null}
     </div>
@@ -85,14 +85,14 @@ export function UsersListPage() {
             { key: 'action', label: '', align: 'end', render: user => <Button onClick={() => setSelectedId(user.id)} variant={selected?.id === user.id ? 'secondary' : 'quiet'}>Inspect</Button> },
           ]}
         /></section>
-        {selected ? <aside className="users-panel users-inspector"><span className="users-panel-label">Inspector</span><h2>{selected.subject}</h2><p>{selected.enrollment} enrollment · {selected.state}</p>{live ? <dl><div><dt>Node ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>IPv4</dt><dd><code>{selectedControllerNode?.ipv4_address ?? 'Not assigned'}</code></dd></div><div><dt>IPv6</dt><dd><code>{selectedControllerNode?.ipv6_address ?? 'Not assigned'}</code></dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl> : <dl><div><dt>Enrollment ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>Devices</dt><dd>{selected.devices}</dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl>}<div className="button-row"><Button to={`/users/${selected.id}`} variant="primary">View details</Button><Button to="/users/new" variant="quiet">Issue access</Button></div></aside> : null}
+        {selected ? <aside className="users-panel users-inspector"><span className="users-panel-label">Inspector</span><h2>{selected.subject}</h2><p>{selected.enrollment} enrollment · {selected.state}</p>{live ? <dl><div><dt>Node ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>IPv4</dt><dd><code>{selectedControllerNode?.ipv4_address ?? 'Not assigned'}</code></dd></div><div><dt>IPv6</dt><dd><code>{selectedControllerNode?.ipv6_address ?? 'Not assigned'}</code></dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl> : <dl><div><dt>Enrollment ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>Devices</dt><dd>{selected.devices}</dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl>}<div className="button-row"><Button to={`/users/${selected.id}`} variant="primary">View details</Button>{canIssueEnrollment ? <Button to="/users/new" variant="quiet">Issue access</Button> : null}</div></aside> : null}
       </div>
     </div>
   </div>
 }
 
 export function IssueUserAccessPage() {
-  const { live, inventory, inventoryPending, request } = useControlPlane()
+  const { live, inventory, inventoryPending, request, captureSessionBinding, storeIssuedEnrollmentToken } = useControlPlane()
   const navigate = useNavigate()
   const [subject, setSubject] = useState('')
   const [enrollment, setEnrollment] = useState('Ephemeral')
@@ -119,6 +119,11 @@ export function IssueUserAccessPage() {
         setSubmitError('The controller has no active network. Refresh the inventory and try again.')
         return
       }
+      const sessionBinding = captureSessionBinding()
+      if (!sessionBinding) {
+        setSubmitError('The administrator session changed. Try again.')
+        return
+      }
       setPending(true)
       setSubmitError('')
       try {
@@ -130,7 +135,10 @@ export function IssueUserAccessPage() {
           enrollment_class: enrollment.toLowerCase(),
           session_lifetime_seconds: enrollment === 'Ephemeral' ? leaseHours * 3600 : 0,
         } })
-        liveIssuedUserToken = { tokenId: issued.token_id, subject: subject.trim(), enrollment, networkName: inventory.network.name, leaseHours, token: issued.enrollment_token }
+        if (typeof issued.enrollment_token !== 'string' || issued.enrollment_token.length === 0 || typeof issued.token_id !== 'string' ||
+          !storeIssuedEnrollmentToken(sessionBinding, { kind: 'user', tokenId: issued.token_id, subject: subject.trim(), enrollment, networkName: inventory.network.name, leaseHours, token: issued.enrollment_token })) {
+          throw new Error('The administrator session changed before the token could be shown.')
+        }
         navigate('/users/new/token')
       } catch (error) {
         setSubmitError(error instanceof Error ? error.message : 'The controller could not issue this access token.')
@@ -170,8 +178,9 @@ export function IssueUserAccessPage() {
 
 export function UserTokenPage() {
   const location = useLocation()
-  const { live } = useControlPlane()
-  const [transientIssue] = useState<IssuedUserToken | null>(() => live ? liveIssuedUserToken : null)
+  const { live, peekIssuedEnrollmentToken, clearIssuedEnrollmentToken, isSessionBindingCurrent } = useControlPlane()
+  const [sessionIssue] = useState(() => live ? peekIssuedEnrollmentToken() : null)
+  const transientIssue: IssuedUserToken | null = sessionIssue && isSessionBindingCurrent(sessionIssue.binding) && sessionIssue.value.kind === 'user' ? sessionIssue.value : null
   const issued = live ? transientIssue : location.state as IssuedUserToken | null
   const displayedToken = issued?.token ?? userToken
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
@@ -179,8 +188,8 @@ export function UserTokenPage() {
   const enrollmentCommand = userEnrollmentCommand(controllerDomain, issued?.enrollment === 'Ephemeral' ? 'Ephemeral' : 'Remembered')
 
   useEffect(() => {
-    if (live) liveIssuedUserToken = null
-  }, [live])
+    if (live && sessionIssue) clearIssuedEnrollmentToken(sessionIssue.binding)
+  }, [clearIssuedEnrollmentToken, live, sessionIssue])
 
   async function copyToken() {
     try {

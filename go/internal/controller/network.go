@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/netvalidate"
 )
@@ -78,15 +79,97 @@ func (s *Store) CreateNetworkDualStackWithID(ctx context.Context, id identity.Ne
 	return Network{ID: id, Name: name, IPv4Pool: pool, IPv6Pool: ipv6Pool, ConfigurationEpoch: 1, CreatedAt: now}, nil
 }
 
+// AdministratorCreateNetworkDualStack creates a network only after the
+// decision's durable subject is revalidated in the insertion and audit
+// transaction.
+func (s *Store) AdministratorCreateNetworkDualStack(ctx context.Context, decision adminauth.Decision, name string, pool netip.Prefix, ipv6Pool netip.Prefix) (Network, error) {
+	id, err := identity.NewNetworkID()
+	if err != nil {
+		return Network{}, fmt.Errorf("generate network ID: %w", err)
+	}
+	return s.AdministratorCreateNetworkDualStackWithID(ctx, decision, id, name, pool, ipv6Pool)
+}
+
+func (s *Store) AdministratorCreateNetworkDualStackWithID(ctx context.Context, decision adminauth.Decision, id identity.NetworkID, name string, pool netip.Prefix, ipv6Pool netip.Prefix) (Network, error) {
+	if id.IsZero() {
+		return Network{}, fmt.Errorf("%w: network ID", ErrInvalid)
+	}
+	if err := validateName("network", name); err != nil {
+		return Network{}, err
+	}
+	if netvalidate.RoutablePrefix(pool, false) != nil || !pool.Addr().Is4() || pool.Bits() < 8 || pool.Bits() > 30 {
+		return Network{}, fmt.Errorf("%w: IPv4 pool must be a canonical /8 through /30", ErrInvalid)
+	}
+	if ipv6Pool.IsValid() && (netvalidate.RoutablePrefix(ipv6Pool, false) != nil || ipv6Pool.Addr().Is4() || ipv6Pool.Bits() < 64 || ipv6Pool.Bits() > 120) {
+		return Network{}, fmt.Errorf("%w: IPv6 pool must be a canonical /64 through /120", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Network{}, fmt.Errorf("begin authorized network creation: %w", err)
+	}
+	defer tx.Rollback()
+	now := s.now()
+	actor, err := s.authorizeAdministratorGlobalResourceTx(ctx, tx, decision, administratorNetworkCreatePolicy, adminauth.GlobalTarget())
+	if err != nil {
+		return Network{}, err
+	}
+	a4 := pool.Addr().As4()
+	var a6, bits6 any
+	if ipv6Pool.IsValid() {
+		value := ipv6Pool.Addr().As16()
+		a6, bits6 = value[:], ipv6Pool.Bits()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO networks
+		(id,name,ipv4_address,ipv4_prefix_length,next_ipv4,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length)
+		VALUES(?,?,?,?,1,1,?,?,?)`, idBytes(id), name, a4[:], pool.Bits(), unix(now), a6, bits6); err != nil {
+		if isConstraint(err) {
+			return Network{}, fmt.Errorf("%w: network name or ID", ErrConflict)
+		}
+		return Network{}, fmt.Errorf("insert network: %w", err)
+	}
+	target := identity.ID(id)
+	if err := auditActorTx(ctx, tx, &id, actor, "network.create", "network", &target, `{}`, now); err != nil {
+		return Network{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Network{}, fmt.Errorf("commit authorized network creation: %w", err)
+	}
+	return Network{ID: id, Name: name, IPv4Pool: pool, IPv6Pool: ipv6Pool, ConfigurationEpoch: 1, CreatedAt: now}, nil
+}
+
 func (s *Store) Network(ctx context.Context, networkID identity.NetworkID) (Network, error) {
+	return networkByRow(s.db.QueryRowContext(ctx, `SELECT name,ipv4_address,ipv4_prefix_length,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length
+		FROM networks WHERE id=?`, idBytes(networkID)), networkID)
+}
+
+func (s *Store) AdministratorNetwork(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID) (Network, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Network{}, err
+	}
+	defer tx.Rollback()
+	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorNetworkReadPolicy, networkID); err != nil {
+		return Network{}, err
+	}
+	result, err := networkByRow(tx.QueryRowContext(ctx, `SELECT name,ipv4_address,ipv4_prefix_length,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length
+		FROM networks WHERE id=?`, idBytes(networkID)), networkID)
+	if err != nil {
+		return Network{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Network{}, err
+	}
+	return result, nil
+}
+
+func networkByRow(row rowScanner, networkID identity.NetworkID) (Network, error) {
 	var name string
 	var addr, addr6 []byte
 	var bits int
 	var bits6 sql.NullInt64
 	var epoch int64
 	var created int64
-	err := s.db.QueryRowContext(ctx, `SELECT name,ipv4_address,ipv4_prefix_length,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length
-		FROM networks WHERE id=?`, idBytes(networkID)).Scan(&name, &addr, &bits, &epoch, &created, &addr6, &bits6)
+	err := row.Scan(&name, &addr, &bits, &epoch, &created, &addr6, &bits6)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Network{}, ErrNotFound
 	}

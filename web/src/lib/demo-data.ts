@@ -2,6 +2,7 @@ export type StateTone = 'positive' | 'warning' | 'danger' | 'muted'
 
 export interface NodeRecord {
   id: string
+  networkId?: string
   name: string
   enrollmentClass: 'Connector' | 'Durable' | 'Exit node' | 'Remembered user' | 'Ephemeral user'
   capabilityRoles?: Array<'Subnet router' | 'Exit node'>
@@ -21,6 +22,7 @@ export const nodes: NodeRecord[] = [
 
 export interface UserEnrollmentRecord {
   id: string
+  networkId?: string
   subject: string
   enrollment: 'Remembered' | 'Ephemeral'
   network: string
@@ -38,6 +40,7 @@ export const userEnrollments: UserEnrollmentRecord[] = [
 
 export interface RouteRecord {
   id: string
+  networkId?: string
   name: string
   destination: string
   via: string
@@ -56,8 +59,10 @@ export const routes: RouteRecord[] = [
 
 export interface AccessRuleRecord {
   id: string
+  networkId?: string
   priority: number
   name: string
+  rawDescription?: string
   action: 'Allow' | 'Deny'
   selector: string
   target: string

@@ -34,6 +34,100 @@ during an upgrade. Update a Connector with:
 sudo laneway-update-connector laneway-connector-office
 ```
 
+## Administrator lifecycle
+
+The browser console uses revocable administrator sessions. The static root
+bearer is reserved for bootstrap, recovery, root-token rotation, and deliberate
+non-browser automation.
+
+### First owner and owner recovery
+
+Run administrator lifecycle commands as root on the control-plane host:
+
+```sh
+sudo laneway control administrator bootstrap --username owner
+sudo laneway control administrator recover --username owner
+```
+
+Bootstrap succeeds only before the first owner has been created. Recovery
+requires the exact canonical username of an existing owner; matching is not
+case-folded or prefix-based. Usernames are 3–64 lowercase ASCII bytes, begin and
+end with a letter or digit, and may contain `.`, `_`, or `-` internally.
+
+Both commands require a controlling terminal. If they are invoked through SSH,
+allocate one explicitly. The command reads a valid UTF-8 password of 15–1024
+bytes and its confirmation from `/dev/tty` with echo disabled. It does not read
+the password from stdin and accepts no password or recovery-grant flag.
+Passwords, grants, and bearer values are not placed in argv, environment
+variables, lifecycle logs, or command output.
+
+After prompting, the command obtains and immediately consumes a ten-minute,
+one-use grant. If an attempt is interrupted before consumption, a retry
+supersedes an inaccessible prior grant. If the controller commits consumption
+but its response is lost, bootstrap is already complete and recovery has
+already installed the new password; verify by signing in before deliberately
+running recovery again. Successful bootstrap creates the first enabled owner.
+Successful recovery replaces the owner password, re-enables the owner, and
+atomically revokes all existing sessions and outstanding administrator
+recovery grants. Neither operation creates a browser session, so sign in
+normally afterward.
+
+Only password-backed administrator sessions are supported. OIDC/SAML SSO and
+SCIM are unavailable; leave them disabled. Never paste or otherwise expose the
+root bearer in the browser.
+
+### Root bearer automation and rotation
+
+Controller CLI automation must read the bearer from its protected file:
+
+```text
+--admin-token-file DEPLOYMENT_DIR/generated/secrets/admin.token
+```
+
+The default deployment directory is `/opt/laneway`.
+
+Do not copy the bearer into a command line or environment variable. Automation
+should reopen the file for each invocation; restart any long-lived process that
+cached the old value after rotation.
+
+Encrypted recovery bundles contain the bearer that existed when each bundle
+was created. After restoring any bundle, immediately rotate the root token and
+create a fresh encrypted bundle. If suspected credential compromise prompted a
+rotation, quarantine and retire pre-rotation bundles under the site's retention
+policy instead of returning them to the recovery set.
+
+Rotate the credential with:
+
+```sh
+sudo laneway control administrator root-token rotate
+```
+
+Rotation uses the same shared lifecycle lock as backup, restore, update,
+upgrade, rollback, bootstrap, and recovery. It atomically publishes the
+replacement at the existing token path and force-recreates only the controller.
+Expect a brief control-plane interruption.
+
+Protected progress and credential copies are kept under:
+
+```text
+DEPLOYMENT_DIR/generated/lifecycle/administrator-root-token-rotation/
+```
+
+Treat the entire directory as secret: do not print, copy, edit, or remove its
+contents. Before the commit point, the wrapper attempts to leave the live
+credential unchanged or restore and verify the prior credential. If automatic
+restore, controller recreation, or proof cannot finish, it retains protected
+state for a safe rerun instead of discarding either credential. Commit occurs
+only after the new credential authenticates and the prior credential is
+rejected. After that proof, rollback is forbidden: the new credential remains
+authoritative even if completion auditing or cleanup fails.
+
+Rerun the same rotation command after an interruption. It resumes the recorded
+phase, completes a pending rollback, or republishes and verifies the committed
+new credential before retrying completion. If it reports that the prior
+credential was restored and verified, run it once more to begin a fresh
+rotation. Successful completion removes the protected rotation directory.
+
 ## Client lifecycle
 
 With one saved login, `laneway connect` remembers its domain. With several,
@@ -177,6 +271,46 @@ After a crash, Laneway reclaims only exact state carrying its ownership markers.
 If startup refuses recovery, stop every Laneway process, inspect the conflicting
 objects, remove only confirmed Laneway residue, and restore the site's recorded
 baseline.
+
+### Stale control-plane lifecycle lock
+
+A host crash or uncatchable process termination can leave the conservative
+shared lock at:
+
+```text
+DEPLOYMENT_DIR/generated/lifecycle/operator.lock
+```
+
+The commands below use the default deployment directory, `/opt/laneway`.
+
+Do not assume the lock is stale from its age. First coordinate with other
+operators, inspect the process tree and protected state without reading file
+contents, and check controller health:
+
+```sh
+sudo ps -ef --forest
+sudo stat -c '%F %a %U:%G %n' \
+  /opt/laneway/generated/lifecycle/operator.lock
+sudo find /opt/laneway/generated/lifecycle -mindepth 1 -maxdepth 2 \
+  -printf '%M %u:%g %p\n'
+sudo laneway control status
+```
+
+Confirm that no `laneway-control`, recovery or upgrade helper, or related
+Docker Compose child remains. Only when the exact lock path is a real, empty,
+root-owned directory and the originating operation is known to have stopped,
+remove it with the non-recursive command:
+
+```sh
+sudo rmdir -- /opt/laneway/generated/lifecycle/operator.lock
+```
+
+If `rmdir` refuses, stop and investigate; do not substitute recursive removal.
+Never delete another object under `generated/lifecycle` to clear the lock. In
+particular, if `administrator-root-token-rotation` exists, leave it intact,
+remove only the confirmed stale lock, and rerun
+`sudo laneway control administrator root-token rotate` so the recorded state
+machine can recover safely.
 
 Controller, relay, and `lane-edge` Connector containers run non-root with
 read-only scratch roots. The full Exit Node alone needs `NET_ADMIN` and

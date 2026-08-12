@@ -8,10 +8,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -20,9 +22,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/identity"
 )
@@ -31,6 +35,7 @@ const (
 	MaxResponseBytes       = 1 << 20
 	MaxJSONRequestBytes    = 128 << 10
 	maxAdminTokenBytes     = 8 << 10
+	maxLifecycleReplyBytes = 8 << 10
 	snapshotValidityHeader = "X-Laneway-Configuration-Valid-Until"
 )
 
@@ -799,6 +804,747 @@ func (c *Client) Audit(ctx context.Context, networkID identity.NetworkID, limit 
 	path := "/v1/admin/networks/" + networkID.String() + "/audit?limit=" + strconv.Itoa(limit)
 	err := c.json(ctx, http.MethodGet, path, nil, &response, true)
 	return response.Events, err
+}
+
+// BootstrapFirstAdministrator issues and immediately consumes a bootstrap
+// grant. The one-use grant never leaves this process, and the password is sent
+// only by the explicitly unauthenticated request over the pinned controller
+// connection. The method takes ownership of password and clears it before
+// returning.
+func (c *Client) BootstrapFirstAdministrator(ctx context.Context, username string, password []byte) error {
+	defer clear(password)
+	if !adminauth.ValidateUsername(username) {
+		return errors.New("controller client: valid administrator username is required")
+	}
+	if err := validateLifecyclePassword(password); err != nil {
+		return err
+	}
+	grant, err := c.issueAdministratorLifecycleGrant(ctx, "/v1/admin/auth/bootstrap-grants")
+	if err != nil {
+		return err
+	}
+	defer clear(grant)
+	payload, err := administratorLifecyclePayload(grant, username, password)
+	if err != nil {
+		return err
+	}
+	defer clear(payload)
+	return c.consumeAdministratorLifecycleGrant(ctx, "/v1/admin/auth/bootstrap", payload)
+}
+
+// RecoverAdministratorOwner resolves an exact canonical owner username before
+// issuing and consuming its one-use recovery grant. Recovery never guesses a
+// principal from list ordering. The method takes ownership of password and
+// clears it before returning.
+func (c *Client) RecoverAdministratorOwner(ctx context.Context, username string, password []byte) error {
+	defer clear(password)
+	if !adminauth.ValidateUsername(username) {
+		return errors.New("controller client: valid administrator username is required")
+	}
+	if err := validateLifecyclePassword(password); err != nil {
+		return err
+	}
+	principalID, err := c.administratorOwnerByUsername(ctx, username)
+	if err != nil {
+		return err
+	}
+	grant, err := c.issueAdministratorLifecycleGrant(ctx,
+		"/v1/admin/administrators/"+principalID.String()+"/recovery-grants")
+	if err != nil {
+		return err
+	}
+	defer clear(grant)
+	payload, err := administratorLifecyclePayload(grant, "", password)
+	if err != nil {
+		return err
+	}
+	defer clear(payload)
+	return c.consumeAdministratorLifecycleGrant(ctx, "/v1/admin/auth/recover", payload)
+}
+
+func validateLifecyclePassword(password []byte) error {
+	if err := adminauth.ValidatePassword(password); err != nil {
+		return err
+	}
+	if !utf8.Valid(password) {
+		return errors.New("controller client: administrator password must be valid UTF-8")
+	}
+	return nil
+}
+
+type lifecycleAdministrator struct {
+	PrincipalID                  string         `json:"principal_id"`
+	Username                     string         `json:"username"`
+	Role                         adminauth.Role `json:"role"`
+	Enabled                      bool           `json:"enabled"`
+	AllNetworks                  bool           `json:"all_networks"`
+	NetworkIDs                   []string       `json:"network_ids"`
+	CreatedAtUnixSeconds         int64          `json:"created_at_unix_seconds"`
+	UpdatedAtUnixSeconds         int64          `json:"updated_at_unix_seconds"`
+	DisabledAtUnixSeconds        *int64         `json:"disabled_at_unix_seconds,omitempty"`
+	PasswordUpdatedAtUnixSeconds int64          `json:"password_updated_at_unix_seconds"`
+}
+
+func (c *Client) administratorOwnerByUsername(ctx context.Context, username string) (identity.ID, error) {
+	status, header, contents, err := c.administratorLifecycleRequest(ctx, http.MethodGet,
+		"/v1/admin/administrators?username="+url.QueryEscape(username), nil, lifecycleRootCredential, maxLifecycleReplyBytes)
+	if err != nil {
+		return identity.ID{}, err
+	}
+	defer clear(contents)
+	if status != http.StatusOK {
+		return identity.ID{}, fmt.Errorf("controller administrator lookup returned unexpected HTTP status %d", status)
+	}
+	if err := requireLifecycleJSON(header); err != nil {
+		return identity.ID{}, err
+	}
+	administrators, err := decodeLifecycleAdministrators(contents)
+	if err != nil {
+		return identity.ID{}, err
+	}
+	if len(administrators) != 1 {
+		return identity.ID{}, errors.New("controller administrator recovery target was not found uniquely")
+	}
+	var result identity.ID
+	matches := 0
+	for _, administrator := range administrators {
+		principalID, validationErr := validateLifecycleAdministrator(administrator)
+		if validationErr != nil {
+			return identity.ID{}, validationErr
+		}
+		if administrator.Username != username {
+			continue
+		}
+		matches++
+		if administrator.Role != adminauth.RoleOwner {
+			return identity.ID{}, errors.New("controller administrator recovery target is invalid")
+		}
+		result = principalID
+	}
+	if matches != 1 {
+		return identity.ID{}, errors.New("controller administrator recovery target was not found uniquely")
+	}
+	return result, nil
+}
+
+func decodeLifecycleAdministrators(contents []byte) ([]lifecycleAdministrator, error) {
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.UseNumber()
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return nil, errors.New("controller administrator lookup returned malformed JSON")
+	}
+	var administrators []lifecycleAdministrator
+	seenAdministrators := false
+	for decoder.More() {
+		key, err := lifecycleJSONStringToken(decoder)
+		if err != nil || key != "administrators" || seenAdministrators {
+			return nil, errors.New("controller administrator lookup returned malformed JSON")
+		}
+		seenAdministrators = true
+		if token, err := decoder.Token(); err != nil || token != json.Delim('[') {
+			return nil, errors.New("controller administrator lookup returned malformed JSON")
+		}
+		for decoder.More() {
+			if len(administrators) == 1 {
+				return nil, errors.New("controller administrator recovery target was not found uniquely")
+			}
+			administrator, err := decodeLifecycleAdministrator(decoder)
+			if err != nil {
+				return nil, err
+			}
+			administrators = append(administrators, administrator)
+		}
+		if token, err := decoder.Token(); err != nil || token != json.Delim(']') {
+			return nil, errors.New("controller administrator lookup returned malformed JSON")
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') || !seenAdministrators {
+		return nil, errors.New("controller administrator lookup returned malformed JSON")
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, errors.New("controller administrator lookup returned malformed JSON")
+	}
+	return administrators, nil
+}
+
+func decodeLifecycleAdministrator(decoder *json.Decoder) (lifecycleAdministrator, error) {
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return lifecycleAdministrator{}, errors.New("controller administrator lookup returned malformed JSON")
+	}
+	const (
+		principalIDField uint16 = 1 << iota
+		usernameField
+		roleField
+		enabledField
+		allNetworksField
+		networkIDsField
+		createdAtField
+		updatedAtField
+		disabledAtField
+		passwordUpdatedAtField
+	)
+	const requiredFields = principalIDField | usernameField | roleField | enabledField | allNetworksField |
+		networkIDsField | createdAtField | updatedAtField | passwordUpdatedAtField
+	var administrator lifecycleAdministrator
+	var seen uint16
+	for decoder.More() {
+		key, err := lifecycleJSONStringToken(decoder)
+		if err != nil {
+			return lifecycleAdministrator{}, errors.New("controller administrator lookup returned malformed JSON")
+		}
+		var bit uint16
+		switch key {
+		case "principal_id":
+			bit = principalIDField
+			administrator.PrincipalID, err = lifecycleJSONStringToken(decoder)
+		case "username":
+			bit = usernameField
+			administrator.Username, err = lifecycleJSONStringToken(decoder)
+		case "role":
+			bit = roleField
+			var role string
+			role, err = lifecycleJSONStringToken(decoder)
+			administrator.Role = adminauth.Role(role)
+		case "enabled":
+			bit = enabledField
+			administrator.Enabled, err = lifecycleJSONBoolToken(decoder)
+		case "all_networks":
+			bit = allNetworksField
+			administrator.AllNetworks, err = lifecycleJSONBoolToken(decoder)
+		case "network_ids":
+			bit = networkIDsField
+			administrator.NetworkIDs, err = lifecycleJSONStringArray(decoder)
+		case "created_at_unix_seconds":
+			bit = createdAtField
+			administrator.CreatedAtUnixSeconds, err = lifecycleJSONInt64Token(decoder)
+		case "updated_at_unix_seconds":
+			bit = updatedAtField
+			administrator.UpdatedAtUnixSeconds, err = lifecycleJSONInt64Token(decoder)
+		case "disabled_at_unix_seconds":
+			bit = disabledAtField
+			administrator.DisabledAtUnixSeconds, err = lifecycleJSONOptionalInt64Token(decoder)
+		case "password_updated_at_unix_seconds":
+			bit = passwordUpdatedAtField
+			administrator.PasswordUpdatedAtUnixSeconds, err = lifecycleJSONInt64Token(decoder)
+		default:
+			return lifecycleAdministrator{}, errors.New("controller administrator lookup returned malformed JSON")
+		}
+		if err != nil || seen&bit != 0 {
+			return lifecycleAdministrator{}, errors.New("controller administrator lookup returned malformed JSON")
+		}
+		seen |= bit
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') || seen&requiredFields != requiredFields {
+		return lifecycleAdministrator{}, errors.New("controller administrator lookup returned malformed JSON")
+	}
+	return administrator, nil
+}
+
+func lifecycleJSONStringToken(decoder *json.Decoder) (string, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return "", err
+	}
+	value, ok := token.(string)
+	if !ok {
+		return "", errors.New("expected JSON string")
+	}
+	return value, nil
+}
+
+func lifecycleJSONBoolToken(decoder *json.Decoder) (bool, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	value, ok := token.(bool)
+	if !ok {
+		return false, errors.New("expected JSON boolean")
+	}
+	return value, nil
+}
+
+func lifecycleJSONInt64Token(decoder *json.Decoder) (int64, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return 0, err
+	}
+	value, ok := token.(json.Number)
+	if !ok {
+		return 0, errors.New("expected JSON integer")
+	}
+	return strconv.ParseInt(value.String(), 10, 64)
+}
+
+func lifecycleJSONOptionalInt64Token(decoder *json.Decoder) (*int64, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if token == nil {
+		return nil, nil
+	}
+	value, ok := token.(json.Number)
+	if !ok {
+		return nil, errors.New("expected JSON integer or null")
+	}
+	parsed, err := strconv.ParseInt(value.String(), 10, 64)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func lifecycleJSONStringArray(decoder *json.Decoder) ([]string, error) {
+	if token, err := decoder.Token(); err != nil || token != json.Delim('[') {
+		return nil, errors.New("expected JSON string array")
+	}
+	values := make([]string, 0)
+	for decoder.More() {
+		value, err := lifecycleJSONStringToken(decoder)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim(']') {
+		return nil, errors.New("expected JSON string array")
+	}
+	return values, nil
+}
+
+func validateLifecycleAdministrator(administrator lifecycleAdministrator) (identity.ID, error) {
+	principalID, err := identity.ParseID(administrator.PrincipalID)
+	if err != nil || !adminauth.ValidateUsername(administrator.Username) || !administrator.Role.Valid() ||
+		administrator.Role == adminauth.RoleOwner && !administrator.AllNetworks ||
+		administrator.AllNetworks && len(administrator.NetworkIDs) != 0 || administrator.CreatedAtUnixSeconds <= 0 ||
+		administrator.UpdatedAtUnixSeconds <= 0 || administrator.PasswordUpdatedAtUnixSeconds <= 0 {
+		return identity.ID{}, errors.New("controller administrator lookup returned an invalid principal")
+	}
+	seenNetworks := make(map[identity.NetworkID]struct{}, len(administrator.NetworkIDs))
+	for _, value := range administrator.NetworkIDs {
+		networkID, parseErr := identity.ParseNetworkID(value)
+		if parseErr != nil {
+			return identity.ID{}, errors.New("controller administrator lookup returned an invalid principal")
+		}
+		if _, duplicate := seenNetworks[networkID]; duplicate {
+			return identity.ID{}, errors.New("controller administrator lookup returned an invalid principal")
+		}
+		seenNetworks[networkID] = struct{}{}
+	}
+	return principalID, nil
+}
+
+func (c *Client) issueAdministratorLifecycleGrant(ctx context.Context, path string) ([]byte, error) {
+	status, header, contents, err := c.administratorLifecycleRequest(ctx, http.MethodPost, path, nil,
+		lifecycleRootCredential, maxLifecycleReplyBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer clear(contents)
+	if status != http.StatusCreated {
+		return nil, fmt.Errorf("controller administrator grant issuance returned unexpected HTTP status %d", status)
+	}
+	if err := requireLifecycleJSON(header); err != nil {
+		return nil, err
+	}
+	grant, expiresAt, err := decodeAdministratorLifecycleGrant(contents)
+	if err != nil {
+		return nil, err
+	}
+	if expiresAt.Unix() <= 0 {
+		clear(grant)
+		return nil, errors.New("controller administrator grant returned an invalid expiry")
+	}
+	return grant, nil
+}
+
+func (c *Client) consumeAdministratorLifecycleGrant(ctx context.Context, path string, payload []byte) error {
+	status, _, contents, err := c.administratorLifecycleRequest(ctx, http.MethodPost, path, payload,
+		lifecycleUnauthenticatedCredential, maxLifecycleReplyBytes)
+	if err != nil {
+		return err
+	}
+	defer clear(contents)
+	if status != http.StatusNoContent {
+		return fmt.Errorf("controller administrator grant consumption returned unexpected HTTP status %d", status)
+	}
+	if len(contents) != 0 {
+		return errors.New("controller administrator grant no-content response contained a body")
+	}
+	return nil
+}
+
+func administratorLifecyclePayload(grant []byte, username string, password []byte) ([]byte, error) {
+	if len(grant) == 0 || !utf8.Valid(password) {
+		return nil, errors.New("controller client: invalid administrator lifecycle secret")
+	}
+	payload := make([]byte, 0, len(grant)+len(username)+len(password)+64)
+	payload = append(payload, '{', '"', 'g', 'r', 'a', 'n', 't', '"', ':')
+	var err error
+	payload, err = appendLifecycleJSONString(payload, grant)
+	if err != nil {
+		clear(payload)
+		return nil, err
+	}
+	if username != "" {
+		payload = append(payload, ',', '"', 'u', 's', 'e', 'r', 'n', 'a', 'm', 'e', '"', ':')
+		payload, err = appendLifecycleJSONString(payload, []byte(username))
+		if err != nil {
+			clear(payload)
+			return nil, err
+		}
+	}
+	payload = append(payload, ',', '"', 'p', 'a', 's', 's', 'w', 'o', 'r', 'd', '"', ':')
+	payload, err = appendLifecycleJSONString(payload, password)
+	if err != nil {
+		clear(payload)
+		return nil, err
+	}
+	payload = append(payload, '}')
+	if len(payload) > MaxJSONRequestBytes {
+		clear(payload)
+		return nil, errors.New("controller administrator lifecycle request exceeds limit")
+	}
+	return payload, nil
+}
+
+func appendLifecycleJSONString(destination, value []byte) ([]byte, error) {
+	if !utf8.Valid(value) {
+		return destination, errors.New("controller administrator lifecycle value must be valid UTF-8")
+	}
+	const hexadecimal = "0123456789abcdef"
+	destination = append(destination, '"')
+	for _, character := range value {
+		switch character {
+		case '"', '\\':
+			destination = append(destination, '\\', character)
+		case '\b':
+			destination = append(destination, '\\', 'b')
+		case '\f':
+			destination = append(destination, '\\', 'f')
+		case '\n':
+			destination = append(destination, '\\', 'n')
+		case '\r':
+			destination = append(destination, '\\', 'r')
+		case '\t':
+			destination = append(destination, '\\', 't')
+		default:
+			if character < 0x20 {
+				destination = append(destination, '\\', 'u', '0', '0', hexadecimal[character>>4], hexadecimal[character&0xf])
+			} else {
+				destination = append(destination, character)
+			}
+		}
+	}
+	return append(destination, '"'), nil
+}
+
+func decodeAdministratorLifecycleGrant(contents []byte) ([]byte, time.Time, error) {
+	cursor := lifecycleJSONCursor{input: contents}
+	if !cursor.consume('{') {
+		return nil, time.Time{}, errors.New("controller administrator grant response is malformed")
+	}
+	var grant []byte
+	var expiresAtUnix int64
+	seenGrant, seenExpiry := false, false
+	for !cursor.peek('}') {
+		key, ok := cursor.canonicalKey()
+		if !ok || !cursor.consume(':') {
+			clear(grant)
+			return nil, time.Time{}, errors.New("controller administrator grant response is malformed")
+		}
+		switch key {
+		case "grant":
+			if seenGrant {
+				clear(grant)
+				return nil, time.Time{}, errors.New("controller administrator grant response contains duplicate fields")
+			}
+			seenGrant = true
+			encoded, ok := cursor.canonicalStringBytes()
+			if !ok {
+				return nil, time.Time{}, errors.New("controller administrator grant response is malformed")
+			}
+			var err error
+			grant, err = canonicalAdministratorGrant(encoded)
+			if err != nil {
+				return nil, time.Time{}, err
+			}
+		case "expires_at_unix_seconds":
+			if seenExpiry {
+				clear(grant)
+				return nil, time.Time{}, errors.New("controller administrator grant response contains duplicate fields")
+			}
+			seenExpiry = true
+			var ok bool
+			expiresAtUnix, ok = cursor.int64()
+			if !ok {
+				clear(grant)
+				return nil, time.Time{}, errors.New("controller administrator grant response is malformed")
+			}
+		default:
+			clear(grant)
+			return nil, time.Time{}, errors.New("controller administrator grant response contains an unknown field")
+		}
+		if cursor.peek('}') {
+			break
+		}
+		if !cursor.consume(',') || cursor.peek('}') {
+			clear(grant)
+			return nil, time.Time{}, errors.New("controller administrator grant response is malformed")
+		}
+	}
+	if !cursor.consume('}') || !cursor.eof() || !seenGrant || !seenExpiry || expiresAtUnix <= 0 {
+		clear(grant)
+		return nil, time.Time{}, errors.New("controller administrator grant response is malformed")
+	}
+	return grant, time.Unix(expiresAtUnix, 0).UTC(), nil
+}
+
+func canonicalAdministratorGrant(encoded []byte) ([]byte, error) {
+	if len(encoded) != 43 {
+		return nil, errors.New("controller administrator grant response contains an invalid grant")
+	}
+	decoded := make([]byte, base64.RawURLEncoding.DecodedLen(len(encoded)))
+	defer clear(decoded)
+	written, err := base64.RawURLEncoding.Strict().Decode(decoded, encoded)
+	if err != nil || written != 32 {
+		return nil, errors.New("controller administrator grant response contains an invalid grant")
+	}
+	return append([]byte(nil), encoded...), nil
+}
+
+// lifecycleJSONCursor parses the small grant response directly over the
+// caller-owned mutable buffer. It deliberately supports only the canonical
+// string and integer forms used by this contract, so the one-use grant is
+// never copied into an inaccessible encoding/json decoder buffer.
+type lifecycleJSONCursor struct {
+	input  []byte
+	offset int
+}
+
+func (c *lifecycleJSONCursor) whitespace() {
+	for c.offset < len(c.input) {
+		switch c.input[c.offset] {
+		case ' ', '\t', '\n', '\r':
+			c.offset++
+		default:
+			return
+		}
+	}
+}
+
+func (c *lifecycleJSONCursor) consume(expected byte) bool {
+	c.whitespace()
+	if c.offset >= len(c.input) || c.input[c.offset] != expected {
+		return false
+	}
+	c.offset++
+	return true
+}
+
+func (c *lifecycleJSONCursor) peek(expected byte) bool {
+	c.whitespace()
+	return c.offset < len(c.input) && c.input[c.offset] == expected
+}
+
+func (c *lifecycleJSONCursor) canonicalKey() (string, bool) {
+	value, ok := c.canonicalStringBytes()
+	if !ok {
+		return "", false
+	}
+	return string(value), true
+}
+
+func (c *lifecycleJSONCursor) canonicalStringBytes() ([]byte, bool) {
+	c.whitespace()
+	if c.offset >= len(c.input) || c.input[c.offset] != '"' {
+		return nil, false
+	}
+	start := c.offset + 1
+	for c.offset = start; c.offset < len(c.input); c.offset++ {
+		value := c.input[c.offset]
+		if value == '"' {
+			result := c.input[start:c.offset]
+			c.offset++
+			return result, true
+		}
+		if value == '\\' || value < 0x20 || value >= 0x80 {
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+func (c *lifecycleJSONCursor) int64() (int64, bool) {
+	c.whitespace()
+	start := c.offset
+	if c.offset < len(c.input) && c.input[c.offset] == '-' {
+		c.offset++
+	}
+	digits := c.offset
+	for c.offset < len(c.input) && c.input[c.offset] >= '0' && c.input[c.offset] <= '9' {
+		c.offset++
+	}
+	if c.offset == digits || c.offset-digits > 1 && c.input[digits] == '0' {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(string(c.input[start:c.offset]), 10, 64)
+	return parsed, err == nil
+}
+
+func (c *lifecycleJSONCursor) eof() bool {
+	c.whitespace()
+	return c.offset == len(c.input)
+}
+
+type lifecycleCredentialKind uint8
+
+const (
+	lifecycleRootCredential lifecycleCredentialKind = iota + 1
+	lifecycleUnauthenticatedCredential
+)
+
+// administratorLifecycleRequest is deliberately independent from json. It
+// never retains a cookie jar, never follows redirects, bounds every response,
+// and never reflects a sensitive response body into an error.
+func (c *Client) administratorLifecycleRequest(ctx context.Context, method, path string, payload []byte,
+	credential lifecycleCredentialKind, responseLimit int64) (int, http.Header, []byte, error) {
+	if c == nil || c.http == nil || c.endpoint == "" {
+		return 0, nil, nil, errors.New("controller client: client is not initialized")
+	}
+	if credential != lifecycleRootCredential && credential != lifecycleUnauthenticatedCredential {
+		return 0, nil, nil, errors.New("controller client: invalid administrator lifecycle credential mode")
+	}
+	if credential == lifecycleRootCredential && c.adminBearer == "" {
+		return 0, nil, nil, errors.New("controller client: admin token is required")
+	}
+	if len(payload) > MaxJSONRequestBytes {
+		return 0, nil, nil, errors.New("controller administrator lifecycle request exceeds limit")
+	}
+	if responseLimit < 0 || responseLimit > MaxResponseBytes {
+		return 0, nil, nil, errors.New("controller client: invalid administrator lifecycle response limit")
+	}
+	var body io.ReadCloser
+	if payload != nil {
+		body = io.NopCloser(bytes.NewReader(payload))
+	}
+	request, err := http.NewRequestWithContext(ctx, method, c.endpoint+path, body)
+	if err != nil {
+		return 0, nil, nil, errors.New("controller administrator lifecycle request could not be created")
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Cache-Control", "no-store")
+	if payload != nil {
+		request.Header.Set("Content-Type", "application/json")
+		request.ContentLength = int64(len(payload))
+		request.GetBody = nil
+	}
+	if credential == lifecycleRootCredential {
+		request.Header.Set("Authorization", c.adminBearer)
+	} else {
+		request.Header.Set("Origin", c.endpoint)
+	}
+	client := *c.http
+	client.Jar = nil
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("controller administrator lifecycle request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNoContent && response.ContentLength > 0 {
+		return 0, nil, nil, errors.New("controller administrator lifecycle no-content response declared a body")
+	}
+	contents, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
+	if err != nil {
+		clear(contents)
+		return 0, nil, nil, errors.New("controller administrator lifecycle response could not be read")
+	}
+	if int64(len(contents)) > responseLimit {
+		clear(contents)
+		return 0, nil, nil, errors.New("controller administrator lifecycle response exceeds limit")
+	}
+	cacheControl := response.Header.Values("Cache-Control")
+	if len(cacheControl) != 1 || !strings.EqualFold(strings.TrimSpace(cacheControl[0]), "no-store") {
+		clear(contents)
+		return 0, nil, nil, errors.New("controller administrator lifecycle response omitted cache protection")
+	}
+	if len(response.Header.Values("Set-Cookie")) != 0 {
+		clear(contents)
+		return 0, nil, nil, errors.New("controller administrator lifecycle response attempted to set a cookie")
+	}
+	return response.StatusCode, response.Header.Clone(), contents, nil
+}
+
+func requireLifecycleJSON(header http.Header) error {
+	values := header.Values("Content-Type")
+	if len(values) != 1 {
+		return errors.New("controller administrator lifecycle response omitted its JSON content type")
+	}
+	mediaType, parameters, err := mime.ParseMediaType(values[0])
+	if err != nil || mediaType != "application/json" || len(parameters) != 0 {
+		return errors.New("controller administrator lifecycle response used an invalid content type")
+	}
+	return nil
+}
+
+// RootAuthenticationAccepted probes only the static root administrator
+// credential. It distinguishes the contract's exact success and rejection
+// statuses so token rotation never treats an unrelated failure as proof that
+// the previous credential was revoked.
+func (c *Client) RootAuthenticationAccepted(ctx context.Context) (bool, error) {
+	status, err := c.rootLifecycleRequest(ctx, http.MethodGet, "/v1/admin/auth/root")
+	if err != nil {
+		return false, err
+	}
+	switch status {
+	case http.StatusNoContent:
+		return true, nil
+	case http.StatusUnauthorized:
+		return false, nil
+	default:
+		return false, fmt.Errorf("controller root authentication returned unexpected HTTP status %d", status)
+	}
+}
+
+func (c *Client) BeginRootTokenRotation(ctx context.Context, rotationID identity.ID) error {
+	return c.rootTokenRotationPhase(ctx, rotationID, "begin")
+}
+
+func (c *Client) CompleteRootTokenRotation(ctx context.Context, rotationID identity.ID) error {
+	return c.rootTokenRotationPhase(ctx, rotationID, "complete")
+}
+
+func (c *Client) rootTokenRotationPhase(ctx context.Context, rotationID identity.ID, phase string) error {
+	if rotationID.IsZero() || phase != "begin" && phase != "complete" {
+		return errors.New("controller client: valid root token rotation ID and phase are required")
+	}
+	path := "/v1/admin/auth/root-token-rotations/" + rotationID.String() + "/" + phase
+	status, err := c.rootLifecycleRequest(ctx, http.MethodPost, path)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusNoContent {
+		return fmt.Errorf("controller root token rotation %s returned unexpected HTTP status %d", phase, status)
+	}
+	return nil
+}
+
+// rootLifecycleRequest deliberately bypasses json: lifecycle endpoints have
+// status-only contracts, must not echo response details, and must never follow
+// a redirect carrying the root bearer.
+func (c *Client) rootLifecycleRequest(ctx context.Context, method, path string) (int, error) {
+	status, _, contents, err := c.administratorLifecycleRequest(ctx, method, path, nil, lifecycleRootCredential,
+		maxLifecycleReplyBytes)
+	if err != nil {
+		return 0, err
+	}
+	defer clear(contents)
+	if status == http.StatusNoContent && len(contents) != 0 {
+		return 0, errors.New("controller lifecycle no-content response contained a body")
+	}
+	return status, nil
 }
 
 func (c *Client) json(ctx context.Context, method, path string, request, response any, admin bool) error {

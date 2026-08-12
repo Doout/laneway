@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 )
 
@@ -28,6 +29,57 @@ func (s *Store) Networks(ctx context.Context, limit int) ([]Network, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list networks: %w", err)
 	}
+	return scanNetworkInventory(rows)
+}
+
+// AdministratorNetworks returns only networks currently visible to the
+// decision's durable subject. Scope filtering happens in SQL before LIMIT so
+// a restricted principal cannot receive a short or empty page merely because
+// inaccessible networks sort first.
+func (s *Store) AdministratorNetworks(ctx context.Context, decision adminauth.Decision, limit int) ([]Network, error) {
+	if err := validateListLimit(limit); err != nil {
+		return nil, err
+	}
+	if err := validateAdministratorResourceDecision(decision, administratorNetworkListPolicy, adminauth.FilteredTarget()); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin authorized network list: %w", err)
+	}
+	defer tx.Rollback()
+	_, principal, err := s.administratorDecisionPrincipalTx(ctx, tx, decision)
+	if err != nil {
+		return nil, err
+	}
+	query := `SELECT n.id,n.name,n.ipv4_address,n.ipv4_prefix_length,
+		n.ipv6_address,n.ipv6_prefix_length,n.configuration_epoch,n.created_at
+		FROM networks n ORDER BY n.created_at,n.id LIMIT ?`
+	arguments := []any{limit}
+	if principal != nil && principal.Role != adminauth.RoleOwner && !principal.AllNetworks {
+		query = `SELECT n.id,n.name,n.ipv4_address,n.ipv4_prefix_length,
+			n.ipv6_address,n.ipv6_prefix_length,n.configuration_epoch,n.created_at
+			FROM administrator_principal_networks scope
+			JOIN networks n ON n.id=scope.network_id
+			WHERE scope.principal_id=?
+			ORDER BY n.created_at,n.id LIMIT ?`
+		arguments = []any{idBytes(principal.ID), limit}
+	}
+	rows, err := tx.QueryContext(ctx, query, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("list authorized networks: %w", err)
+	}
+	result, err := scanNetworkInventory(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit authorized network list: %w", err)
+	}
+	return result, nil
+}
+
+func scanNetworkInventory(rows *sql.Rows) ([]Network, error) {
 	defer rows.Close()
 	var result []Network
 	for rows.Next() {
@@ -79,6 +131,44 @@ func (s *Store) NetworkNodes(ctx context.Context, networkID identity.NetworkID, 
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
+	return scanNodeInventory(rows, networkID)
+}
+
+func (s *Store) AdministratorNetworkNodes(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, limit int) ([]Node, error) {
+	if err := validateListLimit(limit); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorNodeListPolicy, networkID); err != nil {
+		return nil, err
+	}
+	if err := administratorNetworkExistsTx(ctx, tx, networkID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key
+		FROM nodes n LEFT JOIN overlay_addresses a ON a.id=(SELECT oa.id FROM overlay_addresses oa
+			WHERE oa.node_id=n.id AND oa.released_at IS NULL AND length(oa.address)=4 ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
+		LEFT JOIN overlay_addresses a6 ON a6.id=(SELECT oa.id FROM overlay_addresses oa
+			WHERE oa.node_id=n.id AND oa.released_at IS NULL AND length(oa.address)=16 ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
+		WHERE n.network_id=? ORDER BY n.created_at,n.id LIMIT ?`, idBytes(networkID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list authorized nodes: %w", err)
+	}
+	result, err := scanNodeInventory(rows, networkID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func scanNodeInventory(rows *sql.Rows, networkID identity.NetworkID) ([]Node, error) {
 	defer rows.Close()
 	var result []Node
 	for rows.Next() {
@@ -134,6 +224,47 @@ func (s *Store) NetworkRelays(ctx context.Context, networkID identity.NetworkID,
 	if err != nil {
 		return nil, fmt.Errorf("list relays: %w", err)
 	}
+	return scanRelayInventory(rows, networkID)
+}
+
+func (s *Store) AdministratorNetworkRelays(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, limit int) ([]Relay, uint64, error) {
+	if err := validateListLimit(limit); err != nil {
+		return nil, 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
+	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorRelayListPolicy, networkID); err != nil {
+		return nil, 0, err
+	}
+	if err := administratorNetworkExistsTx(ctx, tx, networkID); err != nil {
+		return nil, 0, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,service_id,node_id,name,endpoint,enabled,created_at
+		FROM relays WHERE network_id=? ORDER BY created_at,id LIMIT ?`, idBytes(networkID), limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list authorized relays: %w", err)
+	}
+	result, err := scanRelayInventory(rows, networkID)
+	if err != nil {
+		return nil, 0, err
+	}
+	epoch, err := currentEpochTx(ctx, tx, networkID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, ErrNotFound
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, 0, err
+	}
+	return result, epoch, nil
+}
+
+func scanRelayInventory(rows *sql.Rows, networkID identity.NetworkID) ([]Relay, error) {
 	defer rows.Close()
 	var result []Relay
 	for rows.Next() {
@@ -178,6 +309,47 @@ func (s *Store) NetworkACLRules(ctx context.Context, networkID identity.NetworkI
 	if err != nil {
 		return nil, fmt.Errorf("list ACL rules: %w", err)
 	}
+	return scanACLInventory(rows, networkID)
+}
+
+func (s *Store) AdministratorNetworkACLRules(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, limit int) ([]ACLRule, uint64, error) {
+	if err := validateListLimit(limit); err != nil {
+		return nil, 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer tx.Rollback()
+	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorACLListPolicy, networkID); err != nil {
+		return nil, 0, err
+	}
+	if err := administratorNetworkExistsTx(ctx, tx, networkID); err != nil {
+		return nil, 0, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,priority,action,selector_json,description,enabled,created_at,updated_at
+		FROM acl_rules WHERE network_id=? ORDER BY priority,id LIMIT ?`, idBytes(networkID), limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list authorized ACL rules: %w", err)
+	}
+	result, err := scanACLInventory(rows, networkID)
+	if err != nil {
+		return nil, 0, err
+	}
+	epoch, err := currentEpochTx(ctx, tx, networkID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, 0, ErrNotFound
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, 0, err
+	}
+	return result, epoch, nil
+}
+
+func scanACLInventory(rows *sql.Rows, networkID identity.NetworkID) ([]ACLRule, error) {
 	defer rows.Close()
 	var result []ACLRule
 	for rows.Next() {
@@ -210,6 +382,40 @@ func (s *Store) NetworkCertificates(ctx context.Context, networkID identity.Netw
 	if err != nil {
 		return nil, fmt.Errorf("list certificates: %w", err)
 	}
+	return scanCertificateInventory(rows, networkID)
+}
+
+func (s *Store) AdministratorNetworkCertificates(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, limit int) ([]Certificate, error) {
+	if err := validateListLimit(limit); err != nil {
+		return nil, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorCertificateListPolicy, networkID); err != nil {
+		return nil, err
+	}
+	if err := administratorNetworkExistsTx(ctx, tx, networkID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,node_id,serial,not_before,not_after,created_at,revoked_at,revocation_reason
+		FROM certificates WHERE network_id=? ORDER BY created_at,id LIMIT ?`, idBytes(networkID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list authorized certificates: %w", err)
+	}
+	result, err := scanCertificateInventory(rows, networkID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func scanCertificateInventory(rows *sql.Rows, networkID identity.NetworkID) ([]Certificate, error) {
 	defer rows.Close()
 	var result []Certificate
 	for rows.Next() {

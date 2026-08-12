@@ -99,7 +99,7 @@ function controllerRuleForm(rule: AccessRuleRecord, source?: ControllerACLRule):
   const protocolValue = typeof selector.ip_protocol === 'string' ? selector.ip_protocol.replace('IP_PROTOCOL_', '') : 'TCP'
   const protocol = ['TCP', 'UDP', 'ICMP'].includes(protocolValue) ? protocolValue as RuleFormState['protocol'] : 'TCP'
   const ports = Array.isArray(selector.destination_ports) ? (selector.destination_ports as Array<Record<string, unknown>>).map(port => port.first === port.last ? String(port.first) : `${port.first}-${port.last}`).join(', ') : ''
-  return { description: rule.name, priority: String(rule.priority), action: rule.action === 'Allow' ? 'accept' : 'deny', source: 'any', destination, protocol, ports, confirmed: false }
+  return { description: source?.description ?? rule.rawDescription ?? '', priority: String(rule.priority), action: rule.action === 'Allow' ? 'accept' : 'deny', source: 'any', destination, protocol, ports, confirmed: false }
 }
 
 function ruleForId(id?: string, records = persistedAccessRules()) {
@@ -115,7 +115,7 @@ function displayAction(rule: AccessRuleRecord) {
 }
 
 export function AccessRulesPage() {
-  const { live, inventory } = useControlPlane()
+  const { live, inventory, hasPermission } = useControlPlane()
   const records = live ? controllerRules(inventory?.aclRules ?? []) : persistedAccessRules()
   const [query, setQuery] = useState('')
   const [action, setAction] = useState('all')
@@ -135,11 +135,12 @@ export function AccessRulesPage() {
   const selected = visibleRules.find(rule => rule.id === selectedId) ?? visibleRules[0]
   const selectedControllerRule = live ? inventory?.aclRules.find(rule => rule.rule_id === selected?.id) : undefined
   const enabledCount = records.filter(rule => rule.state === 'Enabled').length
+  const canManageRules = !live || Boolean(inventory?.network && hasPermission('acl.manage', inventory.network.network_id))
 
   return <div className="access-page">
     <PageHeader
       title="Access rules"
-      action={<Button variant="primary" to="/access/new"><ShieldCheck aria-hidden="true" size={17} />New rule</Button>}
+      action={canManageRules ? <Button variant="primary" to="/access/new"><ShieldCheck aria-hidden="true" size={17} />New rule</Button> : undefined}
     />
     <div className="access-health-strip" aria-label="Access policy summary"><div><strong>{enabledCount}</strong><span>Enabled rules</span></div><div><strong>{records.length - enabledCount}</strong><span>Disabled rules</span></div><div><strong>{records.filter(rule => rule.action === 'Allow').length}</strong><span>Accept rules</span></div><div><strong>{live ? inventory?.network?.configuration_epoch ?? '—' : 418}</strong><span>Configuration epoch</span></div></div>
     <Toolbar filters={<>
@@ -322,7 +323,7 @@ export function AccessRuleFormPage() {
 }
 
 export function AccessRuleDetailPage() {
-  const { live, inventory, request, refresh } = useControlPlane()
+  const { live, inventory, request, refresh, hasPermission } = useControlPlane()
   const { ruleId } = useParams()
   const location = useLocation()
   const navigate = useNavigate()
@@ -344,6 +345,7 @@ export function AccessRuleDetailPage() {
 
   const enabling = rule.state === 'Disabled'
   const stateChangeVerb = enabling ? 'enable' : 'disable'
+  const canManageRule = !live || Boolean(liveRule && hasPermission('acl.manage', liveRule.network_id))
 
   async function changeEnabledState(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -385,7 +387,7 @@ export function AccessRuleDetailPage() {
   const action = displayAction(rule)
   return <div className="access-page access-detail-page">
     {locationState?.saved || saved?.result ? <div className="access-saved" role="status"><CheckCircle2 aria-hidden="true" size={17} />{saved?.result ?? 'Rule saved.'}</div> : null}
-    <PageHeader title={rule.name} action={<div className="button-row">{live ? <Button variant="secondary" disabled title="Editing existing live selectors is unavailable.">Editing unavailable</Button> : <Button variant="secondary" to={`/access/${rule.id}/edit`}>Edit rule</Button>}<Button variant="quiet" to="/access">All rules</Button></div>} />
+    <PageHeader title={rule.name} action={<div className="button-row">{!live && canManageRule ? <Button variant="secondary" to={`/access/${rule.id}/edit`}>Edit rule</Button> : null}<Button variant="quiet" to="/access">All rules</Button></div>} />
     <DetailLayout
       identity={<IdentityBlock
         icon={rule.action === 'Allow' ? <ShieldCheck aria-hidden="true" size={34} /> : <ShieldX aria-hidden="true" size={34} />}
@@ -416,13 +418,13 @@ export function AccessRuleDetailPage() {
           <div><dt>Destination ports</dt><dd><code>443</code></dd></div>
         </dl>}
       </Section>
-      <Section title={`${enabling ? 'Enable' : 'Disable'} rule`}>
+      {canManageRule ? <Section title={`${enabling ? 'Enable' : 'Disable'} rule`}>
         <Callout tone="warning"><FileKey2 aria-hidden="true" size={16} /> Rule {rule.priority} will be {enabling ? 'enabled' : 'disabled'} in the next policy epoch.</Callout>
         {showStateChange ? <form className="access-disable-form" onSubmit={changeEnabledState}>
           <Field label={`Type ${rule.name} to confirm`} error={stateChangeError || undefined}><input value={confirmation} disabled={stateChangePending} onChange={event => { setConfirmation(event.target.value); setStateChangeError('') }} autoComplete="off" /></Field>
           <div className="button-row"><Button type="submit" variant={enabling ? 'primary' : 'danger'} disabled={confirmation !== rule.name || stateChangePending}>{stateChangePending ? `${enabling ? 'Enabling' : 'Disabling'}…` : `${enabling ? 'Enable' : 'Disable'} rule`}</Button><Button variant="quiet" disabled={stateChangePending} onClick={() => { setShowStateChange(false); setConfirmation(''); setStateChangeError('') }}>Cancel</Button></div>
         </form> : <div className="access-section-action"><Button variant={enabling ? 'primary' : 'danger'} onClick={() => setShowStateChange(true)}>{enabling ? 'Enable' : 'Disable'} rule</Button></div>}
-      </Section>
+      </Section> : null}
     </DetailLayout>
   </div>
 }

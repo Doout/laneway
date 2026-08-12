@@ -44,8 +44,8 @@ func decodeJSONResponse(t *testing.T, result *httptest.ResponseRecorder, value a
 
 func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 	f := newFixture(t, 1024, nil)
-	original := f.service.authorizeAdm
-	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) { return adminauth.Actor{}, ErrUnauthenticated }
+	original := f.service.access
+	f.service.access = accessControllerErrorStub{err: ErrUnauthenticated}
 	for _, endpoint := range []struct {
 		method string
 		path   string
@@ -71,15 +71,13 @@ func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 			t.Errorf("%s %s status=%d", endpoint.method, endpoint.path, denied.Code)
 		}
 	}
-	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) {
-		return adminauth.IDActor(adminauth.ActorAdministrator, identity.ID{1}), nil
-	}
+	f.service.access = accessControllerErrorStub{err: ErrPermissionDenied}
 	humanSessionActor := jsonRequest(t, f.service.Handler(), http.MethodGet, "/v1/admin/networks", nil)
 	if humanSessionActor.Code != http.StatusForbidden {
 		t.Fatalf("legacy management surface accepted browser administrator actor: status=%d body=%s",
 			humanSessionActor.Code, humanSessionActor.Body.String())
 	}
-	f.service.authorizeAdm = original
+	f.service.access = original
 	unauthenticatedAdvertise := jsonRequest(t, f.service.Handler(), http.MethodPost, "/v1/routes", advertiseRouteRequest{Prefix: "192.0.2.0/24", Kind: "subnet", Mode: "nat"})
 	if unauthenticatedAdvertise.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated advertise status=%d", unauthenticatedAdvertise.Code)
@@ -359,9 +357,7 @@ func TestNodeRouteLifecycleOwnershipAdminApprovalAndReads(t *testing.T) {
 func TestManagementRejectsNonRootServicePrincipalAndRollsBack(t *testing.T) {
 	f := newFixture(t, DefaultMaxBodyBytes, nil)
 	wrongID := identity.ID{99}
-	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) {
-		return adminauth.IDActor(adminauth.ActorServicePrincipal, wrongID), nil
-	}
+	f.service.access = accessControllerStub{rootID: wrongID}
 	response := jsonRequest(t, f.service.Handler(), http.MethodPost, "/v1/admin/networks",
 		networkRequest{Name: "must-not-exist", IPv4Pool: "10.55.0.0/24"})
 	if response.Code != http.StatusUnauthorized {

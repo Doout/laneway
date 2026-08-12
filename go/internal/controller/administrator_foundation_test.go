@@ -3,7 +3,10 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/netip"
 	"os"
@@ -110,10 +113,285 @@ func TestV8MigrationBackfillsAuditActorsAndAuthState(t *testing.T) {
 	}
 }
 
+func createExactV8AdministratorFixture(t *testing.T, path string) (identity.ID, identity.ID, []string, string) {
+	t.Helper()
+	// This digest is pinned to migration 8 from published foundation commit
+	// 2e5e7d5. The fixture intentionally fails if current migrations[:8] drift.
+	wantV8, err := hex.DecodeString("c9c2b894b412c665999b4b3e624764dff9b8ed6bbb41d31e38c3bced5d0a87f5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v8Digest := sha256.Sum256([]byte(migrations[7]))
+	if !bytes.Equal(v8Digest[:], wantV8) {
+		t.Fatalf("published v8 migration drifted: got %x", v8Digest)
+	}
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON; CREATE TABLE schema_versions(
+		version INTEGER PRIMARY KEY CHECK(version > 0), applied_at INTEGER NOT NULL) STRICT;` +
+		strings.Join(migrations[:8], "\n")); err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 8; version++ {
+		if _, err := db.Exec(`INSERT INTO schema_versions(version,applied_at) VALUES(?,?)`, version, version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	principalID, credentialID := identity.ID{81}, identity.ID{82}
+	if _, err := db.Exec(`INSERT INTO administrator_principals
+		(id,username,role,all_networks,enabled,created_at,updated_at) VALUES(?, 'owner', 'owner',1,1,100,100)`,
+		idBytes(principalID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO administrator_credentials
+		(id,principal_id,credential_type,secret_hash,created_at) VALUES(?,?,'password',?,100)`,
+		idBytes(credentialID), idBytes(principalID), strings.Repeat("x", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE administrator_auth_state SET initial_owner_principal_id=?,bootstrap_completed_at=100
+		WHERE singleton=1`, idBytes(principalID)); err != nil {
+		t.Fatal(err)
+	}
+	ids := []identity.ID{{83}, {84}, {85}, {86}, {88}, {89}}
+	tokens := []string{
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32)),
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32)),
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32)),
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32)),
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{5}, 32)),
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{6}, 32)),
+	}
+	for index, id := range ids {
+		var previous any
+		if index == 1 || index == 2 {
+			previous = idBytes(ids[0])
+		} else if index == 3 {
+			previous = idBytes(ids[2])
+		}
+		tokenHash, err := adminauth.HashSecret(adminauth.SecretSession, tokens[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		csrfHash := sha256.Sum256([]byte{byte(index + 1)})
+		if _, err := db.Exec(`INSERT INTO administrator_sessions
+			(id,principal_id,credential_id,token_hash,csrf_hash,previous_session_id,created_at,last_seen_at,
+			 idle_lifetime_seconds,idle_expires_at,absolute_expires_at)
+			VALUES(?,?,?,?,?,?,100,100,3600,3700,7300)`, idBytes(id), idBytes(principalID), idBytes(credentialID),
+			tokenHash[:], csrfHash[:], previous); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE administrator_sessions SET previous_session_id=? WHERE id=?;
+		UPDATE administrator_sessions SET previous_session_id=? WHERE id=?`,
+		idBytes(ids[5]), idBytes(ids[4]), idBytes(ids[4]), idBytes(ids[5])); err != nil {
+		t.Fatal(err)
+	}
+	revokedTokenHash, err := adminauth.HashSecret(adminauth.SecretSession,
+		base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedCSRFHash := sha256.Sum256([]byte{8})
+	if _, err := db.Exec(`INSERT INTO administrator_sessions
+		(id,principal_id,credential_id,token_hash,csrf_hash,created_at,last_seen_at,
+		 idle_lifetime_seconds,idle_expires_at,absolute_expires_at,revoked_at,revocation_reason)
+		VALUES(?,?,?,?,?,100,100,3600,3700,7300,150,'already revoked')`, idBytes(identity.ID{91}),
+		idBytes(principalID), idBytes(credentialID), revokedTokenHash[:], revokedCSRFHash[:]); err != nil {
+		t.Fatal(err)
+	}
+	recoverySecret := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	recoveryHash, err := adminauth.HashSecret(adminauth.SecretRecovery, recoverySecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO administrator_recovery_grants
+		(id,secret_hash,purpose,target_principal_id,recovery_generation,created_at,expires_at)
+		VALUES(?,?, 'owner_recovery',?,0,100,7300)`, idBytes(identity.ID{87}), recoveryHash[:],
+		idBytes(principalID)); err != nil {
+		t.Fatal(err)
+	}
+	return principalID, credentialID, tokens, recoverySecret
+}
+
+func TestV9UpgradeFromExactV8InvalidatesAmbiguousSessions(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "controller-v8.db")
+	principalID, _, tokens, recoverySecret := createExactV8AdministratorFixture(t, path)
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if version, err := store.SchemaVersion(ctx); err != nil || version != 9 {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	var active, wrongMaximum int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_sessions WHERE revoked_at IS NULL`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_sessions WHERE maximum_sessions<>5`).Scan(&wrongMaximum); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 || wrongMaximum != 0 {
+		t.Fatalf("active=%d wrong maximum=%d", active, wrongMaximum)
+	}
+	var linked, migrationAudits int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_sessions
+		WHERE previous_session_id IS NOT NULL`).Scan(&linked); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='administrator.sessions.invalidate_schema_v9'`).Scan(&migrationAudits); err != nil {
+		t.Fatal(err)
+	}
+	if linked != 0 || migrationAudits != 1 {
+		t.Fatalf("linked sessions=%d migration audits=%d", linked, migrationAudits)
+	}
+	var preservedRevoked int64
+	var preservedReason string
+	if err := store.db.QueryRowContext(ctx, `SELECT revoked_at,revocation_reason FROM administrator_sessions WHERE id=?`,
+		idBytes(identity.ID{91})).Scan(&preservedRevoked, &preservedReason); err != nil {
+		t.Fatal(err)
+	}
+	if preservedRevoked != 150 || preservedReason != "already revoked" {
+		t.Fatalf("previous revocation changed: at=%d reason=%q", preservedRevoked, preservedReason)
+	}
+	for _, token := range tokens {
+		if _, _, err := store.AuthenticateAdministratorSession(ctx, token); !errors.Is(err, ErrSessionInvalid) {
+			t.Fatalf("v8 bearer survived v9 migration: %v", err)
+		}
+	}
+	if _, err := store.RecoverAdministratorOwner(ctx, recoverySecret, managementTestPasswordHash(t, 34)); !errors.Is(err, ErrRecoveryInvalid) {
+		t.Fatalf("v8 recovery bearer survived v9 migration: %v", err)
+	}
+	var pendingRecovery, recoveryGeneration, recoveryInvalidations int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_recovery_grants
+		WHERE consumed_at IS NULL AND revoked_at IS NULL`).Scan(&pendingRecovery); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT recovery_generation FROM administrator_auth_state
+		WHERE singleton=1`).Scan(&recoveryGeneration); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='administrator.recovery.invalidate_schema_v9'`).Scan(&recoveryInvalidations); err != nil {
+		t.Fatal(err)
+	}
+	if pendingRecovery != 0 || recoveryGeneration != 1 || recoveryInvalidations != 1 {
+		t.Fatalf("pending recovery=%d generation=%d invalidation audits=%d",
+			pendingRecovery, recoveryGeneration, recoveryInvalidations)
+	}
+	var markerTable int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='table'
+		AND name='administrator_root_token_rotations'`).Scan(&markerTable); err != nil || markerTable != 1 {
+		t.Fatalf("rotation marker table=%d err=%v", markerTable, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO administrator_principal_networks
+		(principal_id,network_id,created_at) VALUES(?,?,1)`, idBytes(principalID), idBytes(identity.NetworkID{99})); err == nil ||
+		!strings.Contains(err.Error(), "scope requires a scoped principal") {
+		t.Fatalf("all-network scope insert error=%v", err)
+	}
+	network, err := store.CreateNetwork(ctx, "scope-trigger", netip.MustParsePrefix("10.99.0.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopedID := identity.ID{90}
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO administrator_principals
+		(id,username,role,all_networks,enabled,created_at,updated_at)
+		VALUES(?,'scoped.auditor','auditor',0,1,200,200)`, idBytes(scopedID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO administrator_principal_networks
+		(principal_id,network_id,created_at) VALUES(?,?,200)`, idBytes(scopedID), idBytes(network.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE administrator_principal_networks SET principal_id=?
+		WHERE principal_id=? AND network_id=?`, idBytes(principalID), idBytes(scopedID), idBytes(network.ID)); err == nil ||
+		!strings.Contains(err.Error(), "scope identity is immutable") {
+		t.Fatalf("scope reassignment error=%v", err)
+	}
+}
+
+func TestV9UpgradeWithoutActiveV8SessionsDoesNotAuditInvalidation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "inactive-v8.db")
+	createExactV8AdministratorFixture(t, path)
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE administrator_sessions SET revoked_at=200,revocation_reason='fixture revoked'
+		WHERE revoked_at IS NULL`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var invalidations int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='administrator.sessions.invalidate_schema_v9'`).Scan(&invalidations); err != nil {
+		t.Fatal(err)
+	}
+	if invalidations != 0 {
+		t.Fatalf("invalidation audit count=%d for fully revoked v8 fixture", invalidations)
+	}
+}
+
+func TestV9MigrationFailureRollsBackExactV8(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "rollback-v8.db")
+	createExactV8AdministratorFixture(t, path)
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force the final v9 DDL statement to fail after the session and audit
+	// rebuilds have run; the outer migration transaction must undo all of it.
+	if _, err := db.Exec(`CREATE TABLE administrator_root_token_rotations(bogus INTEGER)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(ctx, path); err == nil {
+		store.Close()
+		t.Fatal("v9 collision unexpectedly migrated")
+	}
+	db, err = sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version, maximumColumns, active int
+	if err := db.QueryRow(`SELECT MAX(version) FROM schema_versions`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('administrator_sessions')
+		WHERE name='maximum_sessions'`).Scan(&maximumColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM administrator_sessions WHERE revoked_at IS NULL`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if version != 8 || maximumColumns != 0 || active != 6 {
+		t.Fatalf("rollback version=%d maximum columns=%d active=%d", version, maximumColumns, active)
+	}
+}
+
 func TestAdministratorStoreRejectsMalformedBootstrapInputs(t *testing.T) {
 	store, _ := openTestStore(t)
 	ctx := context.Background()
-	if _, err := store.CreateFirstOwner(ctx, adminauth.SystemActor(), "not-a-recovery-secret", "owner", "not-a-password-hash"); err == nil {
+	if _, err := store.BootstrapFirstAdministrator(ctx, "not-a-recovery-secret", "owner", "not-a-password-hash"); err == nil {
 		t.Fatal("malformed bootstrap inputs accepted")
 	}
 	if _, err := store.AdministratorByUsername(ctx, "Owner"); !errors.Is(err, ErrNotFound) {
@@ -121,17 +399,31 @@ func TestAdministratorStoreRejectsMalformedBootstrapInputs(t *testing.T) {
 	}
 }
 
+func administratorRecoveryGrantDecision(t *testing.T, store *Store, target *identity.ID) adminauth.Decision {
+	t.Helper()
+	state, err := store.AdministratorAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := administratorBootstrapGrantPolicy
+	decisionTarget := adminauth.GlobalTarget()
+	if target != nil {
+		policy = administratorOwnerRecoveryGrantPolicy
+		decisionTarget = adminauth.ObjectTarget(*target)
+	}
+	decision, err := adminauth.NewDecision(adminauth.RootSubject(state.RootServicePrincipalID), policy, decisionTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return decision
+}
+
 func TestFirstOwnerBootstrapAndSessionLifecycle(t *testing.T) {
 	store, _ := openTestStore(t)
 	ctx := context.Background()
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store.now = func() time.Time { return now }
-	state, err := store.AdministratorAuthState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootActor := adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID)
-	grant, secret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+	grant, secret, err := store.IssueAdministratorRecoveryGrant(ctx, administratorRecoveryGrantDecision(t, store, nil),
 		AdministratorRecoveryBootstrapOwner, nil, now.Add(time.Hour))
 	if err != nil || secret == "" {
 		t.Fatalf("issue bootstrap grant=%+v secret-empty=%t err=%v", grant, secret == "", err)
@@ -141,7 +433,7 @@ func TestFirstOwnerBootstrapAndSessionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := store.CreateFirstOwner(ctx, rootActor, secret, "owner", passwordHash)
+	owner, err := store.BootstrapFirstAdministrator(ctx, secret, "owner", passwordHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +441,7 @@ func TestFirstOwnerBootstrapAndSessionLifecycle(t *testing.T) {
 		owner.Credential.SecretHash != passwordHash {
 		t.Fatalf("created owner=%+v", owner)
 	}
-	if _, err := store.CreateFirstOwner(ctx, rootActor, secret, "other-owner", passwordHash); !errors.Is(err, ErrBootstrapComplete) {
+	if _, err := store.BootstrapFirstAdministrator(ctx, secret, "other-owner", passwordHash); !errors.Is(err, ErrBootstrapComplete) {
 		t.Fatalf("bootstrap replay error=%v", err)
 	}
 	var storedGrantHash []byte
@@ -171,8 +463,8 @@ func TestFirstOwnerBootstrapAndSessionLifecycle(t *testing.T) {
 			bootstrapActor = event.Actor
 		}
 	}
-	if bootstrapActor.Kind != adminauth.ActorServicePrincipal || bootstrapActor.ID == nil ||
-		*bootstrapActor.ID != state.RootServicePrincipalID {
+	if bootstrapActor.Kind != adminauth.ActorRecoveryGrant || bootstrapActor.ID == nil ||
+		*bootstrapActor.ID != grant.ID {
 		t.Fatalf("bootstrap audit actor=%+v", bootstrapActor)
 	}
 
@@ -207,12 +499,7 @@ func TestFirstOwnerBootstrapHasOneConcurrentWinner(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store.now = func() time.Time { return now }
-	state, err := store.AdministratorAuthState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rootActor := adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID)
-	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, administratorRecoveryGrantDecision(t, store, nil),
 		AdministratorRecoveryBootstrapOwner, nil, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +518,7 @@ func TestFirstOwnerBootstrapHasOneConcurrentWinner(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
-			_, createErr := store.CreateFirstOwner(ctx, rootActor, secret, "owner"+string(rune('a'+index)), passwordHash)
+			_, createErr := store.BootstrapFirstAdministrator(ctx, secret, "owner"+string(rune('a'+index)), passwordHash)
 			results <- createErr
 		}()
 	}
@@ -271,7 +558,7 @@ func bootstrapAdministratorFixture(t *testing.T, store *Store) (AdministratorRec
 		t.Fatal(err)
 	}
 	rootActor := adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID)
-	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, administratorRecoveryGrantDecision(t, store, nil),
 		AdministratorRecoveryBootstrapOwner, nil, store.now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -281,11 +568,159 @@ func bootstrapAdministratorFixture(t *testing.T, store *Store) (AdministratorRec
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := store.CreateFirstOwner(ctx, rootActor, secret, "owner", passwordHash)
+	owner, err := store.BootstrapFirstAdministrator(ctx, secret, "owner", passwordHash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return owner, rootActor
+}
+
+func TestAdministratorOwnerRecoverySupersedesAndRestoresDisabledOwner(t *testing.T) {
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	base := time.Unix(1_901_000_000, 0).UTC()
+	now := base
+	store.now = func() time.Time { return now }
+	owner, _ := bootstrapAdministratorFixture(t, store)
+	session, token, _, err := store.CreateAdministratorSession(ctx, owner.Principal.ID, owner.Credential.ID,
+		AdministratorSessionOptions{IdleTimeout: time.Hour, AbsoluteTimeout: 2 * time.Hour, MaxActive: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerSubject := adminauth.SessionSubject(owner.Principal.ID, session.ID)
+	ownerDecision, err := adminauth.NewDecision(ownerSubject, administratorOwnerRecoveryGrantPolicy,
+		adminauth.ObjectTarget(owner.Principal.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.IssueAdministratorRecoveryGrant(ctx, ownerDecision, AdministratorRecoveryOwner,
+		&owner.Principal.ID, now.Add(time.Hour)); !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("owner session issued static-root recovery grant: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE administrator_principals
+		SET enabled=0,disabled_at=?,updated_at=? WHERE id=?`, unix(now), unix(now), idBytes(owner.Principal.ID)); err != nil {
+		t.Fatal(err)
+	}
+	first, firstSecret, err := store.IssueAdministratorRecoveryGrant(ctx,
+		administratorRecoveryGrantDecision(t, store, &owner.Principal.ID), AdministratorRecoveryOwner,
+		&owner.Principal.ID, base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = base.Add(-time.Minute)
+	second, secondSecret, err := store.IssueAdministratorRecoveryGrant(ctx,
+		administratorRecoveryGrantDecision(t, store, &owner.Principal.ID), AdministratorRecoveryOwner,
+		&owner.Principal.ID, base.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("rollback-clock recovery reissue: %v", err)
+	}
+	if candidate, err := store.AdministratorRecoveryCandidate(ctx, firstSecret, AdministratorRecoveryOwner); err != nil || candidate.Usable {
+		t.Fatalf("superseded candidate=%+v err=%v", candidate, err)
+	}
+	if candidate, err := store.AdministratorRecoveryCandidate(ctx, secondSecret, AdministratorRecoveryOwner); err != nil ||
+		!candidate.Usable || candidate.GrantID != second.ID {
+		t.Fatalf("replacement candidate=%+v err=%v", candidate, err)
+	}
+	var firstRevoked sql.NullInt64
+	if err := store.db.QueryRowContext(ctx, `SELECT revoked_at FROM administrator_recovery_grants WHERE id=?`,
+		idBytes(first.ID)).Scan(&firstRevoked); err != nil || !firstRevoked.Valid || firstRevoked.Int64 < unix(first.CreatedAt) {
+		t.Fatalf("superseded grant revoked_at=%+v err=%v", firstRevoked, err)
+	}
+	now = base.Add(time.Minute)
+	newHash := managementTestPasswordHash(t, 21)
+	recovered, err := store.RecoverAdministratorOwner(ctx, secondSecret, newHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recovered.Principal.Enabled || recovered.Credential.ID == owner.Credential.ID ||
+		recovered.Credential.SecretHash != newHash {
+		t.Fatalf("recovered owner=%+v", recovered)
+	}
+	if _, _, err := store.AuthenticateAdministratorSession(ctx, token); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("pre-recovery bearer survived: %v", err)
+	}
+	state, err := store.AdministratorAuthState(ctx)
+	if err != nil || state.RecoveryGeneration != 1 || state.LastRecoveredAt == nil {
+		t.Fatalf("recovery state=%+v err=%v", state, err)
+	}
+	if _, err := store.RecoverAdministratorOwner(ctx, secondSecret, newHash); !errors.Is(err, ErrRecoveryConsumed) {
+		t.Fatalf("recovery replay error=%v", err)
+	}
+	events, err := store.GlobalAuditEvents(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundComplete := false
+	for _, event := range events {
+		if event.Action == "administrator.recovery.complete" {
+			foundComplete = event.Actor.Kind == adminauth.ActorRecoveryGrant && event.Actor.ID != nil && *event.Actor.ID == second.ID
+		}
+	}
+	if !foundComplete {
+		t.Fatal("recovery completion was not attributed to consumed grant")
+	}
+}
+
+func TestRootTokenRotationAuditLifecycle(t *testing.T) {
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	now := time.Unix(1_902_000_000, 0).UTC()
+	store.now = func() time.Time { return now }
+	rotationID := identity.ID{101}
+	begin := administratorRootDecision(t, store, administratorRootTokenRotationBeginPolicy,
+		adminauth.ObjectTarget(rotationID))
+	complete := administratorRootDecision(t, store, administratorRootTokenRotationCompletePolicy,
+		adminauth.ObjectTarget(rotationID))
+	if err := store.AuditRootAdministratorTokenRotationComplete(ctx, complete, rotationID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("complete-before-begin error=%v", err)
+	}
+	if err := store.AuditRootAdministratorTokenRotationBegin(ctx, begin, rotationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AuditRootAdministratorTokenRotationBegin(ctx, begin, rotationID); err != nil {
+		t.Fatalf("idempotent begin: %v", err)
+	}
+	now = now.Add(-time.Hour)
+	if err := store.AuditRootAdministratorTokenRotationComplete(ctx, complete, rotationID); err != nil {
+		t.Fatalf("rollback-clock complete: %v", err)
+	}
+	if err := store.AuditRootAdministratorTokenRotationComplete(ctx, complete, rotationID); err != nil {
+		t.Fatalf("idempotent complete: %v", err)
+	}
+	var begun, completed int64
+	if err := store.db.QueryRowContext(ctx, `SELECT begun_at,completed_at FROM administrator_root_token_rotations
+		WHERE rotation_id=?`, idBytes(rotationID)).Scan(&begun, &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed < begun {
+		t.Fatalf("rotation completion moved backward: begun=%d complete=%d", begun, completed)
+	}
+	var beginEvents, completeEvents int
+	if err := store.db.QueryRowContext(ctx, `SELECT
+		sum(action='administrator.root_token.rotate.begin'),
+		sum(action='administrator.root_token.rotate.complete')
+		FROM audit_events WHERE target_id=?`, idBytes(rotationID)).Scan(&beginEvents, &completeEvents); err != nil {
+		t.Fatal(err)
+	}
+	if beginEvents != 1 || completeEvents != 1 {
+		t.Fatalf("begin events=%d complete events=%d", beginEvents, completeEvents)
+	}
+	wrongID := identity.ID{102}
+	if err := store.AuditRootAdministratorTokenRotationBegin(ctx, begin, wrongID); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("wrong binding error=%v", err)
+	}
+	state, err := store.AdministratorAuthState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleDecision, err := adminauth.NewDecision(adminauth.RootSubject(identity.ID{103}),
+		administratorRootTokenRotationBeginPolicy, adminauth.ObjectTarget(wrongID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AuditRootAdministratorTokenRotationBegin(ctx, staleDecision, wrongID); !errors.Is(err, ErrCredentialInvalid) {
+		t.Fatalf("stale root error=%v (root=%s)", err, state.RootServicePrincipalID)
+	}
 }
 
 func TestAdministratorSessionLimitRotationAndRevocation(t *testing.T) {
@@ -461,7 +896,7 @@ func TestRestoreInvalidatesAdministratorAuthenticationState(t *testing.T) {
 	store, _ := openTestStore(t)
 	now := time.Now().UTC().Truncate(time.Second)
 	store.now = func() time.Time { return now }
-	owner, rootActor := bootstrapAdministratorFixture(t, store)
+	owner, _ := bootstrapAdministratorFixture(t, store)
 	stateBefore, err := store.AdministratorAuthState(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -471,7 +906,8 @@ func TestRestoreInvalidatesAdministratorAuthenticationState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recovery, recoverySecret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+	recovery, recoverySecret, err := store.IssueAdministratorRecoveryGrant(ctx,
+		administratorRecoveryGrantDecision(t, store, &owner.Principal.ID),
 		AdministratorRecoveryOwner, &owner.Principal.ID, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -607,12 +1043,7 @@ func TestAdministratorSessionRotationPreservesAbsoluteDeadlineAndHasOneWinner(t 
 	ctx := context.Background()
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store.now = func() time.Time { return now }
-	state, err := store.AdministratorAuthState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actor := adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID)
-	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, actor,
+	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, administratorRecoveryGrantDecision(t, store, nil),
 		AdministratorRecoveryBootstrapOwner, nil, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -622,7 +1053,7 @@ func TestAdministratorSessionRotationPreservesAbsoluteDeadlineAndHasOneWinner(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := store.CreateFirstOwner(ctx, actor, secret, "owner", hash)
+	owner, err := store.BootstrapFirstAdministrator(ctx, secret, "owner", hash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,12 +1121,7 @@ func TestAdministratorSessionLimitEvictsOldestAndAudits(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(1_800_000_000, 0).UTC()
 	store.now = func() time.Time { return now }
-	state, err := store.AdministratorAuthState(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actor := adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID)
-	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, actor,
+	_, secret, err := store.IssueAdministratorRecoveryGrant(ctx, administratorRecoveryGrantDecision(t, store, nil),
 		AdministratorRecoveryBootstrapOwner, nil, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -705,7 +1131,7 @@ func TestAdministratorSessionLimitEvictsOldestAndAudits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := store.CreateFirstOwner(ctx, actor, secret, "owner", hash)
+	owner, err := store.BootstrapFirstAdministrator(ctx, secret, "owner", hash)
 	if err != nil {
 		t.Fatal(err)
 	}
