@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/controllerservice"
 	"laneway.dev/laneway/internal/identity"
@@ -100,11 +101,6 @@ func run() error {
 		MinVersion:   tls.VersionTLS13,
 		MaxVersion:   tls.VersionTLS13,
 	}
-	authorizeAdmin, err := adminAuthorizer(*adminTokenFile)
-	if err != nil {
-		return err
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	store, err := controller.Open(ctx, *database)
@@ -112,6 +108,14 @@ func run() error {
 		return err
 	}
 	defer store.Close()
+	authState, err := store.AdministratorAuthState(ctx)
+	if err != nil {
+		return fmt.Errorf("read administrator authentication state: %w", err)
+	}
+	authorizeAdmin, err := adminAuthorizer(*adminTokenFile, authState.RootServicePrincipalID)
+	if err != nil {
+		return err
+	}
 	service, err := controllerservice.New(controllerservice.Options{
 		Store:            store,
 		CACertificate:    issuer,
@@ -216,7 +220,10 @@ func (w *statusResponseWriter) Write(contents []byte) (int, error) {
 	return w.ResponseWriter.Write(contents)
 }
 
-func adminAuthorizer(path string) (controllerservice.AdminAuthorizer, error) {
+func adminAuthorizer(path string, servicePrincipalID identity.ID) (controllerservice.AdminAuthorizer, error) {
+	if servicePrincipalID.IsZero() {
+		return nil, errors.New("admin bearer service principal must be nonzero")
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open admin token: %w", err)
@@ -234,11 +241,12 @@ func adminAuthorizer(path string) (controllerservice.AdminAuthorizer, error) {
 		return nil, errors.New("admin token must contain at least 32 characters")
 	}
 	want := []byte("Bearer " + token)
-	return func(request *http.Request) error {
+	actor := adminauth.IDActor(adminauth.ActorServicePrincipal, servicePrincipalID)
+	return func(request *http.Request) (adminauth.Actor, error) {
 		got := []byte(request.Header.Get("Authorization"))
 		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
-			return controllerservice.ErrUnauthenticated
+			return adminauth.Actor{}, controllerservice.ErrUnauthenticated
 		}
-		return nil
+		return actor, nil
 	}, nil
 }

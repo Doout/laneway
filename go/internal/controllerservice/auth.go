@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 )
 
@@ -13,10 +14,11 @@ var (
 	ErrPermissionDenied = errors.New("permission denied")
 )
 
-// AdminAuthorizer is called before every administrative operation. Deployments
-// can implement bearer-token, reverse-proxy, or mTLS administration without
-// coupling those credentials to the service.
-type AdminAuthorizer func(*http.Request) error
+// AdminAuthorizer is the compatibility contract for the static root bearer.
+// It must return only the stable root service-principal actor. Browser
+// administrator sessions use AccessController and are not wired through this
+// legacy management surface yet.
+type AdminAuthorizer func(*http.Request) (adminauth.Actor, error)
 
 // NodeAuthorizer authenticates a request as a node. Returning an identity does
 // not bypass the service's durable node and revocation checks.

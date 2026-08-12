@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/protocol"
 )
@@ -44,7 +45,7 @@ func decodeJSONResponse(t *testing.T, result *httptest.ResponseRecorder, value a
 func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 	f := newFixture(t, 1024, nil)
 	original := f.service.authorizeAdm
-	f.service.authorizeAdm = func(*http.Request) error { return ErrUnauthenticated }
+	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) { return adminauth.Actor{}, ErrUnauthenticated }
 	for _, endpoint := range []struct {
 		method string
 		path   string
@@ -69,6 +70,14 @@ func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 		if denied.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s status=%d", endpoint.method, endpoint.path, denied.Code)
 		}
+	}
+	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) {
+		return adminauth.IDActor(adminauth.ActorAdministrator, identity.ID{1}), nil
+	}
+	humanSessionActor := jsonRequest(t, f.service.Handler(), http.MethodGet, "/v1/admin/networks", nil)
+	if humanSessionActor.Code != http.StatusForbidden {
+		t.Fatalf("legacy management surface accepted browser administrator actor: status=%d body=%s",
+			humanSessionActor.Code, humanSessionActor.Body.String())
 	}
 	f.service.authorizeAdm = original
 	unauthenticatedAdvertise := jsonRequest(t, f.service.Handler(), http.MethodPost, "/v1/routes", advertiseRouteRequest{Prefix: "192.0.2.0/24", Kind: "subnet", Mode: "nat"})
@@ -312,6 +321,375 @@ func TestNodeRouteLifecycleOwnershipAdminApprovalAndReads(t *testing.T) {
 	decodeJSONResponse(t, audit, &auditList)
 	if len(auditList.Events) < 8 {
 		t.Fatalf("too few audit events: %d", len(auditList.Events))
+	}
+	state, err := f.store.AdministratorAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootID := state.RootServicePrincipalID.String()
+	wantedRootMutations := map[string]string{
+		"route.approve":         route.RouteID,
+		"route.withdraw":        exitRoute.RouteID,
+		"node.capabilities.set": nodeOne.NodeID.String(),
+	}
+	foundRootMutations := make(map[string]bool, len(wantedRootMutations))
+	for _, event := range auditList.Events {
+		if event.ActorKind == "" {
+			t.Fatalf("audit event omitted actor kind: %+v", event)
+		}
+		if event.ActorNodeID != nil && (event.ActorID == nil || *event.ActorID != *event.ActorNodeID) {
+			t.Fatalf("node actor compatibility fields disagree: %+v", event)
+		}
+		wantedTarget, isRootMutation := wantedRootMutations[event.Action]
+		if !isRootMutation || event.TargetID == nil || *event.TargetID != wantedTarget {
+			continue
+		}
+		if event.ActorKind != string(adminauth.ActorServicePrincipal) || event.ActorID == nil || *event.ActorID != rootID {
+			t.Fatalf("administrator mutation actor=%+v want stable root service principal", event)
+		}
+		foundRootMutations[event.Action] = true
+	}
+	for action := range wantedRootMutations {
+		if !foundRootMutations[action] {
+			t.Fatalf("missing root-attributed %s audit event", action)
+		}
+	}
+}
+
+func TestManagementRejectsNonRootServicePrincipalAndRollsBack(t *testing.T) {
+	f := newFixture(t, DefaultMaxBodyBytes, nil)
+	wrongID := identity.ID{99}
+	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) {
+		return adminauth.IDActor(adminauth.ActorServicePrincipal, wrongID), nil
+	}
+	response := jsonRequest(t, f.service.Handler(), http.MethodPost, "/v1/admin/networks",
+		networkRequest{Name: "must-not-exist", IPv4Pool: "10.55.0.0/24"})
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("mismatched service-principal status=%d body=%s", response.Code, response.Body.String())
+	}
+	networks, err := f.store.Networks(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, network := range networks {
+		if network.Name == "must-not-exist" {
+			t.Fatal("mismatched service principal committed management mutation")
+		}
+	}
+}
+
+func TestAdministratorMutationHandlersAuditStableRootServicePrincipal(t *testing.T) {
+	var authenticated identity.NodeIdentity
+	f := newFixture(t, DefaultMaxBodyBytes, func(*http.Request) (identity.NodeIdentity, error) {
+		return authenticated, nil
+	})
+	state, err := f.store.AdministratorAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type auditExpectation struct {
+		networkID identity.NetworkID
+		action    string
+		targetID  identity.ID
+	}
+	requireStatus := func(t *testing.T, method, path string, body any, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		result := jsonRequest(t, f.service.Handler(), method, path, body)
+		if result.Code != want {
+			t.Fatalf("%s %s status=%d want=%d body=%s", method, path, result.Code, want, result.Body.String())
+		}
+		return result
+	}
+	parseID := func(t *testing.T, value string) identity.ID {
+		t.Helper()
+		id, err := identity.ParseID(value)
+		if err != nil {
+			t.Fatalf("parse response ID %q: %v", value, err)
+		}
+		return id
+	}
+	prepareNode := func(t *testing.T, name string) (identity.NodeIdentity, identity.ID, []byte) {
+		t.Helper()
+		token, err := f.store.IssueEnrollmentToken(context.Background(), f.network.ID, name, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, result := enroll(t, f, token.Secret, csrDER(t, ""), name)
+		if result.Code != http.StatusCreated {
+			t.Fatalf("prepare node status=%d body=%s", result.Code, result.Body.String())
+		}
+		var node identity.NodeIdentity
+		copy(node.NetworkID[:], response.GetNetworkId())
+		copy(node.NodeID[:], response.GetNodeId())
+		certificates, err := f.store.NetworkCertificates(context.Background(), node.NetworkID, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, certificate := range certificates {
+			if certificate.NodeID == node.NodeID {
+				return node, certificate.ID, append([]byte(nil), certificate.Serial...)
+			}
+		}
+		t.Fatalf("prepared node %s has no certificate", node.NodeID)
+		return identity.NodeIdentity{}, identity.ID{}, nil
+	}
+	prepareAdvertisedRoute := func(t *testing.T, name, prefix string) identity.ID {
+		t.Helper()
+		node, _, _ := prepareNode(t, name)
+		if _, err := f.store.SetNodeCapabilities(context.Background(), node.NodeID, protocol.CapabilitySubnetRouterV1); err != nil {
+			t.Fatal(err)
+		}
+		authenticated = node
+		result := requireStatus(t, http.MethodPost, "/v1/routes", advertiseRouteRequest{
+			Prefix: prefix, Kind: "subnet", Mode: "nat", Metric: 10,
+		}, http.StatusCreated)
+		var route routeResponse
+		decodeJSONResponse(t, result, &route)
+		if route.State != "advertised" {
+			t.Fatalf("prepared route state=%q", route.State)
+		}
+		return parseID(t, route.RouteID)
+	}
+	validSelector := json.RawMessage(`{"source_prefixes":[{"address":"wAACAA==","prefix_length":24}],"ip_protocol":"IP_PROTOCOL_TCP","destination_ports":[{"first":443,"last":443}]}`)
+
+	tests := []struct {
+		name   string
+		invoke func(*testing.T) []auditExpectation
+	}{
+		{
+			name: "enrollment token issue",
+			invoke: func(t *testing.T) []auditExpectation {
+				result := requireStatus(t, http.MethodPost, "/v1/admin/enrollment-tokens", tokenRequest{
+					NetworkID: f.network.ID.String(), Label: "root actor audit", ExpiresAtUnix: time.Now().Add(time.Hour).Unix(),
+				}, http.StatusCreated)
+				var response tokenResponse
+				decodeJSONResponse(t, result, &response)
+				if response.EnrollmentToken == "" {
+					t.Fatal("issued enrollment token omitted its secret")
+				}
+				return []auditExpectation{{f.network.ID, "enrollment_token.issue", parseID(t, response.TokenID)}}
+			},
+		},
+		{
+			name: "network create",
+			invoke: func(t *testing.T) []auditExpectation {
+				result := requireStatus(t, http.MethodPost, "/v1/admin/networks", networkRequest{
+					Name: "root-actor-audit", IPv4Pool: "10.55.0.0/24",
+				}, http.StatusCreated)
+				var response networkResponse
+				decodeJSONResponse(t, result, &response)
+				networkID, err := identity.ParseNetworkID(response.NetworkID)
+				if err != nil {
+					t.Fatalf("parse created network ID: %v", err)
+				}
+				if _, err := f.store.Network(context.Background(), networkID); err != nil {
+					t.Fatalf("read created network: %v", err)
+				}
+				return []auditExpectation{{networkID, "network.create", identity.ID(networkID)}}
+			},
+		},
+		{
+			name: "route assign",
+			invoke: func(t *testing.T) []auditExpectation {
+				node, _, _ := prepareNode(t, "root-actor-route-assign")
+				result := requireStatus(t, http.MethodPost, "/v1/admin/routes/assign", assignRouteRequest{
+					NetworkID: f.network.ID.String(), NodeID: node.NodeID.String(), Prefix: "192.0.2.0/24", Mode: "nat", Metric: 20,
+				}, http.StatusCreated)
+				var response routeResponse
+				decodeJSONResponse(t, result, &response)
+				if response.State != "approved" {
+					t.Fatalf("assigned route state=%q", response.State)
+				}
+				routeID := parseID(t, response.RouteID)
+				return []auditExpectation{
+					{f.network.ID, "node.capabilities.set", identity.ID(node.NodeID)},
+					{f.network.ID, "route.advertise", routeID},
+					{f.network.ID, "route.approve", routeID},
+				}
+			},
+		},
+		{
+			name: "route approve",
+			invoke: func(t *testing.T) []auditExpectation {
+				routeID := prepareAdvertisedRoute(t, "root-actor-route-approve", "198.51.100.0/24")
+				requireStatus(t, http.MethodPost, "/v1/admin/routes/"+routeID.String()+"/approve", nil, http.StatusOK)
+				return []auditExpectation{{f.network.ID, "route.approve", routeID}}
+			},
+		},
+		{
+			name: "route withdraw",
+			invoke: func(t *testing.T) []auditExpectation {
+				routeID := prepareAdvertisedRoute(t, "root-actor-route-withdraw", "203.0.113.0/24")
+				requireStatus(t, http.MethodPost, "/v1/admin/routes/"+routeID.String()+"/withdraw", nil, http.StatusOK)
+				return []auditExpectation{{f.network.ID, "route.withdraw", routeID}}
+			},
+		},
+		{
+			name: "ACL create",
+			invoke: func(t *testing.T) []auditExpectation {
+				result := requireStatus(t, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/acl-rules", aclRuleRequest{
+					Priority: 10, Action: "accept", Selector: validSelector, Description: "root actor audit create",
+				}, http.StatusCreated)
+				var response aclRuleResponse
+				decodeJSONResponse(t, result, &response)
+				return []auditExpectation{{f.network.ID, "acl_rule.create", parseID(t, response.RuleID)}}
+			},
+		},
+		{
+			name: "ACL update",
+			invoke: func(t *testing.T) []auditExpectation {
+				created := requireStatus(t, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/acl-rules", aclRuleRequest{
+					Priority: 20, Action: "accept", Selector: validSelector, Description: "root actor audit update setup",
+				}, http.StatusCreated)
+				var rule aclRuleResponse
+				decodeJSONResponse(t, created, &rule)
+				result := requireStatus(t, http.MethodPut, "/v1/admin/acl-rules/"+rule.RuleID, updateACLRuleRequest{
+					Priority: 21, Action: "deny", Selector: validSelector, Description: "root actor audit updated", Enabled: false,
+				}, http.StatusOK)
+				var response aclRuleResponse
+				decodeJSONResponse(t, result, &response)
+				if response.Enabled || response.Action != "deny" || response.Priority != 21 {
+					t.Fatalf("updated ACL rule=%+v", response)
+				}
+				return []auditExpectation{{f.network.ID, "acl_rule.update", parseID(t, rule.RuleID)}}
+			},
+		},
+		{
+			name: "ACL delete",
+			invoke: func(t *testing.T) []auditExpectation {
+				created := requireStatus(t, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/acl-rules", aclRuleRequest{
+					Priority: 30, Action: "accept", Selector: validSelector, Description: "root actor audit delete setup",
+				}, http.StatusCreated)
+				var rule aclRuleResponse
+				decodeJSONResponse(t, created, &rule)
+				requireStatus(t, http.MethodDelete, "/v1/admin/acl-rules/"+rule.RuleID, nil, http.StatusOK)
+				return []auditExpectation{{f.network.ID, "acl_rule.delete", parseID(t, rule.RuleID)}}
+			},
+		},
+		{
+			name: "node revoke",
+			invoke: func(t *testing.T) []auditExpectation {
+				node, _, _ := prepareNode(t, "root-actor-node-revoke")
+				requireStatus(t, http.MethodPost, "/v1/admin/nodes/"+node.NodeID.String()+"/revoke", revocationRequest{
+					Reason: "root actor audit",
+				}, http.StatusOK)
+				stored, err := f.store.Node(context.Background(), node.NodeID)
+				if err != nil || stored.RevokedAt == nil {
+					t.Fatalf("revoked node=%+v err=%v", stored, err)
+				}
+				return []auditExpectation{{f.network.ID, "node.revoke", identity.ID(node.NodeID)}}
+			},
+		},
+		{
+			name: "certificate revoke",
+			invoke: func(t *testing.T) []auditExpectation {
+				_, certificateID, serial := prepareNode(t, "root-actor-certificate-revoke")
+				requireStatus(t, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/certificates/"+hex.EncodeToString(serial)+"/revoke", revocationRequest{
+					Reason: "root actor audit",
+				}, http.StatusOK)
+				return []auditExpectation{{f.network.ID, "certificate.revoke", certificateID}}
+			},
+		},
+		{
+			name: "node capabilities set",
+			invoke: func(t *testing.T) []auditExpectation {
+				node, _, _ := prepareNode(t, "root-actor-node-capabilities")
+				requireStatus(t, http.MethodPut, "/v1/admin/nodes/"+node.NodeID.String()+"/capabilities", nodeCapabilitiesRequest{
+					EnabledCapabilities: uint64(protocol.CapabilityExitNodeV1),
+				}, http.StatusOK)
+				stored, err := f.store.Node(context.Background(), node.NodeID)
+				if err != nil || stored.EnabledCapabilities != uint64(protocol.CapabilityExitNodeV1) {
+					t.Fatalf("capability-updated node=%+v err=%v", stored, err)
+				}
+				return []auditExpectation{{f.network.ID, "node.capabilities.set", identity.ID(node.NodeID)}}
+			},
+		},
+		{
+			name: "relay register",
+			invoke: func(t *testing.T) []auditExpectation {
+				serviceID, err := identity.NewID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				result := requireStatus(t, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/relays", registerRelayRequest{
+					ServiceID: serviceID.String(), Name: "root-actor-relay-register", Endpoint: "relay-register.example:443",
+				}, http.StatusCreated)
+				var response relayResponse
+				decodeJSONResponse(t, result, &response)
+				if !response.Enabled {
+					t.Fatal("registered relay is disabled")
+				}
+				return []auditExpectation{{f.network.ID, "relay.register", parseID(t, response.RelayID)}}
+			},
+		},
+		{
+			name: "relay disable",
+			invoke: func(t *testing.T) []auditExpectation {
+				serviceID, err := identity.NewID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				relay, _, err := f.store.RegisterRelay(context.Background(), f.network.ID, serviceID, nil,
+					"root-actor-relay-disable", "relay-disable.example:443")
+				if err != nil {
+					t.Fatal(err)
+				}
+				requireStatus(t, http.MethodPost, "/v1/admin/relays/"+relay.ID.String()+"/disable", nil, http.StatusOK)
+				return []auditExpectation{{f.network.ID, "relay.disable", relay.ID}}
+			},
+		},
+		{
+			name: "relay update",
+			invoke: func(t *testing.T) []auditExpectation {
+				serviceID, err := identity.NewID()
+				if err != nil {
+					t.Fatal(err)
+				}
+				relay, _, err := f.store.RegisterRelay(context.Background(), f.network.ID, serviceID, nil,
+					"root-actor-relay-update", "relay-update.example:443")
+				if err != nil {
+					t.Fatal(err)
+				}
+				result := requireStatus(t, http.MethodPut, "/v1/admin/relays/"+relay.ID.String(), updateRelayRequest{
+					Name: "root-actor-relay-updated", Endpoint: "relay-updated.example:8443", Enabled: false,
+				}, http.StatusOK)
+				var response relayResponse
+				decodeJSONResponse(t, result, &response)
+				if response.Enabled || response.Name != "root-actor-relay-updated" || response.Endpoint != "relay-updated.example:8443" {
+					t.Fatalf("updated relay=%+v", response)
+				}
+				return []auditExpectation{{f.network.ID, "relay.update", relay.ID}}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			expectations := test.invoke(t)
+			events, err := f.store.GlobalAuditEvents(context.Background(), 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, expectation := range expectations {
+				matches := 0
+				for _, event := range events {
+					if event.Action != expectation.action || event.TargetID == nil || *event.TargetID != expectation.targetID {
+						continue
+					}
+					matches++
+					if event.NetworkScope == nil || *event.NetworkScope != expectation.networkID {
+						t.Fatalf("%s audit network=%v want=%s", expectation.action, event.NetworkScope, expectation.networkID)
+					}
+					if event.Actor.Kind != adminauth.ActorServicePrincipal || event.Actor.ID == nil || *event.Actor.ID != state.RootServicePrincipalID {
+						t.Fatalf("%s audit actor=%+v want service principal %s", expectation.action, event.Actor, state.RootServicePrincipalID)
+					}
+				}
+				if matches != 1 {
+					t.Fatalf("%s audit events for target %s=%d want=1", expectation.action, expectation.targetID, matches)
+				}
+			}
+		})
 	}
 }
 

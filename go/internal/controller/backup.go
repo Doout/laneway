@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"laneway.dev/laneway/internal/adminauth"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -25,7 +27,7 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 	if s == nil || s.db == nil {
 		return errors.New("backup controller database: store is closed")
 	}
-	return backupDatabase(ctx, s.db, destination, currentSchemaVersion)
+	return backupDatabase(ctx, s.db, destination, currentSchemaVersion, false)
 }
 
 // BackupDatabase snapshots an existing controller database through a read-only
@@ -40,7 +42,7 @@ func BackupDatabase(ctx context.Context, source, destination string) error {
 		return fmt.Errorf("open controller database read-only: %w", err)
 	}
 	defer db.Close()
-	if err := backupDatabase(ctx, db, destination, currentSchemaVersion); err != nil {
+	if err := backupDatabase(ctx, db, destination, currentSchemaVersion, false); err != nil {
 		return fmt.Errorf("backup controller database: %w", err)
 	}
 	return nil
@@ -58,13 +60,13 @@ func RestoreDatabase(ctx context.Context, source, destination string) error {
 		return fmt.Errorf("open controller backup: %w", err)
 	}
 	defer db.Close()
-	if err := backupDatabase(ctx, db, destination, currentSchemaVersion); err != nil {
+	if err := backupDatabase(ctx, db, destination, currentSchemaVersion, true); err != nil {
 		return fmt.Errorf("restore controller database: %w", err)
 	}
 	return nil
 }
 
-func backupDatabase(ctx context.Context, source *sql.DB, destination string, maximumSchema int) (retErr error) {
+func backupDatabase(ctx context.Context, source *sql.DB, destination string, maximumSchema int, prepareRestore bool) (retErr error) {
 	destination, err := validateNewDatabasePath(destination)
 	if err != nil {
 		return err
@@ -127,6 +129,11 @@ func backupDatabase(ctx context.Context, source *sql.DB, destination string, max
 	}); err != nil {
 		return err
 	}
+	if prepareRestore {
+		if err := prepareRestoredDatabase(ctx, temporaryPath); err != nil {
+			return fmt.Errorf("prepare restored controller database: %w", err)
+		}
+	}
 	if err := validateDatabase(ctx, temporaryPath, maximumSchema); err != nil {
 		return fmt.Errorf("validate completed backup: %w", err)
 	}
@@ -146,6 +153,55 @@ func backupDatabase(ctx context.Context, source *sql.DB, destination string, max
 		_ = os.Remove(destination)
 		return err
 	}
+	return nil
+}
+
+// prepareRestoredDatabase upgrades the private restore candidate and invalidates
+// replayable authentication state before the database is atomically published.
+func prepareRestoredDatabase(ctx context.Context, path string) error {
+	store, err := Open(ctx, path)
+	if err != nil {
+		return err
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = store.Close()
+		}
+	}()
+	now := store.now()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM administrator_sessions`); err != nil {
+		return fmt.Errorf("invalidate restored administrator sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM administrator_recovery_grants WHERE consumed_at IS NULL`); err != nil {
+		return fmt.Errorf("invalidate restored administrator recovery grants: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE administrator_auth_state
+		SET recovery_generation=recovery_generation+1,last_recovered_at=? WHERE singleton=1`, unix(now))
+	if err != nil {
+		return fmt.Errorf("advance restored authentication generation: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows != 1 {
+		return errors.New("restored administrator auth state is missing")
+	}
+	if err := auditActorTx(ctx, tx, nil, adminauth.SystemActor(), "controller.restore", "controller_database", nil, `{}`, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit restored authentication invalidation: %w", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return fmt.Errorf("checkpoint restored controller database: %w", err)
+	}
+	if err := store.Close(); err != nil {
+		return fmt.Errorf("close restored controller database: %w", err)
+	}
+	closed = true
 	return nil
 }
 
@@ -217,14 +273,24 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	if minimumVersion != 1 || versionRows != version {
 		return errors.New("backup schema history is incomplete")
 	}
-	const requiredTables = 10
-	var tableCount int
-	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema
-		WHERE type = 'table' AND name IN ('networks','nodes','certificates','overlay_addresses','routes','acl_rules','relays','enrollment_tokens','audit_events','schema_versions')`).Scan(&tableCount); err != nil {
-		return fmt.Errorf("validate backup tables: %w", err)
+	requiredTables := []string{"networks", "nodes", "certificates", "overlay_addresses", "routes", "acl_rules", "relays", "enrollment_tokens", "audit_events", "schema_versions"}
+	if version >= 8 {
+		requiredTables = append(requiredTables, "administrator_principals", "administrator_principal_networks",
+			"administrator_credentials", "administrator_sessions", "administrator_recovery_grants", "administrator_auth_state")
 	}
-	if tableCount != requiredTables {
-		return fmt.Errorf("backup schema is incomplete: found %d of %d required tables", tableCount, requiredTables)
+	for _, table := range requiredTables {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
+			return fmt.Errorf("validate backup table %s: %w", table, err)
+		}
+		if count != 1 {
+			return fmt.Errorf("backup schema is incomplete: required table %s is missing", table)
+		}
+	}
+	if version >= 8 {
+		if err := validateAdministratorBackupSchema(ctx, db); err != nil {
+			return err
+		}
 	}
 	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
@@ -238,6 +304,94 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 		return fmt.Errorf("read SQLite foreign-key check: %w", err)
 	}
 	return nil
+}
+
+func validateAdministratorBackupSchema(ctx context.Context, db *sql.DB) error {
+	want, wantObjects, err := expectedAdministratorSchemaFingerprint(ctx)
+	if err != nil {
+		return fmt.Errorf("build canonical administrator schema: %w", err)
+	}
+	got, gotObjects, err := administratorSchemaFingerprint(ctx, db)
+	if err != nil {
+		return fmt.Errorf("fingerprint backup administrator schema: %w", err)
+	}
+	if gotObjects != wantObjects || got != want {
+		return errors.New("backup schema is incomplete: administrator schema does not match the canonical v8 definition")
+	}
+	var singletonCount int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_auth_state
+		WHERE singleton=1 AND length(root_service_principal_id)=16 AND root_service_principal_id<>zeroblob(16)`).Scan(&singletonCount); err != nil {
+		return fmt.Errorf("validate administrator auth state: %w", err)
+	}
+	if singletonCount != 1 {
+		return errors.New("backup administrator auth state is missing or corrupt")
+	}
+	return nil
+}
+
+var administratorSchemaTables = map[string]struct{}{
+	"administrator_principals":         {},
+	"administrator_principal_networks": {},
+	"administrator_credentials":        {},
+	"administrator_sessions":           {},
+	"administrator_recovery_grants":    {},
+	"administrator_auth_state":         {},
+	"audit_events":                     {},
+}
+
+// administratorSchemaFingerprint covers the exact sqlite_schema text and
+// complete object set for every security-critical v8 table. This includes
+// implicit/explicit indexes and triggers, so altered CHECK/FK clauses,
+// partial-index predicates, STRICT declarations, or unexpected triggers all
+// change the fingerprint.
+func administratorSchemaFingerprint(ctx context.Context, db *sql.DB) ([sha256.Size]byte, int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT type,name,tbl_name,sql
+		FROM sqlite_schema WHERE type IN ('table','index','trigger')
+		ORDER BY type,name,tbl_name`)
+	if err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	defer rows.Close()
+	hash := sha256.New()
+	objects := 0
+	for rows.Next() {
+		var objectType, name, table string
+		var definition sql.NullString
+		if err := rows.Scan(&objectType, &name, &table, &definition); err != nil {
+			return [sha256.Size]byte{}, 0, err
+		}
+		_, criticalTable := administratorSchemaTables[table]
+		if !criticalTable && objectType != "trigger" {
+			continue
+		}
+		objects++
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%t\x00%s\x00",
+			objectType, name, table, definition.Valid, definition.String)
+	}
+	if err := rows.Err(); err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	var result [sha256.Size]byte
+	copy(result[:], hash.Sum(nil))
+	return result, objects, nil
+}
+
+func expectedAdministratorSchemaFingerprint(ctx context.Context) ([sha256.Size]byte, int, error) {
+	reference, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	reference.SetMaxOpenConns(1)
+	defer reference.Close()
+	if _, err := reference.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	for version, migration := range migrations {
+		if _, err := reference.ExecContext(ctx, migration); err != nil {
+			return [sha256.Size]byte{}, 0, fmt.Errorf("apply reference migration %d: %w", version+1, err)
+		}
+	}
+	return administratorSchemaFingerprint(ctx, reference)
 }
 
 func openReadOnlyDatabase(path string) (*sql.DB, error) {

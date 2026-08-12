@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
@@ -20,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/buildinfo"
 	"laneway.dev/laneway/internal/config"
@@ -130,6 +132,11 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	if err != nil {
 		return err
 	}
+	adminCredential, err := adminBearerCredentialFromFile(cfg.Controller.AdminTokenFile)
+	if err != nil {
+		return err
+	}
+	defer adminCredential.clear()
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return fmt.Errorf("create controller state directory: %w", err)
 	}
@@ -165,11 +172,6 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	if err != nil {
 		return err
 	}
-	adminAuthorizer, err := bearerAuthorizerFromFile(cfg.Controller.AdminTokenFile)
-	if err != nil {
-		return err
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	store, err := controller.Open(ctx, cfg.Controller.DatabaseFile)
@@ -177,6 +179,14 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 		return err
 	}
 	defer store.Close()
+	authState, err := store.AdministratorAuthState(ctx)
+	if err != nil {
+		return fmt.Errorf("read administrator authentication state: %w", err)
+	}
+	adminAuthorizer, err := adminCredential.authorizer(authState.RootServicePrincipalID)
+	if err != nil {
+		return err
+	}
 	service, err := controllerservice.New(controllerservice.Options{
 		Store: store, CACertificate: ca, CAKey: caKey, IssuerChain: issuerChain,
 		LeafValidity: cfg.Controller.LeafValidity.Duration(), AdminAuthorizer: adminAuthorizer,
@@ -504,33 +514,58 @@ func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, error) {
 	}, nil
 }
 
-func bearerAuthorizerFromFile(path string) (controllerservice.AdminAuthorizer, error) {
+type adminBearerCredential struct {
+	authorization []byte
+}
+
+func adminBearerCredentialFromFile(path string) (*adminBearerCredential, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open admin token: %w", err)
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat admin token: %w", err)
-	}
-	if info.Size() > maxAdminTokenFile {
-		return nil, errors.New("admin token file is too large")
-	}
 	contents, err := io.ReadAll(io.LimitReader(file, maxAdminTokenFile+1))
 	if err != nil {
 		return nil, fmt.Errorf("read admin token: %w", err)
 	}
-	token := strings.TrimSpace(string(contents))
+	defer clear(contents)
+	if len(contents) > maxAdminTokenFile {
+		return nil, errors.New("admin token file is too large")
+	}
+	token := bytes.TrimSpace(contents)
 	if len(token) < 32 {
 		return nil, errors.New("admin token must contain at least 32 characters")
 	}
-	want := []byte("Bearer " + token)
-	return func(r *http.Request) error {
+	authorization := make([]byte, len("Bearer ")+len(token))
+	copy(authorization, "Bearer ")
+	copy(authorization[len("Bearer "):], token)
+	return &adminBearerCredential{authorization: authorization}, nil
+}
+
+func (credential *adminBearerCredential) clear() {
+	if credential == nil {
+		return
+	}
+	clear(credential.authorization)
+	credential.authorization = nil
+}
+
+func (credential *adminBearerCredential) authorizer(servicePrincipalID identity.ID) (controllerservice.AdminAuthorizer, error) {
+	if credential == nil || len(credential.authorization) == 0 {
+		return nil, errors.New("admin bearer credential is empty")
+	}
+	if servicePrincipalID.IsZero() {
+		return nil, errors.New("admin bearer service principal must be nonzero")
+	}
+	want := credential.authorization
+	actor := adminauth.IDActor(adminauth.ActorServicePrincipal, servicePrincipalID)
+	return func(r *http.Request) (adminauth.Actor, error) {
 		got := []byte(r.Header.Get("Authorization"))
-		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
-			return controllerservice.ErrUnauthenticated
+		matches := len(got) == len(want) && subtle.ConstantTimeCompare(got, want) == 1
+		clear(got)
+		if !matches {
+			return adminauth.Actor{}, controllerservice.ErrUnauthenticated
 		}
-		return nil
+		return actor, nil
 	}, nil
 }

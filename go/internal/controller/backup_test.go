@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -11,8 +12,11 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
+
+	"laneway.dev/laneway/internal/adminauth"
 )
 
 func TestBackupAndFreshRestore(t *testing.T) {
@@ -268,5 +272,216 @@ func TestBackupDatabaseDoesNotMigrateSource(t *testing.T) {
 	}
 	if wireGuardColumns != 0 {
 		t.Fatal("read-only backup migrated the source nodes table")
+	}
+}
+
+func TestRestoreInvalidatesAdministratorSecrets(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, err := Open(ctx, filepath.Join(directory, "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0).UTC()
+	store.now = func() time.Time { return now }
+	state, err := store.AdministratorAuthState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootActor := adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID)
+	_, bootstrapSecret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+		AdministratorRecoveryBootstrapOwner, nil, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	passwordHash, err := adminauth.HashPassword([]byte("a sufficiently long owner password"),
+		bytes.NewReader(bytes.Repeat([]byte{4}, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := store.CreateFirstOwner(ctx, rootActor, bootstrapSecret, "owner", passwordHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sessionToken, _, err := store.CreateAdministratorSession(ctx, owner.Principal.ID, owner.Credential.ID,
+		AdministratorSessionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant, recoverySecret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+		AdministratorRecoveryOwner, &owner.Principal.ID, now.Add(time.Hour))
+	if err != nil || recoverySecret == "" {
+		t.Fatalf("issue recovery grant=%+v err=%v", grant, err)
+	}
+	backupPath := filepath.Join(directory, "backup.db")
+	if err := store.Backup(ctx, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restoredPath := filepath.Join(directory, "restored.db")
+	if err := RestoreDatabase(ctx, backupPath, restoredPath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(ctx, restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if _, _, err := restored.AuthenticateAdministratorSession(ctx, sessionToken); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("pre-restore session survived: %v", err)
+	}
+	var sessions, pendingGrants int
+	if err := restored.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_recovery_grants WHERE consumed_at IS NULL`).Scan(&pendingGrants); err != nil {
+		t.Fatal(err)
+	}
+	restoredState, err := restored.AdministratorAuthState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 || pendingGrants != 0 || restoredState.RecoveryGeneration != state.RecoveryGeneration+1 ||
+		restoredState.LastRecoveredAt == nil || restoredState.RootServicePrincipalID != state.RootServicePrincipalID {
+		t.Fatalf("restored auth state=%+v sessions=%d pending=%d", restoredState, sessions, pendingGrants)
+	}
+	events, err := restored.GlobalAuditEvents(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRestore := false
+	for _, event := range events {
+		if event.Action == "controller.restore" && event.Actor.Kind == adminauth.ActorSystem && event.NetworkScope == nil {
+			foundRestore = true
+		}
+	}
+	if !foundRestore {
+		t.Fatal("restore system audit event missing")
+	}
+}
+
+func TestRestoreRejectsMalformedV8AdministratorScopeTable(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, source := openTestStore(t)
+	validBackup := filepath.Join(directory, "valid.db")
+	if err := store.Backup(ctx, validBackup); err != nil {
+		t.Fatal(err)
+	}
+	_ = source
+	db, err := sql.Open("sqlite", "file:"+validBackup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF;
+		DROP INDEX administrator_principal_networks_network;
+		ALTER TABLE administrator_principal_networks RENAME TO administrator_principal_networks_old;
+		CREATE TABLE administrator_principal_networks(principal_id BLOB PRIMARY KEY) STRICT;
+		DROP TABLE administrator_principal_networks_old;
+		CREATE INDEX administrator_principal_networks_network ON administrator_principal_networks(principal_id);`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "restored.db")
+	if err := RestoreDatabase(ctx, validBackup, destination); err == nil || !strings.Contains(err.Error(), "canonical v8 definition") {
+		t.Fatalf("malformed v8 restore error=%v, want canonical-schema rejection", err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("malformed restore published destination: %v", err)
+	}
+}
+
+func TestRestoreRejectsWeakenedV8AdministratorDDL(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		old, newer string
+	}{
+		{
+			name:  "partial password uniqueness predicate",
+			old:   `WHERE credential_type = 'password' AND revoked_at IS NULL`,
+			newer: `WHERE credential_type = 'password'`,
+		},
+		{
+			name:  "administrator role constraint",
+			old:   `role TEXT NOT NULL CHECK(role IN ('owner','operator','auditor'))`,
+			newer: `role TEXT NOT NULL`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			directory := t.TempDir()
+			store, _ := openTestStore(t)
+			source := filepath.Join(directory, "weakened.db")
+			if err := store.Backup(ctx, source); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var definition string
+			objectType, objectName := "table", "administrator_principals"
+			if strings.Contains(test.name, "predicate") {
+				objectType, objectName = "index", "one_active_administrator_password"
+			}
+			if err := db.QueryRow(`SELECT sql FROM sqlite_schema WHERE type=? AND name=?`, objectType, objectName).Scan(&definition); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			weakened := strings.Replace(definition, test.old, test.newer, 1)
+			if weakened == definition {
+				db.Close()
+				t.Fatalf("fixture did not find canonical fragment %q", test.old)
+			}
+			if _, err := db.Exec(`PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=? WHERE type=? AND name=?; PRAGMA writable_schema=OFF`,
+				weakened, objectType, objectName); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(directory, "restored.db")
+			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v8 definition") {
+				t.Fatalf("weakened restore error=%v, want canonical-schema rejection", err)
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("weakened restore published destination: %v", err)
+			}
+		})
+	}
+}
+
+func TestRestoreRejectsUnexpectedTriggerThatMutatesAdministratorState(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, _ := openTestStore(t)
+	source := filepath.Join(directory, "trigger.db")
+	if err := store.Backup(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER unexpected_auth_mutation AFTER INSERT ON networks
+		BEGIN DELETE FROM administrator_sessions; END`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "restored.db")
+	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v8 definition") {
+		t.Fatalf("unexpected-trigger restore error=%v, want canonical-schema rejection", err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected-trigger restore published destination: %v", err)
 	}
 }
