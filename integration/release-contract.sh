@@ -129,6 +129,8 @@ for path in "$dockerfile" "$connector_dockerfile" "$exit_dockerfile"; do
   require "laneway.dev/laneway/internal/buildinfo.Version=\${VERSION}" "$path"
 done
 require 'FROM scratch' "$connector_dockerfile"
+require 'HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6' "$connector_dockerfile"
+require 'CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
 require 'ENTRYPOINT ["/usr/local/bin/laneway"]' "$connector_dockerfile"
 require 'CMD ["connector", "run"]' "$connector_dockerfile"
 if grep -E '^RUN apk|/bin/sh|/sbin/tini|/bin/setpriv' "$connector_dockerfile" >/dev/null; then

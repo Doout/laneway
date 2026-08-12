@@ -55,7 +55,9 @@ func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 		{http.MethodGet, "/v1/admin/networks/not-an-id/routes"},
 		{http.MethodGet, "/v1/admin/networks/not-an-id/audit"},
 		{http.MethodPost, "/v1/admin/routes/not-an-id/approve"},
+		{http.MethodPost, "/v1/admin/routes/not-an-id/withdraw"},
 		{http.MethodPost, "/v1/admin/networks/not-an-id/acl-rules"},
+		{http.MethodPut, "/v1/admin/acl-rules/not-an-id"},
 		{http.MethodDelete, "/v1/admin/acl-rules/not-an-id"},
 		{http.MethodPost, "/v1/admin/nodes/not-an-id/revoke"},
 		{http.MethodPost, "/v1/admin/networks/not-an-id/certificates/01/revoke"},
@@ -283,6 +285,12 @@ func TestNodeRouteLifecycleOwnershipAdminApprovalAndReads(t *testing.T) {
 	if exit.Code != http.StatusCreated {
 		t.Fatalf("exit advertise status=%d body=%s", exit.Code, exit.Body.String())
 	}
+	var exitRoute routeResponse
+	decodeJSONResponse(t, exit, &exitRoute)
+	adminWithdrawn := jsonRequest(t, f.service.Handler(), http.MethodPost, "/v1/admin/routes/"+exitRoute.RouteID+"/withdraw", nil)
+	if adminWithdrawn.Code != http.StatusOK {
+		t.Fatalf("admin withdraw status=%d body=%s", adminWithdrawn.Code, adminWithdrawn.Body.String())
+	}
 	allRoutes := jsonRequest(t, f.service.Handler(), http.MethodGet, "/v1/admin/networks/"+f.network.ID.String()+"/routes?limit=10", nil)
 	if allRoutes.Code != http.StatusOK {
 		t.Fatalf("route read status=%d body=%s", allRoutes.Code, allRoutes.Body.String())
@@ -374,13 +382,22 @@ func TestACLStrictProtoJSONEpochAndDelete(t *testing.T) {
 	if rule.ConfigurationEpoch != 2 || rule.RuleID == "" {
 		t.Fatalf("ACL response=%+v", rule)
 	}
+	updated := jsonRequest(t, f.service.Handler(), http.MethodPut, "/v1/admin/acl-rules/"+rule.RuleID, updateACLRuleRequest{Priority: 20, Action: "deny", Selector: validSelector, Description: "blocked HTTPS", Enabled: false})
+	if updated.Code != http.StatusOK {
+		t.Fatalf("ACL update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	var updatedRule aclRuleResponse
+	decodeJSONResponse(t, updated, &updatedRule)
+	if updatedRule.ConfigurationEpoch != 3 || updatedRule.Enabled || updatedRule.Action != "deny" || updatedRule.Priority != 20 {
+		t.Fatalf("ACL update=%+v", updatedRule)
+	}
 	deleted := jsonRequest(t, f.service.Handler(), http.MethodDelete, "/v1/admin/acl-rules/"+rule.RuleID, nil)
 	if deleted.Code != http.StatusOK {
 		t.Fatalf("ACL delete status=%d body=%s", deleted.Code, deleted.Body.String())
 	}
 	var epoch epochResponse
 	decodeJSONResponse(t, deleted, &epoch)
-	if epoch.ConfigurationEpoch != 3 {
+	if epoch.ConfigurationEpoch != 4 {
 		t.Fatalf("delete epoch=%d", epoch.ConfigurationEpoch)
 	}
 }

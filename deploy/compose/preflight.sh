@@ -21,7 +21,7 @@ compose() {
   docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
 }
 
-for command in docker sed grep stat; do command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"; done
+for command in docker jq sed grep stat; do command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"; done
 docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is unavailable"
 server_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null) || die "Docker Engine is unavailable"
 server_major=${server_version%%.*}

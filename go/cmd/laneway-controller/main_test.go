@@ -2,14 +2,26 @@ package main
 
 import (
 	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/controllerservice"
@@ -55,6 +67,139 @@ func TestBearerAuthorizerRejectsWeakAndOversizeFiles(t *testing.T) {
 	if _, err := bearerAuthorizerFromFile(large); err == nil {
 		t.Fatal("oversized token accepted")
 	}
+}
+
+func TestAddConsoleCertificate(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificateFile, privateKeyFile := writeConsoleCertificate(t, privateKey, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	base := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{{1}}}}}
+	config := base.Clone()
+	if err := addConsoleCertificate(config, certificateFile, privateKeyFile, "controller.example"); err != nil {
+		t.Fatal(err)
+	}
+	if len(base.Certificates) != 1 {
+		t.Fatalf("base controller certificate count = %d, want 1", len(base.Certificates))
+	}
+	if len(config.Certificates) != 2 || config.Certificates[1].Leaf == nil {
+		t.Fatalf("console certificate count = %d, leaf = %v", len(config.Certificates), config.Certificates[1].Leaf)
+	}
+	if got := config.Certificates[1].Leaf.PublicKeyAlgorithm; got != x509.ECDSA {
+		t.Fatalf("console public key algorithm = %s, want ECDSA", got)
+	}
+}
+
+func TestAddConsoleCertificateRejectsEd25519AndClientOnly(t *testing.T) {
+	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed25519Certificate, ed25519PrivateKey := writeConsoleCertificate(t, ed25519Key, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	config := &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{{1}}}}}
+	if err := addConsoleCertificate(config, ed25519Certificate, ed25519PrivateKey, "controller.example"); err == nil || !strings.Contains(err.Error(), "unsupported signature algorithm") {
+		t.Fatalf("Ed25519 console certificate error = %v", err)
+	}
+
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientCertificate, clientPrivateKey := writeConsoleCertificate(t, ecdsaKey, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	if err := addConsoleCertificate(config, clientCertificate, clientPrivateKey, "controller.example"); err == nil || !strings.Contains(err.Error(), "server authentication") {
+		t.Fatalf("client-only console certificate error = %v", err)
+	}
+	if err := addConsoleCertificate(config, clientCertificate, clientPrivateKey, "wrong.example"); err == nil || !strings.Contains(err.Error(), "does not cover") {
+		t.Fatalf("wrong-hostname console certificate error = %v", err)
+	}
+}
+
+func TestConsoleCertificateSelectionBySignatureScheme(t *testing.T) {
+	_, ed25519Key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ed25519CertificateFile, ed25519PrivateKeyFile := writeConsoleCertificate(t, ed25519Key, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	ed25519Certificate, err := tls.LoadX509KeyPair(ed25519CertificateFile, ed25519PrivateKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecdsaCertificateFile, ecdsaPrivateKeyFile := writeConsoleCertificate(t, ecdsaKey, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth})
+	config := &tls.Config{Certificates: []tls.Certificate{ed25519Certificate}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13}
+	if err := addConsoleCertificate(config, ecdsaCertificateFile, ecdsaPrivateKeyFile, "controller.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	ecdsaOnly := &tls.ClientHelloInfo{
+		ServerName:        "controller.example",
+		SupportedVersions: []uint16{tls.VersionTLS13},
+		SignatureSchemes:  []tls.SignatureScheme{tls.ECDSAWithP256AndSHA256},
+		SupportedCurves:   []tls.CurveID{tls.CurveP256},
+	}
+	if err := ecdsaOnly.SupportsCertificate(&config.Certificates[0]); err == nil {
+		t.Fatal("ECDSA-only ClientHello accepted the Ed25519 controller certificate")
+	}
+	if err := ecdsaOnly.SupportsCertificate(&config.Certificates[1]); err != nil {
+		t.Fatalf("ECDSA-only ClientHello rejected the console certificate: %v", err)
+	}
+
+	serverConnection, clientConnection := net.Pipe()
+	defer serverConnection.Close()
+	defer clientConnection.Close()
+	serverTLS := tls.Server(serverConnection, config)
+	clientTLS := tls.Client(clientConnection, &tls.Config{
+		ServerName: "controller.example", MinVersion: tls.VersionTLS13,
+		MaxVersion: tls.VersionTLS13, InsecureSkipVerify: true, // The test asserts selection, not trust.
+	})
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- serverTLS.Handshake() }()
+	if err := clientTLS.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := clientTLS.ConnectionState().PeerCertificates[0].PublicKeyAlgorithm; got != x509.Ed25519 {
+		t.Fatalf("ordinary Go client received %s certificate, want Ed25519 controller identity", got)
+	}
+}
+
+func writeConsoleCertificate(t *testing.T, privateKey crypto.Signer, usages []x509.ExtKeyUsage) (string, string) {
+	t.Helper()
+	now := time.Now()
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "controller.example"},
+		DNSNames:              []string{"controller.example"},
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              now.Add(time.Hour),
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           usages,
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, privateKey.Public(), privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	certificateFile := filepath.Join(directory, "console.crt")
+	privateKeyFile := filepath.Join(directory, "console.key")
+	if err := os.WriteFile(certificateFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(privateKeyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKeyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certificateFile, privateKeyFile
 }
 
 func TestMaintenanceBackupAndFreshRestore(t *testing.T) {

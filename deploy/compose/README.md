@@ -8,7 +8,7 @@ the offline root CA key does not remain on the server.
 
 - Linux on AMD64 or ARM64
 - Docker Engine 26+ with Compose v2
-- `age`, `age-keygen`, `curl`, `getent`, and `ss`
+- `age`, `age-keygen`, `curl`, `getent`, `jq`, and `ss`
 - public DNS for the control-plane host
 - inbound TCP+UDP `8443`, UDP `4433`, and TCP `443`
 

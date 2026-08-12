@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -36,6 +38,10 @@ func main() {
 	diagnostics := fs.String("diagnostics", "", "loopback metrics/pprof address (for example 127.0.0.1:6060)")
 	backup := fs.String("backup", "", "write a consistent database backup and exit (never overwrites)")
 	restore := fs.String("restore", "", "restore a backup into a missing database and exit")
+	consoleDir := fs.String("console-dir", "", "optional absolute directory containing the Laneway administrator console")
+	consoleCertificate := fs.String("console-certificate", "", "optional browser-compatible certificate for the HTTPS console and management API")
+	consolePrivateKey := fs.String("console-private-key", "", "private key for -console-certificate")
+	consoleServerName := fs.String("console-server-name", "", "DNS name or IP address covered by -console-certificate")
 	version := fs.Bool("version", false, "print the Laneway build version")
 	_ = fs.Parse(os.Args[1:])
 	if *version {
@@ -48,6 +54,8 @@ func main() {
 		err = fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
 	case *backup != "" && *restore != "":
 		err = errors.New("-backup and -restore are mutually exclusive")
+	case (*consoleCertificate == "") != (*consolePrivateKey == "") || (*consoleCertificate == "") != (*consoleServerName == ""):
+		err = errors.New("-console-certificate, -console-private-key, and -console-server-name must be specified together")
 	case (*backup != "" || *restore != "") && *diagnostics != "":
 		err = errors.New("-diagnostics is not valid with a maintenance operation")
 	case *backup != "":
@@ -55,7 +63,7 @@ func main() {
 	case *restore != "":
 		err = runRestore(*configPath, *restore)
 	default:
-		err = run(*configPath, *diagnostics)
+		err = run(*configPath, *diagnostics, *consoleDir, *consoleCertificate, *consolePrivateKey, *consoleServerName)
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "laneway-controller:", err)
@@ -117,7 +125,7 @@ func runRestore(configPath, source string) error {
 	return nil
 }
 
-func run(path, diagnostics string) error {
+func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, consoleServerName string) error {
 	cfg, err := loadControllerConfig(path)
 	if err != nil {
 		return err
@@ -240,6 +248,11 @@ func run(path, diagnostics string) error {
 		}
 	}
 	server := service.NewHTTPServer(cfg.Controller.Listen, tlsConfig)
+	if consoleCertificate != "" {
+		if err := addConsoleCertificate(server.TLSConfig, consoleCertificate, consolePrivateKey, consoleServerName); err != nil {
+			return err
+		}
+	}
 	if bootstrapHandler != nil {
 		privateHandler := server.Handler
 		server.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -249,6 +262,13 @@ func run(path, diagnostics string) error {
 			}
 			privateHandler.ServeHTTP(writer, request)
 		})
+	}
+	if consoleDir != "" {
+		consoleHandler, consoleErr := controllerservice.ConsoleHandler(server.Handler, consoleDir)
+		if consoleErr != nil {
+			return consoleErr
+		}
+		server.Handler = consoleHandler
 	}
 	quicServer, err := service.ListenQUIC(cfg.Controller.QUICListen, tlsConfig)
 	if err != nil {
@@ -352,6 +372,107 @@ func run(path, diagnostics string) error {
 		}
 		return nil
 	}
+}
+
+func addConsoleCertificate(config *tls.Config, certificateFile, privateKeyFile, serverName string) error {
+	if config == nil || len(config.Certificates) == 0 {
+		return errors.New("configure console certificate: controller HTTPS certificate is missing")
+	}
+	certificate, err := tls.LoadX509KeyPair(certificateFile, privateKeyFile)
+	if err != nil {
+		return fmt.Errorf("load console certificate and key: %w", err)
+	}
+	if len(certificate.Certificate) == 0 {
+		return errors.New("console certificate chain is empty")
+	}
+	now := time.Now()
+	chain := make([]*x509.Certificate, 0, len(certificate.Certificate))
+	for index, certificateDER := range certificate.Certificate {
+		parsed, parseErr := x509.ParseCertificate(certificateDER)
+		if parseErr != nil {
+			return fmt.Errorf("parse console certificate chain entry %d: %w", index, parseErr)
+		}
+		if index == 0 {
+			certificate.Leaf = parsed
+		}
+		chain = append(chain, parsed)
+		if !browserCompatibleSignatureAlgorithm(parsed.SignatureAlgorithm) {
+			return fmt.Errorf("console certificate chain entry %d uses unsupported signature algorithm %s", index, parsed.SignatureAlgorithm)
+		}
+		if now.Before(parsed.NotBefore) || now.After(parsed.NotAfter) {
+			return fmt.Errorf("console certificate chain entry %d is not currently valid", index)
+		}
+		if index > 0 && !parsed.IsCA {
+			return fmt.Errorf("console certificate chain entry %d is not a CA certificate", index)
+		}
+	}
+	for index := 0; index < len(chain)-1; index++ {
+		if err := chain[index].CheckSignatureFrom(chain[index+1]); err != nil {
+			return fmt.Errorf("console certificate chain entries %d and %d are not linked: %w", index, index+1, err)
+		}
+	}
+	last := chain[len(chain)-1]
+	if last.IsCA && last.CheckSignatureFrom(last) == nil {
+		return errors.New("console certificate chain must omit its self-signed root")
+	}
+	leaf := certificate.Leaf
+	if leaf.IsCA {
+		return errors.New("console certificate must be a leaf certificate")
+	}
+	if leaf.PublicKeyAlgorithm != x509.ECDSA && leaf.PublicKeyAlgorithm != x509.RSA {
+		return fmt.Errorf("console certificate public key must be ECDSA or RSA, got %s", leaf.PublicKeyAlgorithm)
+	}
+	switch publicKey := leaf.PublicKey.(type) {
+	case *ecdsa.PublicKey:
+		if publicKey.Curve == nil || publicKey.Curve.Params().BitSize < 256 {
+			return errors.New("console certificate ECDSA public key must use a curve of at least 256 bits")
+		}
+	case *rsa.PublicKey:
+		if publicKey.N.BitLen() < 2048 {
+			return errors.New("console certificate RSA public key must be at least 2048 bits")
+		}
+	default:
+		return fmt.Errorf("console certificate has unsupported public key type %T", leaf.PublicKey)
+	}
+	if leaf.KeyUsage != 0 && leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return errors.New("console certificate is not valid for digital signatures")
+	}
+	if err := leaf.VerifyHostname(serverName); err != nil {
+		return fmt.Errorf("console certificate does not cover %q: %w", serverName, err)
+	}
+	if !allowsServerAuthentication(leaf.ExtKeyUsage) {
+		return errors.New("console certificate is not valid for TLS server authentication")
+	}
+
+	// The HTTP server selects the first chain compatible with the ClientHello.
+	// Laneway clients that advertise Ed25519 continue to receive the controller
+	// identity certificate. Browsers that do not advertise Ed25519 can select
+	// this ECDSA/RSA fallback. QUIC uses the original, unmodified TLS config.
+	config.Certificates = append(config.Certificates, certificate)
+	return nil
+}
+
+func browserCompatibleSignatureAlgorithm(algorithm x509.SignatureAlgorithm) bool {
+	switch algorithm {
+	case x509.SHA256WithRSA, x509.SHA384WithRSA, x509.SHA512WithRSA,
+		x509.SHA256WithRSAPSS, x509.SHA384WithRSAPSS, x509.SHA512WithRSAPSS,
+		x509.ECDSAWithSHA256, x509.ECDSAWithSHA384, x509.ECDSAWithSHA512:
+		return true
+	default:
+		return false
+	}
+}
+
+func allowsServerAuthentication(usages []x509.ExtKeyUsage) bool {
+	if len(usages) == 0 {
+		return true
+	}
+	for _, usage := range usages {
+		if usage == x509.ExtKeyUsageAny || usage == x509.ExtKeyUsageServerAuth {
+			return true
+		}
+	}
+	return false
 }
 
 func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, error) {

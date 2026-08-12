@@ -4,6 +4,13 @@ dist/
 coverage.out
 *.test
 rust/target/
+node_modules/
+*.tsbuildinfo
+.vite/
+.playwright-browsers/
+playwright-report/
+test-results/
+.impeccable/
 
 # Ad-hoc executable output from local cross-builds
 go/netprobe

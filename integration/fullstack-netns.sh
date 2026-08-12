@@ -1557,7 +1557,7 @@ EOF
       --ephemeral --session-lifetime 5m >"${invite_file}" 2>"${case_dir}/invite.log"
   )
   start_process "${user}" "${connect_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
-    "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${invite_file}"
+    "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${invite_file}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${connect_log}" "path=relay-quic"
   rm -f -- "${invite_file}"
@@ -1604,7 +1604,7 @@ EOF
       --ephemeral --session-lifetime 5m >"${crash_token}" 2>"${case_dir}/invite-crash.log"
   )
   start_process "${user}" "${crash_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
-    "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${crash_token}"
+    "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${crash_token}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${crash_log}" "path=relay-quic"
   rm -f -- "${crash_token}"
@@ -1620,7 +1620,7 @@ EOF
       --ephemeral --session-lifetime 5m >"${recovery_token}" 2>"${case_dir}/invite-recovery.log"
   )
   start_process "${user}" "${recovery_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
-    "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${recovery_token}"
+    "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${recovery_token}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${recovery_log}" "path=relay-quic"
   rm -f -- "${recovery_token}"
@@ -1657,7 +1657,7 @@ EOF
   start_process "${user}" "${exit_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
     PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${resolver_state_dir}" \
     LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
-    "${case_dir}/connect-resolver-wrapper" "${work_dir}/laneway" connect "${bootstrap_authority}" --token-file "${exit_token}" \
+    "${case_dir}/connect-resolver-wrapper" "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${exit_token}" \
     --exit connect-node --failure-mode closed --dns 1.1.1.1 --local-lan 10.252.0.0/24
   exit_pid="${last_pid}"
   wait_log "${exit_pid}" "${exit_log}" "path=relay-quic"
@@ -2062,8 +2062,9 @@ EOF
     return 1
   fi
   if cmp -s "${case_dir}/client.crt" "${case_dir}/client.next.crt" || \
-     cmp -s "${case_dir}/client.key" "${case_dir}/client.next.key"; then
-    echo "ERROR: renewal did not produce a distinct staged certificate and key" >&2
+     cmp -s "${case_dir}/client.key" "${case_dir}/client.next.key" || \
+     cmp -s "${case_dir}/client.wireguard.key" "${case_dir}/client.wireguard.next.key"; then
+    echo "ERROR: renewal did not produce distinct staged identity and WireGuard keys" >&2
     return 1
   fi
   cp "${case_dir}/client.crt" "${case_dir}/client.old.crt"
@@ -2071,31 +2072,53 @@ EOF
   chmod 644 "${case_dir}/client.old.crt"
   chmod 600 "${case_dir}/client.old.key"
   stop_process "${client_pid}"
+  local previous_session_removed=0 relay_sessions
+  for _ in $(seq 1 200); do
+    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+      -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
+    if [[ "${relay_sessions}" == "1" ]]; then
+      previous_session_removed=1
+      break
+    fi
+    sleep 0.05
+  done
+  if [[ "${previous_session_removed}" != "1" ]]; then
+    echo "ERROR: prior client relay session was not removed before renewal promotion (sessions=${relay_sessions:-unknown})" >&2
+    return 1
+  fi
   mv "${case_dir}/client.next.crt" "${case_dir}/client.crt"
   mv "${case_dir}/client.next.key" "${case_dir}/client.key"
+  mv "${case_dir}/client.wireguard.next.key" "${case_dir}/client.wireguard.key"
   chmod 644 "${case_dir}/client.crt"
-  chmod 600 "${case_dir}/client.key"
+  chmod 600 "${case_dir}/client.key" "${case_dir}/client.wireguard.key"
   start_process "${client}" "${case_dir}/client-renewed.log" env \
     LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
     LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" "${case_dir}/resolver-wrapper" \
     "${work_dir}/lanewayd" -config "${case_dir}/client.toml" -diagnostics 127.0.0.1:6061
   client_pid="${last_pid}"
   wait_log "${client_pid}" "${case_dir}/client-renewed.log" "interface=lane0"
-  local renewed_connected=0 relay_sessions
+  local renewed_connected=0 renewed_connections
   for _ in $(seq 1 200); do
     relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
-    if [[ "${relay_sessions}" == "2" ]]; then
+    renewed_connections="$(ip netns exec "${client}" "${work_dir}/netprobe" metric \
+      -url http://127.0.0.1:6061/metrics -name laneway_node_connections_total 2>/dev/null || true)"
+    if [[ "${relay_sessions}" == "2" && "${renewed_connections:-0}" =~ ^[0-9]+$ ]] && \
+       (( renewed_connections > 0 )); then
       renewed_connected=1
       break
     fi
     sleep 0.05
   done
   if [[ "${renewed_connected}" != "1" ]]; then
-    echo "ERROR: renewed client did not establish an authenticated relay session" >&2
+    echo "ERROR: renewed client did not establish an authenticated relay session (sessions=${relay_sessions:-unknown}, connections=${renewed_connections:-unknown})" >&2
     sed -n '1,260p' "${case_dir}/client-renewed.log" >&2
     return 1
   fi
+  # The peer receives a release for the retired session and a binding for the
+  # replacement on its control stream. Allow that ordered handoff to reach the
+  # peer before exercising bidirectional data traffic.
+  sleep 1
   start_process "${lan_host}" "${case_dir}/renewed-server.log" "${work_dir}/netprobe" \
     udp-server -listen 192.168.60.2:9403
   server_pid="${last_pid}"
