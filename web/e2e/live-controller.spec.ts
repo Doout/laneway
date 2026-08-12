@@ -10,18 +10,17 @@ test.describe('live controller console', () => {
   test.use({ baseURL: liveURL, ignoreHTTPSErrors: true })
 
   test('authenticates, loads real inventory, and issues real one-time credentials', async ({ page }) => {
+    await page.addInitScript(() => window.sessionStorage.setItem('laneway-console-operator', 'Legacy label'))
     await page.goto('/sign-in')
     await expect(page.getByLabel('Controller address')).toBeDisabled()
     await expect(page.getByRole('button', { name: 'SSO unavailable' })).toBeDisabled()
-    await expect(page.getByLabel('Session label')).toHaveValue('')
+    await expect(page.getByLabel('Session label')).toHaveCount(0)
     expect(await page.evaluate(() => window.sessionStorage.getItem('laneway-console-operator'))).toBeNull()
-    await page.getByLabel('Session label').fill('E2E Operator')
     await page.getByLabel('Administrator token').fill(adminToken!)
     await page.getByRole('button', { name: 'Sign in' }).click()
 
     await expect(page).toHaveURL(/\/overview$/)
     await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible()
-    await expect(page.getByText('E2E Operator', { exact: true })).toBeVisible()
     await expect(page.locator('.system-bar').getByText('Inventory loaded', { exact: true })).toBeVisible()
     await expect(page.getByRole('note', { name: 'Demo data notice' })).toHaveCount(0)
     const networksResponse = await page.request.get('/v1/admin/networks?limit=100', {
@@ -65,8 +64,7 @@ test.describe('live controller console', () => {
 
     await page.getByRole('button', { name: 'Sign out' }).click()
     await expect(page).toHaveURL(/\/sign-in$/)
-    await expect(page.getByLabel('Session label')).toHaveValue('')
-    await expect(page.getByText('E2E Operator', { exact: true })).toHaveCount(0)
+    await expect(page.getByLabel('Session label')).toHaveCount(0)
     expect(await page.evaluate(() => window.sessionStorage.getItem('laneway-console-operator'))).toBeNull()
   })
 })

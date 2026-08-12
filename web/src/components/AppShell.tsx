@@ -83,11 +83,10 @@ function Breadcrumbs({ pathname }: { pathname: string }) {
 export function AppShell() {
   const location = useLocation()
   const navigate = useNavigate()
-  const { live, operator, inventory, inventoryError, inventoryPending, refresh, signOut } = useControlPlane()
+  const { live, inventory, inventoryError, inventoryPending, refresh, signOut } = useControlPlane()
   const networkName = inventory?.network?.name
   const epoch = inventory?.network?.configuration_epoch
   const pendingRoutes = live ? inventory?.routes.filter(isPendingControllerRoute).length ?? 0 : 2
-  const initials = operator.split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()
   const controllerStatus = inventoryError
     ? 'Inventory unavailable'
     : inventory
@@ -129,7 +128,6 @@ export function AppShell() {
         <Breadcrumbs pathname={location.pathname} />
         <div className="command-bar__tools">
           {live ? <button className="refresh-button" type="button" onClick={() => void refresh()} disabled={inventoryPending} aria-label="Refresh controller inventory"><RefreshCw aria-hidden="true" size={15} /></button> : null}
-          {operator ? <span className="operator"><span className="operator__avatar">{initials}</span><span><strong>{operator}</strong></span></span> : null}
           {live ? <button className="sign-out-button" type="button" onClick={handleSignOut}>Sign out</button> : null}
         </div>
       </header>

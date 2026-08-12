@@ -80,8 +80,11 @@ function expectAuthenticatedSameOriginRequests(page: Page, requests: Awaited<Ret
 
 test('compiled artifact preserves its declared data boundary', async ({ page }) => {
   expect(['live', 'demo']).toContain(expectedMode)
+  await page.addInitScript(() => window.sessionStorage.setItem('laneway-console-operator', 'Legacy label'))
   await page.goto('/sign-in')
   const controllerAddress = page.getByLabel('Controller address')
+  await expect(page.getByLabel('Session label')).toHaveCount(0)
+  expect(await page.evaluate(() => window.sessionStorage.getItem('laneway-console-operator'))).toBeNull()
 
   if (expectedMode === 'live') {
     await expect(controllerAddress).toBeDisabled()

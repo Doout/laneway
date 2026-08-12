@@ -20,13 +20,11 @@ test('sign-in, enrollment, route approval, and rule creation flow end to end', a
     await expect(page).toHaveURL(new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`))
   }
   await page.goto('/sign-in')
-  await expect(page.getByLabel('Session label')).toHaveValue('')
-  await page.getByLabel('Session label').fill('Session Operator')
+  await expect(page.getByLabel('Session label')).toHaveCount(0)
   await page.getByLabel('Administrator token').fill('demo-administrator-token')
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page).toHaveURL(/\/overview$/)
   await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible()
-  await expect(page.getByText('Session Operator', { exact: true })).toBeVisible()
 
   await navigateInApp('/nodes/new')
   await page.getByLabel('Node name').fill('field-relay-01')

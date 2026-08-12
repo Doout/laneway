@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type PropsWithChildren } from 'react'
 
 const TOKEN_KEY = 'laneway-console-admin-token'
-const OPERATOR_KEY = 'laneway-console-operator'
+const LEGACY_OPERATOR_KEY = 'laneway-console-operator'
 
 export type ControllerNetwork = {
   network_id: string
@@ -105,11 +105,10 @@ type ControlPlaneContextValue = {
   sessionPending: boolean
   authPending: boolean
   authError: string
-  operator: string
   inventory: ControllerInventory | null
   inventoryPending: boolean
   inventoryError: string
-  signIn: (operator: string, token: string) => Promise<boolean>
+  signIn: (token: string) => Promise<boolean>
   signOut: () => void
   refresh: () => Promise<void>
   request: <T>(path: string, options?: RequestOptions) => Promise<T>
@@ -146,9 +145,11 @@ async function responseError(response: Response) {
 
 export function ControlPlaneProvider({ children }: PropsWithChildren) {
   const live = isLiveMode()
-  const [restoreToken] = useState(() => live ? window.sessionStorage.getItem(TOKEN_KEY) ?? '' : '')
+  const [restoreToken] = useState(() => {
+    window.sessionStorage.removeItem(LEGACY_OPERATOR_KEY)
+    return live ? window.sessionStorage.getItem(TOKEN_KEY) ?? '' : ''
+  })
   const [token, setToken] = useState('')
-  const [operator, setOperator] = useState('')
   const [sessionPending, setSessionPending] = useState(() => Boolean(restoreToken))
   const [authPending, setAuthPending] = useState(false)
   const [authError, setAuthError] = useState('')
@@ -161,9 +162,8 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
     if (expectedToken !== undefined && window.sessionStorage.getItem(TOKEN_KEY) !== expectedToken) return false
     inventoryRequestRef.current += 1
     window.sessionStorage.removeItem(TOKEN_KEY)
-    window.sessionStorage.removeItem(OPERATOR_KEY)
+    window.sessionStorage.removeItem(LEGACY_OPERATOR_KEY)
     setToken('')
-    setOperator('')
     setSessionPending(false)
     setInventory(live ? null : emptyInventory)
     setInventoryPending(false)
@@ -174,8 +174,6 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!live) return
     if (!restoreToken) {
-      // A label has no meaning without an authenticated controller session.
-      window.sessionStorage.removeItem(OPERATOR_KEY)
       return
     }
 
@@ -195,9 +193,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
         }
         await response.json()
         if (controller.signal.aborted || window.sessionStorage.getItem(TOKEN_KEY) !== restoreToken) return
-        const restoredOperator = window.sessionStorage.getItem(OPERATOR_KEY)?.trim() || ''
         setToken(restoreToken)
-        setOperator(restoredOperator)
       } catch (error) {
         if (controller.signal.aborted || window.sessionStorage.getItem(TOKEN_KEY) !== restoreToken) return
         setAuthError(error instanceof Error ? error.message : 'Unable to restore the controller session.')
@@ -291,8 +287,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
     if (live && token) void loadInventory()
   }, [live, loadInventory, token])
 
-  const signIn = useCallback(async (nextOperator: string, nextToken: string) => {
-    const cleanOperator = nextOperator.trim()
+  const signIn = useCallback(async (nextToken: string) => {
     const cleanToken = nextToken.trim()
     setAuthError('')
     if (!cleanToken) {
@@ -309,8 +304,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
         await response.json()
         inventoryRequestRef.current += 1
         window.sessionStorage.setItem(TOKEN_KEY, cleanToken)
-        if (cleanOperator) window.sessionStorage.setItem(OPERATOR_KEY, cleanOperator)
-        else window.sessionStorage.removeItem(OPERATOR_KEY)
+        window.sessionStorage.removeItem(LEGACY_OPERATOR_KEY)
         setInventory(null)
         setInventoryPending(false)
         setInventoryError('')
@@ -318,7 +312,6 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
       }
       setSessionPending(false)
       setAuthError('')
-      setOperator(cleanOperator)
       return true
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : 'Unable to sign in to the controller.')
@@ -339,7 +332,6 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
     sessionPending,
     authPending,
     authError,
-    operator,
     inventory,
     inventoryPending,
     inventoryError,
@@ -347,7 +339,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
     signOut,
     refresh: loadInventory,
     request,
-  }), [authError, authPending, inventory, inventoryError, inventoryPending, live, loadInventory, operator, request, sessionPending, signIn, signOut, token])
+  }), [authError, authPending, inventory, inventoryError, inventoryPending, live, loadInventory, request, sessionPending, signIn, signOut, token])
 
   return <ControlPlaneContext.Provider value={value}>{children}</ControlPlaneContext.Provider>
 }

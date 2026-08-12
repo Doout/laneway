@@ -18,7 +18,6 @@ export function SignInPage() {
   const navigate = useNavigate()
   const { signIn, authError, authPending, live } = useControlPlane()
   const [controller, setController] = useState(() => live ? controllerOrigin() : 'https://controller.home.example')
-  const [operator, setOperator] = useState('')
   const [token, setToken] = useState('')
   const [submitted, setSubmitted] = useState(false)
 
@@ -33,7 +32,7 @@ export function SignInPage() {
     event.preventDefault()
     setSubmitted(true)
     if (isControllerAddress(controller) && token.trim().length >= 8) {
-      const accepted = await signIn(operator, token)
+      const accepted = await signIn(token)
       if (accepted) navigate('/overview')
     }
   }
@@ -64,9 +63,6 @@ export function SignInPage() {
                 type="url"
                 value={controller}
               />
-            </Field>
-            <Field label="Session label" hint="Displayed only in this browser session.">
-              <input autoComplete="off" onChange={(event) => setOperator(event.target.value)} placeholder="Optional session label" type="text" value={operator} />
             </Field>
             <Field label="Administrator token" hint="Stored for this browser session and sent with controller requests." error={tokenError}>
               <input

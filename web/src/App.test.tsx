@@ -23,17 +23,16 @@ describe('Laneway application shell', () => {
     expect(screen.getByRole('button', { name: 'SSO unavailable' })).toBeDisabled()
   })
 
-  it('does not expose an orphaned operator identity before authentication', async () => {
+  it('removes legacy client-only labels on initialization', async () => {
     vi.stubEnv('MODE', 'live')
     vi.stubEnv('VITE_LANEWAY_API_ORIGIN', 'https://controller.example:8443/')
-    window.sessionStorage.setItem('laneway-console-operator', 'Private operator')
+    window.sessionStorage.setItem('laneway-console-operator', 'Legacy label')
     renderApp('/sign-in')
     expect(screen.getByLabelText('Controller address')).toHaveValue('https://controller.example:8443')
-    expect(screen.getByLabelText('Session label')).toHaveValue('')
-    expect(screen.getByLabelText('Session label')).toHaveAttribute('autocomplete', 'off')
-    expect(screen.getByText('Displayed only in this browser session.')).toBeVisible()
+    expect(screen.queryByLabelText('Session label')).not.toBeInTheDocument()
+    expect(screen.queryByText('Displayed only in this browser session.')).not.toBeInTheDocument()
     expect(screen.getByText('Stored for this browser session and sent with controller requests.')).toBeVisible()
-    expect(screen.queryByDisplayValue('Private operator')).not.toBeInTheDocument()
+    expect(screen.queryByText('Legacy label')).not.toBeInTheDocument()
     await waitFor(() => expect(window.sessionStorage.getItem('laneway-console-operator')).toBeNull())
   })
 
@@ -49,7 +48,7 @@ describe('Laneway application shell', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('forbidden')
     expect(screen.queryByRole('heading', { level: 1, name: 'Overview' })).not.toBeInTheDocument()
     expect(window.sessionStorage.getItem('laneway-console-admin-token')).toBe('restricted-token')
-    expect(window.sessionStorage.getItem('laneway-console-operator')).toBe('Restricted session')
+    expect(window.sessionStorage.getItem('laneway-console-operator')).toBeNull()
   })
 
   it('fails closed when the controller has multiple networks', async () => {
@@ -66,7 +65,7 @@ describe('Laneway application shell', () => {
     expect(window.sessionStorage.getItem('laneway-console-admin-token')).toBe('valid-token')
   })
 
-  it('does not restore an operator identity from a rejected session', async () => {
+  it('clears a rejected saved session and its legacy label', async () => {
     vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'expired-token')
     window.sessionStorage.setItem('laneway-console-operator', 'Private operator')
@@ -83,7 +82,7 @@ describe('Laneway application shell', () => {
     expect(window.sessionStorage.getItem('laneway-console-operator')).toBeNull()
   })
 
-  it('restores an operator identity only after the controller accepts the session', async () => {
+  it('restores an accepted controller session without restoring its legacy label', async () => {
     vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'valid-token')
     window.sessionStorage.setItem('laneway-console-operator', 'Private operator')
@@ -98,13 +97,14 @@ describe('Laneway application shell', () => {
     expect(screen.queryByText('Private operator')).not.toBeInTheDocument()
     acceptSession({ ok: true, status: 200, json: async () => ({ networks: [] }) })
     expect(await screen.findByRole('heading', { name: 'Overview' })).toBeVisible()
-    expect(screen.getByText('Private operator', { exact: true })).toBeVisible()
+    expect(screen.queryByText('Private operator')).not.toBeInTheDocument()
+    expect(window.sessionStorage.getItem('laneway-console-operator')).toBeNull()
   })
 
   it('does not let a stale restore invalidate a newer sign-in', async () => {
     vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'expired-token')
-    window.sessionStorage.setItem('laneway-console-operator', 'Previous operator')
+    window.sessionStorage.setItem('laneway-console-operator', 'Previous label')
     let rejectRestore!: (response: unknown) => void
     const restoreResponse = new Promise(resolve => { rejectRestore = resolve })
     vi.stubGlobal('fetch', vi.fn()
@@ -112,19 +112,17 @@ describe('Laneway application shell', () => {
       .mockResolvedValue({ ok: true, status: 200, json: async () => ({ networks: [] }) }))
 
     renderApp('/sign-in')
-    fireEvent.change(screen.getByLabelText('Session label'), { target: { value: 'Current operator' } })
     fireEvent.change(screen.getByLabelText('Administrator token'), { target: { value: 'current-token' } })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     expect(await screen.findByRole('heading', { name: 'Overview' })).toBeVisible()
-    expect(screen.getByText('Current operator', { exact: true })).toBeVisible()
 
     await act(async () => {
       rejectRestore({ ok: false, status: 401, json: async () => ({ error: 'unauthorized' }) })
       await restoreResponse
     })
     expect(window.sessionStorage.getItem('laneway-console-admin-token')).toBe('current-token')
-    expect(screen.getByText('Current operator', { exact: true })).toBeVisible()
-    expect(screen.queryByText('Previous operator', { exact: true })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Overview' })).toBeVisible()
+    expect(window.sessionStorage.getItem('laneway-console-operator')).toBeNull()
   })
 
   it('ignores inventory that finishes after signing into a newer session', async () => {
@@ -141,7 +139,6 @@ describe('Laneway application shell', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderApp('/sign-in')
-    fireEvent.change(screen.getByLabelText('Session label'), { target: { value: 'Old session' } })
     fireEvent.change(screen.getByLabelText('Administrator token'), { target: { value: 'old-session-token' } })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Loading inventory')
@@ -149,7 +146,6 @@ describe('Laneway application shell', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
     expect(await screen.findByRole('heading', { name: 'Sign in to Laneway' })).toBeVisible()
-    fireEvent.change(screen.getByLabelText('Session label'), { target: { value: 'New session' } })
     fireEvent.change(screen.getByLabelText('Administrator token'), { target: { value: 'new-session-token' } })
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Loading inventory')
@@ -166,8 +162,7 @@ describe('Laneway application shell', () => {
       await newInventory
     })
     expect(await screen.findByRole('heading', { level: 1, name: 'Overview' })).toBeVisible()
-    expect(screen.getByText('New session', { exact: true })).toBeVisible()
-    expect(screen.queryByText('Old session', { exact: true })).not.toBeInTheDocument()
+    expect(window.sessionStorage.getItem('laneway-console-admin-token')).toBe('new-session-token')
   })
 
   it('labels authenticated records as demo data', () => {
