@@ -15,6 +15,9 @@ ln -s "$compose_dir/laneway-control" "$test_dir/laneway-control"
 : > "$compose_dir/compose.yaml"
 : > "$compose_dir/generated/config/controller.toml"
 : > "$compose_dir/generated/config/relay.toml"
+printf '%s\n' workflow-database > "$compose_dir/database.state"
+: > "$compose_dir/volume.exists"
+: > "$compose_dir/controller.container"
 : > "$log"
 
 cat > "$compose_dir/validate.sh" <<'EOF'
@@ -40,9 +43,33 @@ set -eu
 printf 'docker' >> "$LANE_TEST_LOG"
 printf ' <%s>' "$@" >> "$LANE_TEST_LOG"
 printf '\n' >> "$LANE_TEST_LOG"
+docker_real_find=$(PATH=/usr/bin:/bin command -v find)
 if [ "${1:-} ${2:-}" = "version --format" ]; then printf '26.1.0\n'; exit 0; fi
 if [ "${1:-} ${2:-}" = "container inspect" ]; then exit 1; fi
+if [ "${1:-} ${2:-}" = "volume inspect" ]; then [ -f "$LANEWAY_DEPLOY_DIR/volume.exists" ]; exit; fi
+if [ "${1:-} ${2:-}" = "volume rm" ]; then
+  "$docker_real_find" "$LANEWAY_DEPLOY_DIR/volume.exists" "$LANEWAY_DEPLOY_DIR/database.state" -maxdepth 0 -delete
+  exit 0
+fi
 case " $* " in
+  *" config --format json "*) printf '%s\n' '{"services":{"controller":{"volumes":[{"type":"volume","source":"controller-state","target":"/var/lib/laneway-controller"}]}},"volumes":{"controller-state":{"name":"laneway-controller-state"}}}' ;;
+  *" ps -a -q controller "*)
+    [ ! -f "$LANEWAY_DEPLOY_DIR/controller.container" ] || printf 'controller-id\n'
+    exit 0
+    ;;
+  *" rm -s -f controller "*) "$docker_real_find" "$LANEWAY_DEPLOY_DIR/controller.container" -maxdepth 0 -delete 2>/dev/null || true ;;
+  *" run --rm --no-deps controller "*" -backup /backups/"*)
+    name=${*##* /backups/}; name=${name%% *}
+    cp "$LANEWAY_DEPLOY_DIR/database.state" "$LANEWAY_DEPLOY_DIR/generated/backups/$name"
+    chmod 0600 "$LANEWAY_DEPLOY_DIR/generated/backups/$name"
+    chown 65532:65532 "$LANEWAY_DEPLOY_DIR/generated/backups/$name"
+    ;;
+  *" run --rm --no-deps controller "*" -restore /backups/"*)
+    name=${*##* /backups/}; name=${name%% *}
+    [ ! -e "$LANEWAY_DEPLOY_DIR/database.state" ]
+    cp "$LANEWAY_DEPLOY_DIR/generated/backups/$name" "$LANEWAY_DEPLOY_DIR/database.state"
+    : > "$LANEWAY_DEPLOY_DIR/volume.exists"
+    ;;
   *" connector bootstrap-activate "*) cat >/dev/null ;;
   *" ps --all --quiet "*) [ "${LANE_TEST_OWNED_STACK:-0}" = 0 ] || printf 'owned-id\n' ;;
   *" ps --status running -q controller "*) [ "${LANE_TEST_CONTROLLER_RUNNING:-0}" = 0 ] || printf 'controller-id\n' ;;
@@ -52,8 +79,14 @@ case " $* " in
   *" ps -q exit-node "*) [ "${LANE_TEST_EXIT_RUNNING:-0}" = 0 ] || printf 'exit-id\n' ;;
   *" inspect --format "*) printf '%s\n' "${LANE_TEST_HEALTH:-healthy}" ;;
   *" exec -T --user 65532:65532 exit-node "*) printf 'carrier=direct-wireguard limiter=healthy\n' ;;
-  *" up -d --wait controller relay "*) [ "${LANE_TEST_FAIL_UP:-0}" = 0 ] || exit 1 ;;
+  *" up -d --wait controller relay "*) [ "${LANE_TEST_FAIL_UP:-0}" = 0 ] || exit 1; : > "$LANEWAY_DEPLOY_DIR/controller.container" ;;
 esac
+EOF
+cat > "$fake_bin/jq" <<'EOF'
+#!/bin/sh
+set -eu
+cat >/dev/null
+printf '%s\n' laneway-controller-state
 EOF
 cat > "$fake_bin/laneway" <<'EOF'
 #!/bin/sh
@@ -115,7 +148,7 @@ cat > "$fake_bin/age" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$compose_dir/recovery.sh" "$fake_bin/docker" "$fake_bin/laneway" "$fake_bin/cosign" "$fake_bin/getent" "$fake_bin/ss" "$fake_bin/age"
+chmod 0755 "$compose_dir/validate.sh" "$compose_dir/bootstrap.sh" "$compose_dir/recovery.sh" "$fake_bin/docker" "$fake_bin/laneway" "$fake_bin/cosign" "$fake_bin/getent" "$fake_bin/ss" "$fake_bin/age" "$fake_bin/jq"
 
 write_env() {
   path=$1; version=$2; digit=$3
@@ -147,7 +180,7 @@ EOF
 write_env "$compose_dir/.env" 1.0.0 1
 candidate=$test_dir/candidate.env
 write_env "$candidate" 1.1.0 2
-export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log" LANEWAY_COMMAND="$fake_bin/laneway"
+export PATH="$fake_bin:$PATH" LANE_TEST_LOG="$log" LANEWAY_COMMAND="$fake_bin/laneway" LANEWAY_DEPLOY_DIR="$compose_dir"
 export LANE_TEST_BOOTSTRAP_CAPTURE="$test_dir/bootstrap-payload.sh"
 
 "$compose_dir/laneway-control" init
@@ -190,13 +223,13 @@ LANE_TEST_HEALTH=healthy; export LANE_TEST_HEALTH
 
 mkdir -p "$compose_dir/generated/recovery"
 printf 'encrypted backup\n' > "$compose_dir/generated/recovery/initial.age"
-if sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+if sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=0 \
   LANE_TEST_COSIGN_FAIL=1 "$compose_dir/laneway-control" production-check >/dev/null 2>&1; then
   echo "production-check accepted failed image signatures" >&2
   exit 1
 fi
 test ! -e "$compose_dir/generated/lifecycle/production-verified"
-sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=1 \
+sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" LANE_TEST_EXIT_RUNNING=0 \
   "$compose_dir/laneway-control" production-check >/dev/null
 test "$(stat -c %a "$compose_dir/generated/lifecycle/production-verified")" = 600
 sudo grep -Fx 'profile=quick' "$compose_dir/generated/lifecycle/production-verified" >/dev/null
@@ -304,9 +337,15 @@ bundle=$test_dir/recovery.age
 grep -F "recovery <restore> <$bundle> <$identity>" "$log" >/dev/null
 
 : > "$log"
-"$compose_dir/laneway-control" upgrade "$candidate"
-grep -F 'LANEWAY_VERSION=1.1.0' "$compose_dir/.env" >/dev/null
-grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/generated/lifecycle/previous.env" >/dev/null
+sudo chown 0:0 "$compose_dir/generated/lifecycle"
+sudo chmod 0700 "$compose_dir/generated/lifecycle" "$compose_dir/generated/backups"
+sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" \
+  LANEWAY_DEPLOY_DIR="$compose_dir" "$compose_dir/laneway-control" upgrade "$candidate"
+sudo grep -F 'LANEWAY_VERSION=1.1.0' "$compose_dir/.env" >/dev/null
+previous_generation_name=$(sudo sed -n '1p' "$compose_dir/generated/lifecycle/previous-release")
+previous_generation=$compose_dir/generated/lifecycle/$previous_generation_name
+sudo sh -c 'cd "$1" && sha256sum -c MANIFEST.sha256 >/dev/null' sh "$previous_generation"
+sudo grep -F 'LANEWAY_VERSION=1.0.0' "$previous_generation/release.env" >/dev/null
 [ "$(grep -c '^cosign ' "$log")" -eq 5 ]
 pull_line=$(grep -n '<pull>' "$log" | tail -1 | cut -d: -f1)
 stop_line=$(grep -n '<stop>' "$log" | tail -1 | cut -d: -f1)
@@ -315,22 +354,33 @@ stop_line=$(grep -n '<stop>' "$log" | tail -1 | cut -d: -f1)
 identity_change=$test_dir/identity-change.env
 write_env "$identity_change" 1.2.0 3
 sed -i 's/^LANEWAY_NETWORK_ID=.*/LANEWAY_NETWORK_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$identity_change"
-if "$compose_dir/laneway-control" upgrade "$identity_change" >/dev/null 2>&1; then
+if sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" \
+  LANEWAY_DEPLOY_DIR="$compose_dir" "$compose_dir/laneway-control" upgrade "$identity_change" \
+  >/dev/null 2>&1; then
   echo "upgrade accepted a changed network identity" >&2
   exit 1
 fi
 
-"$compose_dir/laneway-control" rollback
-grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
+if ! rollback_output=$(sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" \
+  LANEWAY_DEPLOY_DIR="$compose_dir" "$compose_dir/laneway-control" rollback 2>&1); then
+  printf '%s\n' "$rollback_output" >&2
+  cat "$log" >&2
+  echo "rollback workflow failed" >&2
+  exit 1
+fi
+sudo grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
 
 write_env "$candidate" 1.2.0 3
 LANE_TEST_FAIL_UP=1
 export LANE_TEST_FAIL_UP
-if "$compose_dir/laneway-control" upgrade "$candidate" >/dev/null 2>&1; then
+if sudo env PATH="$PATH" LANEWAY_COMMAND="$fake_bin/laneway" LANE_TEST_LOG="$log" \
+  LANEWAY_DEPLOY_DIR="$compose_dir" LANE_TEST_FAIL_UP=1 \
+  "$compose_dir/laneway-control" upgrade "$candidate" >/dev/null 2>&1; then
   echo "failed readiness was reported as success" >&2
   exit 1
 fi
-grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
+sudo grep -F 'LANEWAY_VERSION=1.0.0' "$compose_dir/.env" >/dev/null
+sudo chown -R "$(id -u):$(id -g)" "$test_dir"
 
 update_assets=$test_dir/update-assets
 update_package=$test_dir/update-package/laneway
@@ -339,7 +389,13 @@ mkdir -p "$update_assets" "$update_package/deploy/compose" "$update_tmp"
 printf '%s\n' '1.1.0' > "$update_package/VERSION"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$update_package/install.sh"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$update_package/deploy/compose/upgrade-control-plane.sh"
-tar -C "$test_dir/update-package" -czf "$update_assets/laneway_linux_amd64.tar.gz" laneway
+case "$(uname -m)" in
+  x86_64|amd64) update_arch=amd64 ;;
+  aarch64|arm64) update_arch=arm64 ;;
+  *) echo "unsupported update test architecture" >&2; exit 1 ;;
+esac
+update_asset=laneway_linux_${update_arch}.tar.gz
+tar -C "$test_dir/update-package" -czf "$update_assets/$update_asset" laneway
 cat > "$update_assets/bootstrap-artifacts.toml" <<'EOF'
 [[bootstrap.artifacts]]
 [[bootstrap.artifacts]]
@@ -348,7 +404,7 @@ cat > "$update_assets/bootstrap-artifacts.toml" <<'EOF'
 EOF
 (
   cd "$update_assets"
-  sha256sum bootstrap-artifacts.toml laneway_linux_amd64.tar.gz > checksums.txt
+  sha256sum bootstrap-artifacts.toml "$update_asset" > checksums.txt
 )
 : > "$update_assets/checksums.sigstore.json"
 cat > "$fake_bin/curl" <<'EOF'

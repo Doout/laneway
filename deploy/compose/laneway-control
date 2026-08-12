@@ -20,6 +20,11 @@ env_file=$base_dir/.env
 state_dir=$base_dir/generated/lifecycle
 lock_dir=$state_dir/operator.lock
 lock_held=false
+rollback_database_snapshot=
+rollback_database_sha256=
+rollback_database_restore_target=
+rollback_database_restore_sha256=
+rollback_database_staging=
 
 usage() {
   cat >&2 <<'EOF'
@@ -38,18 +43,31 @@ die() { echo "laneway-control: $*" >&2; exit 1; }
 
 run_step() {
   step_label=$1; shift
-  install -d -m 0700 "$state_dir"
-  step_log=$(mktemp "$state_dir/.operation-step.XXXXXX") || die "could not create operation log"
+  if ! install -d -m 0700 "$state_dir"; then
+    echo "  ✗ $step_label (could not prepare the protected operation log)" >&2
+    return 1
+  fi
+  if ! step_log=$(mktemp "$state_dir/.operation-step.XXXXXX"); then
+    echo "  ✗ $step_label (could not create the protected operation log)" >&2
+    return 1
+  fi
   if "$@" > "$step_log" 2>&1; then
-    find "$step_log" -maxdepth 0 -delete
+    # Successful helpers normally stay quiet, but protected-artifact cleanup
+    # warnings must remain operator-visible instead of disappearing with the log.
+    sed -n '/^laneway-control: WARNING:/p' "$step_log" >&2 || \
+      echo "laneway-control: WARNING: completed operation diagnostics could not be read" >&2
+    find "$step_log" -maxdepth 0 -delete || \
+      echo "laneway-control: WARNING: completed operation log was retained: $step_log" >&2
     printf '  ✓ %s\n' "$step_label"
     return 0
   else
     step_status=$?
   fi
   printf '  ✗ %s\n' "$step_label" >&2
-  sed 's/^/      /' "$step_log" >&2
-  find "$step_log" -maxdepth 0 -delete
+  sed 's/^/      /' "$step_log" >&2 || \
+    echo "      operation diagnostics could not be read" >&2
+  find "$step_log" -maxdepth 0 -delete || \
+    echo "      protected operation log could not be removed: $step_log" >&2
   return "$step_status"
 }
 
@@ -140,8 +158,8 @@ validate_release_env() {
 
 verify_release_images() {
   file=$1
-  cosign_command=$(cosign_verifier)
-  version=$(read_setting "$file" LANEWAY_VERSION)
+  cosign_command=$(cosign_verifier) || return 1
+  version=$(read_setting "$file" LANEWAY_VERSION) || return 1
   identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v$version"
   if optional_setting "$file" LANEWAY_CONNECTOR_IMAGE_DIGEST >/dev/null; then
     set -- \
@@ -161,9 +179,10 @@ verify_release_images() {
   fi
   for item
   do
-    image=${item%%:*}; key=${item#*:}; digest=$(read_setting "$file" "$key")
+    image=${item%%:*}; key=${item#*:}
+    digest=$(read_setting "$file" "$key") || return 1
     "$cosign_command" verify --certificate-identity "$identity" \
-      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image@$digest" >/dev/null
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$image@$digest" >/dev/null || return 1
   done
 }
 
@@ -181,6 +200,330 @@ cosign_verifier() {
 }
 
 backup_recovery() { "$base_dir/recovery.sh" backup "$1"; }
+
+remove_database_artifacts() {
+  rollback_remove_base=$1
+  for rollback_remove_suffix in '' -wal -shm -journal; do
+    rollback_remove_path=$rollback_remove_base$rollback_remove_suffix
+    if [ -e "$rollback_remove_path" ] || [ -L "$rollback_remove_path" ]; then
+      find "$rollback_remove_path" -maxdepth 0 -delete || return 1
+    fi
+  done
+}
+
+require_protected_database_snapshot() {
+  snapshot_path=$1
+  case "$snapshot_path" in
+    "$state_dir"/.release-database-rollback.*|"$state_dir"/.previous-release.*/database.db) ;;
+    *) echo "database rollback snapshot path is outside the protected namespace" >&2; return 1 ;;
+  esac
+  if [ ! -f "$snapshot_path" ] || [ -L "$snapshot_path" ] || \
+    [ "$(stat -c '%a:%u:%g' "$snapshot_path")" != 600:0:0 ]; then
+    echo "database rollback snapshot is missing or unsafe" >&2
+    return 1
+  fi
+}
+
+remove_current_database_snapshot() {
+  [ -n "$rollback_database_snapshot" ] || return 0
+  require_protected_database_snapshot "$rollback_database_snapshot" || return 1
+  case "$rollback_database_snapshot" in
+    "$state_dir"/.release-database-rollback.*) ;;
+    *) echo "refusing to remove a published rollback snapshot" >&2; return 1 ;;
+  esac
+  find "$rollback_database_snapshot" -maxdepth 0 -delete || return 1
+  rollback_database_snapshot=
+  rollback_database_sha256=
+}
+
+cleanup_release_database_staging() {
+  [ -n "$rollback_database_staging" ] || return 0
+  case "$rollback_database_staging" in
+    "$base_dir"/generated/backups/.lane-release-*) ;;
+    *) echo "refusing to remove an unexpected database staging path" >&2; return 1 ;;
+  esac
+  remove_database_artifacts "$rollback_database_staging" || return 1
+  rollback_database_staging=
+}
+
+create_release_database_snapshot() {
+  rollback_operation=$1
+  rollback_backup_dir=$base_dir/generated/backups
+  if [ "$(id -u)" -ne 0 ] || [ "$(stat -c '%a:%u:%g' "$state_dir")" != 700:0:0 ]; then
+    echo "release database snapshots require a root-owned lifecycle directory with mode 0700" >&2
+    return 1
+  fi
+  if [ -e "$rollback_backup_dir" ] || [ -L "$rollback_backup_dir" ]; then
+    if [ ! -d "$rollback_backup_dir" ] || [ -L "$rollback_backup_dir" ]; then
+      echo "generated/backups must be a real directory" >&2
+      return 1
+    fi
+  fi
+  install -d -m 0700 "$rollback_backup_dir" || return 1
+  chown 65532:65532 "$rollback_backup_dir" || return 1
+  # A hard kill can bypass shell traps. Reclaim only the internal namespace,
+  # under the lifecycle lock and after the controller has been quiesced.
+  find "$rollback_backup_dir" -mindepth 1 -maxdepth 1 \
+    \( -type f -o -type l \) -name '.lane-release-*' -delete || return 1
+
+  rollback_staging_name=.lane-release-snapshot-$PPID-$$.db
+  rollback_staging_path=$rollback_backup_dir/$rollback_staging_name
+  rollback_database_staging=$rollback_staging_path
+  if [ -e "$rollback_staging_path" ] || [ -L "$rollback_staging_path" ]; then
+    echo "rollback snapshot staging path already exists" >&2
+    return 1
+  fi
+  rollback_database_snapshot=$(mktemp "$state_dir/.release-database-rollback.XXXXXX") || return 1
+  chmod 0600 "$rollback_database_snapshot" || {
+    remove_current_database_snapshot || true
+    return 1
+  }
+  if ! compose run --rm --no-deps controller -config /etc/laneway/controller.toml \
+    -backup "/backups/$rollback_staging_name"; then
+    cleanup_release_database_staging || true
+    remove_current_database_snapshot || true
+    return 1
+  fi
+  if [ ! -f "$rollback_staging_path" ] || [ -L "$rollback_staging_path" ] || \
+    [ "$(stat -c '%a:%u:%g' "$rollback_staging_path")" != 600:65532:65532 ]; then
+    echo "controller produced an unsafe rollback snapshot" >&2
+    cleanup_release_database_staging || true
+    remove_current_database_snapshot || true
+    return 1
+  fi
+  if ! install -m 0600 -o 0 -g 0 "$rollback_staging_path" "$rollback_database_snapshot"; then
+    cleanup_release_database_staging || true
+    remove_current_database_snapshot || true
+    return 1
+  fi
+  rollback_database_sha256=$(sha256sum "$rollback_database_snapshot" | awk '{print $1}')
+  if ! printf '%s\n' "$rollback_database_sha256" | grep -Eq '^[0-9a-f]{64}$' || \
+    ! sync -f "$rollback_database_snapshot"; then
+    cleanup_release_database_staging || true
+    remove_current_database_snapshot || true
+    return 1
+  fi
+  if ! cleanup_release_database_staging; then
+    echo "could not remove rollback snapshot staging files" >&2
+    remove_current_database_snapshot || true
+    return 1
+  fi
+  printf 'protected pre-%s database snapshot created\n' "$rollback_operation"
+}
+
+restore_release_database_snapshot() {
+  rollback_restore_source=$1
+  rollback_restore_sha256=$2
+  rollback_backup_dir=$base_dir/generated/backups
+  # A prior restore may have completed before its controller-writable staging
+  # copy could be removed. Never overwrite the tracked path and orphan it.
+  if [ -n "$rollback_database_staging" ] && ! cleanup_release_database_staging; then
+    echo "could not remove prior rollback restore staging files" >&2
+    return 1
+  fi
+  require_protected_database_snapshot "$rollback_restore_source" || return 1
+  rollback_restore_actual=$(sha256sum "$rollback_restore_source" | awk '{print $1}')
+  if [ "$rollback_restore_actual" != "$rollback_restore_sha256" ]; then
+    echo "protected rollback snapshot checksum changed" >&2
+    return 1
+  fi
+  if [ ! -d "$rollback_backup_dir" ] || [ -L "$rollback_backup_dir" ]; then
+    echo "generated/backups must be a real directory" >&2
+    return 1
+  fi
+  rollback_compose_config=$(compose config --format json) || return 1
+  rollback_controller_volume=$(printf '%s\n' "$rollback_compose_config" | jq -r '
+    .volumes[.services.controller.volumes[] |
+      select(.target == "/var/lib/laneway-controller" and .type == "volume").source].name // empty
+  ') || return 1
+  if [ "$rollback_controller_volume" != laneway-controller-state ]; then
+    echo "controller state does not use the managed rollback volume" >&2
+    return 1
+  fi
+  if ! compose rm -s -f controller; then
+    return 1
+  fi
+  rollback_controller_container=$(compose ps -a -q controller) || return 1
+  if [ -n "$rollback_controller_container" ]; then
+    echo "controller container still exists after removal" >&2
+    return 1
+  fi
+  if docker volume inspect "$rollback_controller_volume" >/dev/null 2>&1; then
+    if ! docker volume rm "$rollback_controller_volume"; then
+      return 1
+    fi
+  fi
+  if docker volume inspect "$rollback_controller_volume" >/dev/null 2>&1; then
+    echo "controller state volume still exists after removal" >&2
+    return 1
+  fi
+
+  rollback_restore_path=$(mktemp "$rollback_backup_dir/.lane-release-restore.XXXXXX") || return 1
+  rollback_database_staging=$rollback_restore_path
+  if ! install -m 0600 -o 65532 -g 65532 "$rollback_restore_source" "$rollback_restore_path"; then
+    cleanup_release_database_staging || true
+    return 1
+  fi
+  rollback_restore_staged_sha256=$(sha256sum "$rollback_restore_path" | awk '{print $1}')
+  if [ "$rollback_restore_staged_sha256" != "$rollback_restore_sha256" ] || \
+    ! sync -f "$rollback_restore_path"; then
+    echo "rollback restore staging checksum changed" >&2
+    cleanup_release_database_staging || true
+    return 1
+  fi
+  if ! compose run --rm --no-deps controller -config /etc/laneway/controller.toml \
+    -restore "/backups/${rollback_restore_path##*/}"; then
+    cleanup_release_database_staging || true
+    return 1
+  fi
+  cleanup_release_database_staging
+}
+
+load_previous_release() {
+  previous_pointer=$state_dir/previous-release
+  if [ ! -f "$previous_pointer" ] || [ -L "$previous_pointer" ] || \
+    [ "$(stat -c '%a:%u:%g' "$previous_pointer")" != 600:0:0 ] || \
+    [ "$(wc -l < "$previous_pointer")" -ne 1 ]; then
+    echo "previous release pointer is missing or unsafe" >&2
+    return 1
+  fi
+  previous_generation_name=$(sed -n '1p' "$previous_pointer")
+  case "$previous_generation_name" in
+    .previous-release.*)
+      previous_generation_suffix=${previous_generation_name#.previous-release.}
+      case "$previous_generation_suffix" in ''|*[!A-Za-z0-9]*) echo "previous release pointer is invalid" >&2; return 1 ;; esac
+      ;;
+    *) echo "previous release pointer is invalid" >&2; return 1 ;;
+  esac
+  previous_generation=$state_dir/$previous_generation_name
+  if [ ! -d "$previous_generation" ] || [ -L "$previous_generation" ] || \
+    [ "$(stat -c '%a:%u:%g' "$previous_generation")" != 700:0:0 ]; then
+    echo "previous release generation is missing or unsafe" >&2
+    return 1
+  fi
+  previous_files_directory=$previous_generation/files
+  if [ ! -d "$previous_files_directory" ] || [ -L "$previous_files_directory" ] || \
+    [ "$(stat -c '%a:%u:%g' "$previous_files_directory")" != 700:0:0 ]; then
+    echo "previous release files directory is missing or unsafe" >&2
+    return 1
+  fi
+  previous_manifest=$previous_generation/MANIFEST.sha256
+  previous_expected='database.db
+files/compose.yaml
+files/controller.toml
+files/relay.toml
+release.env'
+  for previous_relative in MANIFEST.sha256 database.db release.env \
+    files/compose.yaml files/controller.toml files/relay.toml; do
+    previous_path=$previous_generation/$previous_relative
+    if [ ! -f "$previous_path" ] || [ -L "$previous_path" ] || \
+      [ "$(stat -c '%a:%u:%g' "$previous_path")" != 600:0:0 ]; then
+      echo "previous release generation member is missing or unsafe: $previous_relative" >&2
+      return 1
+    fi
+  done
+  previous_actual=$(sed -n 's/^[0-9a-f]\{64\}  //p' "$previous_manifest" | LC_ALL=C sort)
+  if [ "$previous_actual" != "$previous_expected" ] || \
+    ! (cd "$previous_generation" && sha256sum -c MANIFEST.sha256 >/dev/null); then
+    echo "previous release generation integrity check failed" >&2
+    return 1
+  fi
+  previous_release_env=$previous_generation/release.env
+  previous_release_files=$previous_generation/files
+  rollback_database_restore_target=$previous_generation/database.db
+  rollback_database_restore_sha256=$(sha256sum "$rollback_database_restore_target" | awk '{print $1}')
+}
+
+publish_previous_release() {
+  publish_env=$1
+  publish_files=$2
+  require_protected_database_snapshot "$rollback_database_snapshot" || return 1
+  for publish_source in "$publish_env" "$publish_files/compose.yaml" \
+    "$publish_files/controller.toml" "$publish_files/relay.toml"; do
+    if [ ! -f "$publish_source" ] || [ -L "$publish_source" ]; then
+      echo "cannot publish incomplete previous release state" >&2
+      return 1
+    fi
+  done
+  old_previous_generation=
+  old_previous_generation_name=
+  if [ -e "$state_dir/previous-release" ] || [ -L "$state_dir/previous-release" ]; then
+    load_previous_release || return 1
+    old_previous_generation=$previous_generation
+    old_previous_generation_name=$previous_generation_name
+  fi
+  publish_generation=$(mktemp -d "$state_dir/.previous-release.XXXXXX") || return 1
+  if ! chmod 0700 "$publish_generation" || \
+    ! install -d -m 0700 -o 0 -g 0 "$publish_generation/files"; then
+    find "$publish_generation" -depth -delete 2>/dev/null || true
+    return 1
+  fi
+  if ! install -m 0600 -o 0 -g 0 "$publish_env" "$publish_generation/release.env" || \
+    ! install -m 0600 -o 0 -g 0 "$publish_files/compose.yaml" "$publish_generation/files/compose.yaml" || \
+    ! install -m 0600 -o 0 -g 0 "$publish_files/controller.toml" "$publish_generation/files/controller.toml" || \
+    ! install -m 0600 -o 0 -g 0 "$publish_files/relay.toml" "$publish_generation/files/relay.toml" || \
+    ! install -m 0600 -o 0 -g 0 "$rollback_database_snapshot" "$publish_generation/database.db"; then
+    find "$publish_generation" -depth -delete 2>/dev/null || true
+    return 1
+  fi
+  if ! (
+    cd "$publish_generation" || exit 1
+    sha256sum database.db files/compose.yaml files/controller.toml files/relay.toml release.env > MANIFEST.sha256 || exit 1
+    chmod 0600 MANIFEST.sha256 || exit 1
+    for publish_member in database.db files/compose.yaml files/controller.toml files/relay.toml release.env MANIFEST.sha256; do
+      sync -f "$publish_member" || exit 1
+    done
+    sync -f files || exit 1
+    sync -f . || exit 1
+  ); then
+    find "$publish_generation" -depth -delete 2>/dev/null || true
+    return 1
+  fi
+  # Make the new generation's directory entry durable before any pointer can
+  # name it. The pointer rename has its own parent-directory barrier below.
+  if ! sync -f "$state_dir"; then
+    find "$publish_generation" -depth -delete 2>/dev/null || true
+    return 1
+  fi
+  publish_pointer=$(mktemp "$state_dir/.previous-release-pointer.XXXXXX") || {
+    find "$publish_generation" -depth -delete 2>/dev/null || true
+    return 1
+  }
+  if ! printf '%s\n' "${publish_generation##*/}" > "$publish_pointer" || \
+    ! chmod 0600 "$publish_pointer" || ! sync -f "$publish_pointer" || \
+    ! mv "$publish_pointer" "$state_dir/previous-release"; then
+    find "$publish_pointer" -maxdepth 0 -delete 2>/dev/null || true
+    find "$publish_generation" -depth -delete 2>/dev/null || true
+    return 1
+  fi
+  if ! sync -f "$state_dir"; then
+    # The new generation remains valid if restoring the prior pointer also
+    # fails. Never delete a generation while a pointer may still reference it.
+    echo "laneway-control: WARNING: previous release pointer durability could not be confirmed" >&2
+    if [ -n "$old_previous_generation_name" ]; then
+      rollback_pointer=$(mktemp "$state_dir/.previous-release-pointer.XXXXXX") || rollback_pointer=
+      if [ -n "$rollback_pointer" ] && \
+        printf '%s\n' "$old_previous_generation_name" > "$rollback_pointer" && \
+        chmod 0600 "$rollback_pointer" && sync -f "$rollback_pointer" && \
+        mv "$rollback_pointer" "$state_dir/previous-release" && sync -f "$state_dir"; then
+        find "$publish_generation" -depth -delete 2>/dev/null || \
+          echo "laneway-control: WARNING: unpublished protected release generation was retained" >&2
+      else
+        [ -z "$rollback_pointer" ] || \
+          find "$rollback_pointer" -maxdepth 0 -delete 2>/dev/null || true
+        echo "laneway-control: WARNING: prior release pointer could not be republished; all candidate generations were retained" >&2
+      fi
+    fi
+    return 1
+  fi
+  if ! remove_current_database_snapshot; then
+    echo "laneway-control: WARNING: current rollback snapshot cleanup failed; protected copy retained" >&2
+  fi
+  if [ -n "$old_previous_generation" ] && [ "$old_previous_generation" != "$publish_generation" ]; then
+    find "$old_previous_generation" -depth -delete 2>/dev/null || \
+      echo "laneway-control: WARNING: obsolete protected release generation was retained" >&2
+  fi
+}
 
 admin() {
   laneway_command=${LANEWAY_COMMAND:-/usr/local/bin/laneway}
@@ -664,17 +1007,55 @@ run_update() {
     sh /usr/local/share/laneway/deploy/compose/upgrade-control-plane.sh
 }
 
-atomic_copy() {
-  source=$1; destination=$2; directory=$(dirname "$destination")
-  if [ -e "$destination" ] || [ -L "$destination" ]; then
-    if [ ! -f "$destination" ] || [ -L "$destination" ]; then
-      die "refusing to replace non-regular state: $destination"
+try_atomic_copy() {
+  copy_source=$1
+  copy_destination=$2
+  copy_directory=$(dirname "$copy_destination")
+  if [ -e "$copy_destination" ] || [ -L "$copy_destination" ]; then
+    if [ ! -f "$copy_destination" ] || [ -L "$copy_destination" ]; then
+      echo "refusing to replace non-regular state: $copy_destination" >&2
+      return 1
     fi
   fi
-  temporary=$(mktemp "$directory/.lane-env.XXXXXX")
-  if ! cp "$source" "$temporary" || ! chmod 0600 "$temporary" || ! mv "$temporary" "$destination"; then
-    find "$temporary" -maxdepth 0 -delete 2>/dev/null || true
-    die "cannot publish release environment: $destination"
+  copy_temporary=$(mktemp "$copy_directory/.lane-env.XXXXXX") || {
+    echo "cannot create temporary release environment in $copy_directory" >&2
+    return 1
+  }
+  if ! cp "$copy_source" "$copy_temporary" || ! chmod 0600 "$copy_temporary" || \
+    ! mv "$copy_temporary" "$copy_destination"; then
+    find "$copy_temporary" -maxdepth 0 -delete 2>/dev/null || true
+    echo "cannot publish release environment: $copy_destination" >&2
+    return 1
+  fi
+}
+
+atomic_copy() {
+  try_atomic_copy "$1" "$2" || die "cannot atomically copy release state"
+}
+
+install_release_selection() {
+  selection_env=$1
+  selection_files=${2:-}
+  if [ -n "$selection_files" ]; then
+    for selection_relative in compose.yaml controller.toml relay.toml; do
+      selection_source=$selection_files/$selection_relative
+      if [ ! -f "$selection_source" ] || [ -L "$selection_source" ]; then
+        echo "release selection file is missing or unsafe: $selection_relative" >&2
+        return 1
+      fi
+    done
+    install -m 0644 "$selection_files/compose.yaml" "$base_dir/compose.yaml" || return 1
+    install -m 0444 "$selection_files/controller.toml" "$base_dir/generated/config/controller.toml" || return 1
+    install -m 0444 "$selection_files/relay.toml" "$base_dir/generated/config/relay.toml" || return 1
+  fi
+  try_atomic_copy "$selection_env" "$env_file"
+}
+
+restart_quiesced_source() {
+  restart_exit_was_running=$1
+  run_step "Restore current controller and relay" compose up -d --wait controller relay || return 1
+  if [ "$restart_exit_was_running" = true ]; then
+    run_step "Restore current exit node" compose --profile exit-node up -d --wait exit-node || return 1
   fi
 }
 
@@ -703,11 +1084,6 @@ activate_release() {
     fi
   fi
   install -d -m 0700 "$state_dir"
-  if [ -e "$state_dir/previous.env" ] || [ -L "$state_dir/previous.env" ]; then
-    if [ ! -f "$state_dir/previous.env" ] || [ -L "$state_dir/previous.env" ]; then
-      die "previous release state is not a regular file"
-    fi
-  fi
   current_copy=$state_dir/current-before-$operation.env; atomic_copy "$env_file" "$current_copy"
   current_files=$(mktemp -d "$state_dir/current-files-before-$operation.XXXXXX")
   chmod 0700 "$current_files"
@@ -715,45 +1091,104 @@ activate_release() {
   install -m 0444 "$base_dir/generated/config/controller.toml" "$current_files/controller.toml"
   install -m 0444 "$base_dir/generated/config/relay.toml" "$current_files/relay.toml"
   exit_was_running=false
-  [ -z "$(compose --profile exit-node ps --status running -q exit-node)" ] || exit_was_running=true
+  if ! exit_running_id=$(compose --profile exit-node ps --status running -q exit-node); then
+    find "$current_files" -depth -delete 2>/dev/null || true
+    find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
+    die "$operation could not determine whether the exit node is running; release selection is unchanged"
+  fi
+  [ -z "$exit_running_id" ] || exit_was_running=true
+  # Stop is the first mutating step. Defer interruption before it begins so a
+  # partially stopped dependency chain cannot escape the recovery state machine.
+  trap '' HUP INT TERM
   if ! run_step "Stop current control plane" compose --profile exit-node stop exit-node relay controller; then
-    run_step "Restore current control plane" compose up -d --wait controller relay || true
-    [ "$exit_was_running" = false ] || run_step "Restore current exit node" compose --profile exit-node up -d --wait exit-node || true
-    die "$operation could not stop the current stack; release selection is unchanged"
+    if restart_quiesced_source "$exit_was_running"; then
+      find "$current_files" -depth -delete 2>/dev/null || true
+      find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
+      die "$operation could not stop the current stack; release selection is unchanged and the source stack was restarted"
+    fi
+    find "$current_files" -depth -delete 2>/dev/null || true
+    find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
+    die "$operation could not stop the current stack; automatic recovery incomplete and the source stack may be stopped"
   fi
-  if [ -n "$migration_dir" ]; then
-    install -m 0644 "$migration_dir/compose.yaml" "$base_dir/compose.yaml"
-    install -m 0444 "$migration_dir/controller.toml" "$base_dir/generated/config/controller.toml"
-    install -m 0444 "$migration_dir/relay.toml" "$base_dir/generated/config/relay.toml"
+  if ! run_step "Create protected pre-migration database snapshot" create_release_database_snapshot "$operation"; then
+    if restart_quiesced_source "$exit_was_running"; then
+      find "$current_files" -depth -delete 2>/dev/null || true
+      find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
+      die "$operation database rollback snapshot failed; release selection is unchanged and the source stack was restarted"
+    fi
+    find "$current_files" -depth -delete 2>/dev/null || true
+    find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
+    die "$operation database rollback snapshot failed; automatic recovery incomplete and the source stack may be stopped"
   fi
-  atomic_copy "$candidate" "$env_file"
+  source_snapshot=$rollback_database_snapshot
+  source_sha256=$rollback_database_sha256
   startup_ok=true
-  run_step "Validate migrated deployment" "$base_dir/validate.sh" || startup_ok=false
+  run_step "Install candidate release selection" install_release_selection "$candidate" "$migration_dir" || startup_ok=false
+  if [ "$startup_ok" = true ]; then
+    run_step "Validate migrated deployment" "$base_dir/validate.sh" || startup_ok=false
+  fi
+  if [ "$startup_ok" = true ] && [ "$operation" = rollback ]; then
+    if ! run_step "Restore rollback target database" restore_release_database_snapshot \
+      "$rollback_database_restore_target" "$rollback_database_restore_sha256"; then
+      startup_ok=false
+    fi
+  fi
   if [ "$startup_ok" = true ]; then
     run_step "Start controller and relay" compose up -d --wait controller relay || startup_ok=false
   fi
+  if [ "$startup_ok" = true ] && [ "$exit_was_running" = true ]; then
+    run_step "Start exit node" compose --profile exit-node up -d --wait exit-node || startup_ok=false
+  fi
   if [ "$startup_ok" = true ]; then
-    [ "$exit_was_running" = false ] || run_step "Start exit node" compose --profile exit-node up -d --wait exit-node
-    atomic_copy "$current_copy" "$state_dir/previous.env"
-    previous_files=$state_dir/previous-files
-    install -d -m 0700 "$previous_files"
-    install -m 0644 "$current_files/compose.yaml" "$previous_files/compose.yaml"
-    install -m 0444 "$current_files/controller.toml" "$previous_files/controller.toml"
-    install -m 0444 "$current_files/relay.toml" "$previous_files/relay.toml"
-    find "$current_files" -depth -delete
+    if ! run_step "Publish previous release generation" publish_previous_release "$current_copy" "$current_files"; then
+      startup_ok=false
+    fi
+  fi
+  if [ "$startup_ok" = true ]; then
+    find "$current_files" -depth -delete 2>/dev/null || \
+      echo "laneway-control: WARNING: committed release retained temporary configuration state" >&2
+    find "$current_copy" -maxdepth 0 -delete 2>/dev/null || \
+      echo "laneway-control: WARNING: committed release retained temporary environment state" >&2
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     printf '\nLaneway control-plane %s complete\n' "$operation"
     printf '  Recovery backup: generated/recovery/%s\n' "$backup_name"
+    printf '  Rollback restores the database snapshot taken before this %s and discards later management changes.\n' "$operation"
     return
   fi
-  echo "laneway-control: $operation failed; restoring previous images/config" >&2
-  atomic_copy "$current_copy" "$env_file"
-  install -m 0644 "$current_files/compose.yaml" "$base_dir/compose.yaml"
-  install -m 0444 "$current_files/controller.toml" "$base_dir/generated/config/controller.toml"
-  install -m 0444 "$current_files/relay.toml" "$base_dir/generated/config/relay.toml"
-  find "$current_files" -depth -delete
-  run_step "Restore previous controller and relay" compose up -d --wait controller relay || true
-  [ "$exit_was_running" = false ] || run_step "Restore previous exit node" compose --profile exit-node up -d --wait exit-node || true
-  die "$operation failed; database was not rolled back; backup: generated/recovery/$backup_name"
+  echo "laneway-control: $operation failed; restoring previous images, configuration, and database" >&2
+  failed_stopped=false
+  run_step "Stop failed control plane" compose --profile exit-node stop exit-node relay controller && failed_stopped=true
+  source_selection_restored=false
+  if run_step "Restore source release selection" install_release_selection "$current_copy" "$current_files"; then
+    source_selection_restored=true
+  fi
+  database_restored=false
+  if [ "$failed_stopped" = true ] && [ "$source_selection_restored" = true ] && \
+    run_step "Restore source database" restore_release_database_snapshot \
+    "$source_snapshot" "$source_sha256"; then
+    database_restored=true
+  fi
+  previous_started=false
+  if [ "$database_restored" = true ] && \
+    run_step "Restore previous controller and relay" compose up -d --wait controller relay; then
+    previous_started=true
+  fi
+  if [ "$previous_started" = true ] && [ "$exit_was_running" = true ]; then
+    run_step "Restore previous exit node" compose --profile exit-node up -d --wait exit-node || previous_started=false
+  fi
+  if [ "$database_restored" = true ] && [ "$previous_started" = true ]; then
+    remove_current_database_snapshot || true
+    find "$current_files" -depth -delete 2>/dev/null || true
+    find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    die "$operation failed; previous images, configuration, and database restored; backup: generated/recovery/$backup_name"
+  fi
+  retained_snapshot=${rollback_database_snapshot##*/}
+  die "$operation failed; automatic rollback incomplete; encrypted backup: generated/recovery/$backup_name; protected database snapshot retained: generated/lifecycle/$retained_snapshot"
 }
 
 run_init() {
@@ -805,6 +1240,7 @@ case "$command" in
     "$base_dir/recovery.sh" restore "$1" "$3"
     ;;
   upgrade)
+    [ "$(id -u)" -eq 0 ] || die "upgrade must run as root"
     acquire_lock
     if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
       die "upgrade requires CANDIDATE.env and optionally MIGRATION_DIR"
@@ -812,16 +1248,11 @@ case "$command" in
     activate_release "$1" upgrade "${2:-}"
     ;;
   rollback)
+    [ "$(id -u)" -eq 0 ] || die "rollback must run as root"
     acquire_lock
     [ "$#" -eq 0 ] || die "rollback accepts no arguments"
-    if [ ! -f "$state_dir/previous.env" ] || [ -L "$state_dir/previous.env" ]; then
-      die "no previous release is available"
-    fi
-    rollback_files=
-    if [ -d "$state_dir/previous-files" ] && [ ! -L "$state_dir/previous-files" ]; then
-      rollback_files=$state_dir/previous-files
-    fi
-    candidate=$state_dir/rollback-candidate.env; atomic_copy "$state_dir/previous.env" "$candidate"; activate_release "$candidate" rollback "$rollback_files"
+    load_previous_release || die "no valid previous release generation is available"
+    activate_release "$previous_release_env" rollback "$previous_release_files"
     ;;
   help|-h|--help) usage ;;
   *) usage; die "unknown command: $command" ;;

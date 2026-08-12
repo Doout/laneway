@@ -104,7 +104,7 @@ if [ "$(grep -Fc "$release_target_expression" "$workflow")" -ne 2 ]; then
   exit 1
 fi
 
-for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'compose_file_with_env' 'backup_recovery' 'database was not rolled back' 'run_update' 'releases/latest' 'verify-blob'; do
+for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'compose_file_with_env' 'backup_recovery' 'create_release_database_snapshot' 'restore_release_database_snapshot' 'publish_previous_release' 'load_previous_release' 'previous images, configuration, and database restored' 'run_update' 'releases/latest' 'verify-blob'; do
   require "$value" "$lane_workflow"
 done
 for value in 'pki verify-authority' 'offline root private key ca.key must never' 'chown 65532:65532'; do

@@ -40,10 +40,19 @@ firewall rules, routes, interfaces, or sysctls.
 sudo laneway control update
 ```
 
-The updater verifies the release, takes an encrypted backup, replaces the
-containers with health checks, and restores the prior selection if startup
-fails. Deployment identity, PKI, state, endpoints, and host networking remain
-unchanged.
+The updater verifies the release, takes an encrypted backup and a root-only
+database snapshot after quiescing the controller, then replaces the containers
+with health checks.
+If candidate startup fails after a database migration, it restores the prior
+image and configuration, replaces only the managed controller-state volume,
+and restores the snapshot through the prior controller image before restarting
+the stack. After a verified start, the snapshot is retained with the prior
+image and configuration as one checksummed release generation under the
+root-only lifecycle directory. A later explicit rollback restores that
+point-in-time database and therefore discards management changes made after the
+upgrade. An incomplete automatic recovery retains its protected source
+snapshot and reports the path. Deployment identity, PKI, endpoints, and host
+networking remain unchanged.
 
 ## Docker Connector
 
