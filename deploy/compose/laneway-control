@@ -1355,7 +1355,13 @@ emit_docker_connector_bootstrap() {
 	bootstrap_dir=$(mktemp -d "$state_dir/.connector-bootstrap.XXXXXX") || die "could not create protected bootstrap workspace"
 	chmod 0700 "$bootstrap_dir"
 	cleanup_bootstrap() { [ ! -e "$bootstrap_dir" ] || find "$bootstrap_dir" -depth -delete; }
-	trap cleanup_bootstrap EXIT HUP INT TERM
+	# Preserve the outer lifecycle lock cleanup while this nested protected
+	# workspace is live. Clearing these traps would strand operator.lock after a
+	# successful bootstrap or an injected bootstrap failure.
+	trap 'cleanup_bootstrap; release_lock' EXIT
+	trap 'cleanup_bootstrap; exit 129' HUP
+	trap 'cleanup_bootstrap; exit 130' INT
+	trap 'cleanup_bootstrap; exit 143' TERM
 	envelope_file=$bootstrap_dir/envelope
 	key=$(printf '%s\n' "$setup_token" | admin connector bootstrap-seal --out "$envelope_file" --expires-at "$expires_at")
 	unset setup_token enrollment_token
@@ -1376,7 +1382,10 @@ emit_docker_connector_bootstrap() {
 	public_path=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"public_path":[[:space:]]*"\([^"]*\)"[,]*$/\1/p')
 	printf '%s\n' "$public_path" | grep -Eq '^/\.well-known/laneway/bootstrap/[A-Za-z0-9_-]{43}$' || die "controller returned no valid bootstrap path"
 	cleanup_bootstrap
-	trap - EXIT HUP INT TERM
+	trap release_lock EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 
 	public_port=$(read_setting "$env_file" LANEWAY_RELAY_TCP_PORT)
 	public_authority=$server_name

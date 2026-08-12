@@ -110,6 +110,7 @@ case " $* " in
     printf '%s\n' 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk'
     ;;
   *" controller bootstrap-bundle create "*)
+    [ "${LANE_TEST_BOOTSTRAP_BUNDLE_FAIL:-0}" = 0 ] || exit 1
     payload_file=
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -295,6 +296,13 @@ bootstrap_stderr=$test_dir/bootstrap-command.err
 grep -F "curl --fail --silent --show-error --proto '=https' --tlsv1.3 'https://lane.example.test/.well-known/laneway/bootstrap/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB'" "$bootstrap_command" >/dev/null
 grep -F "| sudo bash -s -- 'kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk'" "$bootstrap_command" >/dev/null
 grep -F 'expires in 10 minutes and is consumed by the first download' "$bootstrap_stderr" >/dev/null
+test ! -e "$compose_dir/generated/lifecycle/operator.lock"
+if LANE_TEST_BOOTSTRAP_BUNDLE_FAIL=1 "$compose_dir/laneway-control" invite \
+  --name failed-office --docker --connector --bootstrap >/dev/null 2>&1; then
+  echo "failed encrypted bootstrap was reported as successful" >&2
+  exit 1
+fi
+test ! -e "$compose_dir/generated/lifecycle/operator.lock"
 bash -n "$LANE_TEST_BOOTSTRAP_CAPTURE"
 grep -F 'connector bootstrap-activate --envelope-file /run/laneway-bootstrap/envelope' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
 grep -F 'docker run -d' "$LANE_TEST_BOOTSTRAP_CAPTURE" >/dev/null
@@ -329,6 +337,7 @@ if "$compose_dir/laneway-control" invite --name invalid --docker --connector --b
   echo "bootstrap accepted a caller-controlled lifetime" >&2
   exit 1
 fi
+test ! -e "$compose_dir/generated/lifecycle/operator.lock"
 
 identity=$test_dir/identity.txt
 bundle=$test_dir/recovery.age
