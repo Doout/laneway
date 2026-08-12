@@ -186,8 +186,10 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 		"GET /v1/admin/networks/" + networkID.String():                                true,
 		"POST /v1/admin/enrollment-tokens":                                            true,
 		"POST /v1/admin/routes/" + objectID.String() + "/approve":                     true,
+		"POST /v1/admin/routes/" + objectID.String() + "/withdraw":                    true,
 		"GET /v1/admin/networks/" + networkID.String() + "/routes?limit=7":            true,
 		"POST /v1/admin/networks/" + networkID.String() + "/acl-rules":                true,
+		"PUT /v1/admin/acl-rules/" + objectID.String():                                true,
 		"DELETE /v1/admin/acl-rules/" + objectID.String():                             true,
 		"POST /v1/admin/nodes/" + nodeID.String() + "/revoke":                         true,
 		"POST /v1/admin/networks/" + networkID.String() + "/certificates/0123/revoke": true,
@@ -274,10 +276,16 @@ func TestManagementMethodsAndAuthentication(t *testing.T) {
 	if _, err := client.ApproveRoute(ctx, objectID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := client.AdminWithdrawRoute(ctx, objectID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := client.Routes(ctx, networkID, 7); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.AddACLRule(ctx, networkID, 1, "deny", json.RawMessage(`{}`), "test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.UpdateACLRule(ctx, objectID, 2, "accept", json.RawMessage(`{}`), "updated", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.DeleteACLRule(ctx, objectID); err != nil {

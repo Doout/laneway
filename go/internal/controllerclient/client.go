@@ -611,6 +611,12 @@ func (c *Client) ApproveRoute(ctx context.Context, routeID identity.ID) (*Epoch,
 	return response, err
 }
 
+func (c *Client) AdminWithdrawRoute(ctx context.Context, routeID identity.ID) (*Epoch, error) {
+	response := new(Epoch)
+	err := c.json(ctx, http.MethodPost, "/v1/admin/routes/"+routeID.String()+"/withdraw", nil, response, true)
+	return response, err
+}
+
 func (c *Client) AssignRoute(ctx context.Context, networkID identity.NetworkID, nodeID identity.NodeID, prefix netip.Prefix, mode string, metric uint32) (*Route, error) {
 	if networkID.IsZero() || nodeID.IsZero() || !prefix.IsValid() || prefix != prefix.Masked() || prefix.Bits() == 0 || (mode != "nat" && mode != "routed") {
 		return nil, errors.New("controller client: assigned route requires network, node, canonical non-default prefix, and valid mode")
@@ -678,6 +684,21 @@ func (c *Client) ACLRules(ctx context.Context, networkID identity.NetworkID, lim
 func (c *Client) DeleteACLRule(ctx context.Context, ruleID identity.ID) (*Epoch, error) {
 	response := new(Epoch)
 	err := c.json(ctx, http.MethodDelete, "/v1/admin/acl-rules/"+ruleID.String(), nil, response, true)
+	return response, err
+}
+
+func (c *Client) UpdateACLRule(ctx context.Context, ruleID identity.ID, priority uint32, action string, selector json.RawMessage, description string, enabled bool) (*ACLRule, error) {
+	if ruleID.IsZero() || (action != "accept" && action != "deny") || !json.Valid(selector) {
+		return nil, errors.New("controller client: rule ID, ACL action, and selector are invalid")
+	}
+	response := new(ACLRule)
+	err := c.json(ctx, http.MethodPut, "/v1/admin/acl-rules/"+ruleID.String(), struct {
+		Priority    uint32          `json:"priority"`
+		Action      string          `json:"action"`
+		Selector    json.RawMessage `json:"selector"`
+		Description string          `json:"description"`
+		Enabled     bool            `json:"enabled"`
+	}{priority, action, selector, description, enabled}, response, true)
 	return response, err
 }
 

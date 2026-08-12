@@ -18,7 +18,7 @@ services:
   controller:
     <<: *security
     image: ghcr.io/doout/laneway-controller:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_CONTROLLER_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
-    command: ["-config", "/etc/laneway/controller.toml"]
+    command: ["-config", "/etc/laneway/controller.toml", "-console-dir", "/usr/share/laneway-console"]
     volumes:
       - controller-state:/var/lib/laneway-controller
       - ./generated/config/controller.toml:/etc/laneway/controller.toml:ro

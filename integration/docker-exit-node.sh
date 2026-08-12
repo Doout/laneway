@@ -184,9 +184,9 @@ wait_peer_path() {
 }
 
 echo "==> build pinned product images and a scratch-only test probe"
-docker build --quiet --label "${owner}" --build-arg BINARY=laneway-controller -t "${controller_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
-docker build --quiet --label "${owner}" --build-arg BINARY=laneway-relay -t "${relay_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
-docker build --quiet --label "${owner}" --build-arg BINARY=laneway -t "${admin_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target controller -t "${controller_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target relay -t "${relay_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target admin -t "${admin_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
 docker build --quiet --label "${owner}" -t "${node_image}" -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
 mkdir -p "${work_dir}/probe-context"
 (cd "${repo_root}/go" && CGO_ENABLED=0 go build -trimpath -o "${work_dir}/probe-context/netprobe" ./integration/netprobe)
@@ -431,7 +431,7 @@ for node_name in "${client_name}" "${gateway_name}"; do
     .[0].HostConfig.Privileged == false and
     .[0].HostConfig.NetworkMode != "host" and
     (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
-    ((.[0].HostConfig.SecurityOpt // []) == []) and
+    ((.[0].HostConfig.SecurityOpt // []) | map(sub(":true$"; ""))) == ["no-new-privileges"] and
     .[0].Config.Entrypoint == ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"] and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and

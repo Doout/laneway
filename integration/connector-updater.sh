@@ -98,6 +98,10 @@ if grep -F -- '--entrypoint /bin/sh' "$work_dir/docker.log" >/dev/null; then
   echo "Connector updater still requires a shell in the target image" >&2
   exit 1
 fi
+if grep -F -- '--health-cmd' "$work_dir/docker.log" >/dev/null; then
+  echo "Connector updater overrides the scratch image health check with a shell command" >&2
+  exit 1
+fi
 if grep -F 'config-backup' "$work_dir/docker.log" >/dev/null; then
   echo "Connector updater created a redundant configuration backup volume" >&2
   exit 1

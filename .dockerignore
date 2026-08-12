@@ -1,0 +1,17 @@
+.git
+.codex
+.impeccable
+.laneway
+**/*.key
+**/*.pem
+**/laneway-recovery.identity
+laneway-recovery-kit-*
+web/node_modules
+web/.playwright-browsers
+web/test-results
+web/dist
+web/.env*
+deploy/compose/.env
+deploy/compose/generated
+**/*.tsbuildinfo
+**/.DS_Store

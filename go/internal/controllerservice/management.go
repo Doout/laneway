@@ -613,11 +613,37 @@ func (s *Service) approveRoute(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, epochResponse{ConfigurationEpoch: epoch})
 }
 
+func (s *Service) adminWithdrawRoute(w http.ResponseWriter, r *http.Request) {
+	if err := s.authorizeAdm(r); err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	routeID, err := parseIDPath(r, "route_id")
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	epoch, err := s.store.WithdrawRoute(r.Context(), routeID, nil)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, epochResponse{ConfigurationEpoch: epoch})
+}
+
 type aclRuleRequest struct {
 	Priority    uint32          `json:"priority"`
 	Action      string          `json:"action"`
 	Selector    json.RawMessage `json:"selector"`
 	Description string          `json:"description"`
+}
+
+type updateACLRuleRequest struct {
+	Priority    uint32          `json:"priority"`
+	Action      string          `json:"action"`
+	Selector    json.RawMessage `json:"selector"`
+	Description string          `json:"description"`
+	Enabled     bool            `json:"enabled"`
 }
 
 type aclRuleResponse struct {
@@ -703,6 +729,46 @@ func (s *Service) readACLRules(w http.ResponseWriter, r *http.Request) {
 			ConfigurationEpoch: network.ConfigurationEpoch})
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"acl_rules": response})
+}
+
+func (s *Service) updateACLRule(w http.ResponseWriter, r *http.Request) {
+	if err := s.authorizeAdm(r); err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	ruleID, err := parseIDPath(r, "rule_id")
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	var req updateACLRuleRequest
+	if err := s.decodeJSON(w, r, &req); err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	action := controller.ACLAction(req.Action)
+	if action != controller.ACLActionAccept && action != controller.ACLActionDeny {
+		s.writeError(w, malformed("action must be accept or deny"), false)
+		return
+	}
+	selector, selectorJSON, err := parseTrafficSelector(req.Selector)
+	if err != nil {
+		s.writeError(w, malformed(err.Error()), false)
+		return
+	}
+	if err := validateTrafficSelector(selector); err != nil {
+		s.writeError(w, malformed(err.Error()), false)
+		return
+	}
+	rule, epoch, err := s.store.UpdateACLRule(r.Context(), ruleID, req.Priority, action, string(selectorJSON), req.Description, req.Enabled)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, aclRuleResponse{
+		RuleID: rule.ID.String(), NetworkID: rule.NetworkID.String(), Priority: rule.Priority, Action: string(rule.Action),
+		Selector: selectorJSON, Description: rule.Description, Enabled: rule.Enabled, ConfigurationEpoch: epoch,
+	})
 }
 
 func parseTrafficSelector(raw json.RawMessage) (*lanewayv1.TrafficSelector, []byte, error) {

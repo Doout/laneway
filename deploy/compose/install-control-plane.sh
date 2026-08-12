@@ -120,7 +120,7 @@ valid_ipv4_pool() {
 }
 
 missing=
-for command in age age-keygen chown curl date dirname docker find getent grep install laneway ln sed sha256sum ss stat sync wc; do
+for command in age age-keygen chown curl date dirname docker find getent grep install jq laneway ln sed sha256sum ss stat sync wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 [ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"

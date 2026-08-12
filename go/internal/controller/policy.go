@@ -87,3 +87,51 @@ func (s *Store) DeleteACLRule(ctx context.Context, ruleID identity.ID) (uint64, 
 	}
 	return epoch, nil
 }
+
+func (s *Store) UpdateACLRule(ctx context.Context, ruleID identity.ID, priority uint32, action ACLAction, selectorJSON, description string, enabled bool) (ACLRule, uint64, error) {
+	if action != ACLActionAccept && action != ACLActionDeny {
+		return ACLRule{}, 0, fmt.Errorf("%w: ACL action", ErrInvalid)
+	}
+	if len(selectorJSON) < 2 || len(selectorJSON) > MaxAuditDetailLength || !json.Valid([]byte(selectorJSON)) {
+		return ACLRule{}, 0, fmt.Errorf("%w: ACL selector JSON", ErrInvalid)
+	}
+	if len(description) > 1024 || strings.IndexByte(description, 0) >= 0 {
+		return ACLRule{}, 0, fmt.Errorf("%w: ACL description", ErrInvalid)
+	}
+	now := s.now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ACLRule{}, 0, fmt.Errorf("begin update ACL rule: %w", err)
+	}
+	defer tx.Rollback()
+	var networkBytes []byte
+	var created int64
+	err = tx.QueryRowContext(ctx, `SELECT network_id,created_at FROM acl_rules WHERE id=?`, idBytes(ruleID)).Scan(&networkBytes, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ACLRule{}, 0, ErrNotFound
+	}
+	if err != nil {
+		return ACLRule{}, 0, fmt.Errorf("read ACL rule: %w", err)
+	}
+	networkRaw, err := scanID(networkBytes)
+	if err != nil {
+		return ACLRule{}, 0, err
+	}
+	networkID := identity.NetworkID(networkRaw)
+	if _, err := tx.ExecContext(ctx, `UPDATE acl_rules SET priority=?,action=?,selector_json=?,description=?,enabled=?,updated_at=? WHERE id=?`,
+		priority, string(action), selectorJSON, description, enabled, unix(now), idBytes(ruleID)); err != nil {
+		return ACLRule{}, 0, fmt.Errorf("update ACL rule: %w", err)
+	}
+	epoch, err := incrementEpochTx(ctx, tx, networkID)
+	if err != nil {
+		return ACLRule{}, 0, err
+	}
+	details := fmt.Sprintf(`{"enabled":%t}`, enabled)
+	if err := auditTx(ctx, tx, networkID, nil, "acl_rule.update", "acl_rule", &ruleID, details, now); err != nil {
+		return ACLRule{}, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ACLRule{}, 0, err
+	}
+	return ACLRule{ID: ruleID, NetworkID: networkID, Priority: priority, Action: action, SelectorJSON: selectorJSON, Description: description, Enabled: enabled, CreatedAt: fromUnix(created), UpdatedAt: now}, epoch, nil
+}

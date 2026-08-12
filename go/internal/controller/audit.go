@@ -12,7 +12,7 @@ func (s *Store) AuditEvents(ctx context.Context, networkID identity.NetworkID, l
 		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id,actor_node_id,action,target_type,target_id,details_json,created_at
-        FROM audit_events WHERE network_id=? ORDER BY created_at,id LIMIT ?`, idBytes(networkID), limit)
+        FROM audit_events WHERE network_id=? ORDER BY created_at DESC,id DESC LIMIT ?`, idBytes(networkID), limit)
 	if err != nil {
 		return nil, fmt.Errorf("query audit events: %w", err)
 	}

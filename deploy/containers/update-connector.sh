@@ -166,7 +166,6 @@ if ! docker run -d \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \
   --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \
   --volume "$state_volume:/var/lib/laneway" \
-  --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \
   --health-interval 10s \
   --health-timeout 3s \
   --health-retries 6 \

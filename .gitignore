@@ -4,6 +4,15 @@ dist/
 coverage.out
 *.test
 rust/target/
+node_modules/
+*.tsbuildinfo
+.vite/
+.playwright-browsers/
+playwright-report/
+test-results/
+.impeccable/
+web/.env*
+!web/.env.example
 
 # Ad-hoc executable output from local cross-builds
 go/netprobe
@@ -13,6 +22,9 @@ go/netprobe.exe
 .laneway/
 *.key
 *.pem
+**/laneway-recovery.identity
+laneway-recovery-kit-*/
+deploy/compose/.env
 
 # Editors and operating systems
 .DS_Store

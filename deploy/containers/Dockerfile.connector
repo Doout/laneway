@@ -22,6 +22,8 @@ COPY --from=build /out/laneway /usr/local/bin/laneway
 COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --from=build --chown=65532:65532 /out/connector-state /var/lib/laneway
 COPY --from=build --chown=65532:65532 /out/connector-run /run/laneway
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway"]
 CMD ["connector", "run"]
