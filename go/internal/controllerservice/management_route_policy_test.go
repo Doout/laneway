@@ -28,24 +28,36 @@ func TestManagementRoutePoliciesCoverEveryRegisteredAdminHandler(t *testing.T) {
 	registered := make(map[routePolicyKey]struct{})
 	ast.Inspect(parsed, func(node ast.Node) bool {
 		call, ok := node.(*ast.CallExpr)
-		if !ok || len(call.Args) == 0 {
+		if !ok || len(call.Args) < 3 {
 			return true
 		}
 		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || selector.Sel.Name != "HandleFunc" {
+		if !ok || selector.Sel.Name != "registerManagementRoute" {
 			return true
 		}
-		patternLiteral, ok := call.Args[0].(*ast.BasicLit)
+		methodSelector, ok := call.Args[1].(*ast.SelectorExpr)
+		if !ok {
+			t.Errorf("management method is not an http.Method constant")
+			return true
+		}
+		method := map[string]string{
+			"MethodGet": http.MethodGet, "MethodPost": http.MethodPost, "MethodPut": http.MethodPut,
+			"MethodPatch": http.MethodPatch, "MethodDelete": http.MethodDelete,
+		}[methodSelector.Sel.Name]
+		if method == "" {
+			t.Errorf("unknown management method constant %s", methodSelector.Sel.Name)
+			return true
+		}
+		patternLiteral, ok := call.Args[2].(*ast.BasicLit)
 		if !ok || patternLiteral.Kind != token.STRING {
 			return true
 		}
-		pattern, unquoteErr := strconv.Unquote(patternLiteral.Value)
+		path, unquoteErr := strconv.Unquote(patternLiteral.Value)
 		if unquoteErr != nil {
 			t.Errorf("unquote route pattern %s: %v", patternLiteral.Value, unquoteErr)
 			return true
 		}
-		method, path, found := strings.Cut(pattern, " ")
-		if !found || path != "/v1/admin" && !strings.HasPrefix(path, "/v1/admin/") {
+		if path != "/v1/admin" && !strings.HasPrefix(path, "/v1/admin/") {
 			return true
 		}
 		registered[routePolicyKey{method: method, pattern: path}] = struct{}{}
@@ -99,4 +111,83 @@ func TestRoutePolicyRegistryRejectsInvalidAndDuplicatePolicies(t *testing.T) {
 	if _, err := newRoutePolicyRegistry([]adminauth.RoutePolicy{invalidOperation}); err == nil {
 		t.Fatal("unknown operation policy accepted")
 	}
+}
+
+func TestManagementHandlersDoNotCallLegacyAdministratorStoreMethods(t *testing.T) {
+	_, currentFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	directory := filepath.Dir(currentFile)
+	serviceSource, err := parser.ParseFile(token.NewFileSet(), filepath.Join(directory, "service.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managementHandlers := map[string]struct{}{
+		// Decision-bound helpers called only from registered management handlers.
+		"issueRecoveryGrant": {}, "auditRootTokenRotation": {},
+	}
+	ast.Inspect(serviceSource, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) != 4 {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "registerManagementRoute" {
+			return true
+		}
+		handler, ok := call.Args[3].(*ast.SelectorExpr)
+		if !ok {
+			t.Errorf("management route handler is not a service method")
+			return true
+		}
+		managementHandlers[handler.Sel.Name] = struct{}{}
+		return true
+	})
+	if len(managementHandlers) != len(ManagementRoutePolicies())+2 {
+		t.Fatalf("management handlers=%d policies=%d", len(managementHandlers)-2, len(ManagementRoutePolicies()))
+	}
+	for _, name := range []string{"service.go", "management.go", "bootstrap_bundles.go", "administrator_management_http.go"} {
+		parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(directory, name), nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, declaration := range parsed.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			if _, ok := managementHandlers[function.Name.Name]; !ok {
+				continue
+			}
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || !isServiceStoreSelector(selector.X) {
+					return true
+				}
+				method := selector.Sel.Name
+				if strings.HasPrefix(method, "Administrator") || strings.HasPrefix(method, "AuditRootAdministrator") ||
+					method == "CreateAdministrator" || method == "UpdateAdministrator" ||
+					method == "ReplaceAdministratorPassword" || method == "RevokeAdministratorSessionByDecision" ||
+					method == "IssueAdministratorRecoveryGrant" {
+					return true
+				}
+				t.Errorf("%s.%s calls legacy Store method %s", name, function.Name.Name, method)
+				return true
+			})
+		}
+	}
+}
+
+func isServiceStoreSelector(expression ast.Expr) bool {
+	selector, ok := expression.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "store" {
+		return false
+	}
+	identifier, ok := selector.X.(*ast.Ident)
+	return ok && identifier.Name == "s"
 }

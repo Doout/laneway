@@ -33,7 +33,6 @@ import './nodes.css'
 const nodeToken = 'lnw_node_01J8ATLAS_8eK3yF4pM2sQ9vR6'
 const defaultCapabilities: NodeCapabilities = { publish: true, accept: true, exit: false, relay: true }
 type IssuedNodeToken = { id?: string; name?: string; nodeClass?: string; expiry?: string; token?: string }
-let liveIssuedNodeToken: IssuedNodeToken | null = null
 
 function controllerCapabilities(mask: number): NodeCapabilities {
   return { publish: (mask & 8) !== 0, accept: false, exit: (mask & 16) !== 0, relay: false }
@@ -55,7 +54,7 @@ function nodeIcon(kind: NodeRecord['enrollmentClass']) {
 }
 
 export function NodesListPage() {
-  const { live, inventory, inventoryError, inventoryPending } = useControlPlane()
+  const { live, inventory, inventoryError, inventoryPending, hasPermission } = useControlPlane()
   const records = live ? controllerNodes(inventory?.nodes ?? []) : persistedNodes()
   const [query, setQuery] = useState('')
   const [enrollment, setEnrollment] = useState('all')
@@ -72,12 +71,13 @@ export function NodesListPage() {
     })
   }, [enrollment, query, records, state])
   const selected = records.find(node => node.id === selectedId) ?? filteredNodes[0]
+  const canIssueEnrollment = !live || Boolean(inventory?.network && hasPermission('enrollment.issue', inventory.network.network_id))
 
   return <>
     <PageHeader
       title={`${records.length} Nodes`}
       description={live ? inventory?.network?.name : 'Home network'}
-      action={<Button to="/nodes/new" variant="primary"><MonitorDot size={17} />Add node</Button>}
+      action={canIssueEnrollment ? <Button to="/nodes/new" variant="primary"><MonitorDot size={17} />Add node</Button> : undefined}
     />
     {inventoryError ? <Callout tone="danger">{inventoryError}</Callout> : null}
     <div className="nodes-segments" role="group" aria-label="Quick node filters">
@@ -131,7 +131,7 @@ export function NodesListPage() {
 
 export function AddNodePage() {
   const navigate = useNavigate()
-  const { live, inventory, inventoryPending, request } = useControlPlane()
+  const { live, inventory, inventoryPending, request, captureSessionBinding, storeIssuedEnrollmentToken } = useControlPlane()
   const [name, setName] = useState('')
   const [nodeClass, setNodeClass] = useState('Durable')
   const [networkName, setNetworkName] = useState('Production')
@@ -160,6 +160,11 @@ export function AddNodePage() {
       }
       const expirySeconds = expiry === '1 hour' ? 3600 : expiry === '7 days' ? 604800 : 86400
       const enabledCapabilities = nodeClass === 'Connector' ? 8 : nodeClass === 'Exit node' ? 16 : 0
+      const sessionBinding = captureSessionBinding()
+      if (!sessionBinding) {
+        setError('The administrator session changed. Try again.')
+        return
+      }
       setPending(true)
       try {
         const issued = await request<{ enrollment_token: string; token_id: string; expires_at_unix_seconds: number }>('/v1/admin/enrollment-tokens', {
@@ -173,7 +178,9 @@ export function AddNodePage() {
             enabled_capabilities: enabledCapabilities,
           },
         })
-        liveIssuedNodeToken = { name: cleanName, nodeClass, expiry, token: issued.enrollment_token }
+        if (typeof issued.enrollment_token !== 'string' || issued.enrollment_token.length === 0 || !storeIssuedEnrollmentToken(sessionBinding, { kind: 'node', name: cleanName, nodeClass, expiry, token: issued.enrollment_token })) {
+          throw new Error('The administrator session changed before the token could be shown.')
+        }
         navigate('/nodes/new/token')
       } catch (requestError) {
         setError(requestError instanceof Error ? requestError.message : 'Unable to issue the enrollment token.')
@@ -221,9 +228,10 @@ export function AddNodePage() {
 
 export function NodeTokenPage() {
   const location = useLocation()
-  const { live, inventory } = useControlPlane()
+  const { live, inventory, peekIssuedEnrollmentToken, clearIssuedEnrollmentToken, isSessionBindingCurrent } = useControlPlane()
   const records = live ? controllerNodes(inventory?.nodes ?? []) : persistedNodes()
-  const [transientIssue] = useState<IssuedNodeToken | null>(() => live ? liveIssuedNodeToken : null)
+  const [sessionIssue] = useState(() => live ? peekIssuedEnrollmentToken() : null)
+  const transientIssue: IssuedNodeToken | null = sessionIssue && isSessionBindingCurrent(sessionIssue.binding) && sessionIssue.value.kind === 'node' ? sessionIssue.value : null
   const issued = live ? transientIssue : location.state as IssuedNodeToken | null
   const target = issued?.id ? nodeForId(records, issued.id) : undefined
   const issuedToken = issued?.token ?? nodeToken
@@ -231,8 +239,8 @@ export function NodeTokenPage() {
   const controllerDomain = live ? new URL(controllerOrigin()).host : 'controller.example.com'
 
   useEffect(() => {
-    if (live) liveIssuedNodeToken = null
-  }, [live])
+    if (live && sessionIssue) clearIssuedEnrollmentToken(sessionIssue.binding)
+  }, [clearIssuedEnrollmentToken, live, sessionIssue])
 
   async function copyToken() {
     try {
@@ -265,14 +273,15 @@ export function NodeTokenPage() {
 
 export function NodeDetailPage() {
   const { nodeId } = useParams()
-  const { live, inventory } = useControlPlane()
+  const { live, inventory, hasPermission } = useControlPlane()
   const records = live ? controllerNodes(inventory?.nodes ?? []) : persistedNodes()
   const node = nodeForId(records, nodeId)
   if (!node) return <NodeNotFound id={nodeId} />
   const controllerNode = live ? inventory?.nodes.find(record => record.node_id === node.id) : undefined
+  const mayManageNode = !live || Boolean(controllerNode && hasPermission('node.manage', controllerNode.network_id))
   const rawRevoked = live && controllerNode?.revoked_at_unix_seconds !== undefined
-  const canEditCapabilities = live ? !rawRevoked && node.state !== 'Lease expired' : node.state !== 'Revoked'
-  const canRevoke = live ? !rawRevoked : node.state !== 'Revoked'
+  const canEditCapabilities = mayManageNode && (live ? !rawRevoked && node.state !== 'Lease expired' : node.state !== 'Revoked')
+  const canRevoke = mayManageNode && (live ? !rawRevoked : node.state !== 'Revoked')
   const change = live ? undefined : readDemoState().nodes[node.id]
   const capabilities = controllerNode ? { publish: (controllerNode.enabled_capabilities & 8) !== 0, accept: false, exit: (controllerNode.enabled_capabilities & 16) !== 0, relay: false } : change?.capabilities ?? defaultCapabilities
   const capabilityLabels = (live
@@ -342,7 +351,7 @@ export function NodeCapabilitiesPage() {
   const affectedRoutes = (inventory?.routes ?? []).filter(route =>
     route.node_id === activeNode.id
       && (route.state === 'advertised' || route.state === 'approved')
-      && (!route.valid_until_unix_seconds || route.valid_until_unix_seconds > Math.floor(Date.now() / 1000))
+      && (route.valid_until_unix_seconds === undefined || route.valid_until_unix_seconds > Math.floor(Date.now() / 1000))
       && ((removesSubnetRole && route.kind === 'subnet') || (removesExitRole && route.kind === 'exit')),
   )
   const affectedPrefixes = Array.from(new Set(affectedRoutes.map(route => route.prefix)))

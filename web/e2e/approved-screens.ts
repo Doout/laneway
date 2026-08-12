@@ -1,5 +1,5 @@
 export const approvedScreens = [
-  ['/sign-in', 'Sign in to Laneway'],
+  ['/sign-in', 'Overview'],
   ['/overview', 'Overview'],
   ['/nodes', '5 Nodes'],
   ['/nodes/new', 'Add node'],

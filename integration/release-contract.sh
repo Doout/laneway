@@ -15,6 +15,7 @@ compose_file=$repo_dir/deploy/compose/compose.yaml
 compose_dev_file=$repo_dir/deploy/compose/compose.dev.yaml
 docker_exit_integration=$repo_dir/integration/docker-exit-node.sh
 console_image_boundary=$repo_dir/integration/console-image-boundary.sh
+administrator_lifecycle=$repo_dir/integration/administrator-lifecycle.sh
 lane_workflow=$repo_dir/deploy/compose/laneway-control
 prepare_workflow=$repo_dir/deploy/compose/prepare.sh
 recovery_workflow=$repo_dir/deploy/compose/recovery.sh
@@ -104,7 +105,16 @@ if [ "$(grep -Fc "$release_target_expression" "$workflow")" -ne 2 ]; then
   exit 1
 fi
 
-for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'compose_file_with_env' 'backup_recovery' 'create_release_database_snapshot' 'restore_release_database_snapshot' 'publish_previous_release' 'load_previous_release' 'previous images, configuration, and database restored' 'run_update' 'releases/latest' 'verify-blob'; do
+for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'compose_file_with_env' 'backup_recovery' 'create_release_database_snapshot' 'restore_release_database_snapshot' 'publish_previous_release' 'load_previous_release' 'previous images, configuration, and database restored' 'run_update' 'releases/latest' 'verify-blob' 'administrator bootstrap --username USERNAME' 'administrator recover --username USERNAME' 'administrator root-token rotate' 'committed_pending_complete' '--force-recreate --no-deps controller' '--admin-token-file'; do
+  require "$value" "$lane_workflow"
+done
+for value in \
+  'user-token|api-token) acquire_lock; run_user_token "$@" ;;' \
+  'invite) acquire_lock; run_invite "$@" ;;' \
+  'route) acquire_lock; run_route "$@" ;;' \
+  'status) run_status "$@" ;;' \
+  'production-check) acquire_lock; run_production_check "$@" ;;'
+do
   require "$value" "$lane_workflow"
 done
 for value in 'pki verify-authority' 'offline root private key ca.key must never' 'chown 65532:65532'; do
@@ -280,10 +290,23 @@ require '! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c t
 require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
 require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
 require './integration/connector-updater.sh' "$ci_workflow"
+require './integration/administrator-lifecycle.sh' "$ci_workflow"
+if ! grep -Eq '^[[:space:]]+\./integration/administrator-lifecycle\.sh[[:space:]]*$' "$ci_workflow" ||
+  ! grep -Eq '^[[:space:]]+\./integration/administrator-lifecycle\.sh[[:space:]]*$' "$workflow"; then
+  echo "administrator lifecycle integration must execute in CI and release verification" >&2
+  exit 1
+fi
 if [ ! -x "$console_image_boundary" ]; then
   echo "console image boundary integration check must be executable" >&2
   exit 1
 fi
+if [ ! -x "$administrator_lifecycle" ]; then
+  echo "administrator lifecycle integration check must be executable" >&2
+  exit 1
+fi
+for value in 'LANE_TEST_FAIL_NEW_AUTH' 'LANE_TEST_FAIL_COMPLETE' 'operator.lock' 'committed_pending_complete' '.admin.token.rotate.orphan'; do
+  require "$value" "$administrator_lifecycle"
+done
 for value in \
   'releases/latest' \
   'checksums.sigstore.json' \

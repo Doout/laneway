@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	currentSchemaVersion = 8
+	currentSchemaVersion = 9
 	busyTimeoutMS        = 5_000
 )
 
@@ -35,6 +35,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", busyTimeoutMS))
 	q.Add("_pragma", "journal_mode(WAL)")
+	q.Set("_txlock", "immediate")
 	dsn := "file:" + path + "?" + q.Encode()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -89,6 +90,17 @@ func scanID(src []byte) (identity.ID, error) {
 
 func unix(t time.Time) int64     { return t.UTC().Unix() }
 func fromUnix(v int64) time.Time { return time.Unix(v, 0).UTC() }
+
+func latestTime(base time.Time, candidates ...time.Time) time.Time {
+	result := base.UTC()
+	for _, candidate := range candidates {
+		candidate = candidate.UTC()
+		if candidate.After(result) {
+			result = candidate
+		}
+	}
+	return result
+}
 
 func nullableTime(v sql.NullInt64) *time.Time {
 	if !v.Valid {

@@ -67,10 +67,11 @@ func TestPermissionMatrixIsExhaustive(t *testing.T) {
 		{OperationCertificateRead, true, true, true},
 		{OperationCertificateManage, true, true, false},
 		{OperationAuditRead, true, true, true},
+		{OperationAuditReadGlobal, true, false, false},
 		{OperationPrincipalManage, true, false, false},
 		{OperationSessionManage, true, false, false},
-		{OperationRecoveryManage, true, false, false},
-		{OperationRootTokenRotate, true, false, false},
+		{OperationRecoveryManage, false, false, false},
+		{OperationRootTokenRotate, false, false, false},
 	}
 	if len(expectations) != len(operationPolicies) {
 		t.Fatalf("permission expectations=%d policies=%d", len(expectations), len(operationPolicies))
@@ -93,6 +94,9 @@ func TestPermissionMatrixIsExhaustive(t *testing.T) {
 			if got := Authorize(principal, expectation.operation, scope); got != role.want {
 				t.Errorf("%s %s=%t want %t", role.name, expectation.operation, got, role.want)
 			}
+			if got := RoleAllows(role.role, expectation.operation); got != role.want {
+				t.Errorf("RoleAllows(%s, %s)=%t want %t", role.role, expectation.operation, got, role.want)
+			}
 			if expectation.operation.NetworkScoped() && Authorize(principal, expectation.operation, nil) {
 				t.Errorf("%s %s accepted a missing scope", role.name, expectation.operation)
 			}
@@ -100,6 +104,47 @@ func TestPermissionMatrixIsExhaustive(t *testing.T) {
 				t.Errorf("%s %s accepted an unexpected scope", role.name, expectation.operation)
 			}
 		}
+	}
+	if RoleAllows(Role("unknown"), OperationNetworkRead) {
+		t.Fatal("unknown role was allowed")
+	}
+	if RoleAllows(RoleOwner, Operation("unknown")) {
+		t.Fatal("unknown operation was allowed")
+	}
+}
+
+func TestPermissionsAreDeterministicExhaustiveAndDefensive(t *testing.T) {
+	for _, role := range []Role{RoleOwner, RoleOperator, RoleAuditor} {
+		first := Permissions(role)
+		second := Permissions(role)
+		if len(first) == 0 || len(first) != len(second) {
+			t.Fatalf("Permissions(%s) lengths=%d,%d", role, len(first), len(second))
+		}
+		for index, operation := range first {
+			if operation != second[index] || !RoleAllows(role, operation) {
+				t.Fatalf("Permissions(%s)[%d]=%q", role, index, operation)
+			}
+		}
+		first[0] = "changed"
+		if Permissions(role)[0] == "changed" {
+			t.Fatalf("Permissions(%s) exposed mutable storage", role)
+		}
+	}
+	if got := Permissions(Role("unknown")); len(got) != 0 {
+		t.Fatalf("unknown role permissions=%v", got)
+	}
+	if len(permissionOrder) != len(operationPolicies) {
+		t.Fatalf("permission order=%d policies=%d", len(permissionOrder), len(operationPolicies))
+	}
+	seen := make(map[Operation]struct{}, len(permissionOrder))
+	for _, operation := range permissionOrder {
+		if !operation.Valid() {
+			t.Errorf("invalid ordered permission %q", operation)
+		}
+		if _, exists := seen[operation]; exists {
+			t.Errorf("duplicate ordered permission %q", operation)
+		}
+		seen[operation] = struct{}{}
 	}
 }
 
@@ -128,8 +173,8 @@ func TestVisibleNetworkIDs(t *testing.T) {
 
 func TestManagementRoutesAreCompleteAndUnique(t *testing.T) {
 	routes := ManagementRoutes()
-	if len(routes) != 23 {
-		t.Fatalf("management routes=%d want 23", len(routes))
+	if len(routes) != 35 {
+		t.Fatalf("management routes=%d want 35", len(routes))
 	}
 	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
@@ -156,7 +201,15 @@ func TestManagementRoutesAreCompleteAndUnique(t *testing.T) {
 	if invalid.Valid() {
 		t.Fatal("unsupported management method accepted")
 	}
-	invalid = ManagementRoutes()[3]
+	for _, route := range ManagementRoutes() {
+		if !route.Mutation {
+			invalid = route
+			break
+		}
+	}
+	if invalid.Mutation {
+		t.Fatal("management route registry has no safe route")
+	}
 	invalid.Mutation = true
 	if invalid.Valid() {
 		t.Fatal("safe route accepted as mutating")
@@ -201,7 +254,8 @@ func TestOperationsAreExhaustivelyClassified(t *testing.T) {
 		OperationBootstrapCreate, OperationNodeRead, OperationNodeManage, OperationRouteRead,
 		OperationRouteManage, OperationACLRead, OperationACLManage, OperationRelayRead,
 		OperationRelayManage, OperationCertificateRead, OperationCertificateManage, OperationAuditRead,
-		OperationPrincipalManage, OperationSessionManage, OperationRecoveryManage, OperationRootTokenRotate,
+		OperationAuditReadGlobal, OperationPrincipalManage, OperationSessionManage, OperationRecoveryManage,
+		OperationRootTokenRotate,
 	}
 	if len(operations) != len(operationPolicies) {
 		t.Fatalf("declared operations=%d policies=%d", len(operations), len(operationPolicies))

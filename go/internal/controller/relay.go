@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/netvalidate"
 )
@@ -290,4 +291,207 @@ func (s *Store) UpdateRelay(ctx context.Context, relayID identity.ID, name, endp
 		nodeID = &parsed
 	}
 	return Relay{ID: relayID, NetworkID: networkID, ServiceID: serviceValue, NodeID: nodeID, Name: name, Endpoint: endpoint, Enabled: enabled, CreatedAt: fromUnix(created)}, epoch, nil
+}
+
+func (s *Store) AdministratorRegisterRelay(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, serviceID identity.ID, nodeID *identity.NodeID, name, endpoint string) (Relay, uint64, error) {
+	if networkID.IsZero() || serviceID.IsZero() {
+		return Relay{}, 0, fmt.Errorf("%w: relay network and service identity", ErrInvalid)
+	}
+	if err := validateName("relay", name); err != nil {
+		return Relay{}, 0, err
+	}
+	endpoint, err := netvalidate.CanonicalHostPort(endpoint)
+	if err != nil {
+		return Relay{}, 0, fmt.Errorf("%w: relay endpoint", ErrInvalid)
+	}
+	id, err := newID()
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	actor, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorRelayCreatePolicy, networkID)
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	var networkExists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM networks WHERE id=?`, idBytes(networkID)).Scan(&networkExists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Relay{}, 0, ErrNotFound
+		}
+		return Relay{}, 0, err
+	}
+	var enabledRelays int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relays WHERE network_id=? AND enabled=1`, idBytes(networkID)).Scan(&enabledRelays); err != nil {
+		return Relay{}, 0, err
+	}
+	if enabledRelays >= netvalidate.MaxRelayEndpoints {
+		return Relay{}, 0, fmt.Errorf("%w: network already has %d enabled relays", ErrInvalid, netvalidate.MaxRelayEndpoints)
+	}
+	var nodeBytes any
+	if nodeID != nil {
+		var one int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM nodes WHERE id=? AND network_id=? AND revoked_at IS NULL`, idBytes(*nodeID), idBytes(networkID)).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Relay{}, 0, ErrNotFound
+		}
+		if err != nil {
+			return Relay{}, 0, err
+		}
+		nodeBytes = idBytes(*nodeID)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO relays
+		(id,network_id,service_id,node_id,name,endpoint,enabled,created_at) VALUES(?,?,?,?,?,?,1,?)`,
+		idBytes(id), idBytes(networkID), idBytes(serviceID), nodeBytes, name, endpoint, unix(now)); err != nil {
+		if isConstraint(err) {
+			return Relay{}, 0, fmt.Errorf("%w: relay service identity, name, or endpoint", ErrConflict)
+		}
+		return Relay{}, 0, err
+	}
+	epoch, err := incrementEpochTx(ctx, tx, networkID)
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	details := fmt.Sprintf(`{"service_id":%q}`, serviceID.String())
+	if err := auditActorTx(ctx, tx, &networkID, actor, "relay.register", "relay", &id, details, now); err != nil {
+		return Relay{}, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Relay{}, 0, err
+	}
+	return Relay{ID: id, NetworkID: networkID, ServiceID: serviceID, NodeID: nodeID, Name: name, Endpoint: endpoint, Enabled: true, CreatedAt: now}, epoch, nil
+}
+
+func (s *Store) AdministratorDisableRelay(ctx context.Context, decision adminauth.Decision, relayID identity.ID) (uint64, error) {
+	if relayID.IsZero() {
+		return 0, fmt.Errorf("%w: relay ID", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	actor, networkID, err := s.authorizeAdministratorObjectResourceTx(ctx, tx, decision,
+		administratorRelayDisablePolicy, relayID, `SELECT network_id FROM relays WHERE id=?`, idBytes(relayID))
+	if err != nil {
+		return 0, err
+	}
+	var enabled bool
+	if err := tx.QueryRowContext(ctx, `SELECT enabled FROM relays WHERE id=?`, idBytes(relayID)).Scan(&enabled); err != nil {
+		return 0, err
+	}
+	if !enabled {
+		return 0, fmt.Errorf("%w: relay already disabled", ErrConflict)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE relays SET enabled=0 WHERE id=? AND enabled=1`, idBytes(relayID))
+	if err != nil {
+		return 0, err
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("%w: relay concurrently disabled", ErrConflict)
+	}
+	epoch, err := incrementEpochTx(ctx, tx, networkID)
+	if err != nil {
+		return 0, err
+	}
+	if err := auditActorTx(ctx, tx, &networkID, actor, "relay.disable", "relay", &relayID, `{}`, now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return epoch, nil
+}
+
+func (s *Store) AdministratorUpdateRelay(ctx context.Context, decision adminauth.Decision, relayID identity.ID, name, endpoint string, enabled bool) (Relay, uint64, error) {
+	if relayID.IsZero() {
+		return Relay{}, 0, fmt.Errorf("%w: relay ID", ErrInvalid)
+	}
+	if err := validateName("relay", name); err != nil {
+		return Relay{}, 0, err
+	}
+	endpoint, err := netvalidate.CanonicalHostPort(endpoint)
+	if err != nil {
+		return Relay{}, 0, fmt.Errorf("%w: relay endpoint", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	actor, networkID, err := s.authorizeAdministratorObjectResourceTx(ctx, tx, decision,
+		administratorRelayUpdatePolicy, relayID, `SELECT network_id FROM relays WHERE id=?`, idBytes(relayID))
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	var serviceRaw, nodeRaw []byte
+	var previousName, previousEndpoint string
+	var previousEnabled bool
+	var created int64
+	if err := tx.QueryRowContext(ctx, `SELECT service_id,node_id,name,endpoint,enabled,created_at FROM relays WHERE id=?`, idBytes(relayID)).
+		Scan(&serviceRaw, &nodeRaw, &previousName, &previousEndpoint, &previousEnabled, &created); err != nil {
+		return Relay{}, 0, err
+	}
+	if len(serviceRaw) == 0 {
+		return Relay{}, 0, fmt.Errorf("%w: legacy relay has no certificate service identity", ErrConflict)
+	}
+	if enabled && !previousEnabled {
+		var enabledRelays int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM relays WHERE network_id=? AND enabled=1`, idBytes(networkID)).Scan(&enabledRelays); err != nil {
+			return Relay{}, 0, err
+		}
+		if enabledRelays >= netvalidate.MaxRelayEndpoints {
+			return Relay{}, 0, fmt.Errorf("%w: network already has %d enabled relays", ErrInvalid, netvalidate.MaxRelayEndpoints)
+		}
+	}
+	if previousName == name && previousEndpoint == endpoint && previousEnabled == enabled {
+		return Relay{}, 0, fmt.Errorf("%w: relay update makes no change", ErrConflict)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE relays SET name=?,endpoint=?,enabled=? WHERE id=?`, name, endpoint, enabled, idBytes(relayID))
+	if err != nil {
+		if isConstraint(err) {
+			return Relay{}, 0, fmt.Errorf("%w: relay name or endpoint", ErrConflict)
+		}
+		return Relay{}, 0, err
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return Relay{}, 0, err
+		}
+		return Relay{}, 0, fmt.Errorf("%w: relay concurrently changed", ErrConflict)
+	}
+	serviceValue, err := scanID(serviceRaw)
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	epoch, err := incrementEpochTx(ctx, tx, networkID)
+	if err != nil {
+		return Relay{}, 0, err
+	}
+	details := fmt.Sprintf(`{"name":%q,"endpoint":%q,"enabled":%t}`, name, endpoint, enabled)
+	if err := auditActorTx(ctx, tx, &networkID, actor, "relay.update", "relay", &relayID, details, now); err != nil {
+		return Relay{}, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Relay{}, 0, err
+	}
+	var resultNodeID *identity.NodeID
+	if len(nodeRaw) != 0 {
+		nodeValue, err := scanID(nodeRaw)
+		if err != nil {
+			return Relay{}, 0, err
+		}
+		parsed := identity.NodeID(nodeValue)
+		resultNodeID = &parsed
+	}
+	return Relay{ID: relayID, NetworkID: networkID, ServiceID: serviceValue, NodeID: resultNodeID, Name: name, Endpoint: endpoint, Enabled: enabled, CreatedAt: fromUnix(created)}, epoch, nil
 }

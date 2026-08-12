@@ -47,11 +47,6 @@ func networkJSON(network controller.Network) networkResponse {
 }
 
 func (s *Service) createNetwork(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	var req networkRequest
 	if err := s.decodeJSON(w, r, &req); err != nil {
 		s.writeError(w, err, false)
@@ -70,14 +65,14 @@ func (s *Service) createNetwork(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var network controller.Network
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationNetworkCreate, nil)
+	decision, err := s.administratorDecision(r, adminauth.GlobalTarget())
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
+	var network controller.Network
 	if req.NetworkID == "" {
-		network, err = s.store.CreateNetworkDualStack(mutationContext, req.Name, pool, pool6)
+		network, err = s.store.AdministratorCreateNetworkDualStack(r.Context(), decision, req.Name, pool, pool6)
 	} else {
 		var networkID identity.NetworkID
 		networkID, err = identity.ParseNetworkID(req.NetworkID)
@@ -85,7 +80,7 @@ func (s *Service) createNetwork(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, malformed("network_id must be a canonical non-zero ID"), false)
 			return
 		}
-		network, err = s.store.CreateNetworkDualStackWithID(mutationContext, networkID, req.Name, pool, pool6)
+		network, err = s.store.AdministratorCreateNetworkDualStackWithID(r.Context(), decision, networkID, req.Name, pool, pool6)
 	}
 	if err != nil {
 		s.writeError(w, err, false)
@@ -95,16 +90,17 @@ func (s *Service) createNetwork(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) readNetwork(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	network, err := s.store.Network(r.Context(), networkID)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	network, err := s.store.AdministratorNetwork(r.Context(), decision, networkID)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -113,16 +109,17 @@ func (s *Service) readNetwork(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) readNetworks(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	limit, err := queryLimit(r, 100)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	values, err := s.store.Networks(r.Context(), limit)
+	decision, err := s.administratorDecision(r, adminauth.FilteredTarget())
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	values, err := s.store.AdministratorNetworks(r.Context(), decision, limit)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -148,10 +145,6 @@ type nodeResponse struct {
 }
 
 func (s *Service) readNodes(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
@@ -162,7 +155,12 @@ func (s *Service) readNodes(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	values, err := s.store.NetworkNodes(r.Context(), networkID, limit)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	values, err := s.store.AdministratorNetworkNodes(r.Context(), decision, networkID, limit)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -222,11 +220,6 @@ func relayJSON(relay controller.Relay, epoch uint64) relayResponse {
 }
 
 func (s *Service) registerRelay(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
@@ -251,12 +244,12 @@ func (s *Service) registerRelay(w http.ResponseWriter, r *http.Request) {
 		}
 		nodeID = &parsed
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationRelayManage, &networkID)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	relay, epoch, err := s.store.RegisterRelay(mutationContext, networkID, serviceID, nodeID, req.Name, req.Endpoint)
+	relay, epoch, err := s.store.AdministratorRegisterRelay(r.Context(), decision, networkID, serviceID, nodeID, req.Name, req.Endpoint)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -265,22 +258,17 @@ func (s *Service) registerRelay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) disableRelay(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	relayID, err := parseIDPath(r, "relay_id")
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationRelayManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(relayID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	epoch, err := s.store.DisableRelay(mutationContext, relayID)
+	epoch, err := s.store.AdministratorDisableRelay(r.Context(), decision, relayID)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -289,11 +277,6 @@ func (s *Service) disableRelay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) updateRelay(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	relayID, err := parseIDPath(r, "relay_id")
 	if err != nil {
 		s.writeError(w, err, false)
@@ -304,12 +287,12 @@ func (s *Service) updateRelay(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationRelayManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(relayID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	value, epoch, err := s.store.UpdateRelay(mutationContext, relayID, request.Name, request.Endpoint, request.Enabled)
+	value, epoch, err := s.store.AdministratorUpdateRelay(r.Context(), decision, relayID, request.Name, request.Endpoint, request.Enabled)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -318,10 +301,6 @@ func (s *Service) updateRelay(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) readRelays(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
@@ -332,19 +311,19 @@ func (s *Service) readRelays(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	values, err := s.store.NetworkRelays(r.Context(), networkID, limit)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	network, err := s.store.Network(r.Context(), networkID)
+	values, epoch, err := s.store.AdministratorNetworkRelays(r.Context(), decision, networkID, limit)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
 	response := make([]relayResponse, 0, len(values))
 	for _, value := range values {
-		response = append(response, relayJSON(value, network.ConfigurationEpoch))
+		response = append(response, relayJSON(value, epoch))
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"relays": response})
 }
@@ -362,10 +341,6 @@ type certificateResponse struct {
 }
 
 func (s *Service) readCertificates(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
@@ -376,7 +351,12 @@ func (s *Service) readCertificates(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	values, err := s.store.NetworkCertificates(r.Context(), networkID, limit)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	values, err := s.store.AdministratorNetworkCertificates(r.Context(), decision, networkID, limit)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -479,11 +459,6 @@ type assignRouteRequest struct {
 }
 
 func (s *Service) assignRoute(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	var req assignRouteRequest
 	if err := s.decodeJSON(w, r, &req); err != nil {
 		s.writeError(w, err, false)
@@ -509,78 +484,21 @@ func (s *Service) assignRoute(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed("mode must be nat or routed"), false)
 		return
 	}
-	node, err := s.store.Node(r.Context(), nodeID)
-	if err != nil || node.NetworkID != networkID || node.RevokedAt != nil {
-		if err == nil {
-			err = controller.ErrNotFound
-		}
-		s.writeError(w, err, false)
-		return
-	}
-	routes, err := s.store.NetworkRoutes(r.Context(), networkID, 1000)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	var existing *controller.Route
-	for i := range routes {
-		route := routes[i]
-		if route.Prefix != prefix || (route.State != controller.RouteStateAdvertised && route.State != controller.RouteStateApproved) {
-			continue
-		}
-		if route.NodeID != nodeID || route.Kind != controller.RouteKindSubnet || route.Mode != mode || route.Metric != req.Metric {
-			s.writeError(w, fmt.Errorf("%w: destination already has a different active route", controller.ErrConflict), false)
-			return
-		}
-		existing = &routes[i]
-	}
-	required := uint64(protocol.CapabilitySubnetRouterV1)
-	if node.EnabledCapabilities&required == 0 {
-		mutationContext, contextErr := s.administratorMutationContext(r, actor, adminauth.OperationRouteManage, &networkID)
-		if contextErr != nil {
-			s.writeError(w, contextErr, false)
-			return
-		}
-		if _, err := s.store.SetNodeCapabilities(mutationContext, nodeID, protocol.Capability(node.EnabledCapabilities|required)); err != nil {
-			s.writeError(w, err, false)
-			return
-		}
-	}
-	if existing != nil {
-		if existing.State == controller.RouteStateAdvertised {
-			mutationContext, contextErr := s.administratorMutationContext(r, actor, adminauth.OperationRouteManage, &networkID)
-			if contextErr != nil {
-				s.writeError(w, contextErr, false)
-				return
-			}
-			if _, err := s.store.ApproveRoute(mutationContext, existing.ID); err != nil {
-				s.writeError(w, err, false)
-				return
-			}
-			existing.State = controller.RouteStateApproved
-			now := time.Now().UTC()
-			existing.ApprovedAt = &now
-		}
-		s.writeJSON(w, http.StatusOK, routeJSON(*existing))
-		return
-	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationRouteManage, &networkID)
+	route, _, created, err := s.store.AdministratorAssignRoute(r.Context(), decision, networkID, nodeID, prefix, mode, req.Metric)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	route, err := s.store.AdvertiseRoute(mutationContext, nodeID, prefix, controller.RouteKindSubnet, mode, req.Metric, nil)
-	if err == nil {
-		_, err = s.store.ApproveRoute(mutationContext, route.ID)
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
 	}
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
-	route.State = controller.RouteStateApproved
-	now := time.Now().UTC()
-	route.ApprovedAt = &now
-	s.writeJSON(w, http.StatusCreated, routeJSON(route))
+	s.writeJSON(w, status, routeJSON(route))
 }
 
 type epochResponse struct {
@@ -592,11 +510,6 @@ type nodeCapabilitiesRequest struct {
 }
 
 func (s *Service) setNodeCapabilities(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	nodeRaw, err := parseIDPath(r, "node_id")
 	if err != nil {
 		s.writeError(w, err, false)
@@ -607,12 +520,12 @@ func (s *Service) setNodeCapabilities(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationNodeManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(nodeRaw))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	epoch, err := s.store.SetNodeCapabilities(mutationContext, identity.NodeID(nodeRaw), protocol.Capability(req.EnabledCapabilities))
+	epoch, err := s.store.AdministratorSetNodeCapabilities(r.Context(), decision, identity.NodeID(nodeRaw), protocol.Capability(req.EnabledCapabilities))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -643,22 +556,17 @@ func (s *Service) withdrawRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) approveRoute(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	routeID, err := parseIDPath(r, "route_id")
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationRouteManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(routeID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	epoch, err := s.store.ApproveRoute(mutationContext, routeID)
+	epoch, err := s.store.AdministratorApproveRoute(r.Context(), decision, routeID)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -667,22 +575,17 @@ func (s *Service) approveRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminWithdrawRoute(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	routeID, err := parseIDPath(r, "route_id")
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationRouteManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(routeID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	epoch, err := s.store.WithdrawRoute(mutationContext, routeID, nil)
+	epoch, err := s.store.AdministratorWithdrawRoute(r.Context(), decision, routeID)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -717,11 +620,6 @@ type aclRuleResponse struct {
 }
 
 func (s *Service) addACLRule(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
@@ -746,12 +644,12 @@ func (s *Service) addACLRule(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed(err.Error()), false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationACLManage, &networkID)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	rule, epoch, err := s.store.AddACLRule(mutationContext, networkID, req.Priority, action, string(selectorJSON), req.Description)
+	rule, epoch, err := s.store.AdministratorAddACLRule(r.Context(), decision, networkID, req.Priority, action, string(selectorJSON), req.Description)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -763,10 +661,6 @@ func (s *Service) addACLRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) readACLRules(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
@@ -777,12 +671,12 @@ func (s *Service) readACLRules(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	values, err := s.store.NetworkACLRules(r.Context(), networkID, limit)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	network, err := s.store.Network(r.Context(), networkID)
+	values, epoch, err := s.store.AdministratorNetworkACLRules(r.Context(), decision, networkID, limit)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -791,17 +685,12 @@ func (s *Service) readACLRules(w http.ResponseWriter, r *http.Request) {
 	for _, value := range values {
 		response = append(response, aclRuleResponse{RuleID: value.ID.String(), NetworkID: networkID.String(), Priority: value.Priority,
 			Action: string(value.Action), Selector: json.RawMessage(value.SelectorJSON), Description: value.Description, Enabled: value.Enabled,
-			ConfigurationEpoch: network.ConfigurationEpoch})
+			ConfigurationEpoch: epoch})
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"acl_rules": response})
 }
 
 func (s *Service) updateACLRule(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	ruleID, err := parseIDPath(r, "rule_id")
 	if err != nil {
 		s.writeError(w, err, false)
@@ -826,12 +715,12 @@ func (s *Service) updateACLRule(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, malformed(err.Error()), false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationACLManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(ruleID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	rule, epoch, err := s.store.UpdateACLRule(mutationContext, ruleID, req.Priority, action, string(selectorJSON), req.Description, req.Enabled)
+	rule, epoch, err := s.store.AdministratorUpdateACLRule(r.Context(), decision, ruleID, req.Priority, action, string(selectorJSON), req.Description, req.Enabled)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -905,22 +794,17 @@ func validateTrafficSelector(selector *lanewayv1.TrafficSelector) error {
 }
 
 func (s *Service) deleteACLRule(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	ruleID, err := parseIDPath(r, "rule_id")
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationACLManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(ruleID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	epoch, err := s.store.DeleteACLRule(mutationContext, ruleID)
+	epoch, err := s.store.AdministratorDeleteACLRule(r.Context(), decision, ruleID)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -933,11 +817,6 @@ type revocationRequest struct {
 }
 
 func (s *Service) revokeNode(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	nodeRaw, err := parseIDPath(r, "node_id")
 	if err != nil {
 		s.writeError(w, err, false)
@@ -948,12 +827,12 @@ func (s *Service) revokeNode(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationNodeManage, nil)
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(nodeRaw))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	epoch, err := s.store.RevokeNode(mutationContext, identity.NodeID(nodeRaw), req.Reason)
+	epoch, err := s.store.AdministratorRevokeNode(r.Context(), decision, identity.NodeID(nodeRaw), req.Reason)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -962,11 +841,6 @@ func (s *Service) revokeNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) revokeCertificate(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
 		s.writeError(w, err, false)
@@ -987,12 +861,12 @@ func (s *Service) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationCertificateManage, &networkID)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	epoch, err := s.store.RevokeCertificateBySerial(mutationContext, networkID, serial, req.Reason)
+	epoch, err := s.store.AdministratorRevokeCertificateBySerial(r.Context(), decision, networkID, serial, req.Reason)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -1001,16 +875,8 @@ func (s *Service) revokeCertificate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) readRoutes(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
-	if _, err := s.store.Network(r.Context(), networkID); err != nil {
 		s.writeError(w, err, false)
 		return
 	}
@@ -1019,7 +885,12 @@ func (s *Service) readRoutes(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	routes, err := s.store.NetworkRoutes(r.Context(), networkID, limit)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	routes, err := s.store.AdministratorNetworkRoutes(r.Context(), decision, networkID, limit)
 	if err != nil {
 		s.writeError(w, err, false)
 		return
@@ -1033,7 +904,7 @@ func (s *Service) readRoutes(w http.ResponseWriter, r *http.Request) {
 
 type auditResponse struct {
 	EventID   string  `json:"event_id"`
-	NetworkID string  `json:"network_id"`
+	NetworkID string  `json:"network_id,omitempty"`
 	ActorKind string  `json:"actor_kind"`
 	ActorID   *string `json:"actor_id,omitempty"`
 	// ActorNodeID is retained for existing clients while actor_kind/actor_id
@@ -1047,16 +918,8 @@ type auditResponse struct {
 }
 
 func (s *Service) readAudit(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeAdministrator(r); err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
-	if _, err := s.store.Network(r.Context(), networkID); err != nil {
 		s.writeError(w, err, false)
 		return
 	}
@@ -1065,7 +928,12 @@ func (s *Service) readAudit(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	events, err := s.store.AuditEvents(r.Context(), networkID, limit)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	events, err := s.store.AdministratorAuditEvents(r.Context(), decision, networkID, limit)
 	if err != nil {
 		s.writeError(w, err, false)
 		return

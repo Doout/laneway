@@ -8,6 +8,7 @@ import (
 	"os/exec"
 
 	"github.com/spf13/cobra"
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/buildinfo"
 )
 
@@ -129,6 +130,7 @@ func controllerCommand() *cobra.Command {
 	controller := group("controller", "Administer controller resources", runController)
 	controller.AddCommand(
 		command("overview", "Show active nodes and their approved forwarding", runControllerOverview),
+		controllerAdministratorCommand(),
 		resourceCommand("network", "Manage networks", runControllerNetwork, "create", "get", "list"),
 		resourceCommand("enrollment-token", "Issue enrollment tokens", runControllerEnrollmentToken, "issue"),
 		resourceCommand("bootstrap-bundle", "Manage short-lived Connector bootstrap bundles", runControllerBootstrapBundle, "create"),
@@ -192,7 +194,64 @@ func controlCommand() *cobra.Command {
 			return runControl(append([]string{name}, args...))
 		}))
 	}
+	administrator := &cobra.Command{
+		Use:   "administrator",
+		Short: "Bootstrap and recover administrator access",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	var bootstrapUsername string
+	bootstrap := &cobra.Command{
+		Use:   "bootstrap",
+		Short: "Bootstrap the first administrator",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if !adminauth.ValidateUsername(bootstrapUsername) {
+				return errors.New("administrator bootstrap requires a valid --username")
+			}
+			return runControl([]string{"administrator", "bootstrap", "--username", bootstrapUsername})
+		},
+	}
+	bootstrap.Flags().StringVar(&bootstrapUsername, "username", "", "username for the first administrator")
+	var recoveryUsername string
+	recoverAdministrator := &cobra.Command{
+		Use:   "recover",
+		Short: "Recover administrator access",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			if !adminauth.ValidateUsername(recoveryUsername) {
+				return errors.New("administrator recovery requires a valid --username")
+			}
+			return runControl([]string{"administrator", "recover", "--username", recoveryUsername})
+		},
+	}
+	recoverAdministrator.Flags().StringVar(&recoveryUsername, "username", "", "username of the owner to recover")
+	administrator.AddCommand(bootstrap, recoverAdministrator)
+	rootToken := &cobra.Command{
+		Use:   "root-token",
+		Short: "Manage the control-plane root administrator token",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return cmd.Help()
+		},
+	}
+	rootToken.AddCommand(controlNoArgs("rotate", "Rotate the root administrator token", "administrator", "root-token", "rotate"))
+	administrator.AddCommand(rootToken)
+	control.AddCommand(administrator)
 	return control
+}
+
+func controlNoArgs(use, summary string, forwarded ...string) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: summary,
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runControl(append([]string(nil), forwarded...))
+		},
+	}
 }
 
 func runControl(args []string) error {

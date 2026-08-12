@@ -3,13 +3,17 @@ package controllerclient
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,6 +27,12 @@ import (
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
 )
+
+type controllerClientRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f controllerClientRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func TestNormalizeEndpoint(t *testing.T) {
 	for _, value := range []string{"http://controller", "https://controller/path", "https://user@controller", "controller"} {
@@ -334,6 +344,428 @@ func TestJSONAdminRequiredErrorsAndLimits(t *testing.T) {
 		Value string `json:"value"`
 	}{strings.Repeat("x", MaxJSONRequestBytes)}, new(Epoch), false); err == nil || !strings.Contains(err.Error(), "request exceeds") {
 		t.Fatalf("request limit error = %v", err)
+	}
+}
+
+func TestRootTokenLifecycleUsesExactStatusesAndNeverFollowsRedirects(t *testing.T) {
+	rotationID, _ := identity.ParseID("202122232425262728292a2b2c2d2e2f")
+	redirected := 0
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		redirected++
+		if request.Header.Get("Authorization") != "" {
+			t.Error("redirect target received root Authorization")
+		}
+	}))
+	defer redirectTarget.Close()
+
+	var rootStatus = http.StatusNoContent
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Cache-Control", "no-store")
+		if request.Header.Get("Authorization") != "Bearer root-secret" {
+			t.Errorf("%s %s authorization=%q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
+		}
+		switch request.Method + " " + request.URL.Path {
+		case "GET /v1/admin/auth/root":
+			writer.WriteHeader(rootStatus)
+			if rootStatus == http.StatusUnauthorized {
+				_, _ = io.WriteString(writer, `{"code":"ERROR_CODE_UNAUTHENTICATED","detail":"authentication failed"}`)
+			}
+		case "POST /v1/admin/auth/root-token-rotations/" + rotationID.String() + "/begin",
+			"POST /v1/admin/auth/root-token-rotations/" + rotationID.String() + "/complete":
+			writer.WriteHeader(http.StatusNoContent)
+		case "GET /redirect":
+			http.Redirect(writer, request, redirectTarget.URL, http.StatusTemporaryRedirect)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client := &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer root-secret"}
+
+	accepted, err := client.RootAuthenticationAccepted(context.Background())
+	if err != nil || !accepted {
+		t.Fatalf("accepted root probe=%t error=%v", accepted, err)
+	}
+	rootStatus = http.StatusUnauthorized
+	accepted, err = client.RootAuthenticationAccepted(context.Background())
+	if err != nil || accepted {
+		t.Fatalf("rejected root probe=%t error=%v", accepted, err)
+	}
+	rootStatus = http.StatusForbidden
+	if _, err := client.RootAuthenticationAccepted(context.Background()); err == nil {
+		t.Fatal("403 was accepted as root-token rejection")
+	}
+	if err := client.BeginRootTokenRotation(context.Background(), rotationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteRootTokenRotation(context.Background(), rotationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.rootLifecycleRequest(context.Background(), http.MethodGet, "/redirect"); err != nil {
+		t.Fatal(err)
+	}
+	if redirected != 0 {
+		t.Fatalf("lifecycle redirect target requests=%d", redirected)
+	}
+}
+
+func TestRootTokenLifecycleRejectsMissingAuthOversizeAndInvalidRotation(t *testing.T) {
+	client := &Client{endpoint: "https://unused.invalid", http: http.DefaultClient}
+	if _, err := client.RootAuthenticationAccepted(context.Background()); err == nil {
+		t.Fatal("root probe accepted missing administrator credential")
+	}
+	if err := client.BeginRootTokenRotation(context.Background(), identity.ID{}); err == nil {
+		t.Fatal("root rotation accepted zero ID")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Cache-Control", "no-store")
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(writer, strings.Repeat("x", maxLifecycleReplyBytes+1))
+	}))
+	defer server.Close()
+	client = &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer root-secret"}
+	if _, err := client.RootAuthenticationAccepted(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized lifecycle response error=%v", err)
+	}
+}
+
+func TestDecodeLifecycleAdministratorsRequiresExactJSONShape(t *testing.T) {
+	const principalID = "202122232425262728292a2b2c2d2e2f"
+	principal := `{"principal_id":"` + principalID + `","username":"owner.name","role":"owner","enabled":false,"all_networks":true,"network_ids":[],"created_at_unix_seconds":1,"updated_at_unix_seconds":2,"password_updated_at_unix_seconds":1}`
+	valid := `{"administrators":[` + principal + `]}`
+
+	administrators, err := decodeLifecycleAdministrators([]byte(valid))
+	if err != nil || len(administrators) != 1 {
+		t.Fatalf("valid administrator lookup=%+v error=%v", administrators, err)
+	}
+	parsed, err := validateLifecycleAdministrator(administrators[0])
+	if err != nil || parsed.String() != principalID {
+		t.Fatalf("valid lifecycle administrator ID=%s error=%v", parsed, err)
+	}
+
+	duplicatePrincipalID := strings.Replace(principal, `"principal_id":"`+principalID+`"`,
+		`"principal_id":"`+principalID+`","principal_id":"`+principalID+`"`, 1)
+	missingEnabled := strings.Replace(principal, `,"enabled":false`, "", 1)
+	nullEnabled := strings.Replace(principal, `"enabled":false`, `"enabled":null`, 1)
+	missingNetworks := strings.Replace(principal, `,"network_ids":[]`, "", 1)
+	nullNetworks := strings.Replace(principal, `"network_ids":[]`, `"network_ids":null`, 1)
+	unknownPrincipalField := strings.TrimSuffix(principal, "}") + `,"unexpected":true}`
+	wrongPrincipalIDType := strings.Replace(principal, `"principal_id":"`+principalID+`"`, `"principal_id":7`, 1)
+	wrongTimestampType := strings.Replace(principal, `"created_at_unix_seconds":1`, `"created_at_unix_seconds":"1"`, 1)
+
+	invalid := map[string]string{
+		"duplicate wrapper field":   `{"administrators":[],"administrators":[]}`,
+		"missing wrapper field":     `{}`,
+		"null wrapper field":        `{"administrators":null}`,
+		"unknown wrapper field":     `{"administrators":[],"unexpected":true}`,
+		"wrong wrapper type":        `{"administrators":{}}`,
+		"trailing JSON":             valid + `{}`,
+		"multiple results":          `{"administrators":[` + principal + `,` + principal + `]}`,
+		"duplicate principal field": `{"administrators":[` + duplicatePrincipalID + `]}`,
+		"missing boolean field":     `{"administrators":[` + missingEnabled + `]}`,
+		"null boolean field":        `{"administrators":[` + nullEnabled + `]}`,
+		"missing array field":       `{"administrators":[` + missingNetworks + `]}`,
+		"null array field":          `{"administrators":[` + nullNetworks + `]}`,
+		"unknown principal field":   `{"administrators":[` + unknownPrincipalField + `]}`,
+		"wrong string type":         `{"administrators":[` + wrongPrincipalIDType + `]}`,
+		"wrong integer type":        `{"administrators":[` + wrongTimestampType + `]}`,
+	}
+	for name, input := range invalid {
+		t.Run(name, func(t *testing.T) {
+			if decoded, err := decodeLifecycleAdministrators([]byte(input)); err == nil {
+				t.Fatalf("unsafe administrator lookup JSON was accepted: %+v", decoded)
+			}
+		})
+	}
+}
+
+func TestDecodeAdministratorLifecycleGrantRequiresCanonicalJSON(t *testing.T) {
+	grantText := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x35}, 32))
+	const expiresAtUnix = int64(2_000_000_000)
+	valid := map[string]string{
+		"contract order": fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%d}`, grantText, expiresAtUnix),
+		"reordered with whitespace": fmt.Sprintf("\n { \n \"expires_at_unix_seconds\" : %d, \n \"grant\" : %q \n } \r\n",
+			expiresAtUnix, grantText),
+	}
+	for name, input := range valid {
+		t.Run(name, func(t *testing.T) {
+			mutable := []byte(input)
+			grant, expiresAt, err := decodeAdministratorLifecycleGrant(mutable)
+			clear(mutable)
+			defer clear(grant)
+			if err != nil || string(grant) != grantText || expiresAt.Unix() != expiresAtUnix {
+				t.Fatalf("grant=%q expiry=%d error=%v", grant, expiresAt.Unix(), err)
+			}
+		})
+	}
+
+	escapedGrant := fmt.Sprintf(`{"grant":"\u%04x%s","expires_at_unix_seconds":%d}`,
+		grantText[0], grantText[1:], expiresAtUnix)
+	invalid := map[string]string{
+		"duplicate grant": fmt.Sprintf(`{"grant":%q,"grant":%q,"expires_at_unix_seconds":%d}`,
+			grantText, grantText, expiresAtUnix),
+		"duplicate expiry": fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%d,"expires_at_unix_seconds":%d}`,
+			grantText, expiresAtUnix, expiresAtUnix),
+		"unknown field": fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%d,"unexpected":true}`,
+			grantText, expiresAtUnix),
+		"trailing JSON":    fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%d}{}`, grantText, expiresAtUnix),
+		"escaped grant":    escapedGrant,
+		"missing grant":    fmt.Sprintf(`{"expires_at_unix_seconds":%d}`, expiresAtUnix),
+		"missing expiry":   fmt.Sprintf(`{"grant":%q}`, grantText),
+		"wrong grant type": fmt.Sprintf(`{"grant":7,"expires_at_unix_seconds":%d}`, expiresAtUnix),
+		"wrong expiry type": fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%q}`, grantText,
+			strconv.FormatInt(expiresAtUnix, 10)),
+		"trailing comma": fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%d,}`, grantText, expiresAtUnix),
+	}
+	for name, input := range invalid {
+		t.Run(name, func(t *testing.T) {
+			mutable := []byte(input)
+			grant, _, err := decodeAdministratorLifecycleGrant(mutable)
+			clear(mutable)
+			clear(grant)
+			if err == nil {
+				t.Fatal("unsafe administrator grant JSON was accepted")
+			}
+		})
+	}
+}
+
+func TestAdministratorLifecycleConsumeRejectsUnsafeResponsesAndNeverReplaysSecrets(t *testing.T) {
+	const endpoint = "https://controller.example"
+	const requestCanary = "request-password-secret-canary"
+	const responseCanary = "response-body-secret-canary"
+	tests := []struct {
+		name          string
+		status        int
+		body          string
+		contentLength int64
+		response      func(http.Header)
+		wantErr       bool
+	}{
+		{name: "success", status: http.StatusNoContent, contentLength: 0, wantErr: false},
+		{name: "wrong status", status: http.StatusOK, body: responseCanary,
+			contentLength: int64(len(responseCanary)), wantErr: true},
+		{name: "no-content body", status: http.StatusNoContent, body: responseCanary,
+			contentLength: -1, wantErr: true},
+		{name: "no-content declared body", status: http.StatusNoContent,
+			contentLength: 1, wantErr: true},
+		{name: "missing no-store", status: http.StatusNoContent, contentLength: 0,
+			response: func(header http.Header) { header.Del("Cache-Control") }, wantErr: true},
+		{name: "sets cookie", status: http.StatusNoContent, contentLength: 0,
+			response: func(header http.Header) { header.Set("Set-Cookie", "server-secret-canary=forbidden; Secure") }, wantErr: true},
+		{name: "redirect", status: http.StatusFound, body: responseCanary,
+			contentLength: int64(len(responseCanary)), response: func(header http.Header) {
+				header.Set("Location", "https://redirect.example/secret-target")
+			}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			endpointURL, err := url.Parse(endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jar, err := cookiejar.New(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			jar.SetCookies(endpointURL, []*http.Cookie{{Name: "browser", Value: "forbidden", Secure: true, Path: "/"}})
+
+			payload := []byte(`{"grant":"grant-secret-canary","password":"` + requestCanary + `"}`)
+			roundTrips := 0
+			transport := controllerClientRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+				roundTrips++
+				if request.Method != http.MethodPost || request.URL.String() != endpoint+"/v1/admin/auth/recover" {
+					t.Errorf("consume request=%s %s", request.Method, request.URL)
+				}
+				if request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" ||
+					request.Header.Get("Origin") != endpoint || request.Header.Get("Cache-Control") != "no-store" ||
+					request.Header.Get("Content-Type") != "application/json" || request.Header.Get("Accept") != "application/json" ||
+					request.Header.Get("Sec-Fetch-Site") != "" {
+					t.Errorf("consume credential headers=%v", request.Header)
+				}
+				if request.GetBody != nil {
+					t.Error("secret-bearing consume request retained a replay body")
+				}
+				if request.ContentLength != int64(len(payload)) {
+					t.Errorf("consume ContentLength=%d want=%d", request.ContentLength, len(payload))
+				}
+				body, readErr := io.ReadAll(request.Body)
+				_ = request.Body.Close()
+				if readErr != nil || !bytes.Equal(body, payload) {
+					t.Errorf("consume request body mismatch: %v", readErr)
+				}
+				clear(body)
+
+				header := make(http.Header)
+				header.Set("Cache-Control", "no-store")
+				if test.response != nil {
+					test.response(header)
+				}
+				return &http.Response{
+					StatusCode:    test.status,
+					Status:        fmt.Sprintf("%d %s", test.status, http.StatusText(test.status)),
+					Header:        header,
+					Body:          io.NopCloser(strings.NewReader(test.body)),
+					ContentLength: test.contentLength,
+					Request:       request,
+				}, nil
+			})
+			client := &Client{endpoint: endpoint, http: &http.Client{Transport: transport, Jar: jar},
+				adminBearer: "Bearer root-secret-canary"}
+			err = client.consumeAdministratorLifecycleGrant(context.Background(), "/v1/admin/auth/recover", payload)
+			clear(payload)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("consume error=%v wantErr=%t", err, test.wantErr)
+			}
+			if err != nil && (strings.Contains(err.Error(), requestCanary) || strings.Contains(err.Error(), responseCanary) ||
+				strings.Contains(err.Error(), "root-secret-canary") || strings.Contains(err.Error(), "grant-secret-canary")) {
+				t.Fatalf("consume error leaked a credential: %v", err)
+			}
+			if roundTrips != 1 {
+				t.Fatalf("consume round trips=%d, want 1", roundTrips)
+			}
+			for _, cookie := range jar.Cookies(endpointURL) {
+				if cookie.Name != "browser" {
+					t.Fatalf("lifecycle response updated the caller cookie jar: %s", cookie.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestAdministratorLifecycleIssuesAndConsumesGrantWithoutLeakingCredentials(t *testing.T) {
+	principalID := "202122232425262728292a2b2c2d2e2f"
+	grant := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	expiresAt := time.Now().Add(5 * time.Minute).Unix()
+	requests := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requests++
+		writer.Header().Set("Cache-Control", "no-store")
+		if request.Header.Get("Cache-Control") != "no-store" {
+			t.Errorf("%s request omitted cache protection", request.URL.RequestURI())
+		}
+		if request.Header.Get("Cookie") != "" {
+			t.Errorf("%s sent a browser cookie", request.URL.RequestURI())
+		}
+		key := request.Method + " " + request.URL.RequestURI()
+		switch key {
+		case "POST /v1/admin/auth/bootstrap-grants",
+			"POST /v1/admin/administrators/" + principalID + "/recovery-grants":
+			if request.Header.Get("Authorization") != "Bearer root-secret" || request.Header.Get("Origin") != "" {
+				t.Errorf("%s used the wrong credential boundary", key)
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			writer.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(writer, `{"grant":%q,"expires_at_unix_seconds":%d}`, grant, expiresAt)
+		case "GET /v1/admin/administrators?username=owner.name":
+			if request.Header.Get("Authorization") != "Bearer root-secret" || request.Header.Get("Origin") != "" {
+				t.Errorf("%s used the wrong credential boundary", key)
+			}
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(writer, `{"administrators":[{"principal_id":%q,"username":"owner.name","role":"owner","enabled":false,"all_networks":true,"network_ids":[],"created_at_unix_seconds":1,"updated_at_unix_seconds":2,"disabled_at_unix_seconds":2,"password_updated_at_unix_seconds":1}]}`, principalID)
+		case "POST /v1/admin/auth/bootstrap", "POST /v1/admin/auth/recover":
+			if request.Header.Get("Authorization") != "" || request.Header.Get("Origin") != server.URL ||
+				request.Header.Get("Content-Type") != "application/json" || request.Header.Get("Sec-Fetch-Site") != "" {
+				t.Errorf("%s used the wrong unauthenticated request boundary", key)
+			}
+			body, _ := io.ReadAll(request.Body)
+			var decoded map[string]string
+			if err := json.Unmarshal(body, &decoded); err != nil || decoded["grant"] != grant ||
+				decoded["password"] != "a private administrator password" {
+				t.Errorf("%s lifecycle body was invalid", key)
+			}
+			if key == "POST /v1/admin/auth/bootstrap" && decoded["username"] != "owner.name" {
+				t.Error("bootstrap omitted the canonical username")
+			}
+			if key == "POST /v1/admin/auth/recover" {
+				if _, exists := decoded["username"]; exists {
+					t.Error("recovery sent an uncontracted username in the grant consumption body")
+				}
+			}
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client := &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer root-secret"}
+	bootstrapPassword := []byte("a private administrator password")
+	if err := client.BootstrapFirstAdministrator(context.Background(), "owner.name", bootstrapPassword); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bootstrapPassword, make([]byte, len(bootstrapPassword))) {
+		t.Fatal("bootstrap did not clear its caller-owned password")
+	}
+	recoveryPassword := []byte("a private administrator password")
+	if err := client.RecoverAdministratorOwner(context.Background(), "owner.name", recoveryPassword); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(recoveryPassword, make([]byte, len(recoveryPassword))) {
+		t.Fatal("recovery did not clear its caller-owned password")
+	}
+	if requests != 5 {
+		t.Fatalf("administrator lifecycle requests=%d, want 5", requests)
+	}
+}
+
+func TestAdministratorLifecycleFailsClosedBeforeGrantConsumption(t *testing.T) {
+	grant := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, 32))
+	redirected := 0
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { redirected++ }))
+	defer target.Close()
+	tests := []struct {
+		name   string
+		header func(http.Header)
+		status int
+		body   string
+	}{
+		{"missing no-store", func(header http.Header) { header.Set("Content-Type", "application/json") }, http.StatusCreated,
+			fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%d}`, grant, time.Now().Add(time.Minute).Unix())},
+		{"sets cookie", func(header http.Header) {
+			header.Set("Cache-Control", "no-store")
+			header.Set("Content-Type", "application/json")
+			header.Set("Set-Cookie", "browser=forbidden; Secure")
+		}, http.StatusCreated, fmt.Sprintf(`{"grant":%q,"expires_at_unix_seconds":%d}`, grant, time.Now().Add(time.Minute).Unix())},
+		{"wrong status", func(header http.Header) { header.Set("Cache-Control", "no-store") }, http.StatusNoContent, ""},
+		{"malformed grant", func(header http.Header) {
+			header.Set("Cache-Control", "no-store")
+			header.Set("Content-Type", "application/json")
+		}, http.StatusCreated, `{"grant":"not-canonical","expires_at_unix_seconds":1}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				test.header(writer.Header())
+				writer.WriteHeader(test.status)
+				_, _ = io.WriteString(writer, test.body)
+			}))
+			defer server.Close()
+			client := &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer root-secret"}
+			password := []byte("a private administrator password")
+			if err := client.BootstrapFirstAdministrator(context.Background(), "owner.name", password); err == nil {
+				t.Fatal("unsafe lifecycle response was accepted")
+			}
+			if !bytes.Equal(password, make([]byte, len(password))) {
+				t.Fatal("failed lifecycle request did not clear the password")
+			}
+		})
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Cache-Control", "no-store")
+		http.Redirect(writer, request, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	client := &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer root-secret"}
+	password := []byte("a private administrator password")
+	if err := client.BootstrapFirstAdministrator(context.Background(), "owner.name", password); err == nil || redirected != 0 {
+		t.Fatalf("lifecycle redirect error=%v redirected=%d", err, redirected)
+	}
+	invalid := []byte("short")
+	if err := client.BootstrapFirstAdministrator(context.Background(), "owner.name", invalid); err == nil ||
+		!bytes.Equal(invalid, make([]byte, len(invalid))) {
+		t.Fatal("invalid password reached the lifecycle transport or was not cleared")
 	}
 }
 

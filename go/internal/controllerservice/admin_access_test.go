@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
@@ -71,10 +72,11 @@ func TestDetectAdminCredential(t *testing.T) {
 }
 
 func TestRequestActorValidationAndAccessControllerContract(t *testing.T) {
+	now := time.Now().UTC()
 	servicePrincipalID := identity.ID{1}
 	root := RequestActor{
 		Credential: CredentialRootBearer,
-		Actor:      adminauth.IDActor(adminauth.ActorServicePrincipal, servicePrincipalID),
+		Subject:    adminauth.RootSubject(servicePrincipalID),
 	}
 	if !root.Valid() {
 		t.Fatal("valid root actor rejected")
@@ -83,11 +85,11 @@ func TestRequestActorValidationAndAccessControllerContract(t *testing.T) {
 	principal := adminauth.Principal{ID: principalID, Username: "owner", Role: adminauth.RoleOwner, Enabled: true, AllNetworks: true}
 	csrf := [sha256.Size]byte{4}
 	session := RequestActor{
-		Credential: CredentialAdministratorSession,
-		Actor:      adminauth.IDActor(adminauth.ActorAdministrator, principalID),
-		Principal:  &principal,
-		SessionID:  &sessionID,
-		CSRFHash:   csrf,
+		Credential:   CredentialAdministratorSession,
+		Subject:      adminauth.SessionSubject(principalID, sessionID),
+		Principal:    &principal,
+		CSRFHash:     csrf,
+		IdleLifetime: time.Minute, IdleExpiresAt: now.Add(time.Minute), AbsoluteExpiresAt: now.Add(time.Hour),
 	}
 	if !session.Valid() {
 		t.Fatal("valid session actor rejected")
@@ -96,13 +98,12 @@ func TestRequestActorValidationAndAccessControllerContract(t *testing.T) {
 	wrongID := identity.ID{9}
 	invalid := []RequestActor{
 		{},
-		{Credential: CredentialRootBearer, Actor: adminauth.SystemActor()},
-		{Credential: CredentialRootBearer, Actor: root.Actor, Principal: &principal},
-		{Credential: CredentialRootBearer, Actor: root.Actor, SessionID: &sessionID},
-		{Credential: CredentialRootBearer, Actor: root.Actor, CSRFHash: csrf},
-		{Credential: CredentialAdministratorSession, Actor: session.Actor, Principal: &principal, SessionID: &sessionID},
-		{Credential: CredentialAdministratorSession, Actor: adminauth.IDActor(adminauth.ActorAdministrator, wrongID), Principal: &principal, SessionID: &sessionID, CSRFHash: csrf},
-		{Credential: CredentialAdministratorSession, Actor: session.Actor, Principal: &principal, CSRFHash: csrf},
+		{Credential: CredentialRootBearer},
+		{Credential: CredentialRootBearer, Subject: root.Subject, Principal: &principal},
+		{Credential: CredentialRootBearer, Subject: root.Subject, CSRFHash: csrf},
+		{Credential: CredentialAdministratorSession, Subject: session.Subject, Principal: &principal},
+		{Credential: CredentialAdministratorSession, Subject: adminauth.SessionSubject(wrongID, sessionID), Principal: &principal, CSRFHash: csrf},
+		{Credential: CredentialAdministratorSession, Subject: adminauth.SessionSubject(principalID, identity.ID{}), Principal: &principal, CSRFHash: csrf},
 	}
 	for index, actor := range invalid {
 		if actor.Valid() {
@@ -117,104 +118,29 @@ func TestRequestActorValidationAndAccessControllerContract(t *testing.T) {
 	}
 }
 
-type accessControllerStub struct{}
+type accessControllerStub struct{ rootID identity.ID }
 
-func (accessControllerStub) Authenticate(context.Context, *http.Request) (RequestActor, error) {
-	id := identity.ID{1}
-	return RequestActor{Credential: CredentialRootBearer, Actor: adminauth.IDActor(adminauth.ActorServicePrincipal, id)}, nil
+func (s accessControllerStub) Authenticate(context.Context, *http.Request) (RequestActor, error) {
+	id := s.rootID
+	if id.IsZero() {
+		id = identity.ID{1}
+	}
+	return RequestActor{Credential: CredentialRootBearer, Subject: adminauth.RootSubject(id)}, nil
 }
 
-func (accessControllerStub) Authorize(_ context.Context, actor RequestActor, operation adminauth.Operation, networkID *identity.NetworkID) (Decision, error) {
-	return NewDecision(actor, operation, networkID)
+type accessControllerErrorStub struct{ err error }
+
+func (s accessControllerErrorStub) Authenticate(context.Context, *http.Request) (RequestActor, error) {
+	return RequestActor{}, s.err
 }
 
-func TestDecisionValidationAndDefensiveCopies(t *testing.T) {
-	actorID := identity.ID{1}
-	sessionID := identity.ID{4}
-	networkID := identity.NetworkID{2}
-	actor := adminauth.IDActor(adminauth.ActorAdministrator, actorID)
-	principal := adminauth.Principal{ID: actorID, Username: "operator", Role: adminauth.RoleOperator, Enabled: true, AllNetworks: true}
-	requestActor := RequestActor{
-		Credential: CredentialAdministratorSession, Actor: actor, Principal: &principal,
-		SessionID: &sessionID, CSRFHash: [sha256.Size]byte{1},
-	}
-	decision, err := NewDecision(requestActor, adminauth.OperationRouteManage, &networkID)
-	if err != nil || !decision.Valid() {
-		t.Fatalf("valid scoped decision=%+v err=%v", decision, err)
-	}
-	if !decision.Matches(requestActor, adminauth.OperationRouteManage, &networkID) {
-		t.Fatal("valid decision did not match its authorization input")
-	}
-	otherNetwork := identity.NetworkID{5}
-	otherPrincipalID := identity.ID{6}
-	otherPrincipal := principal
-	otherPrincipal.ID = otherPrincipalID
-	otherActor := requestActor
-	otherActor.Actor = adminauth.IDActor(adminauth.ActorAdministrator, otherPrincipalID)
-	otherActor.Principal = &otherPrincipal
-	otherSession := requestActor
-	otherSessionID := identity.ID{7}
-	otherSession.SessionID = &otherSessionID
-	for name, matches := range map[string]bool{
-		"operation": decision.Matches(requestActor, adminauth.OperationACLManage, &networkID),
-		"network":   decision.Matches(requestActor, adminauth.OperationRouteManage, &otherNetwork),
-		"nil scope": decision.Matches(requestActor, adminauth.OperationRouteManage, nil),
-		"actor":     decision.Matches(otherActor, adminauth.OperationRouteManage, &networkID),
-		"session":   decision.Matches(otherSession, adminauth.OperationRouteManage, &networkID),
-		"invalid":   decision.Matches(RequestActor{}, adminauth.OperationRouteManage, &networkID),
-	} {
-		if matches {
-			t.Errorf("decision matched mismatched %s", name)
-		}
-	}
-	actor.ID[0] = 9
-	sessionID[0] = 9
-	networkID[0] = 9
-	if decision.Actor().ID == nil || *decision.Actor().ID != (identity.ID{1}) || decision.Operation() != adminauth.OperationRouteManage ||
-		decision.Credential() != CredentialAdministratorSession || decision.SessionID() == nil || *decision.SessionID() != (identity.ID{4}) ||
-		decision.NetworkID() == nil || *decision.NetworkID() != (identity.NetworkID{2}) {
-		t.Fatalf("decision retained caller-owned storage: %+v scope=%v", decision, decision.NetworkID())
-	}
-	returnedActor := decision.Actor()
-	returnedActor.ID[0] = 8
-	if *decision.Actor().ID != (identity.ID{1}) {
-		t.Fatalf("decision exposed mutable actor: %+v", decision.Actor())
-	}
-	returned := decision.NetworkID()
-	returned[0] = 7
-	if *decision.NetworkID() != (identity.NetworkID{2}) {
-		t.Fatalf("decision exposed mutable scope: %v", decision.NetworkID())
-	}
-	returnedSession := decision.SessionID()
-	returnedSession[0] = 7
-	if *decision.SessionID() != (identity.ID{4}) {
-		t.Fatalf("decision exposed mutable session: %v", decision.SessionID())
-	}
+func (s accessControllerErrorStub) Authorize(context.Context, RequestActor, adminauth.RoutePolicy,
+	adminauth.DecisionTarget) (adminauth.Decision, error) {
+	return adminauth.Decision{}, s.err
+}
 
-	serviceID := identity.ID{3}
-	root := RequestActor{Credential: CredentialRootBearer, Actor: adminauth.IDActor(adminauth.ActorServicePrincipal, serviceID)}
-	global, err := NewDecision(root, adminauth.OperationNetworkList, nil)
-	if err != nil || !global.Valid() || global.NetworkID() != nil {
-		t.Fatalf("valid global decision=%+v err=%v", global, err)
-	}
-	for name, test := range map[string]struct {
-		actor     RequestActor
-		operation adminauth.Operation
-		network   *identity.NetworkID
-	}{
-		"invalid actor":     {actor: RequestActor{}, operation: adminauth.OperationNetworkList},
-		"system actor":      {actor: RequestActor{Credential: CredentialRootBearer, Actor: adminauth.SystemActor()}, operation: adminauth.OperationNetworkList},
-		"invalid operation": {actor: root, operation: "unknown"},
-		"missing scope":     {actor: root, operation: adminauth.OperationRouteManage},
-		"unexpected scope":  {actor: root, operation: adminauth.OperationNetworkList, network: &networkID},
-		"zero scope":        {actor: root, operation: adminauth.OperationRouteManage, network: new(identity.NetworkID)},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if decision, err := NewDecision(test.actor, test.operation, test.network); err == nil || decision.Valid() {
-				t.Fatalf("invalid decision accepted: %+v err=%v", decision, err)
-			}
-		})
-	}
+func (accessControllerStub) Authorize(_ context.Context, actor RequestActor, policy adminauth.RoutePolicy, target adminauth.DecisionTarget) (adminauth.Decision, error) {
+	return adminauth.NewDecision(actor.Subject, policy, target)
 }
 
 func TestValidateSameOrigin(t *testing.T) {
@@ -340,13 +266,13 @@ func TestMutationProtectionCredentialBoundary(t *testing.T) {
 	principalID, sessionID, serviceID := identity.ID{1}, identity.ID{2}, identity.ID{3}
 	principal := adminauth.Principal{ID: principalID, Username: "operator", Role: adminauth.RoleOperator, Enabled: true, AllNetworks: true}
 	session := RequestActor{
-		Credential: CredentialAdministratorSession,
-		Actor:      adminauth.IDActor(adminauth.ActorAdministrator, principalID),
-		Principal:  &principal,
-		SessionID:  &sessionID,
-		CSRFHash:   digest,
+		Credential:   CredentialAdministratorSession,
+		Subject:      adminauth.SessionSubject(principalID, sessionID),
+		Principal:    &principal,
+		CSRFHash:     digest,
+		IdleLifetime: time.Minute, IdleExpiresAt: time.Now().Add(time.Minute), AbsoluteExpiresAt: time.Now().Add(time.Hour),
 	}
-	root := RequestActor{Credential: CredentialRootBearer, Actor: adminauth.IDActor(adminauth.ActorServicePrincipal, serviceID)}
+	root := RequestActor{Credential: CredentialRootBearer, Subject: adminauth.RootSubject(serviceID)}
 
 	validBrowser := httptest.NewRequest(http.MethodPost, "https://controller.example/v1/admin/networks", nil)
 	validBrowser.Header.Set("Origin", "https://controller.example")

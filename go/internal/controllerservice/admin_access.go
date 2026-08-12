@@ -11,9 +11,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
 )
 
 var (
@@ -44,28 +44,30 @@ func (k CredentialKind) Valid() bool {
 // value. Principal is populated only for administrator sessions; the root
 // bearer is represented as its durable service-principal actor.
 type RequestActor struct {
-	Credential CredentialKind
-	Actor      adminauth.Actor
-	Principal  *adminauth.Principal
-	SessionID  *identity.ID
-	CSRFHash   [sha256.Size]byte
+	Credential        CredentialKind
+	Subject           adminauth.Subject
+	Principal         *adminauth.Principal
+	CSRFHash          [sha256.Size]byte
+	IdleLifetime      time.Duration
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
 }
 
 func (a RequestActor) Valid() bool {
-	if !a.Credential.Valid() || !a.Actor.Valid() {
+	if !a.Credential.Valid() || !a.Subject.Valid() {
 		return false
 	}
 	switch a.Credential {
 	case CredentialRootBearer:
-		return a.Actor.Kind == adminauth.ActorServicePrincipal && a.Principal == nil &&
-			a.SessionID == nil && zeroDigest(a.CSRFHash)
+		return a.Subject.Kind() == adminauth.SubjectRootServicePrincipal && a.Principal == nil && zeroDigest(a.CSRFHash) &&
+			a.IdleLifetime == 0 && a.IdleExpiresAt.IsZero() && a.AbsoluteExpiresAt.IsZero()
 	case CredentialAdministratorSession:
-		if a.Actor.Kind != adminauth.ActorAdministrator || a.Actor.ID == nil || a.Principal == nil ||
-			a.SessionID == nil || a.SessionID.IsZero() || zeroDigest(a.CSRFHash) {
+		if a.Subject.Kind() != adminauth.SubjectAdministratorSession || a.Principal == nil || zeroDigest(a.CSRFHash) {
 			return false
 		}
-		return a.Principal.Enabled && a.Principal.Valid() &&
-			*a.Actor.ID == a.Principal.ID
+		return a.Principal.Enabled && a.Principal.Valid() && a.Subject.ActorID() == a.Principal.ID &&
+			a.IdleLifetime >= time.Minute && !a.IdleExpiresAt.IsZero() && !a.AbsoluteExpiresAt.IsZero() &&
+			!a.IdleExpiresAt.After(a.AbsoluteExpiresAt)
 	default:
 		return false
 	}
@@ -77,107 +79,7 @@ func (a RequestActor) Valid() bool {
 // and network-grant state for each call rather than trusting browser state.
 type AccessController interface {
 	Authenticate(context.Context, *http.Request) (RequestActor, error)
-	Authorize(context.Context, RequestActor, adminauth.Operation, *identity.NetworkID) (Decision, error)
-}
-
-// Decision is the immutable early authorization result propagated into a
-// handler. Session-backed decisions are bound to the exact authenticated
-// session, but they are not durable write authority: the store must still
-// revalidate that session and its current permissions inside the mutation and
-// audit transaction.
-type Decision struct {
-	credential CredentialKind
-	actor      adminauth.Actor
-	sessionID  *identity.ID
-	operation  adminauth.Operation
-	networkID  *identity.NetworkID
-}
-
-func NewDecision(requestActor RequestActor, operation adminauth.Operation, networkID *identity.NetworkID) (Decision, error) {
-	decision := Decision{
-		credential: requestActor.Credential,
-		actor:      copyActor(requestActor.Actor),
-		operation:  operation,
-	}
-	if requestActor.SessionID != nil {
-		copyID := *requestActor.SessionID
-		decision.sessionID = &copyID
-	}
-	if networkID != nil {
-		copyID := *networkID
-		decision.networkID = &copyID
-	}
-	if !requestActor.Valid() || !decision.Valid() {
-		return Decision{}, errors.New("invalid administrator authorization decision")
-	}
-	return decision, nil
-}
-
-func (d Decision) Valid() bool {
-	credentialValid := d.credential == CredentialRootBearer && d.actor.Kind == adminauth.ActorServicePrincipal && d.sessionID == nil ||
-		d.credential == CredentialAdministratorSession && d.actor.Kind == adminauth.ActorAdministrator &&
-			d.sessionID != nil && !d.sessionID.IsZero()
-	return credentialValid && d.actor.Valid() &&
-		d.operation.Valid() && d.operation.NetworkScoped() == (d.networkID != nil) &&
-		(d.networkID == nil || !d.networkID.IsZero())
-}
-
-func (d Decision) Actor() adminauth.Actor { return copyActor(d.actor) }
-
-func (d Decision) Credential() CredentialKind { return d.credential }
-
-func (d Decision) SessionID() *identity.ID {
-	if d.sessionID == nil {
-		return nil
-	}
-	copyID := *d.sessionID
-	return &copyID
-}
-
-func (d Decision) Operation() adminauth.Operation { return d.operation }
-
-// Matches verifies that a decision is bound to the exact authenticated actor,
-// operation, and canonical scope requested by middleware. This prevents an
-// AccessController implementation error from authorizing one route with a
-// valid decision created for another route or network.
-func (d Decision) Matches(actor RequestActor, operation adminauth.Operation, networkID *identity.NetworkID) bool {
-	if !d.Valid() || !actor.Valid() || d.operation != operation || d.credential != actor.Credential ||
-		!actorsEqual(d.actor, actor.Actor) || !optionalIDsEqual(d.sessionID, actor.SessionID) {
-		return false
-	}
-	if d.networkID == nil || networkID == nil {
-		return d.networkID == nil && networkID == nil
-	}
-	return *d.networkID == *networkID
-}
-
-func optionalIDsEqual(first, second *identity.ID) bool {
-	if first == nil || second == nil {
-		return first == nil && second == nil
-	}
-	return *first == *second
-}
-
-func (d Decision) NetworkID() *identity.NetworkID {
-	if d.networkID == nil {
-		return nil
-	}
-	copyID := *d.networkID
-	return &copyID
-}
-
-func copyActor(actor adminauth.Actor) adminauth.Actor {
-	if actor.ID == nil {
-		return adminauth.Actor{Kind: actor.Kind}
-	}
-	return adminauth.IDActor(actor.Kind, *actor.ID)
-}
-
-func actorsEqual(first, second adminauth.Actor) bool {
-	if first.Kind != second.Kind || (first.ID == nil) != (second.ID == nil) {
-		return false
-	}
-	return first.ID == nil || *first.ID == *second.ID
+	Authorize(context.Context, RequestActor, adminauth.RoutePolicy, adminauth.DecisionTarget) (adminauth.Decision, error)
 }
 
 type routePolicyKey struct {

@@ -84,7 +84,7 @@ function RouteNotFound({ id }: { id?: string }) {
 }
 
 export function RoutesListPage() {
-  const { live, inventory } = useControlPlane()
+  const { live, inventory, hasPermission } = useControlPlane()
   const records = live ? controllerRoutes(inventory?.routes ?? [], inventory?.nodes ?? []) : persistedRoutes()
   const [searchParams, setSearchParams] = useSearchParams()
   const [query, setQuery] = useState('')
@@ -127,11 +127,12 @@ export function RoutesListPage() {
   const pendingCount = records.filter(route => route.state === 'Pending approval').length
   const approvedCount = records.filter(route => route.state === approvedState).length
   const thirdSummaryCount = live ? inventory?.routes.filter(route => route.state === 'withdrawn').length ?? 0 : records.filter(route => route.state === 'Relay fallback').length
+  const canManageRoutes = !live || Boolean(inventory?.network && hasPermission('route.manage', inventory.network.network_id))
 
   return <div className="routes-page">
     <PageHeader
       title="Routes"
-      action={<Button variant="primary" to="/routes/new"><RouteIcon aria-hidden="true" size={17} />Create route</Button>}
+      action={canManageRoutes ? <Button variant="primary" to="/routes/new"><RouteIcon aria-hidden="true" size={17} />Create route</Button> : undefined}
     />
     <div className="routes-health-strip" aria-label="Route inventory summary"><div><strong>{approvedCount}</strong><span>{live ? 'Approved routes' : 'Healthy routes'}</span></div><div><strong>{pendingCount}</strong><span>Approval queue</span></div><div><strong>{thirdSummaryCount}</strong><span>{live ? 'Withdrawn routes' : 'Relay fallback'}</span></div><div><strong>{live ? inventory?.network?.configuration_epoch ?? '—' : 418}</strong><span>Configuration epoch</span></div></div>
     <Toolbar filters={<>
@@ -158,7 +159,7 @@ export function RoutesListPage() {
           { key: 'actions', label: '', align: 'end', render: route => <Button variant={selected?.id === route.id ? 'secondary' : 'quiet'} onClick={() => setSelectedId(route.id)}>Inspect</Button> },
         ]}
         empty={<div className="routes-empty"><RouteIcon aria-hidden="true" /><h2>No routes match</h2><p>Clear a filter or search for a different prefix.</p></div>}
-      /></section>{selected ? <aside className="routes-panel routes-inspector"><span className="routes-panel-label">Inspector</span><h2>{selected.name}</h2><p><code>{selected.destination}</code> · {selected.state}</p><dl><div><dt>Gateway</dt><dd>{selected.via}</dd></div><div><dt>Mode</dt><dd>{live ? controllerRouteMode(selectedControllerRoute) : selected.mode}</dd></div><div><dt>Metric</dt><dd>{selected.metric}</dd></div><div><dt>{live ? 'Created' : 'Requested'}</dt><dd>{live ? formatControllerTime(selectedControllerRoute?.created_at_unix_seconds) : selected.state === 'Pending approval' ? '14 minutes ago' : 'Today, 09:38'}</dd></div></dl><div className="button-row">{selected.state === 'Pending approval' ? <Button variant="primary" to={`/routes/${selected.id}/approve`}>Review request</Button> : <Button variant="primary" to={`/routes/${selected.id}`}>View route</Button>}</div></aside> : null}</div>
+      /></section>{selected ? <aside className="routes-panel routes-inspector"><span className="routes-panel-label">Inspector</span><h2>{selected.name}</h2><p><code>{selected.destination}</code> · {selected.state}</p><dl><div><dt>Gateway</dt><dd>{selected.via}</dd></div><div><dt>Mode</dt><dd>{live ? controllerRouteMode(selectedControllerRoute) : selected.mode}</dd></div><div><dt>Metric</dt><dd>{selected.metric}</dd></div><div><dt>{live ? 'Created' : 'Requested'}</dt><dd>{live ? formatControllerTime(selectedControllerRoute?.created_at_unix_seconds) : selected.state === 'Pending approval' ? '14 minutes ago' : 'Today, 09:38'}</dd></div></dl><div className="button-row">{selected.state === 'Pending approval' && canManageRoutes ? <Button variant="primary" to={`/routes/${selected.id}/approve`}>Review request</Button> : <Button variant="primary" to={`/routes/${selected.id}`}>View route</Button>}</div></aside> : null}</div>
   </div>
 }
 
@@ -435,7 +436,7 @@ export function RouteApprovalPage() {
 }
 
 export function RouteDetailPage() {
-  const { live, inventory, request, refresh } = useControlPlane()
+  const { live, inventory, request, refresh, hasPermission } = useControlPlane()
   const { routeId } = useParams()
   const location = useLocation()
   const supplied = (location.state as ApprovalLocation | null)?.route
@@ -455,6 +456,7 @@ export function RouteDetailPage() {
   const liveRouteActive = liveRoute?.state === 'approved' && (liveRoute.valid_until_unix_seconds === undefined || liveRoute.valid_until_unix_seconds > Math.floor(Date.now() / 1000))
   const liveNetworkName = inventory?.network?.name || liveRoute?.network_id || 'Unavailable'
   const forwardingNodeId = liveRoute?.node_id ?? route.via
+  const canManageRoute = !live || Boolean(liveRoute && hasPermission('route.manage', liveRoute.network_id))
 
   async function withdraw(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -486,7 +488,7 @@ export function RouteDetailPage() {
   }
 
   return <div className="routes-page routes-detail-page">
-    <PageHeader title={route.name} action={<div className="button-row">{pending ? <Button variant="primary" to={`/routes/${route.id}/approve`}>Review approval</Button> : null}<Button variant="quiet" to="/routes">All routes</Button></div>} />
+    <PageHeader title={route.name} action={<div className="button-row">{pending && canManageRoute ? <Button variant="primary" to={`/routes/${route.id}/approve`}>Review approval</Button> : null}<Button variant="quiet" to="/routes">All routes</Button></div>} />
     <DetailLayout
       identity={<IdentityBlock
         icon={<Waypoints aria-hidden="true" size={34} />}
@@ -522,7 +524,7 @@ export function RouteDetailPage() {
         </dl>
       </Section>
       {saved?.result ? <Callout tone={withdrawn ? 'danger' : 'neutral'}>{saved.result} by {saved.actedBy} · {saved.actedAt}.</Callout> : null}
-      <Section title="Withdraw route">
+      {canManageRoute ? <Section title="Withdraw route">
         {withdrawn ? <Callout>This route is no longer distributed.</Callout> : <>
           <Callout tone="danger"><ShieldAlert aria-hidden="true" size={16} /> {live ? liveRouteActive ? `The route is removed in the next configuration epoch. Connections using ${route.destination} may be interrupted when nodes apply that configuration.` : liveRoute?.state === 'advertised' ? 'The advertisement is marked withdrawn and can no longer be approved.' : 'The route is marked withdrawn in the controller.' : `Enrolled nodes will stop receiving ${route.destination}; active connections using this path may be interrupted.`}</Callout>
           {showWithdraw ? <form className="routes-withdraw-form" onSubmit={withdraw}>
@@ -530,7 +532,7 @@ export function RouteDetailPage() {
             <div className="button-row"><Button type="submit" variant="danger" disabled={withdrawPending || confirmation !== route.destination}>{withdrawPending ? 'Withdrawing…' : 'Withdraw route'}</Button><Button variant="quiet" disabled={withdrawPending} onClick={() => { setShowWithdraw(false); setConfirmation(''); setWithdrawError('') }}>Cancel</Button></div>
           </form> : <div className="routes-section-action"><Button variant="danger" onClick={() => setShowWithdraw(true)}>Withdraw route</Button></div>}
         </>}
-      </Section>
+      </Section> : null}
     </DetailLayout>
   </div>
 }

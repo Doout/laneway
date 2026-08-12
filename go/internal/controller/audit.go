@@ -68,6 +68,34 @@ func (s *Store) AuditAdministratorMutation(ctx context.Context, action, targetTy
 	return tx.Commit()
 }
 
+// AdministratorAuditMutation records the bootstrap bundle mutation, whose
+// payload is intentionally ephemeral and therefore has no durable resource
+// row. The exact global route decision is revalidated in the audit write
+// transaction; durable resource mutations audit in their own Store methods.
+func (s *Store) AdministratorAuditMutation(ctx context.Context, decision adminauth.Decision, action, targetType, details string) error {
+	if action != "bootstrap_bundle.create" || targetType != "bootstrap_bundle" {
+		return fmt.Errorf("%w: unsupported non-resource administrator audit", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	actor, err := s.authorizeAdministratorGlobalResourceTx(ctx, tx, decision,
+		administratorBootstrapCreatePolicy, adminauth.GlobalTarget())
+	if err != nil {
+		return err
+	}
+	if err := auditActorTx(ctx, tx, nil, actor, action, targetType, nil, details, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit authorized administrator audit: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) AuditEvents(ctx context.Context, networkID identity.NetworkID, limit int) ([]AuditEvent, error) {
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
@@ -78,6 +106,67 @@ func (s *Store) AuditEvents(ctx context.Context, networkID identity.NetworkID, l
 		return nil, fmt.Errorf("query audit events: %w", err)
 	}
 	return scanAuditEvents(rows)
+}
+
+func (s *Store) AdministratorAuditEvents(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, limit int) ([]AuditEvent, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorAuditListPolicy, networkID); err != nil {
+		return nil, err
+	}
+	if err := administratorNetworkExistsTx(ctx, tx, networkID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
+		FROM audit_events WHERE network_id=? ORDER BY created_at DESC,id DESC LIMIT ?`, idBytes(networkID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("query authorized audit events: %w", err)
+	}
+	events, err := scanAuditEvents(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// AdministratorGlobalAuditEvents returns the global lifecycle stream and all
+// network-scoped events after revalidating the exact owner/root decision in
+// the same read transaction. Ordering matches the existing audit APIs.
+func (s *Store) AdministratorGlobalAuditEvents(ctx context.Context, decision adminauth.Decision, limit int) ([]AuditEvent, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := s.authorizeAdministratorGlobalResourceTx(ctx, tx, decision,
+		administratorGlobalAuditListPolicy, adminauth.GlobalTarget()); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
+		FROM audit_events ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query authorized global audit events: %w", err)
+	}
+	events, err := scanAuditEvents(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 // GlobalAuditEvents returns global authentication/recovery records alongside

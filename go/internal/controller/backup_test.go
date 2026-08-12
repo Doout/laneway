@@ -275,6 +275,68 @@ func TestBackupDatabaseDoesNotMigrateSource(t *testing.T) {
 	}
 }
 
+func TestExactV8BackupAndRestoreUpgradePrivateCopy(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	source := filepath.Join(directory, "source-v8.db")
+	createExactV8AdministratorFixture(t, source)
+	backup := filepath.Join(directory, "backup-v8.db")
+	if err := BackupDatabase(ctx, source, backup); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"source": source, "backup": backup} {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var version, active, pending int
+		if err := db.QueryRow(`SELECT MAX(version) FROM schema_versions`).Scan(&version); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT count(*) FROM administrator_sessions WHERE revoked_at IS NULL`).Scan(&active); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT count(*) FROM administrator_recovery_grants
+			WHERE consumed_at IS NULL AND revoked_at IS NULL`).Scan(&pending); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		db.Close()
+		if version != 8 || active != 6 || pending != 1 {
+			t.Fatalf("%s mutated: version=%d active=%d pending=%d", name, version, active, pending)
+		}
+	}
+	restored := filepath.Join(directory, "restored-v9.db")
+	if err := RestoreDatabase(ctx, backup, restored); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(ctx, restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version, sessions, pending int
+	if err := store.db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_versions`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM administrator_recovery_grants
+		WHERE consumed_at IS NULL AND revoked_at IS NULL`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.AdministratorAuthState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 9 || sessions != 0 || pending != 0 || state.RecoveryGeneration != 2 {
+		t.Fatalf("restored version=%d sessions=%d pending=%d state=%+v", version, sessions, pending, state)
+	}
+}
+
 func TestRestoreInvalidatesAdministratorSecrets(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
@@ -288,8 +350,7 @@ func TestRestoreInvalidatesAdministratorSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootActor := adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID)
-	_, bootstrapSecret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+	_, bootstrapSecret, err := store.IssueAdministratorRecoveryGrant(ctx, administratorRecoveryGrantDecision(t, store, nil),
 		AdministratorRecoveryBootstrapOwner, nil, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +360,7 @@ func TestRestoreInvalidatesAdministratorSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner, err := store.CreateFirstOwner(ctx, rootActor, bootstrapSecret, "owner", passwordHash)
+	owner, err := store.BootstrapFirstAdministrator(ctx, bootstrapSecret, "owner", passwordHash)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +369,8 @@ func TestRestoreInvalidatesAdministratorSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	grant, recoverySecret, err := store.IssueAdministratorRecoveryGrant(ctx, rootActor,
+	grant, recoverySecret, err := store.IssueAdministratorRecoveryGrant(ctx,
+		administratorRecoveryGrantDecision(t, store, &owner.Principal.ID),
 		AdministratorRecoveryOwner, &owner.Principal.ID, now.Add(time.Hour))
 	if err != nil || recoverySecret == "" {
 		t.Fatalf("issue recovery grant=%+v err=%v", grant, err)
@@ -362,7 +424,7 @@ func TestRestoreInvalidatesAdministratorSecrets(t *testing.T) {
 	}
 }
 
-func TestRestoreRejectsMalformedV8AdministratorScopeTable(t *testing.T) {
+func TestRestoreRejectsMalformedCurrentAdministratorScopeTable(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
 	store, source := openTestStore(t)
@@ -388,15 +450,15 @@ func TestRestoreRejectsMalformedV8AdministratorScopeTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(directory, "restored.db")
-	if err := RestoreDatabase(ctx, validBackup, destination); err == nil || !strings.Contains(err.Error(), "canonical v8 definition") {
-		t.Fatalf("malformed v8 restore error=%v, want canonical-schema rejection", err)
+	if err := RestoreDatabase(ctx, validBackup, destination); err == nil || !strings.Contains(err.Error(), "canonical v9 definition") {
+		t.Fatalf("malformed current-schema restore error=%v, want canonical-schema rejection", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("malformed restore published destination: %v", err)
 	}
 }
 
-func TestRestoreRejectsWeakenedV8AdministratorDDL(t *testing.T) {
+func TestRestoreRejectsWeakenedCurrentAdministratorDDL(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		old, newer string
@@ -447,7 +509,7 @@ func TestRestoreRejectsWeakenedV8AdministratorDDL(t *testing.T) {
 				t.Fatal(err)
 			}
 			destination := filepath.Join(directory, "restored.db")
-			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v8 definition") {
+			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v9 definition") {
 				t.Fatalf("weakened restore error=%v, want canonical-schema rejection", err)
 			}
 			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
@@ -478,7 +540,7 @@ func TestRestoreRejectsUnexpectedTriggerThatMutatesAdministratorState(t *testing
 		t.Fatal(err)
 	}
 	destination := filepath.Join(directory, "restored.db")
-	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v8 definition") {
+	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v9 definition") {
 		t.Fatalf("unexpected-trigger restore error=%v, want canonical-schema rejection", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {

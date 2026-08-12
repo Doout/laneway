@@ -54,6 +54,7 @@ type Options struct {
 	LeafValidity     time.Duration
 	MaxBodyBytes     int64
 	AdminAuthorizer  AdminAuthorizer
+	AccessController AccessController
 	NodeAuthorizer   NodeAuthorizer
 	Now              func() time.Time
 	SnapshotValidity time.Duration
@@ -67,6 +68,13 @@ type Service struct {
 	validity              time.Duration
 	maxBody               int64
 	authorizeAdm          AdminAuthorizer
+	access                AccessController
+	passwordVerifier      *adminauth.PasswordVerifier
+	passwordHasher        func([]byte) (string, error)
+	passwordWorkSlots     chan struct{}
+	loginLimiter          *adminauth.LoginLimiter
+	recoveryLimiter       *adminauth.LoginLimiter
+	authStateLimiter      *adminauth.LoginLimiter
 	authorizeNode         NodeAuthorizer
 	verifyPeerCertificate bool
 	now                   func() time.Time
@@ -142,67 +150,99 @@ func New(opts Options) (*Service, error) {
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return time.Now().UTC() }
 	}
+	passwordVerifier, err := adminauth.NewPasswordVerifier(adminauth.PasswordVerifierOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("initialize administrator password verifier: %w", err)
+	}
+	loginLimiter, err := adminauth.NewLoginLimiter(adminauth.LoginLimiterOptions{Now: opts.Now})
+	if err != nil {
+		return nil, fmt.Errorf("initialize administrator login limiter: %w", err)
+	}
+	recoveryLimiter, err := adminauth.NewLoginLimiter(adminauth.LoginLimiterOptions{Now: opts.Now})
+	if err != nil {
+		return nil, fmt.Errorf("initialize administrator recovery limiter: %w", err)
+	}
+	authStateLimiter, err := adminauth.NewLoginLimiter(adminauth.LoginLimiterOptions{
+		GlobalLimit: 300, SourceLimit: 30, UsernameLimit: 300, Now: opts.Now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initialize administrator auth-state limiter: %w", err)
+	}
 	s := &Service{
 		store: opts.Store, ca: opts.CACertificate, caKey: opts.CAKey, issuerChain: issuerChain, validity: opts.LeafValidity,
-		maxBody: opts.MaxBodyBytes, authorizeAdm: opts.AdminAuthorizer,
+		maxBody: opts.MaxBodyBytes, authorizeAdm: opts.AdminAuthorizer, access: opts.AccessController,
+		passwordVerifier: passwordVerifier, passwordHasher: func(password []byte) (string, error) {
+			return adminauth.HashPassword(password, nil)
+		}, passwordWorkSlots: make(chan struct{}, adminauth.DefaultConcurrentPasswordVerifications),
+		loginLimiter: loginLimiter, recoveryLimiter: recoveryLimiter, authStateLimiter: authStateLimiter,
 		authorizeNode: opts.NodeAuthorizer, verifyPeerCertificate: verifyPeerCertificate, now: opts.Now,
 		snapshotValidity:  opts.SnapshotValidity,
 		enrollmentLimiter: newEnrollmentRateLimiter(),
 		bootstrapBundles:  newBootstrapBundleStore(opts.Now),
 	}
+	if s.access == nil {
+		s.access = &storeAccessController{store: s.store, rootBearer: func(request *http.Request) (adminauth.Actor, error) {
+			return s.authorizeAdm(request)
+		}}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
-	mux.HandleFunc("POST /v1/admin/enrollment-tokens", s.issueToken)
-	mux.HandleFunc("POST /v1/admin/bootstrap-bundles", s.createBootstrapBundle)
+	mux.HandleFunc("GET /v1/admin/auth/state", s.administratorAuthState)
+	mux.HandleFunc("POST /v1/admin/auth/login", s.administratorLogin)
+	mux.HandleFunc("GET /v1/admin/auth/session", s.administratorSession)
+	mux.HandleFunc("POST /v1/admin/auth/session/rotate", s.administratorSessionRotate)
+	mux.HandleFunc("POST /v1/admin/auth/logout", s.administratorLogout)
+	mux.HandleFunc("GET /v1/admin/auth/root", s.administratorRootProbe)
+	mux.HandleFunc("POST /v1/admin/auth/bootstrap", s.bootstrapAdministrator)
+	mux.HandleFunc("POST /v1/admin/auth/recover", s.recoverAdministrator)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/auth/bootstrap-grants", s.issueBootstrapGrant)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/auth/root-token-rotations/{rotation_id}/begin", s.beginRootTokenRotation)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/auth/root-token-rotations/{rotation_id}/complete", s.completeRootTokenRotation)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/administrators", s.createAdministrator)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/administrators", s.readAdministrators)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/administrators/{principal_id}", s.readAdministrator)
+	s.registerManagementRoute(mux, http.MethodPatch, "/v1/admin/administrators/{principal_id}", s.updateAdministrator)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/administrators/{principal_id}/password", s.replaceAdministratorPassword)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/administrators/{principal_id}/recovery-grants", s.issueAdministratorRecoveryGrant)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/administrators/{principal_id}/sessions", s.readAdministratorSessions)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/sessions/{session_id}/revoke", s.revokeAdministratorSession)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/audit", s.readGlobalAudit)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/enrollment-tokens", s.issueToken)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/bootstrap-bundles", s.createBootstrapBundle)
 	mux.HandleFunc("GET /v1/bootstrap-bundles/{bundle_id}", s.servePrivateBootstrapBundle)
 	mux.HandleFunc("POST /v1/enroll", s.enroll)
 	mux.HandleFunc("POST /v1/renew", s.renew)
 	mux.HandleFunc("POST /v1/configuration", s.configuration)
 	mux.HandleFunc("POST /v1/relay/configuration", s.relayConfiguration)
 	mux.HandleFunc("GET /v1/revocations/{serial}", s.revocation)
-	mux.HandleFunc("POST /v1/admin/networks", s.createNetwork)
-	mux.HandleFunc("GET /v1/admin/networks", s.readNetworks)
-	mux.HandleFunc("GET /v1/admin/networks/{network_id}", s.readNetwork)
-	mux.HandleFunc("GET /v1/admin/networks/{network_id}/nodes", s.readNodes)
-	mux.HandleFunc("GET /v1/admin/networks/{network_id}/relays", s.readRelays)
-	mux.HandleFunc("GET /v1/admin/networks/{network_id}/acl-rules", s.readACLRules)
-	mux.HandleFunc("GET /v1/admin/networks/{network_id}/certificates", s.readCertificates)
-	mux.HandleFunc("GET /v1/admin/networks/{network_id}/routes", s.readRoutes)
-	mux.HandleFunc("GET /v1/admin/networks/{network_id}/audit", s.readAudit)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks", s.createNetwork)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks", s.readNetworks)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}", s.readNetwork)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/nodes", s.readNodes)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/relays", s.readRelays)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/acl-rules", s.readACLRules)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/certificates", s.readCertificates)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/routes", s.readRoutes)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/audit", s.readAudit)
 	mux.HandleFunc("POST /v1/routes", s.advertiseRoute)
 	mux.HandleFunc("DELETE /v1/routes/{route_id}", s.withdrawRoute)
-	mux.HandleFunc("POST /v1/admin/routes/assign", s.assignRoute)
-	mux.HandleFunc("POST /v1/admin/routes/{route_id}/approve", s.approveRoute)
-	mux.HandleFunc("POST /v1/admin/routes/{route_id}/withdraw", s.adminWithdrawRoute)
-	mux.HandleFunc("POST /v1/admin/networks/{network_id}/acl-rules", s.addACLRule)
-	mux.HandleFunc("PUT /v1/admin/acl-rules/{rule_id}", s.updateACLRule)
-	mux.HandleFunc("DELETE /v1/admin/acl-rules/{rule_id}", s.deleteACLRule)
-	mux.HandleFunc("POST /v1/admin/nodes/{node_id}/revoke", s.revokeNode)
-	mux.HandleFunc("POST /v1/admin/networks/{network_id}/certificates/{serial}/revoke", s.revokeCertificate)
-	mux.HandleFunc("PUT /v1/admin/nodes/{node_id}/capabilities", s.setNodeCapabilities)
-	mux.HandleFunc("POST /v1/admin/networks/{network_id}/relays", s.registerRelay)
-	mux.HandleFunc("POST /v1/admin/relays/{relay_id}/disable", s.disableRelay)
-	mux.HandleFunc("PUT /v1/admin/relays/{relay_id}", s.updateRelay)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/routes/assign", s.assignRoute)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/routes/{route_id}/approve", s.approveRoute)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/routes/{route_id}/withdraw", s.adminWithdrawRoute)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/acl-rules", s.addACLRule)
+	s.registerManagementRoute(mux, http.MethodPut, "/v1/admin/acl-rules/{rule_id}", s.updateACLRule)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/acl-rules/{rule_id}", s.deleteACLRule)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/nodes/{node_id}/revoke", s.revokeNode)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/certificates/{serial}/revoke", s.revokeCertificate)
+	s.registerManagementRoute(mux, http.MethodPut, "/v1/admin/nodes/{node_id}/capabilities", s.setNodeCapabilities)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/relays", s.registerRelay)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/relays/{relay_id}/disable", s.disableRelay)
+	s.registerManagementRoute(mux, http.MethodPut, "/v1/admin/relays/{relay_id}", s.updateRelay)
 	s.handler = s.observe(securityHeaders(mux))
 	return s, nil
 }
 
 func (s *Service) Handler() http.Handler { return s.handler }
-
-func (s *Service) authorizeAdministrator(request *http.Request) (adminauth.Actor, error) {
-	actor, err := s.authorizeAdm(request)
-	if err != nil {
-		return adminauth.Actor{}, err
-	}
-	if !actor.Valid() || actor.Kind != adminauth.ActorServicePrincipal {
-		return adminauth.Actor{}, ErrPermissionDenied
-	}
-	return actor, nil
-}
-
-func (s *Service) administratorMutationContext(request *http.Request, actor adminauth.Actor, operation adminauth.Operation, networkID *identity.NetworkID) (context.Context, error) {
-	return controller.WithAdministratorMutationActor(request.Context(), actor, operation, networkID)
-}
 
 func (s *Service) Metrics() Metrics {
 	if s == nil {
@@ -296,11 +336,6 @@ type tokenResponse struct {
 }
 
 func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
-	actor, err := s.authorizeAdministrator(r)
-	if err != nil {
-		s.writeError(w, err, false)
-		return
-	}
 	var req tokenRequest
 	if err := s.decodeJSON(w, r, &req); err != nil {
 		s.writeError(w, err, false)
@@ -315,12 +350,12 @@ func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
 	if class == "" {
 		class = controller.EnrollmentClassDurable
 	}
-	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationEnrollmentIssue, &networkID)
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	token, err := s.store.IssueEnrollmentTokenWithOptions(mutationContext, networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
+	token, err := s.store.AdministratorIssueEnrollmentTokenWithOptions(r.Context(), decision, networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
 		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second, RequestedName: req.RequestedName, EnabledCapabilities: req.EnabledCapabilities,
 	})
 	if err != nil {
@@ -1037,6 +1072,7 @@ func (s *Service) decodeJSON(w http.ResponseWriter, r *http.Request, value any) 
 	if err != nil {
 		return err
 	}
+	defer clear(data)
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
@@ -1073,6 +1109,8 @@ func (s *Service) writeError(w http.ResponseWriter, err error, protobuf bool) {
 	case errors.As(err, &requestErr):
 		status, code, detail, retryable = requestErr.status, requestErr.code, requestErr.detail, requestErr.retryable
 	case errors.Is(err, ErrUnauthenticated),
+		errors.Is(err, ErrMalformedAdminCredentials),
+		errors.Is(err, ErrMixedAdminCredentials),
 		errors.Is(err, controller.ErrTokenInvalid),
 		errors.Is(err, controller.ErrCredentialInvalid),
 		errors.Is(err, controller.ErrSessionInvalid),
@@ -1080,7 +1118,8 @@ func (s *Service) writeError(w http.ResponseWriter, err error, protobuf bool) {
 		status, code, detail, retryable = http.StatusUnauthorized, lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "authentication failed", false
 	case errors.Is(err, controller.ErrTokenExpired):
 		status, code, detail, retryable = http.StatusUnauthorized, lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "enrollment code has expired", false
-	case errors.Is(err, ErrPermissionDenied):
+	case errors.Is(err, ErrPermissionDenied), errors.Is(err, controller.ErrPermissionDenied),
+		errors.Is(err, ErrBrowserOrigin), errors.Is(err, ErrCSRF):
 		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "permission denied", false
 	case errors.Is(err, controller.ErrTokenNetwork):
 		status, code, detail, retryable = http.StatusForbidden, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code belongs to a different network", false
@@ -1094,6 +1133,11 @@ func (s *Service) writeError(w http.ResponseWriter, err error, protobuf bool) {
 		status, code, detail, retryable = http.StatusConflict, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "enrollment code has already been used", false
 	case errors.Is(err, controller.ErrConflict), errors.Is(err, controller.ErrAlreadyApproved):
 		status, code, detail, retryable = http.StatusConflict, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "request conflicts with controller state", false
+	case errors.Is(err, controller.ErrBootstrapComplete):
+		status, code, detail, retryable = http.StatusConflict, lanewayv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "administrator bootstrap is already complete", false
+	case errors.Is(err, controller.ErrRecoveryInvalid), errors.Is(err, controller.ErrRecoveryExpired),
+		errors.Is(err, controller.ErrRecoveryConsumed):
+		status, code, detail, retryable = http.StatusUnauthorized, lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "authentication failed", false
 	case errors.Is(err, controller.ErrInvalid):
 		status, code, detail, retryable = http.StatusBadRequest, lanewayv1.ErrorCode_ERROR_CODE_MALFORMED, "invalid request", false
 	}

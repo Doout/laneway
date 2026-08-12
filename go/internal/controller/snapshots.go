@@ -242,6 +242,10 @@ func (s *Store) NetworkRoutes(ctx context.Context, networkID identity.NetworkID,
 	if err != nil {
 		return nil, fmt.Errorf("read network routes: %w", err)
 	}
+	return scanNetworkRoutes(rows, networkID)
+}
+
+func scanNetworkRoutes(rows *sql.Rows, networkID identity.NetworkID) ([]Route, error) {
 	defer rows.Close()
 	routes := make([]Route, 0)
 	for rows.Next() {

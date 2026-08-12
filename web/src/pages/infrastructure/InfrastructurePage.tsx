@@ -12,7 +12,7 @@ import { useInfrastructureView } from './useInfrastructureView'
 import './infrastructure.css'
 
 export function InfrastructurePage() {
-  const { networks, relays, live, inventory, request, refresh, inventoryPending, inventoryError } = useInfrastructureView()
+  const { networks, relays, live, inventory, request, refresh, inventoryPending, inventoryError, hasPermission } = useInfrastructureView()
   const location = useLocation()
   const [creatingNetwork, setCreatingNetwork] = useState(false)
   const [networkName, setNetworkName] = useState('')
@@ -24,7 +24,9 @@ export function InfrastructurePage() {
     const state = location.state as { infraResult?: string } | null
     return state?.infraResult ?? ''
   })
+  const canCreateNetwork = !live || hasPermission('network.create')
   const canBootstrapNetwork = live
+    && canCreateNetwork
     && inventory !== null
     && inventory.networks.length === 0
     && !inventoryPending
@@ -52,9 +54,13 @@ export function InfrastructurePage() {
     ...(!live ? [{ key: 'state', label: 'State', render: (row: InfrastructureNetwork) => <Status tone={row.connectedNodes ? 'positive' : 'muted'}>{row.connectedNodes ? 'Healthy' : 'Awaiting connector'}</Status> }] : []),
   ]
   const pendingLiveRoute = inventory?.routes.find(isPendingControllerRoute)
+  const liveNetworkId = inventory?.network?.network_id
+  const canManageRoutes = !live || Boolean(liveNetworkId && hasPermission('route.manage', liveNetworkId))
+  const canManageRelays = !live || Boolean(liveNetworkId && hasPermission('relay.manage', liveNetworkId))
+  const canReadAudit = !live || Boolean(liveNetworkId && hasPermission('audit.read', liveNetworkId))
   const workItems = live
     ? [
-      pendingLiveRoute ? { kind: 'route', to: `/routes/${pendingLiveRoute.route_id}/approve`, title: 'Approve advertised route', detail: `${pendingLiveRoute.prefix} · metric ${pendingLiveRoute.metric}`, age: 'Pending' } : null,
+      pendingLiveRoute ? { kind: 'route', to: canManageRoutes ? `/routes/${pendingLiveRoute.route_id}/approve` : `/routes/${pendingLiveRoute.route_id}`, title: canManageRoutes ? 'Approve advertised route' : 'Review advertised route', detail: `${pendingLiveRoute.prefix} · metric ${pendingLiveRoute.metric}`, age: 'Pending' } : null,
     ].filter((item): item is { kind: string; to: string; title: string; detail: string; age: string } => Boolean(item))
     : [
       { kind: 'route', to: '/routes/rte_01J8KUBEAPI/approve', title: 'Approve Kubernetes API', detail: '10.24.8.10/32 · requested 8 min ago', age: '8m' },
@@ -97,7 +103,7 @@ export function InfrastructurePage() {
     <>
       <PageHeader
         title="Infrastructure"
-        action={<div className="button-row">{live && !canBootstrapNetwork ? <Button disabled title={networks.length ? 'Additional networks are unavailable in this console.' : 'Network inventory is unavailable.'} variant="secondary"><Plus aria-hidden="true" size={16} /> Add network</Button> : <Button onClick={() => { setCreatingNetwork(true); setResult('') }} variant="secondary"><Plus aria-hidden="true" size={16} /> Add network</Button>}<Button to="/infrastructure/relays/new" variant="primary" disabled={live && !networks.length}><RadioTower aria-hidden="true" size={17} /> Register relay</Button></div>}
+        action={(!live || canBootstrapNetwork || canManageRelays) ? <div className="button-row">{(!live || canBootstrapNetwork) && canCreateNetwork ? <Button onClick={() => { setCreatingNetwork(true); setResult('') }} variant="secondary"><Plus aria-hidden="true" size={16} /> Add network</Button> : null}{canManageRelays ? <Button to="/infrastructure/relays/new" variant="primary"><RadioTower aria-hidden="true" size={17} /> Register relay</Button> : null}</div> : undefined}
       />
 
       {result ? <div className="infra-success" role="status"><Status>{result}</Status></div> : null}
@@ -147,7 +153,7 @@ export function InfrastructurePage() {
           <div className="infra-panel-head"><div><h2 id="infra-work-title">Needs attention</h2></div><span className="infra-queue-count">{workItems.length}</span></div>
           {workItems.map((item) => <Link key={`${item.kind}-${item.to}`} to={item.to}><span className={`infra-queue-icon ${item.kind === 'relay' ? 'is-danger' : 'is-warning'}`}>{item.kind === 'route' ? <TriangleAlert aria-hidden="true" size={16} /> : item.kind === 'relay' ? <RadioTower aria-hidden="true" size={16} /> : <ServerCog aria-hidden="true" size={16} />}</span><span><strong>{item.title}</strong><small>{item.detail}</small></span><time>{item.age}</time></Link>)}
           {!workItems.length ? <div className="infra-queue-empty"><ShieldCheck aria-hidden="true" size={18} /><span><strong>No pending routes</strong></span></div> : null}
-          <Button to="/audit" variant="quiet">Review all activity</Button>
+          {canReadAudit ? <Button to="/audit" variant="quiet">Review all activity</Button> : null}
         </aside>
       </div>
 

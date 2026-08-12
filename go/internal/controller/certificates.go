@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 )
 
@@ -54,12 +55,12 @@ func (s *Store) RenewNodeBound(ctx context.Context, networkID identity.NetworkID
 	if networkID.IsZero() || nodeID.IsZero() || issuer == nil {
 		return NodeRenewal{}, fmt.Errorf("%w: renewal identity and issuer are required", ErrInvalid)
 	}
-	now := s.now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return NodeRenewal{}, fmt.Errorf("begin node renewal: %w", err)
 	}
 	defer tx.Rollback()
+	now := s.now()
 	var name, class string
 	var capabilities, created, epoch int64
 	var lease sql.NullInt64
@@ -308,6 +309,123 @@ func (s *Store) RevokeNode(ctx context.Context, nodeID identity.NodeID, reason s
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit node revocation: %w", err)
+	}
+	return epoch, nil
+}
+
+// AdministratorRevokeCertificateBySerial performs lookup, durable
+// authorization, revocation, epoch advancement, and audit in one transaction.
+func (s *Store) AdministratorRevokeCertificateBySerial(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, serial []byte, reason string) (uint64, error) {
+	if networkID.IsZero() || len(serial) < 1 || len(serial) > 32 || serial[0] == 0 {
+		return 0, fmt.Errorf("%w: certificate network or serial", ErrInvalid)
+	}
+	if reason != strings.TrimSpace(reason) || reason == "" || len(reason) > 1024 {
+		return 0, fmt.Errorf("%w: revocation reason", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin authorized certificate revocation: %w", err)
+	}
+	defer tx.Rollback()
+	now := s.now()
+	actor, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorCertificateRevokePolicy, networkID)
+	if err != nil {
+		return 0, err
+	}
+	var certificateRaw []byte
+	var revoked sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT id,revoked_at FROM certificates WHERE network_id=? AND serial=?`, idBytes(networkID), serial).
+		Scan(&certificateRaw, &revoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read certificate by network serial: %w", err)
+	}
+	if revoked.Valid {
+		return 0, fmt.Errorf("%w: certificate already revoked", ErrConflict)
+	}
+	certificateID, err := scanID(certificateRaw)
+	if err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE certificates SET revoked_at=?,revocation_reason=?
+		WHERE id=? AND network_id=? AND revoked_at IS NULL`, unix(now), reason, idBytes(certificateID), idBytes(networkID))
+	if err != nil {
+		return 0, fmt.Errorf("revoke certificate: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("%w: certificate concurrently revoked", ErrConflict)
+	}
+	epoch, err := incrementEpochTx(ctx, tx, networkID)
+	if err != nil {
+		return 0, err
+	}
+	if err := auditActorTx(ctx, tx, &networkID, actor, "certificate.revoke", "certificate", &certificateID,
+		fmt.Sprintf(`{"reason":%q}`, reason), now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit authorized certificate revocation: %w", err)
+	}
+	return epoch, nil
+}
+
+func (s *Store) AdministratorRevokeNode(ctx context.Context, decision adminauth.Decision, nodeID identity.NodeID, reason string) (uint64, error) {
+	if nodeID.IsZero() || reason != strings.TrimSpace(reason) || reason == "" || len(reason) > 1024 {
+		return 0, fmt.Errorf("%w: node revocation", ErrInvalid)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin authorized node revocation: %w", err)
+	}
+	defer tx.Rollback()
+	now := s.now()
+	objectID := identity.ID(nodeID)
+	actor, networkID, err := s.authorizeAdministratorObjectResourceTx(ctx, tx, decision,
+		administratorNodeRevokePolicy, objectID, `SELECT network_id FROM nodes WHERE id=?`, idBytes(nodeID))
+	if err != nil {
+		return 0, err
+	}
+	var revoked sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT revoked_at FROM nodes WHERE id=?`, idBytes(nodeID)).Scan(&revoked); err != nil {
+		return 0, err
+	}
+	if revoked.Valid {
+		return 0, fmt.Errorf("%w: node already revoked", ErrConflict)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE nodes SET revoked_at=? WHERE id=? AND revoked_at IS NULL`, unix(now), idBytes(nodeID))
+	if err != nil {
+		return 0, err
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return 0, err
+		}
+		return 0, fmt.Errorf("%w: node concurrently revoked", ErrConflict)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE certificates SET revoked_at=?,revocation_reason=? WHERE node_id=? AND revoked_at IS NULL`, unix(now), reason, idBytes(nodeID)); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE overlay_addresses SET released_at=? WHERE node_id=? AND released_at IS NULL`, unix(now), idBytes(nodeID)); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE routes SET state='withdrawn',withdrawn_at=? WHERE node_id=? AND state IN ('advertised','approved')`, unix(now), idBytes(nodeID)); err != nil {
+		return 0, err
+	}
+	epoch, err := incrementEpochTx(ctx, tx, networkID)
+	if err != nil {
+		return 0, err
+	}
+	if err := auditActorTx(ctx, tx, &networkID, actor, "node.revoke", "node", &objectID,
+		fmt.Sprintf(`{"reason":%q}`, reason), now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit authorized node revocation: %w", err)
 	}
 	return epoch, nil
 }

@@ -34,6 +34,46 @@ sudo laneway control status
 The first command is fail-closed. The installer does not change host DNS,
 firewall rules, routes, interfaces, or sysctls.
 
+## Administrator access
+
+Create the first owner from a terminal on the control-plane host:
+
+```sh
+sudo laneway control administrator bootstrap --username owner
+```
+
+To recover an existing owner, supply its exact canonical username:
+
+```sh
+sudo laneway control administrator recover --username owner
+```
+
+Both commands require root and a controlling terminal. They read the new
+password and confirmation from `/dev/tty` with terminal echo disabled; stdin is
+not used. Passwords, one-use grants, and the root bearer are never accepted in
+argv or environment variables and are not printed. Neither command creates a
+browser session; sign in normally after it succeeds. Recovery atomically
+replaces the password, re-enables the owner, and revokes its prior sessions and
+all outstanding administrator recovery grants.
+
+Rotate the static root credential with:
+
+```sh
+sudo laneway control administrator root-token rotate
+```
+
+The command atomically replaces
+`generated/secrets/admin.token` below the deployment directory (normally
+`/opt/laneway`), recreates the controller, and
+verifies that the new credential is accepted and the old credential is
+rejected. Existing file-based automation continues to use the same
+`--admin-token-file` path. See the operations guide for interrupted-rotation
+recovery.
+
+The browser console supports password-backed administrator sessions only.
+OIDC/SAML SSO and SCIM are unavailable and must remain disabled. Never expose
+the static root bearer to a browser.
+
 ## Update
 
 ```sh
@@ -90,7 +130,11 @@ sudo /opt/laneway/laneway-control init
 
 Transfer the bundle and age identity through separate trusted channels. Restore
 refuses existing deployment state, malformed archives, checksum failures, and a
-running controller. Test this procedure before relying on the deployment.
+running controller. A bundle restores the root bearer captured when it was
+created. Immediately rotate that bearer after every restore, then create and
+store a fresh encrypted bundle. If suspected credential compromise prompted a
+rotation, quarantine and retire every pre-rotation bundle under the applicable
+retention policy. Test this procedure before relying on the deployment.
 
 ## Prepare keys on another host
 

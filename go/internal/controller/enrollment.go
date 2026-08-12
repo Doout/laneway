@@ -137,6 +137,90 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName, EnabledCapabilities: options.EnabledCapabilities}, nil
 }
 
+// AdministratorIssueEnrollmentTokenWithOptions revalidates the decision's
+// current durable authority before observing network existence or inserting
+// the one-time credential. Issuance and actor-aware audit are one transaction.
+func (s *Store) AdministratorIssueEnrollmentTokenWithOptions(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, label string, expiresAt time.Time, options EnrollmentTokenOptions) (EnrollmentToken, error) {
+	if label != strings.TrimSpace(label) || len(label) > MaxTokenLabelLength || strings.IndexByte(label, 0) >= 0 {
+		return EnrollmentToken{}, fmt.Errorf("%w: invalid enrollment token label", ErrInvalid)
+	}
+	expiresAt = expiresAt.UTC().Truncate(time.Second)
+	if options.Class == "" {
+		options.Class = EnrollmentClassDurable
+	}
+	if !options.Class.Valid() {
+		return EnrollmentToken{}, fmt.Errorf("%w: invalid enrollment class %q", ErrInvalid, options.Class)
+	}
+	if options.RequestedName != "" {
+		if err := validateName("requested enrollment", options.RequestedName); err != nil {
+			return EnrollmentToken{}, err
+		}
+	}
+	if options.EnabledCapabilities > math.MaxInt64 || protocol.Capability(options.EnabledCapabilities)&^NodePolicyCapabilities != 0 {
+		return EnrollmentToken{}, fmt.Errorf("%w: enrollment token contains unsupported policy capabilities", ErrInvalid)
+	}
+	if options.Class == EnrollmentClassEphemeral {
+		options.SessionLifetime = options.SessionLifetime.Truncate(time.Second)
+		if options.SessionLifetime < MinEphemeralLifetime || options.SessionLifetime > MaxEphemeralLifetime {
+			return EnrollmentToken{}, fmt.Errorf("%w: ephemeral lifetime must be in [%s,%s]", ErrInvalid, MinEphemeralLifetime, MaxEphemeralLifetime)
+		}
+	} else if options.SessionLifetime != 0 {
+		return EnrollmentToken{}, fmt.Errorf("%w: session lifetime is valid only for ephemeral enrollment", ErrInvalid)
+	}
+	raw := make([]byte, enrollmentSecretBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return EnrollmentToken{}, fmt.Errorf("generate enrollment token: %w", err)
+	}
+	secret := base64.RawURLEncoding.EncodeToString(raw)
+	digest := sha256.Sum256(raw)
+	id, err := newID()
+	if err != nil {
+		return EnrollmentToken{}, fmt.Errorf("generate enrollment token ID: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return EnrollmentToken{}, fmt.Errorf("begin authorized enrollment token issue: %w", err)
+	}
+	defer tx.Rollback()
+	actor, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorEnrollmentIssuePolicy, networkID)
+	if err != nil {
+		return EnrollmentToken{}, err
+	}
+	now := s.now()
+	if !expiresAt.After(now) || expiresAt.Sub(now) > MaxTokenLifetime {
+		return EnrollmentToken{}, fmt.Errorf("%w: token expiry must be in the next %s", ErrInvalid, MaxTokenLifetime)
+	}
+	var sessionLifetime any
+	if options.Class == EnrollmentClassEphemeral {
+		sessionLifetime = int64(options.SessionLifetime / time.Second)
+	}
+	var requestedName any
+	if options.RequestedName != "" {
+		requestedName = options.RequestedName
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_tokens
+		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName, int64(options.EnabledCapabilities)); err != nil {
+		if isConstraint(err) {
+			return EnrollmentToken{}, fmt.Errorf("%w: network does not exist", ErrNotFound)
+		}
+		return EnrollmentToken{}, fmt.Errorf("insert enrollment token: %w", err)
+	}
+	target := id
+	details := fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q,"enabled_capabilities":%d}`, options.Class, options.RequestedName, options.EnabledCapabilities)
+	if options.Class == EnrollmentClassEphemeral {
+		details = fmt.Sprintf(`{"enrollment_class":%q,"requested_name":%q,"session_lifetime_seconds":%d,"enabled_capabilities":%d}`, options.Class, options.RequestedName, int64(options.SessionLifetime/time.Second), options.EnabledCapabilities)
+	}
+	if err := auditActorTx(ctx, tx, &networkID, actor, "enrollment_token.issue", "enrollment_token", &target, details, now); err != nil {
+		return EnrollmentToken{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return EnrollmentToken{}, fmt.Errorf("commit authorized enrollment token: %w", err)
+	}
+	return EnrollmentToken{ID: id, NetworkID: networkID, Label: label, Secret: secret, ExpiresAt: expiresAt, CreatedAt: now,
+		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName, EnabledCapabilities: options.EnabledCapabilities}, nil
+}
+
 // EnrollNode atomically consumes a single-use bearer token, creates a node and
 // assigns its IPv4 and optional IPv6 overlay addresses. Any failure rolls back
 // all changes.
@@ -206,12 +290,12 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	if _, err := s.ExpireEphemeral(ctx, MaxExpireBatch); err != nil {
 		return Enrollment{}, fmt.Errorf("maintain ephemeral identities before enrollment: %w", err)
 	}
-	now := s.now()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Enrollment{}, fmt.Errorf("begin enrollment: %w", err)
 	}
 	defer tx.Rollback()
+	now := s.now()
 	var tokenIDBytes, networkIDBytes []byte
 	var expires int64
 	var consumed sql.NullInt64

@@ -54,6 +54,7 @@ const (
 	ActorNode             ActorKind = "node"
 	ActorAdministrator    ActorKind = "administrator"
 	ActorServicePrincipal ActorKind = "service_principal"
+	ActorRecoveryGrant    ActorKind = "recovery_grant"
 	ActorUnauthenticated  ActorKind = "unauthenticated"
 	ActorLegacyUnknown    ActorKind = "legacy_unknown"
 )
@@ -67,7 +68,7 @@ func (a Actor) Valid() bool {
 	switch a.Kind {
 	case ActorSystem, ActorUnauthenticated, ActorLegacyUnknown:
 		return a.ID == nil
-	case ActorNode, ActorAdministrator, ActorServicePrincipal:
+	case ActorNode, ActorAdministrator, ActorServicePrincipal, ActorRecoveryGrant:
 		return a.ID != nil && !a.ID.IsZero()
 	default:
 		return false
@@ -127,6 +128,7 @@ const (
 	OperationCertificateRead   Operation = "certificate.read"
 	OperationCertificateManage Operation = "certificate.revoke"
 	OperationAuditRead         Operation = "audit.read"
+	OperationAuditReadGlobal   Operation = "audit.read_global"
 	OperationPrincipalManage   Operation = "principal.manage"
 	OperationSessionManage     Operation = "session.manage_others"
 	OperationRecoveryManage    Operation = "recovery.manage"
@@ -158,10 +160,39 @@ var operationPolicies = map[Operation]operationPolicy{
 	OperationCertificateRead:   {owner: true, operator: true, auditor: true, networkScoped: true},
 	OperationCertificateManage: {owner: true, operator: true, networkScoped: true},
 	OperationAuditRead:         {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationAuditReadGlobal:   {owner: true},
 	OperationPrincipalManage:   {owner: true},
 	OperationSessionManage:     {owner: true},
-	OperationRecoveryManage:    {owner: true},
-	OperationRootTokenRotate:   {owner: true},
+	// Recovery-grant issuance and root-token rotation are stable root service-
+	// principal capabilities, not human-role permissions. Root subjects bypass
+	// this role matrix and are revalidated against the durable singleton.
+	OperationRecoveryManage:  {},
+	OperationRootTokenRotate: {},
+}
+
+// permissionOrder is the stable wire order used by session views. Keep it
+// exhaustive with operationPolicies so clients never need to duplicate the
+// controller's permission matrix.
+var permissionOrder = []Operation{
+	OperationNetworkList, OperationNetworkRead, OperationNetworkCreate,
+	OperationEnrollmentIssue, OperationBootstrapCreate, OperationNodeRead,
+	OperationNodeManage, OperationRouteRead, OperationRouteManage,
+	OperationACLRead, OperationACLManage, OperationRelayRead,
+	OperationRelayManage, OperationCertificateRead, OperationCertificateManage,
+	OperationAuditRead, OperationAuditReadGlobal, OperationPrincipalManage,
+	OperationSessionManage, OperationRecoveryManage, OperationRootTokenRotate,
+}
+
+// Permissions returns a deterministic, defensive list of every operation
+// granted to role by the authoritative matrix.
+func Permissions(role Role) []Operation {
+	permissions := make([]Operation, 0, len(permissionOrder))
+	for _, operation := range permissionOrder {
+		if RoleAllows(role, operation) {
+			permissions = append(permissions, operation)
+		}
+	}
+	return permissions
 }
 
 func (o Operation) Valid() bool {
@@ -174,6 +205,26 @@ func (o Operation) NetworkScoped() bool {
 	return ok && policy.networkScoped
 }
 
+// RoleAllows reports whether the authoritative permission matrix grants an
+// operation to a role. It deliberately ignores principal state and network
+// scope; callers that have a canonical network must use Authorize instead.
+func RoleAllows(role Role, operation Operation) bool {
+	policy, ok := operationPolicies[operation]
+	if !ok {
+		return false
+	}
+	switch role {
+	case RoleOwner:
+		return policy.owner
+	case RoleOperator:
+		return policy.operator
+	case RoleAuditor:
+		return policy.auditor
+	default:
+		return false
+	}
+}
+
 func Authorize(principal Principal, operation Operation, networkID *identity.NetworkID) bool {
 	if !principal.Enabled || !principal.Valid() {
 		return false
@@ -182,10 +233,7 @@ func Authorize(principal Principal, operation Operation, networkID *identity.Net
 	if !ok || (policy.networkScoped != (networkID != nil)) {
 		return false
 	}
-	allowed := principal.Role == RoleOwner && policy.owner ||
-		principal.Role == RoleOperator && policy.operator ||
-		principal.Role == RoleAuditor && policy.auditor
-	if !allowed {
+	if !RoleAllows(principal.Role, operation) {
 		return false
 	}
 	if networkID == nil || principal.Role == RoleOwner || principal.AllNetworks {

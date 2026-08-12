@@ -25,15 +25,24 @@ rollback_database_sha256=
 rollback_database_restore_target=
 rollback_database_restore_sha256=
 rollback_database_staging=
+root_token_rotation_dir=$state_dir/administrator-root-token-rotation
+root_token_rotation_prepare_prefix=$state_dir/.administrator-root-token-rotation.prepare
+root_token_rotation_cleanup_prefix=$state_dir/.administrator-root-token-rotation.cleanup
+root_token_rotation_id=
+root_token_rotation_phase=
+root_token_rotation_reaped_phase=
 
 usage() {
   cat >&2 <<'EOF'
-usage: laneway-control <init|user-token|invite|route|status|update|production-check|backup|restore|upgrade|rollback> [options]
+usage: laneway-control <init|user-token|invite|route|status|administrator|update|production-check|backup|restore|upgrade|rollback> [options]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
   invite --name NAME [--ephemeral|--remembered] [--docker --connector [--bootstrap]]
   route add --connector NAME --to IP_OR_PREFIX [--allow USER] [--mode nat|routed] [--metric NUMBER]
+  administrator bootstrap --username USERNAME
+  administrator recover --username USERNAME
+  administrator root-token rotate
   update
   backup [NAME.age]
   restore BUNDLE.age --identity AGE_IDENTITY_FILE
@@ -541,6 +550,605 @@ local_controller_endpoint() {
   printf 'https://%s:%s' "$bind_address" "$controller_port"
 }
 
+require_root_token_rotation_directory() {
+  directory=$1
+  if [ ! -d "$directory" ] || [ -L "$directory" ] || \
+    [ "$(stat -c '%a:%u:%g' "$directory")" != 700:0:0 ]; then
+    echo "unsafe administrator root-token rotation directory" >&2
+    return 1
+  fi
+}
+
+require_root_token_rotation_file() {
+  file=$1
+  if [ ! -f "$file" ] || [ -L "$file" ] || \
+    [ "$(stat -c '%a:%u:%g:%h' "$file")" != 600:0:0:1 ]; then
+    echo "unsafe administrator root-token rotation state" >&2
+    return 1
+  fi
+}
+
+require_root_token_value_file() {
+  file=$1
+  require_root_token_rotation_file "$file" || return 1
+  size=$(wc -c < "$file") || return 1
+  lines=$(wc -l < "$file") || return 1
+  if [ "$size" -lt 33 ] || [ "$size" -gt 4097 ] || [ "$lines" -ne 1 ] || \
+    ! LC_ALL=C grep -Eq '^[^[:space:]]+$' "$file"; then
+    echo "invalid protected administrator root-token value" >&2
+    return 1
+  fi
+}
+
+require_live_root_token() {
+  secrets_dir=$base_dir/generated/secrets
+  token_file=$secrets_dir/admin.token
+  for directory in "$base_dir/generated" "$secrets_dir" "$state_dir"; do
+    if [ ! -d "$directory" ] || [ -L "$directory" ] || \
+      [ "$(stat -c '%a:%u:%g' "$directory")" != 700:0:0 ]; then
+      echo "administrator lifecycle requires a root-owned mode-0700 deployment directory: $directory" >&2
+      return 1
+    fi
+  done
+  if [ ! -f "$token_file" ] || [ -L "$token_file" ] || \
+    [ "$(stat -c '%a:%u:%g:%h' "$token_file")" != 400:65532:65532:1 ]; then
+    echo "administrator root token is missing or unsafe" >&2
+    return 1
+  fi
+  token_size=$(wc -c < "$token_file") || return 1
+  token_lines=$(wc -l < "$token_file") || return 1
+  if [ "$token_size" -lt 33 ] || [ "$token_size" -gt 4097 ] || [ "$token_lines" -ne 1 ] || \
+    ! LC_ALL=C grep -Eq '^[^[:space:]]+$' "$token_file"; then
+    echo "administrator root token is invalid" >&2
+    return 1
+  fi
+}
+
+cleanup_root_token_rotation_staging() {
+  for staging in "$root_token_rotation_prepare_prefix".*; do
+    if [ ! -e "$staging" ] && [ ! -L "$staging" ]; then
+      continue
+    fi
+    require_root_token_rotation_directory "$staging" || \
+      die "inspect unsafe administrator rotation staging state before retrying"
+    find "$staging" -depth -delete || die "could not remove abandoned administrator rotation staging state"
+  done
+  sync -f "$state_dir" || die "could not make administrator rotation staging cleanup durable"
+}
+
+validate_root_token_rotation_tombstone() {
+  tombstone=$1
+  expected_phase=$2
+  temporary_state_count=0
+  temporary_state_bytes=0
+  require_root_token_rotation_directory "$tombstone" || return 1
+  for entry in "$tombstone"/* "$tombstone"/.[!.]* "$tombstone"/..?*; do
+    if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then
+      continue
+    fi
+    case "${entry##*/}" in
+      old.token|new.token)
+        require_root_token_value_file "$entry" || return 1
+        ;;
+      state)
+        require_root_token_rotation_file "$entry" || return 1
+        [ "$(wc -l < "$entry")" -eq 3 ] || return 1
+        [ "$(sed -n '1p' "$entry")" = version=1 ] || return 1
+        tombstone_rotation_id=$(sed -n 's/^rotation_id=//p' "$entry")
+        tombstone_phase=$(sed -n 's/^phase=//p' "$entry")
+        [ "${#tombstone_rotation_id}" -eq 32 ] || return 1
+        case "$tombstone_rotation_id" in *[!0-9a-f]*) return 1 ;; esac
+        [ "$tombstone_rotation_id" != 00000000000000000000000000000000 ] || return 1
+        [ "$tombstone_phase" = "$expected_phase" ] || return 1
+        ;;
+      .state.*)
+        temporary_state_suffix=${entry##*.state.}
+        [ "${#temporary_state_suffix}" -eq 6 ] || return 1
+        case "$temporary_state_suffix" in *[!A-Za-z0-9]*) return 1 ;; esac
+        require_root_token_rotation_file "$entry" || return 1
+        temporary_state_size=$(wc -c < "$entry")
+        [ "$temporary_state_size" -le 256 ] || return 1
+        temporary_state_count=$((temporary_state_count + 1))
+        temporary_state_bytes=$((temporary_state_bytes + temporary_state_size))
+        [ "$temporary_state_count" -le 256 ] || return 1
+        [ "$temporary_state_bytes" -le 65536 ] || return 1
+        ;;
+      *)
+        echo "unsafe administrator root-token cleanup state" >&2
+        return 1
+        ;;
+    esac
+  done
+  if [ -e "$tombstone/old.token" ] && [ -e "$tombstone/new.token" ] && \
+    cmp -s "$tombstone/old.token" "$tombstone/new.token"; then
+    return 1
+  fi
+}
+
+remove_root_token_tombstone_member() {
+  tombstone=$1
+  member=$2
+  if [ -e "$tombstone/$member" ] || [ -L "$tombstone/$member" ]; then
+    find "$tombstone/$member" -maxdepth 0 -delete || return 1
+    sync -f "$tombstone" || return 1
+  fi
+}
+
+cleanup_root_token_rotation_tombstone() {
+  tombstone=$1
+  phase=$2
+  validate_root_token_rotation_tombstone "$tombstone" "$phase" || return 1
+  case "$phase" in
+    complete_recorded) first_token=old.token; authoritative_token=new.token ;;
+    rolled_back) first_token=new.token; authoritative_token=old.token ;;
+    *) return 1 ;;
+  esac
+  remove_root_token_tombstone_member "$tombstone" "$first_token" || return 1
+  if [ "${LANEWAY_TEST_ROOT_TOKEN_CLEANUP_FAIL:-}" = mid-delete ]; then
+    return 1
+  fi
+  remove_root_token_tombstone_member "$tombstone" "$authoritative_token" || return 1
+  for temporary_state in "$tombstone"/.state.*; do
+    if [ ! -e "$temporary_state" ] && [ ! -L "$temporary_state" ]; then
+      continue
+    fi
+    remove_root_token_tombstone_member "$tombstone" "${temporary_state##*/}" || return 1
+  done
+  remove_root_token_tombstone_member "$tombstone" state || return 1
+  [ -z "$(find "$tombstone" -mindepth 1 -maxdepth 1 -print -quit)" ] || return 1
+  rmdir "$tombstone" || return 1
+  if ! sync -f "$state_dir"; then
+    echo "laneway-control: WARNING: administrator root-token cleanup completed, but parent-directory durability could not be confirmed" >&2
+  fi
+  return 0
+}
+
+reap_root_token_rotation_tombstone() {
+  root_token_rotation_reaped_phase=
+  tombstone=
+  tombstone_count=0
+  for candidate in "$root_token_rotation_cleanup_prefix".*; do
+    if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then
+      continue
+    fi
+    tombstone_count=$((tombstone_count + 1))
+    [ "$tombstone_count" -eq 1 ] || \
+      die "multiple administrator root-token cleanup states require inspection"
+    tombstone=$candidate
+  done
+  [ -n "$tombstone" ] || return 0
+  if [ -e "$root_token_rotation_dir" ] || [ -L "$root_token_rotation_dir" ]; then
+    die "active and completed administrator root-token rotation states coexist"
+  fi
+  tombstone_name=${tombstone##*/}
+  case "$tombstone_name" in
+    .administrator-root-token-rotation.cleanup.complete_recorded.*)
+      root_token_rotation_reaped_phase=complete_recorded
+      suffix=${tombstone_name#.administrator-root-token-rotation.cleanup.complete_recorded.}
+      ;;
+    .administrator-root-token-rotation.cleanup.rolled_back.*)
+      root_token_rotation_reaped_phase=rolled_back
+      suffix=${tombstone_name#.administrator-root-token-rotation.cleanup.rolled_back.}
+      ;;
+    *) die "administrator root-token cleanup state has an unsafe name" ;;
+  esac
+  [ "${#suffix}" -eq 32 ] || die "administrator root-token cleanup state has an unsafe name"
+  case "$suffix" in *[!0-9a-f]*) die "administrator root-token cleanup state has an unsafe name" ;; esac
+  [ "$suffix" != 00000000000000000000000000000000 ] || \
+    die "administrator root-token cleanup state has an unsafe name"
+  cleanup_root_token_rotation_tombstone "$tombstone" "$root_token_rotation_reaped_phase" || \
+    die "administrator root-token terminal state is safe, but protected cleanup remains"
+}
+
+cleanup_root_token_publish_staging() {
+  secrets_dir=$base_dir/generated/secrets
+  removed=false
+  for temporary in "$secrets_dir"/.admin.token.rotate.*; do
+    if [ ! -e "$temporary" ] && [ ! -L "$temporary" ]; then
+      continue
+    fi
+    if [ ! -f "$temporary" ] || [ -L "$temporary" ]; then
+      die "inspect unsafe administrator root-token publication residue before retrying"
+    fi
+    attributes=$(stat -c '%a:%u:%g:%h' "$temporary") || \
+      die "could not inspect administrator root-token publication residue"
+    case "$attributes" in
+      600:0:0:1|600:65532:65532:1|400:0:0:1)
+        # A killed install(1) can leave a bounded partial copy before its final
+        # mode/ownership transition. This root-only namespace and nlink check
+        # make deletion safe without parsing or printing credential bytes.
+        temporary_size=$(wc -c < "$temporary") || \
+          die "could not inspect administrator root-token publication residue"
+        [ "$temporary_size" -le 4097 ] || \
+          die "inspect unsafe administrator root-token publication residue before retrying"
+        ;;
+      400:65532:65532:1)
+        temporary_size=$(wc -c < "$temporary") || \
+          die "could not inspect administrator root-token publication residue"
+        temporary_lines=$(wc -l < "$temporary") || \
+          die "could not inspect administrator root-token publication residue"
+        if [ "$temporary_size" -lt 33 ] || [ "$temporary_size" -gt 4097 ] || \
+          [ "$temporary_lines" -ne 1 ] || ! LC_ALL=C grep -Eq '^[^[:space:]]+$' "$temporary"; then
+          die "inspect unsafe administrator root-token publication residue before retrying"
+        fi
+        ;;
+      *) die "inspect unsafe administrator root-token publication residue before retrying" ;;
+    esac
+    find "$temporary" -maxdepth 0 -delete || \
+      die "could not remove administrator root-token publication residue"
+    removed=true
+  done
+  [ "$removed" = false ] || sync -f "$secrets_dir" || \
+    die "could not make administrator root-token residue cleanup durable"
+}
+
+write_root_token_rotation_state_to() {
+  directory=$1
+  phase=$2
+  case "$phase" in
+    prepared|begin_recorded|new_published|new_started|committed_pending_complete|complete_recorded|rollback_required|old_published|old_started|rolled_back) ;;
+    *) echo "invalid administrator root-token rotation phase" >&2; return 1 ;;
+  esac
+  case "$root_token_rotation_id" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) echo "invalid administrator root-token rotation ID" >&2; return 1 ;;
+  esac
+  [ "$root_token_rotation_id" != 00000000000000000000000000000000 ] || {
+    echo "invalid administrator root-token rotation ID" >&2
+    return 1
+  }
+  require_root_token_rotation_directory "$directory" || return 1
+  state_temporary=$(mktemp "$directory/.state.XXXXXX") || return 1
+  if ! printf 'version=1\nrotation_id=%s\nphase=%s\n' "$root_token_rotation_id" "$phase" > "$state_temporary" || \
+    ! chmod 0600 "$state_temporary" || ! chown 0:0 "$state_temporary" || \
+    ! sync -f "$state_temporary" || ! mv "$state_temporary" "$directory/state" || \
+    ! sync -f "$directory"; then
+    find "$state_temporary" -maxdepth 0 -delete 2>/dev/null || true
+    echo "could not publish administrator root-token rotation state" >&2
+    return 1
+  fi
+  root_token_rotation_phase=$phase
+}
+
+write_root_token_rotation_state() {
+  write_root_token_rotation_state_to "$root_token_rotation_dir" "$1"
+}
+
+prepare_root_token_rotation() {
+  cleanup_root_token_rotation_staging
+  staging=$(mktemp -d "$root_token_rotation_prepare_prefix.XXXXXX") || \
+    die "could not create administrator rotation staging state"
+  chmod 0700 "$staging" || die "could not protect administrator rotation staging state"
+  chown 0:0 "$staging" || die "could not own administrator rotation staging state"
+  if ! install -m 0600 -o 0 -g 0 "$base_dir/generated/secrets/admin.token" "$staging/old.token"; then
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "could not preserve the current administrator root token"
+  fi
+  if ! admin controller administrator root-token generate --out-file "$staging/new.token" >/dev/null; then
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "could not generate a candidate administrator root token"
+  fi
+  require_root_token_value_file "$staging/old.token" || {
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "preserved administrator root token is unsafe"
+  }
+  require_root_token_value_file "$staging/new.token" || {
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "candidate administrator root token is unsafe"
+  }
+  if cmp -s "$staging/old.token" "$staging/new.token"; then
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "candidate administrator root token unexpectedly matches the current token"
+  fi
+  root_token_rotation_id=$(admin id) || {
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "could not create a root-token rotation correlation ID"
+  }
+  if [ "${#root_token_rotation_id}" -ne 32 ]; then
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "root-token rotation correlation ID is invalid"
+  fi
+  if [ "$root_token_rotation_id" = 00000000000000000000000000000000 ]; then
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "root-token rotation correlation ID is invalid"
+  fi
+  case "$root_token_rotation_id" in *[!0-9a-f]*)
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "root-token rotation correlation ID is invalid" ;;
+  esac
+  write_root_token_rotation_state_to "$staging" prepared || {
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "could not prepare administrator root-token rotation state"
+  }
+  for member in "$staging/old.token" "$staging/new.token" "$staging/state"; do
+    sync -f "$member" || {
+      find "$staging" -depth -delete 2>/dev/null || true
+      die "could not make administrator rotation state durable"
+    }
+  done
+  sync -f "$staging" || {
+    find "$staging" -depth -delete 2>/dev/null || true
+    die "could not make administrator rotation directory durable"
+  }
+  if ! mv "$staging" "$root_token_rotation_dir" || ! sync -f "$state_dir"; then
+    [ ! -e "$staging" ] || find "$staging" -depth -delete 2>/dev/null || true
+    die "could not publish administrator root-token rotation state"
+  fi
+  root_token_rotation_phase=prepared
+}
+
+load_root_token_rotation() {
+  require_root_token_rotation_directory "$root_token_rotation_dir" || \
+    die "administrator root-token rotation state is unsafe"
+  require_root_token_value_file "$root_token_rotation_dir/old.token" || \
+    die "preserved administrator root token is unsafe"
+  require_root_token_value_file "$root_token_rotation_dir/new.token" || \
+    die "candidate administrator root token is unsafe"
+  require_root_token_rotation_file "$root_token_rotation_dir/state" || \
+    die "administrator root-token rotation marker is unsafe"
+  [ "$(wc -l < "$root_token_rotation_dir/state")" -eq 3 ] || \
+    die "administrator root-token rotation marker is malformed"
+  [ "$(sed -n '1p' "$root_token_rotation_dir/state")" = version=1 ] || \
+    die "administrator root-token rotation marker version is unsupported"
+  root_token_rotation_id=$(sed -n 's/^rotation_id=//p' "$root_token_rotation_dir/state")
+  root_token_rotation_phase=$(sed -n 's/^phase=//p' "$root_token_rotation_dir/state")
+  [ "${#root_token_rotation_id}" -eq 32 ] || die "administrator root-token rotation ID is malformed"
+  case "$root_token_rotation_id" in *[!0-9a-f]*) die "administrator root-token rotation ID is malformed" ;; esac
+  [ "$root_token_rotation_id" != 00000000000000000000000000000000 ] || \
+    die "administrator root-token rotation ID is malformed"
+  case "$root_token_rotation_phase" in
+    prepared|begin_recorded|new_published|new_started|committed_pending_complete|complete_recorded|rollback_required|old_published|old_started|rolled_back) ;;
+    *) die "administrator root-token rotation phase is malformed" ;;
+  esac
+  cmp -s "$root_token_rotation_dir/old.token" "$root_token_rotation_dir/new.token" && \
+    die "administrator root-token rotation copies unexpectedly match"
+  return 0
+}
+
+root_token_remote() {
+  token_path=$1
+  shift
+  network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+  controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
+  server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
+  admin controller administrator root-token "$@" \
+    --controller "$(local_controller_endpoint)" \
+    --ca "$base_dir/generated/pki/ca.crt" --server-name "$server_name" \
+    --controller-network-id "$network_id" --controller-service-id "$controller_id" \
+    --admin-token-file "$token_path"
+}
+
+publish_root_token_copy() {
+  source=$1
+  require_root_token_value_file "$source" || return 1
+  secrets_dir=$base_dir/generated/secrets
+  temporary=$(mktemp "$secrets_dir/.admin.token.rotate.XXXXXX") || return 1
+  if ! install -m 0400 -o 65532 -g 65532 "$source" "$temporary" || \
+    ! sync -f "$temporary" || ! mv "$temporary" "$secrets_dir/admin.token" || \
+    ! sync -f "$secrets_dir"; then
+    find "$temporary" -maxdepth 0 -delete 2>/dev/null || true
+    echo "could not atomically publish administrator root token" >&2
+    return 1
+  fi
+  if [ ! -f "$secrets_dir/admin.token" ] || [ -L "$secrets_dir/admin.token" ] || \
+    [ "$(stat -c '%a:%u:%g:%h' "$secrets_dir/admin.token")" != 400:65532:65532:1 ] || \
+    ! cmp -s "$source" "$secrets_dir/admin.token"; then
+    echo "published administrator root token is unsafe" >&2
+    return 1
+  fi
+}
+
+recreate_controller_for_root_token() {
+  compose up -d --wait --force-recreate --no-deps controller
+}
+
+remove_root_token_rotation() {
+  require_root_token_rotation_directory "$root_token_rotation_dir" || return 1
+  case "$root_token_rotation_phase" in complete_recorded|rolled_back) ;; *) return 1 ;; esac
+  [ "${#root_token_rotation_id}" -eq 32 ] || return 1
+  case "$root_token_rotation_id" in *[!0-9a-f]*) return 1 ;; esac
+  [ "$root_token_rotation_id" != 00000000000000000000000000000000 ] || return 1
+  cleanup_tombstone=$root_token_rotation_cleanup_prefix.$root_token_rotation_phase.$root_token_rotation_id
+  [ ! -e "$cleanup_tombstone" ] && [ ! -L "$cleanup_tombstone" ] || return 1
+  mv "$root_token_rotation_dir" "$cleanup_tombstone" || return 1
+  sync -f "$state_dir" || return 1
+  [ "${LANEWAY_TEST_ROOT_TOKEN_CLEANUP_FAIL:-}" != post-rename ] || return 1
+  cleanup_root_token_rotation_tombstone "$cleanup_tombstone" "$root_token_rotation_phase"
+}
+
+rollback_root_token_rotation() {
+  write_root_token_rotation_state rollback_required || \
+    die "root-token rotation failed before commit and rollback state could not be recorded; protected recovery copies were retained"
+  if ! publish_root_token_copy "$root_token_rotation_dir/old.token"; then
+    die "root-token rotation failed before commit; automatic rollback could not restore the prior token; protected recovery copies were retained"
+  fi
+  write_root_token_rotation_state old_published || \
+    die "root-token rotation restored the prior token but could not record rollback progress; protected recovery copies were retained"
+  if ! recreate_controller_for_root_token; then
+    die "root-token rotation restored the prior token but could not recreate the controller; protected recovery copies were retained"
+  fi
+  write_root_token_rotation_state old_started || \
+    die "root-token rotation restored the prior controller but could not record rollback progress; protected recovery copies were retained"
+  if ! root_token_remote "$root_token_rotation_dir/old.token" authentication-check --expect accepted >/dev/null || \
+    ! root_token_remote "$root_token_rotation_dir/new.token" authentication-check --expect rejected >/dev/null; then
+    die "root-token rotation rollback could not prove the prior token authoritative; protected recovery copies were retained"
+  fi
+  write_root_token_rotation_state rolled_back || \
+    die "root-token rotation rolled back but could not record completion; protected recovery copies were retained"
+  remove_root_token_rotation || \
+    die "root-token rotation rolled back; protected lifecycle cleanup is still required"
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  die "root-token rotation failed before commit; the prior credential was restored and verified"
+}
+
+resume_root_token_rotation_rollback() {
+  case "$root_token_rotation_phase" in
+    rollback_required)
+      publish_root_token_copy "$root_token_rotation_dir/old.token" || \
+        die "administrator root-token rollback could not restore the prior token"
+      write_root_token_rotation_state old_published || die "administrator root-token rollback progress could not be recorded"
+      ;;
+    old_published)
+      recreate_controller_for_root_token || die "administrator root-token rollback could not recreate the controller"
+      write_root_token_rotation_state old_started || die "administrator root-token rollback progress could not be recorded"
+      ;;
+    old_started)
+      root_token_remote "$root_token_rotation_dir/old.token" authentication-check --expect accepted >/dev/null || \
+        die "administrator root-token rollback could not authenticate the prior token"
+      root_token_remote "$root_token_rotation_dir/new.token" authentication-check --expect rejected >/dev/null || \
+        die "administrator root-token rollback could not prove candidate rejection"
+      write_root_token_rotation_state rolled_back || die "administrator root-token rollback completion could not be recorded"
+      ;;
+    rolled_back)
+      remove_root_token_rotation || die "administrator root-token rollback cleanup is incomplete"
+      trap 'exit 129' HUP
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      die "previous administrator root-token rotation was rolled back and verified"
+      ;;
+  esac
+}
+
+run_root_token_rotation() {
+  require_live_root_token || die "administrator root-token rotation preflight failed"
+  cleanup_root_token_publish_staging
+  trap '' HUP INT TERM
+  reap_root_token_rotation_tombstone
+  case "$root_token_rotation_reaped_phase" in
+    complete_recorded)
+      trap 'exit 129' HUP
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      printf 'Administrator root token rotation was already complete; protected cleanup reconciled.\n'
+      return
+      ;;
+    rolled_back)
+      trap 'exit 129' HUP
+      trap 'exit 130' INT
+      trap 'exit 143' TERM
+      die "previous administrator root-token rotation was rolled back and verified; protected cleanup reconciled"
+      ;;
+  esac
+  resumed=false
+  if [ -e "$root_token_rotation_dir" ] || [ -L "$root_token_rotation_dir" ]; then
+    resumed=true
+    load_root_token_rotation
+  else
+    prepare_root_token_rotation
+  fi
+  while :; do
+    case "$root_token_rotation_phase" in
+      prepared)
+        cmp -s "$root_token_rotation_dir/old.token" "$base_dir/generated/secrets/admin.token" || \
+          die "prepared administrator rotation no longer matches the live token"
+        if ! root_token_remote "$root_token_rotation_dir/old.token" rotation-begin \
+          --rotation-id "$root_token_rotation_id" >/dev/null; then
+          die "administrator root-token rotation begin was not confirmed; live credential is unchanged and protected state was retained"
+        fi
+        write_root_token_rotation_state begin_recorded || \
+          die "administrator root-token rotation begin committed but progress could not be recorded; protected state was retained"
+        ;;
+      begin_recorded)
+        if cmp -s "$root_token_rotation_dir/old.token" "$base_dir/generated/secrets/admin.token"; then
+          publish_root_token_copy "$root_token_rotation_dir/new.token" || rollback_root_token_rotation
+        elif ! cmp -s "$root_token_rotation_dir/new.token" "$base_dir/generated/secrets/admin.token"; then
+          die "live administrator root token matches neither protected rotation copy"
+        fi
+        write_root_token_rotation_state new_published || rollback_root_token_rotation
+        ;;
+      new_published)
+        cmp -s "$root_token_rotation_dir/new.token" "$base_dir/generated/secrets/admin.token" || \
+          rollback_root_token_rotation
+        recreate_controller_for_root_token || rollback_root_token_rotation
+        write_root_token_rotation_state new_started || rollback_root_token_rotation
+        ;;
+      new_started)
+        if ! root_token_remote "$root_token_rotation_dir/new.token" authentication-check --expect accepted >/dev/null || \
+          ! root_token_remote "$root_token_rotation_dir/old.token" authentication-check --expect rejected >/dev/null; then
+          rollback_root_token_rotation
+        fi
+        write_root_token_rotation_state committed_pending_complete || \
+          die "administrator root-token authority changed but commit state could not be recorded; protected state was retained"
+        ;;
+      committed_pending_complete)
+        if [ "$resumed" = true ]; then
+          publish_root_token_copy "$root_token_rotation_dir/new.token" || \
+            die "committed administrator root token could not be republished; rollback is forbidden"
+          recreate_controller_for_root_token || \
+            die "committed administrator root token could not recreate the controller; rollback is forbidden"
+          root_token_remote "$root_token_rotation_dir/new.token" authentication-check --expect accepted >/dev/null || \
+            die "committed administrator root token could not be authenticated; rollback is forbidden"
+          root_token_remote "$root_token_rotation_dir/old.token" authentication-check --expect rejected >/dev/null || \
+            die "prior administrator root token rejection could not be reconfirmed; rollback is forbidden"
+        fi
+        if ! root_token_remote "$root_token_rotation_dir/new.token" rotation-complete \
+          --rotation-id "$root_token_rotation_id" >/dev/null; then
+          die "administrator root-token rotation committed; the new credential remains authoritative, but completion audit reconciliation is required"
+        fi
+        write_root_token_rotation_state complete_recorded || \
+          die "administrator root-token rotation committed and completion was recorded; protected cleanup remains"
+        ;;
+      complete_recorded)
+        remove_root_token_rotation || \
+          die "administrator root-token rotation completed; protected lifecycle cleanup remains"
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        printf 'Administrator root token rotated; file-based automation continues to use generated/secrets/admin.token.\n'
+        return
+        ;;
+      rollback_required|old_published|old_started|rolled_back)
+        resume_root_token_rotation_rollback
+        ;;
+    esac
+  done
+}
+
+require_administrator_username() {
+  username=$1
+  if [ "${#username}" -lt 3 ] || [ "${#username}" -gt 64 ] || \
+    [ "$(printf '%s\n' "$username" | wc -l)" -ne 1 ]; then
+    die "administrator lifecycle requires a canonical lowercase --username"
+  fi
+  if ! LC_ALL=C printf '%s\n' "$username" | grep -Eq '^[a-z0-9]([a-z0-9._-]*[a-z0-9])$'; then
+    die "administrator lifecycle requires a canonical lowercase --username"
+  fi
+}
+
+run_administrator_password_lifecycle() {
+  action=$1
+  username=$2
+  require_live_root_token || die "administrator lifecycle preflight failed"
+  network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+  controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
+  server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
+  if ! admin controller administrator "$action" --username "$username" \
+    --controller "$(local_controller_endpoint)" \
+    --ca "$base_dir/generated/pki/ca.crt" --server-name "$server_name" \
+    --controller-network-id "$network_id" --controller-service-id "$controller_id" \
+    --admin-token-file "$base_dir/generated/secrets/admin.token"; then
+    die "administrator $action did not complete"
+  fi
+  printf 'Administrator %s completed; sign in normally with the new password.\n' "$action"
+}
+
+run_administrator() {
+  case "${1:-} ${2:-}" in
+    'bootstrap --username'|'recover --username')
+      [ "$#" -eq 3 ] || die "administrator ${1:-} requires --username USERNAME"
+      require_administrator_username "$3"
+      run_administrator_password_lifecycle "$1" "$3"
+      ;;
+    'root-token rotate')
+      [ "$#" -eq 2 ] || die "administrator root-token rotate accepts no arguments"
+      run_root_token_rotation
+      ;;
+    *) die "administrator requires bootstrap --username USERNAME, recover --username USERNAME, or root-token rotate" ;;
+  esac
+}
+
 service_health() {
   service=$1; required=$2
   container=$(compose --profile exit-node ps -q "$service")
@@ -747,7 +1355,13 @@ emit_docker_connector_bootstrap() {
 	bootstrap_dir=$(mktemp -d "$state_dir/.connector-bootstrap.XXXXXX") || die "could not create protected bootstrap workspace"
 	chmod 0700 "$bootstrap_dir"
 	cleanup_bootstrap() { [ ! -e "$bootstrap_dir" ] || find "$bootstrap_dir" -depth -delete; }
-	trap cleanup_bootstrap EXIT HUP INT TERM
+	# Preserve the outer lifecycle lock cleanup while this nested protected
+	# workspace is live. Clearing these traps would strand operator.lock after a
+	# successful bootstrap or an injected bootstrap failure.
+	trap 'cleanup_bootstrap; release_lock' EXIT
+	trap 'cleanup_bootstrap; exit 129' HUP
+	trap 'cleanup_bootstrap; exit 130' INT
+	trap 'cleanup_bootstrap; exit 143' TERM
 	envelope_file=$bootstrap_dir/envelope
 	key=$(printf '%s\n' "$setup_token" | admin connector bootstrap-seal --out "$envelope_file" --expires-at "$expires_at")
 	unset setup_token enrollment_token
@@ -768,7 +1382,10 @@ emit_docker_connector_bootstrap() {
 	public_path=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"public_path":[[:space:]]*"\([^"]*\)"[,]*$/\1/p')
 	printf '%s\n' "$public_path" | grep -Eq '^/\.well-known/laneway/bootstrap/[A-Za-z0-9_-]{43}$' || die "controller returned no valid bootstrap path"
 	cleanup_bootstrap
-	trap - EXIT HUP INT TERM
+	trap release_lock EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 
 	public_port=$(read_setting "$env_file" LANEWAY_RELAY_TCP_PORT)
 	public_authority=$server_name
@@ -1225,10 +1842,15 @@ run_init() {
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 case "$command" in
   init) acquire_lock; run_init "$@" ;;
-  user-token|api-token) run_user_token "$@" ;;
-  invite) run_invite "$@" ;;
-  route) run_route "$@" ;;
+  user-token|api-token) acquire_lock; run_user_token "$@" ;;
+  invite) acquire_lock; run_invite "$@" ;;
+  route) acquire_lock; run_route "$@" ;;
   status) run_status "$@" ;;
+  administrator)
+    [ "$(id -u)" -eq 0 ] || die "administrator lifecycle commands must run as root"
+    acquire_lock
+    run_administrator "$@"
+    ;;
   update) run_update "$@" ;;
   production-check) acquire_lock; run_production_check "$@" ;;
   backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;

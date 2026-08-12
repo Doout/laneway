@@ -43,6 +43,10 @@ func newFixture(t *testing.T, maxBody int64, nodeAuth NodeAuthorizer) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authState, err := store.AdministratorAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = store.Close() })
 	network, err := store.CreateNetwork(context.Background(), "test", netip.MustParsePrefix("10.44.0.0/24"))
 	if err != nil {
@@ -62,7 +66,7 @@ func newFixture(t *testing.T, maxBody int64, nodeAuth NodeAuthorizer) fixture {
 			}
 			return adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID), nil
 		},
-		NodeAuthorizer: nodeAuth,
+		AccessController: accessControllerStub{rootID: authState.RootServicePrincipalID}, NodeAuthorizer: nodeAuth,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +89,7 @@ func TestOperationalMetricsClassifySuccessMalformedAndAuthorizationFailure(t *te
 		t.Fatalf("missing status = %d", missing.Code)
 	}
 
-	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) { return adminauth.Actor{}, ErrUnauthenticated }
+	f.service.access = accessControllerErrorStub{err: ErrUnauthenticated}
 	denied := httptest.NewRecorder()
 	f.service.Handler().ServeHTTP(denied, httptest.NewRequest(http.MethodPost, "/v1/admin/enrollment-tokens", nil))
 	if denied.Code != http.StatusUnauthorized {
@@ -684,6 +688,10 @@ func TestEnrollmentAndRenewalReturnIntermediateChainForRootTrust(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	authState, err := store.AdministratorAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	var authenticated identity.NodeIdentity
 	service, err := New(Options{
 		Store: store, CACertificate: issuer, CAKey: issuerMaterial.PrivateKey,
@@ -695,7 +703,8 @@ func TestEnrollmentAndRenewalReturnIntermediateChainForRootTrust(t *testing.T) {
 			}
 			return adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID), nil
 		},
-		NodeAuthorizer: func(*http.Request) (identity.NodeIdentity, error) { return authenticated, nil },
+		AccessController: accessControllerStub{rootID: authState.RootServicePrincipalID},
+		NodeAuthorizer:   func(*http.Request) (identity.NodeIdentity, error) { return authenticated, nil },
 	})
 	if err != nil {
 		t.Fatal(err)

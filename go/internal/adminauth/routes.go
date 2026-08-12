@@ -21,6 +21,18 @@ type RoutePolicy struct {
 }
 
 var managementRoutes = []RoutePolicy{
+	{http.MethodPost, "/v1/admin/auth/bootstrap-grants", OperationRecoveryManage, ScopeGlobal, true},
+	{http.MethodPost, "/v1/admin/auth/root-token-rotations/{rotation_id}/begin", OperationRootTokenRotate, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/auth/root-token-rotations/{rotation_id}/complete", OperationRootTokenRotate, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/administrators", OperationPrincipalManage, ScopeGlobal, true},
+	{http.MethodGet, "/v1/admin/administrators", OperationPrincipalManage, ScopeGlobal, false},
+	{http.MethodGet, "/v1/admin/administrators/{principal_id}", OperationPrincipalManage, ScopeObject, false},
+	{http.MethodPatch, "/v1/admin/administrators/{principal_id}", OperationPrincipalManage, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/administrators/{principal_id}/password", OperationPrincipalManage, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/administrators/{principal_id}/recovery-grants", OperationRecoveryManage, ScopeObject, true},
+	{http.MethodGet, "/v1/admin/administrators/{principal_id}/sessions", OperationSessionManage, ScopeObject, false},
+	{http.MethodPost, "/v1/admin/sessions/{session_id}/revoke", OperationSessionManage, ScopeObject, true},
+	{http.MethodGet, "/v1/admin/audit", OperationAuditReadGlobal, ScopeGlobal, false},
 	{http.MethodPost, "/v1/admin/enrollment-tokens", OperationEnrollmentIssue, ScopeBody, true},
 	{http.MethodPost, "/v1/admin/bootstrap-bundles", OperationBootstrapCreate, ScopeGlobal, true},
 	{http.MethodPost, "/v1/admin/networks", OperationNetworkCreate, ScopeGlobal, true},
@@ -69,8 +81,12 @@ func (p RoutePolicy) Valid() bool {
 	switch p.ScopeSource {
 	case ScopeGlobal, ScopeFiltered:
 		return !p.Operation.NetworkScoped()
-	case ScopePath, ScopeBody, ScopeObject:
+	case ScopePath, ScopeBody:
 		return p.Operation.NetworkScoped()
+	case ScopeObject:
+		return p.Operation.NetworkScoped() || p.Operation == OperationPrincipalManage ||
+			p.Operation == OperationSessionManage || p.Operation == OperationRecoveryManage ||
+			p.Operation == OperationRootTokenRotate
 	default:
 		return false
 	}

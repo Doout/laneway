@@ -7,7 +7,15 @@ export default defineConfig(({ command, mode }) => {
   }
 
   return {
-    plugins: [react()],
+    plugins: [{
+      name: 'laneway-mode-app',
+      enforce: 'pre',
+      resolveId(source, importer) {
+        if (source === './App' && importer?.endsWith('/src/main.tsx')) {
+          return new URL(mode === 'live' ? './src/App.live.tsx' : './src/App.tsx', import.meta.url).pathname
+        }
+      },
+    }, react()],
     test: {
       environment: 'jsdom',
       setupFiles: './src/test/setup.ts',
