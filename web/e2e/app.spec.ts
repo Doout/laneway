@@ -1,33 +1,7 @@
 import { expect, test } from '@playwright/test'
+import { approvedScreens } from './approved-screens'
 
-const screens = [
-  ['/sign-in', 'Sign in to Laneway'],
-  ['/overview', 'Overview'],
-  ['/nodes', '5 Nodes'],
-  ['/nodes/new', 'Add node'],
-  ['/nodes/new/token', 'Node token issued'],
-  ['/nodes/atlas-gateway', 'Node detail'],
-  ['/nodes/atlas-gateway/capabilities', 'Edit capabilities'],
-  ['/nodes/atlas-gateway/revoke', 'Revoke atlas-gateway?'],
-  ['/users', 'Users'],
-  ['/users/new', 'Issue user access'],
-  ['/users/new/token', 'User token issued'],
-  ['/users/platform-operator', 'User enrollment detail'],
-  ['/routes', 'Routes'],
-  ['/routes/new', 'Create route'],
-  ['/routes/rte_01J8KUBEAPI/approve', 'Review Kubernetes API'],
-  ['/routes/rte_01J8PROD16', 'Production services'],
-  ['/access', 'Access rules'],
-  ['/access/new', 'Create access rule'],
-  ['/access/acl_01J8PRODOPS', 'Production operators'],
-  ['/infrastructure', 'Infrastructure'],
-  ['/infrastructure/networks/production', 'Production'],
-  ['/infrastructure/relays/new', 'Register relay'],
-  ['/security', 'Security'],
-  ['/audit', 'Audit events'],
-] as const
-
-for (const [path, heading] of screens) {
+for (const [path, heading] of approvedScreens) {
   test(`${path} renders its approved screen`, async ({ page }) => {
     const pageErrors: string[] = []
     page.on('pageerror', error => pageErrors.push(error.message))

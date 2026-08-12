@@ -3,11 +3,18 @@ set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 workflow=$repo_dir/.github/workflows/release.yml
+ci_workflow=$repo_dir/.github/workflows/ci.yml
+dockerignore=$repo_dir/.dockerignore
+gitignore=$repo_dir/.gitignore
+compose_gitignore=$repo_dir/deploy/compose/.gitignore
 dockerfile=$repo_dir/deploy/containers/Dockerfile
 connector_dockerfile=$repo_dir/deploy/containers/Dockerfile.connector
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 connector_updater=$repo_dir/deploy/containers/update-connector.sh
 compose_file=$repo_dir/deploy/compose/compose.yaml
+compose_dev_file=$repo_dir/deploy/compose/compose.dev.yaml
+docker_exit_integration=$repo_dir/integration/docker-exit-node.sh
+console_image_boundary=$repo_dir/integration/console-image-boundary.sh
 lane_workflow=$repo_dir/deploy/compose/laneway-control
 prepare_workflow=$repo_dir/deploy/compose/prepare.sh
 recovery_workflow=$repo_dir/deploy/compose/recovery.sh
@@ -17,12 +24,52 @@ upgrader=$repo_dir/deploy/compose/upgrade-control-plane.sh
 package_workflow=$repo_dir/scripts/package.sh
 package_installer=$repo_dir/scripts/install-package.sh
 client_installer=$repo_dir/install.sh
+web_package=$repo_dir/web/package.json
+vite_config=$repo_dir/web/vite.config.ts
+playwright_config=$repo_dir/web/playwright.config.ts
+control_plane=$repo_dir/web/src/lib/control-plane.tsx
 
 require() {
   pattern=$1
   path=$2
   if ! grep -F -- "$pattern" "$path" >/dev/null; then
     echo "release contract is missing '$pattern' in ${path#"$repo_dir"/}" >&2
+    exit 1
+  fi
+}
+
+require_line() {
+  pattern=$1
+  path=$2
+  if ! grep -Fx -- "$pattern" "$path" >/dev/null; then
+    echo "release contract is missing exact line '$pattern' in ${path#"$repo_dir"/}" >&2
+    exit 1
+  fi
+}
+
+require_release_target() {
+  image=$1
+  expected=$2
+  actual=$(awk -v image="$image" '
+    $1 == "image:" { active = ($2 == image); next }
+    active && $1 == "target:" { print $2; exit }
+  ' "$workflow")
+  if [ "$actual" != "$expected" ]; then
+    echo "release image $image selects Docker target ${actual:-none}, want $expected" >&2
+    exit 1
+  fi
+}
+
+require_compose_target() {
+  service=$1
+  target=$2
+  if ! awk -v service="  $service:" -v target="      target: $target" '
+    $0 == service { active = 1; next }
+    active && $0 ~ /^  [^[:space:]][^:]*:[[:space:]]*$/ { active = 0 }
+    active && $0 == target { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$compose_dev_file"; then
+    echo "development Compose service $service does not select Docker target $target" >&2
     exit 1
   fi
 }
@@ -44,6 +91,18 @@ for image in \
 do
   require "image: $image" "$workflow"
 done
+require_release_target ghcr.io/doout/laneway-controller controller
+require_release_target ghcr.io/doout/laneway-relay relay
+require_release_target ghcr.io/doout/laneway-admin admin
+if grep -F 'BINARY=' "$workflow" >/dev/null || grep -F 'matrix.binary' "$workflow" >/dev/null; then
+  echo "release images must use fixed Docker targets instead of a free-form binary argument" >&2
+  exit 1
+fi
+release_target_expression="target: \${{ matrix.target }}"
+if [ "$(grep -Fc "$release_target_expression" "$workflow")" -ne 2 ]; then
+  echo "release scan and publication builds must both select the matrix Docker target" >&2
+  exit 1
+fi
 
 for value in 'production-check' 'production-verified' 'cosign_command' 'compose_with_env' 'compose_file_with_env' 'backup_recovery' 'database was not rolled back' 'run_update' 'releases/latest' 'verify-blob'; do
   require "$value" "$lane_workflow"
@@ -128,6 +187,59 @@ for path in "$dockerfile" "$connector_dockerfile" "$exit_dockerfile"; do
   require "CGO_ENABLED=0 GOOS=\${TARGETOS} GOARCH=\${TARGETARCH}" "$path"
   require "laneway.dev/laneway/internal/buildinfo.Version=\${VERSION}" "$path"
 done
+require 'RUN pnpm build:live' "$dockerfile"
+require 'FROM scratch AS runtime' "$dockerfile"
+require 'FROM runtime AS controller' "$dockerfile"
+require 'FROM runtime AS relay' "$dockerfile"
+require 'FROM runtime AS admin' "$dockerfile"
+require 'FROM build-base AS build-controller' "$dockerfile"
+require 'FROM build-base AS build-relay' "$dockerfile"
+require 'FROM build-base AS build-admin' "$dockerfile"
+require "test \"\${BINARY}\" = laneway-controller" "$dockerfile"
+require "test \"\${BINARY}\" = laneway-relay" "$dockerfile"
+require "test \"\${BINARY}\" = laneway" "$dockerfile"
+require '-o /out/laneway ./cmd/laneway-controller' "$dockerfile"
+require '-o /out/laneway ./cmd/laneway-relay' "$dockerfile"
+require '-o /out/laneway ./cmd/laneway' "$dockerfile"
+console_copy_stage=$(awk '/^FROM / { stage = $NF } /^COPY --from=console / { print stage }' "$dockerfile")
+if [ "$console_copy_stage" != controller ]; then
+  echo "console assets must be copied exactly once and only by the controller target" >&2
+  exit 1
+fi
+if [ "$(awk '/^FROM / { stage = $NF } END { print stage }' "$dockerfile")" != relay ]; then
+  echo "the shared Dockerfile default target must preserve the historical relay image" >&2
+  exit 1
+fi
+require_compose_target controller controller
+require_compose_target relay relay
+require_compose_target admin admin
+if grep -F 'BINARY:' "$compose_dev_file" >/dev/null ||
+  grep -F -- '--build-arg BINARY=' "$docker_exit_integration" >/dev/null ||
+  grep -F -- '--build-arg BINARY=' "$ci_workflow" >/dev/null; then
+  echo "development and integration image builds must use fixed Docker targets" >&2
+  exit 1
+fi
+require '--target controller' "$docker_exit_integration"
+require '--target relay' "$docker_exit_integration"
+require '--target admin' "$docker_exit_integration"
+require '"dev": "vite --mode demo"' "$web_package"
+require '"build": "vite build"' "$web_package"
+require '"build:live": "tsc -b && vite build --mode live"' "$web_package"
+require '"build:demo": "tsc -b && vite build --mode demo"' "$web_package"
+require "mode !== 'live' && mode !== 'demo'" "$vite_config"
+require 'parseConsoleBuildMode(import.meta.env.MODE)' "$control_plane"
+require "sourcemap: mode === 'demo'" "$vite_config"
+require "command: 'corepack pnpm preview --host 127.0.0.1'" "$playwright_config"
+require 'reuseExistingServer: false' "$playwright_config"
+for value in '.laneway' '**/*.key' '**/*.pem' '**/laneway-recovery.identity' 'laneway-recovery-kit-*' 'web/.env*' 'deploy/compose/.env' 'deploy/compose/generated'; do
+  require_line "$value" "$dockerignore"
+done
+for value in '.laneway/' '*.key' '*.pem' '**/laneway-recovery.identity' 'laneway-recovery-kit-*/' 'web/.env*' '!web/.env.example' 'deploy/compose/.env'; do
+  require_line "$value" "$gitignore"
+done
+for value in 'generated/backups/' 'generated/config/*.toml' 'generated/pki/' 'generated/secrets/' 'generated/lifecycle/' 'generated/recovery/' 'generated/.prepare.*' 'generated/.recovery-backup.*' '!generated/config/*.example'; do
+  require_line "$value" "$compose_gitignore"
+done
 require 'FROM scratch' "$connector_dockerfile"
 require 'HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6' "$connector_dockerfile"
 require 'CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
@@ -152,11 +264,26 @@ require 'LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/lane-edge:LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST' "$lane_workflow"
-require 'deploy/containers/Dockerfile.connector' "$repo_dir/.github/workflows/ci.yml"
-require '! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true' "$repo_dir/.github/workflows/ci.yml"
-require './integration/connector-bootstrap.sh lane-edge:ci' "$repo_dir/.github/workflows/ci.yml"
-require './integration/connector-upgrade.sh lane-edge:ci' "$repo_dir/.github/workflows/ci.yml"
-require './integration/connector-updater.sh' "$repo_dir/.github/workflows/ci.yml"
+require 'deploy/containers/Dockerfile.connector' "$ci_workflow"
+require 'if corepack pnpm build; then' "$ci_workflow"
+require 'corepack pnpm build:demo' "$ci_workflow"
+require 'corepack pnpm build:live' "$ci_workflow"
+require 'LANEWAY_EXPECTED_BUILD_MODE=demo corepack pnpm test:e2e' "$ci_workflow"
+require 'LANEWAY_EXPECTED_BUILD_MODE=live corepack pnpm exec playwright test e2e/build-mode.spec.ts' "$ci_workflow"
+require '--target controller --build-arg VERSION=ci' "$ci_workflow"
+require '--target relay --build-arg VERSION=ci' "$ci_workflow"
+require '--target admin --build-arg VERSION=ci' "$ci_workflow"
+require 'docker run --rm --network none laneway-controller:ci -version' "$ci_workflow"
+require 'docker run --rm --network none laneway-relay:ci -version' "$ci_workflow"
+require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci' "$ci_workflow"
+require '! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true' "$ci_workflow"
+require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
+require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
+require './integration/connector-updater.sh' "$ci_workflow"
+if [ ! -x "$console_image_boundary" ]; then
+  echo "console image boundary integration check must be executable" >&2
+  exit 1
+fi
 for value in \
   'releases/latest' \
   'checksums.sigstore.json' \

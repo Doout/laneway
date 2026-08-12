@@ -16,4 +16,16 @@ corepack pnpm install
 corepack pnpm dev
 ```
 
-The production build is created with `corepack pnpm build` and written to `dist/`.
+The development server always starts in the deliberate demo mode.
+
+Builds must select their data boundary explicitly:
+
+```sh
+# Controller-hosted production artifact. Never falls back to demo records.
+corepack pnpm build:live
+
+# Deliberate review artifact with a visible demo-data notice.
+corepack pnpm build:demo
+```
+
+Both commands write to `dist/`. The unscoped `corepack pnpm build` command fails so a production artifact cannot silently inherit demo behavior.

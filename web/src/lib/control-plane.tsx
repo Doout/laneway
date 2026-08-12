@@ -122,12 +122,17 @@ const emptyInventory: ControllerInventory = {
 const ControlPlaneContext = createContext<ControlPlaneContextValue | null>(null)
 
 export function controllerOrigin() {
-  const configured = (import.meta.env.VITE_LANEWAY_API_ORIGIN as string | undefined)?.trim()
+  const configured = import.meta.env.VITE_LANEWAY_API_ORIGIN?.trim()
   return configured ? configured.replace(/\/+$/, '') : window.location.origin
 }
 
+export function parseConsoleBuildMode(value: unknown): 'live' | 'demo' {
+  if (value === 'live' || value === 'demo') return value
+  throw new Error(`Unsupported console build mode: ${String(value)}`)
+}
+
 function isLiveMode() {
-  return import.meta.env.VITE_LANEWAY_LIVE === 'true'
+  return parseConsoleBuildMode(import.meta.env.MODE) === 'live'
 }
 
 async function responseError(response: Response) {

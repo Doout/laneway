@@ -73,8 +73,8 @@ function isValidDnsHost(value: string) {
 }
 
 function isValidRelayEndpoint(value: string) {
-  let host = ''
-  let portText = ''
+  let host: string
+  let portText: string
   let bracketed = false
   if (value.startsWith('[')) {
     const match = value.match(/^\[([^\]]+)\]:([0-9]+)$/)
@@ -200,6 +200,7 @@ function RelayRegistrationPage() {
             </div>
           ) : (
             <FormStack onSubmit={handleSubmit}>
+              {live ? <Callout>Pre-provision and start the relay. Register its certificate service ID and reachable host:port here.</Callout> : null}
               <div className="infra-field-pair"><Field label="Relay name" error={nameError}><input aria-invalid={Boolean(nameError)} maxLength={100} onChange={(event) => setName(event.target.value)} value={name} /></Field><Field label="Advertised endpoint" error={endpointError}><input aria-invalid={Boolean(endpointError)} onChange={(event) => setEndpoint(event.target.value)} value={endpoint} /></Field></div>
               <Field label="Network scope"><select disabled={!registrationNetworks.length} onChange={(event) => setNetworkId(event.target.value)} value={networkId}>{registrationNetworks.map((network) => <option key={network.id} value={network.id}>{network.name}</option>)}{!live ? <option value="all">All networks</option> : null}</select></Field>
               {live ? <Field label="Relay service ID" hint="Existing service ID for this relay." error={serviceIdError}><input aria-invalid={Boolean(serviceIdError)} autoCapitalize="none" maxLength={32} onChange={(event) => setServiceId(event.target.value)} spellCheck={false} value={serviceId} /></Field> : null}

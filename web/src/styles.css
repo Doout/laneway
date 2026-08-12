@@ -114,7 +114,7 @@ kbd { font-family: inherit; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding: 8px 14px; border: 1px solid transparent; border-radius: 7px; font-weight: 600; transition: color 160ms ease-out, background-color 160ms ease-out, border-color 160ms ease-out, transform 160ms ease-out; }
 .button:active { transform: translateY(1px); }
 .button:disabled { opacity: .42; transform: none; }
-.button--primary { color: #f7fbff; background: var(--primary); }
+.button--primary { color: #07111e; background: var(--primary); }
 .button--primary:hover:not(:disabled) { background: var(--primary-hover); }
 .button--secondary { color: var(--text); background: var(--surface-raised); border-color: var(--border-strong); }
 .button--secondary:hover:not(:disabled) { background: var(--surface-hover); border-color: #48627e; }

@@ -127,7 +127,7 @@ export function InfrastructurePage() {
       <div className={`infra-topology-grid${live ? ' is-live' : ''}`}>
         {!live ? <section className="infra-panel infra-topology-panel" aria-labelledby="infra-topology-title">
           <div className="infra-panel-head"><div><h2 id="infra-topology-title">Network topology</h2></div></div>
-          <div className="infra-topology" role="img" aria-label="Network and relay topology">
+          <div className="infra-topology" role="group" aria-label="Network and relay topology">
             <svg viewBox="0 0 760 270" preserveAspectRatio="none" aria-hidden="true">
               <path className="infra-topology-path is-active" d="M105 135 C220 42 335 45 430 112 S602 196 665 135" />
               <path className="infra-topology-path" d="M105 135 C228 224 348 222 430 159 S590 64 665 135" />

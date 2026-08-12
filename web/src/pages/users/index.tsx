@@ -24,6 +24,7 @@ import {
 } from '../../components/ui'
 import { type UserEnrollmentRecord } from '../../lib/demo-data'
 import { controllerOrigin, useControlPlane } from '../../lib/control-plane'
+import { userEnrollmentCommand } from '../../lib/enrollment-commands'
 import { controllerUsers } from '../../lib/live-records'
 import { attributed, persistedUsers, readDemoState, updateDemoState } from '../../lib/persisted-demo-state'
 import './users.css'
@@ -175,9 +176,7 @@ export function UserTokenPage() {
   const displayedToken = issued?.token ?? userToken
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const controllerDomain = live ? new URL(controllerOrigin()).host : 'controller.example.com'
-  const enrollmentCommand = issued?.enrollment === 'Ephemeral'
-    ? `laneway connect ${controllerDomain} --ephemeral --token-file ./laneway.code`
-    : `laneway login ${controllerDomain} --token-file ./laneway.code`
+  const enrollmentCommand = userEnrollmentCommand(controllerDomain, issued?.enrollment === 'Ephemeral' ? 'Ephemeral' : 'Remembered')
 
   useEffect(() => {
     if (live) liveIssuedUserToken = null
@@ -199,7 +198,7 @@ export function UserTokenPage() {
   return <div className="users-page users-token-page">
     <PageHeader title="User token issued" description="Send the single-use secret through a secure channel." />
     <div className="users-token-grid"><section className="users-panel users-token-card"><div className="users-panel-head"><h2>One-time credential</h2><Status tone="warning">Shown once</Status></div><Callout tone="warning"><strong>Copy this credential now.</strong> Laneway stores only its fingerprint and cannot reveal it again.</Callout><div className="users-token-space"><TokenBox label="User enrollment token" value={displayedToken}><Button onClick={copyToken} variant="primary">{copyState === 'copied' ? <Check size={17} /> : <Clipboard size={17} />}{copyState === 'copied' ? 'Copied' : 'Copy credential'}</Button></TokenBox></div>{copyState === 'failed' ? <Callout tone="danger">Clipboard access was blocked. Select the token text and copy it manually.</Callout> : null}</section>
-    <section className="users-panel users-connect-card"><div className="users-panel-head"><h2>Connect</h2><span>Linux / macOS</span></div><p>Save the token in <code>./laneway.code</code> with mode <code>0600</code>, then run:</p><pre className="users-command"><code>{enrollmentCommand}</code></pre></section></div>
+    <section className="users-panel users-connect-card"><div className="users-panel-head"><h2>Connect</h2><span>Linux / macOS</span></div><p>Save the token in <code>./laneway.code</code> with mode <code>0600</code>, then run:</p><pre className="users-command" tabIndex={0}><code>{enrollmentCommand}</code></pre></section></div>
     <div className="button-row users-token-actions"><Button to={issued?.id ? `/users/${issued.id}` : '/users'} variant="primary">{issued?.id ? 'View enrollment' : 'View user access'}</Button><Button to="/users/new" variant="quiet">Issue another</Button></div>
   </div>
 }

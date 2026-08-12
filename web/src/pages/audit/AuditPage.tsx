@@ -95,7 +95,7 @@ export function AuditPage() {
       const matchesRange = event.timestampMs >= cutoff
       return matchesQuery && matchesOutcome && matchesAction && matchesRange
     })
-  }, [action, events, outcome, query, range])
+  }, [action, events, live, outcome, query, range])
 
   const selected = events.find((event) => event.id === selectedId)
 

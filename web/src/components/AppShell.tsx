@@ -101,13 +101,16 @@ export function AppShell() {
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <Link to="/overview" className="wordmark"><BrandMark /><span>Laneway</span></Link>
+      <Link to="/overview" className="wordmark" aria-label="Laneway overview"><BrandMark /><span>Laneway</span></Link>
       <nav className="sidebar-nav" aria-label="Primary navigation">
         {navigation.map(group => <section className="sidebar-nav__group" key={group.label}>
           <h2>{group.label}</h2>
           {group.items.map(item => {
             const Icon = item.icon
-            return <NavLink key={item.to} to={item.to} className={({ isActive }) => clsx('sidebar-nav__item', isActive && 'is-active')}>
+            const accessibleLabel = item.to === '/routes' && pendingRoutes > 0
+              ? `${item.label}, ${pendingRoutes} routes need review`
+              : item.label
+            return <NavLink aria-label={accessibleLabel} key={item.to} to={item.to} className={({ isActive }) => clsx('sidebar-nav__item', isActive && 'is-active')}>
               <Icon aria-hidden="true" size={17} />
               <span>{item.label}</span>
               {item.to === '/routes' && pendingRoutes > 0 ? <em aria-label={`${pendingRoutes} routes need review`}>{pendingRoutes}</em> : null}

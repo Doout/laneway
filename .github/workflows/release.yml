@@ -101,23 +101,21 @@ jobs:
           - name: controller
             image: ghcr.io/doout/laneway-controller
             dockerfile: deploy/containers/Dockerfile
-            binary: laneway-controller
+            target: controller
           - name: relay
             image: ghcr.io/doout/laneway-relay
             dockerfile: deploy/containers/Dockerfile
-            binary: laneway-relay
+            target: relay
           - name: admin
             image: ghcr.io/doout/laneway-admin
             dockerfile: deploy/containers/Dockerfile
-            binary: laneway
+            target: admin
           - name: connector
             image: ghcr.io/doout/lane-edge
             dockerfile: deploy/containers/Dockerfile.connector
-            binary: laneway
           - name: exit-node
             image: ghcr.io/doout/laneway-exit-node
             dockerfile: deploy/containers/Dockerfile.exit-node
-            binary: laneway
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -138,8 +136,8 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           build-args: |
-            BINARY=${{ matrix.binary }}
             VERSION=${{ steps.version.outputs.value }}
           platforms: linux/amd64,linux/arm64
           outputs: type=oci,dest=/tmp/${{ matrix.name }}.oci.tar
@@ -184,8 +182,8 @@ jobs:
         with:
           context: .
           file: ${{ matrix.dockerfile }}
+          target: ${{ matrix.target }}
           build-args: |
-            BINARY=${{ matrix.binary }}
             VERSION=${{ steps.version.outputs.value }}
           platforms: linux/amd64,linux/arm64
           push: true

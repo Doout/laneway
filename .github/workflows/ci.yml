@@ -29,18 +29,32 @@ jobs:
       - name: Install dependencies
         working-directory: web
         run: corepack pnpm install --frozen-lockfile
-      - name: Typecheck, test, and build
+      - name: Reject an unscoped console build
         working-directory: web
         run: |
+          if corepack pnpm build; then
+            echo "unscoped console build unexpectedly succeeded" >&2
+            exit 1
+          fi
+      - name: Lint, typecheck, and unit tests
+        working-directory: web
+        run: |
+          corepack pnpm lint
           corepack pnpm typecheck
           corepack pnpm test
-          corepack pnpm build
       - name: Install Chromium
         working-directory: web
         run: corepack pnpm exec playwright install --with-deps chromium
-      - name: Browser workflows
+      - name: Build and test the demo artifact
         working-directory: web
-        run: corepack pnpm test:e2e
+        run: |
+          corepack pnpm build:demo
+          LANEWAY_EXPECTED_BUILD_MODE=demo corepack pnpm test:e2e
+      - name: Build and smoke-test the live artifact
+        working-directory: web
+        run: |
+          corepack pnpm build:live
+          LANEWAY_EXPECTED_BUILD_MODE=live corepack pnpm exec playwright test e2e/build-mode.spec.ts
 
   go:
     name: Go ${{ matrix.go }}
@@ -112,16 +126,25 @@ jobs:
       - name: Build pinned release image families
         run: |
           docker build --file deploy/containers/Dockerfile \
-            --build-arg BINARY=laneway --build-arg VERSION=ci \
+            --target controller --build-arg VERSION=ci \
+            --tag laneway-controller:ci .
+          docker build --file deploy/containers/Dockerfile \
+            --target relay --build-arg VERSION=ci \
+            --tag laneway-relay:ci .
+          docker build --file deploy/containers/Dockerfile \
+            --target admin --build-arg VERSION=ci \
             --tag laneway-admin:ci .
           docker build --file deploy/containers/Dockerfile.connector \
             --build-arg VERSION=ci --tag lane-edge:ci .
           docker build --file deploy/containers/Dockerfile.exit-node \
             --build-arg VERSION=ci --tag laneway-exit-node:ci .
+          test "$(docker run --rm --network none laneway-controller:ci -version)" = ci
+          test "$(docker run --rm --network none laneway-relay:ci -version)" = ci
           test "$(docker run --rm --network none laneway-admin:ci version)" = ci
           test "$(docker run --rm --network none lane-edge:ci version)" = ci
           test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = ci
           ! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true
+          ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci
           ./integration/connector-bootstrap.sh lane-edge:ci
           ./integration/connector-upgrade.sh lane-edge:ci
 

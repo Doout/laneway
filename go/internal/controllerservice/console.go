@@ -41,17 +41,18 @@ func ConsoleHandler(api http.Handler, directory string) (http.Handler, error) {
 			api.ServeHTTP(writer, request)
 			return
 		}
-		if request.Method != http.MethodGet && request.Method != http.MethodHead {
-			writer.Header().Set("Allow", "GET, HEAD")
-			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
 
 		writer.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		writer.Header().Set("Referrer-Policy", "no-referrer")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		writer.Header().Set("X-Frame-Options", "DENY")
 		writer.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+
+		if request.Method != http.MethodGet && request.Method != http.MethodHead {
+			writer.Header().Set("Allow", "GET, HEAD")
+			http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
 		name := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(request.URL.Path)), "/")
 		if name != "." && name != "" && !strings.HasPrefix(name, ".") {

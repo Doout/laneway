@@ -4,22 +4,19 @@ services:
     build:
       context: ../..
       dockerfile: deploy/containers/Dockerfile
-      args:
-        BINARY: laneway-controller
+      target: controller
   relay:
     image: laneway-relay:dev
     build:
       context: ../..
       dockerfile: deploy/containers/Dockerfile
-      args:
-        BINARY: laneway-relay
+      target: relay
   admin:
     image: laneway-admin:dev
     build:
       context: ../..
       dockerfile: deploy/containers/Dockerfile
-      args:
-        BINARY: laneway
+      target: admin
   exit-node:
     image: laneway-exit-node:dev
     build:

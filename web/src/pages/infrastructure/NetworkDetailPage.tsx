@@ -79,7 +79,7 @@ export function NetworkDetailPage() {
       <div className="infra-detail-workspace">
         <section className="infra-panel infra-network-path" aria-labelledby={live ? 'network-connectors-title' : 'network-path-title'}>
           {!live ? <><div className="infra-panel-head"><div><h2 id="network-path-title">Network path</h2></div><Status tone={network.connectedNodes ? 'positive' : 'muted'}>{network.connectedNodes ? 'Healthy' : 'Awaiting connector'}</Status></div>
-          <div className="infra-effective-path" role="img" aria-label={`${network.connectedNodes} connected nodes use ${network.connector.name} to reach ${network.routes} routes with relay fallback`}>
+          <div className="infra-effective-path" role="group" aria-label={`${network.connectedNodes} connected nodes use ${network.connector.name} to reach ${network.routes} routes with relay fallback`}>
             <div><span className="infra-path-icon"><Laptop aria-hidden="true" size={19} /></span><strong>{network.connectedNodes} {live ? 'enrolled nodes' : 'connected nodes'}</strong><small>{live ? `${network.nodes - network.connectedNodes} revoked` : `${network.nodes - network.connectedNodes} offline`}</small></div>
             <span className="infra-path-line"><small>QUIC direct</small></span>
             <Link className="infra-path-gateway" to={network.connector.id === 'none' ? '/nodes/new' : `/nodes/${network.connector.id}`}><ServerCog aria-hidden="true" size={21} /><strong>{network.connector.name}</strong><small>{network.connector.sessions}</small></Link>

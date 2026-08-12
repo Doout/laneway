@@ -184,9 +184,9 @@ wait_peer_path() {
 }
 
 echo "==> build pinned product images and a scratch-only test probe"
-docker build --quiet --label "${owner}" --build-arg BINARY=laneway-controller -t "${controller_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
-docker build --quiet --label "${owner}" --build-arg BINARY=laneway-relay -t "${relay_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
-docker build --quiet --label "${owner}" --build-arg BINARY=laneway -t "${admin_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target controller -t "${controller_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target relay -t "${relay_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target admin -t "${admin_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
 docker build --quiet --label "${owner}" -t "${node_image}" -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
 mkdir -p "${work_dir}/probe-context"
 (cd "${repo_root}/go" && CGO_ENABLED=0 go build -trimpath -o "${work_dir}/probe-context/netprobe" ./integration/netprobe)

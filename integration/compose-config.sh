@@ -12,6 +12,7 @@ fi
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 compose_file=$repo_dir/deploy/compose/compose.yaml
+compose_dev_file=$repo_dir/deploy/compose/compose.dev.yaml
 
 LANEWAY_VERSION=1.2.3 \
 LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
@@ -37,6 +38,7 @@ jq -e '
   ([.services[] | (.privileged // false) == false] | all) and
   ([.services[] | (.network_mode // "") != "host"] | all) and
   (.services.controller.image == "ghcr.io/doout/laneway-controller:1.2.3@sha256:1111111111111111111111111111111111111111111111111111111111111111") and
+  (.services.controller.command == ["-config", "/etc/laneway/controller.toml", "-console-dir", "/usr/share/laneway-console"]) and
   (.services.relay.image == "ghcr.io/doout/laneway-relay:1.2.3@sha256:2222222222222222222222222222222222222222222222222222222222222222") and
   (.services.admin.image == "ghcr.io/doout/laneway-admin:1.2.3@sha256:3333333333333333333333333333333333333333333333333333333333333333") and
   (.services["exit-node"].image == "ghcr.io/doout/laneway-exit-node:1.2.3@sha256:4444444444444444444444444444444444444444444444444444444444444444") and
@@ -53,6 +55,8 @@ jq -e '
   ([.services["exit-node"].volumes[] | select(.type == "bind") | .read_only == true] | all) and
   (.services["exit-node"].healthcheck.test == ["CMD", "/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]) and
   (.services.controller.volumes | any(.type == "volume" and .target == "/var/lib/laneway-controller")) and
+  (.services.controller.volumes | any(.type == "bind" and .target == "/etc/laneway/controller.toml" and .read_only == true)) and
+  ([.services.controller.volumes[] | .target != "/usr/share/laneway-console"] | all) and
   (.services.controller.volumes | any(.type == "bind" and .target == "/backups" and ((.read_only // false) == false))) and
   ([.services.controller.volumes[] | select(.type == "bind" and .target != "/backups") | .read_only == true] | all) and
   ([.services.relay.volumes[] | select(.type == "bind") | .read_only == true] | all) and
@@ -60,4 +64,22 @@ jq -e '
   (.services.relay.healthcheck.test[0] == "CMD")
 ' >/dev/null
 
-echo "Compose security and port contract is valid"
+LANEWAY_VERSION=1.2.3 \
+LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+LANEWAY_RELAY_IMAGE_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+LANEWAY_ADMIN_IMAGE_DIGEST=sha256:3333333333333333333333333333333333333333333333333333333333333333 \
+LANEWAY_CONNECTOR_IMAGE_DIGEST=sha256:5555555555555555555555555555555555555555555555555555555555555555 \
+LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:4444444444444444444444444444444444444444444444444444444444444444 \
+LANEWAY_CONTROLLER_SERVER_NAME=controller.example.test \
+docker compose --project-directory "$repo_dir/deploy/compose" \
+  --env-file /dev/null --profile tools --profile exit-node \
+  -f "$compose_file" -f "$compose_dev_file" config --format json |
+jq -e '
+  (.services.controller.build.target == "controller") and
+  (.services.relay.build.target == "relay") and
+  (.services.admin.build.target == "admin") and
+  (.services.controller.command == ["-config", "/etc/laneway/controller.toml", "-console-dir", "/usr/share/laneway-console"]) and
+  ([.services.controller.volumes[] | .target != "/usr/share/laneway-console"] | all)
+' >/dev/null
+
+echo "Compose security, port, and console contract is valid"

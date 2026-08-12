@@ -25,6 +25,7 @@ import {
 } from '../../components/ui'
 import { type NodeRecord } from '../../lib/demo-data'
 import { controllerOrigin, useControlPlane } from '../../lib/control-plane'
+import { durableNodeEnrollmentCommand } from '../../lib/enrollment-commands'
 import { controllerNodes } from '../../lib/live-records'
 import { attributed, persistedNodes, readDemoState, updateDemoState, type NodeCapabilities } from '../../lib/persisted-demo-state'
 import './nodes.css'
@@ -256,7 +257,7 @@ export function NodeTokenPage() {
     </div>
     {copyState === 'failed' ? <Callout tone="danger">Clipboard access was blocked. Select the token text and copy it manually.</Callout> : null}
     <Section title="Enroll from the node" meta="Save the token in ./laneway.code with mode 0600, then run this on the Linux node.">
-      <pre className="nodes-command"><code>sudo laneway node install {controllerDomain} --token-file ./laneway.code</code></pre>
+      <pre className="nodes-command" tabIndex={0}><code>{durableNodeEnrollmentCommand(controllerDomain)}</code></pre>
     </Section>
     <div className="button-row nodes-token-actions"><Button to={target ? `/nodes/${target.id}` : '/nodes'} variant="primary">{target ? 'View node' : 'View nodes'}</Button><Button to="/nodes/new" variant="quiet">Add another node</Button></div>
   </div>
@@ -325,7 +326,7 @@ export function NodeCapabilitiesPage() {
     setCapabilities(controllerCapabilities(controllerNode.enabled_capabilities))
     setConfirmation('')
     setError('')
-  }, [controllerNode?.enabled_capabilities, controllerNode?.node_id, live])
+  }, [controllerNode, live])
 
   if (live && (!inventory || (inventoryPending && !controllerNode))) return <div className="nodes-narrow" role="status">Loading node…</div>
   if (!node) return <NodeNotFound id={nodeId} />

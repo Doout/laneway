@@ -24,7 +24,7 @@ describe('Laneway application shell', () => {
   })
 
   it('does not expose an orphaned operator identity before authentication', async () => {
-    vi.stubEnv('VITE_LANEWAY_LIVE', 'true')
+    vi.stubEnv('MODE', 'live')
     vi.stubEnv('VITE_LANEWAY_API_ORIGIN', 'https://controller.example:8443/')
     window.sessionStorage.setItem('laneway-console-operator', 'Private operator')
     renderApp('/sign-in')
@@ -38,7 +38,7 @@ describe('Laneway application shell', () => {
   })
 
   it('keeps a forbidden saved session without rendering empty inventory as controller state', async () => {
-    vi.stubEnv('VITE_LANEWAY_LIVE', 'true')
+    vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'restricted-token')
     window.sessionStorage.setItem('laneway-console-operator', 'Restricted session')
     vi.stubGlobal('fetch', vi.fn()
@@ -53,7 +53,7 @@ describe('Laneway application shell', () => {
   })
 
   it('fails closed when the controller has multiple networks', async () => {
-    vi.stubEnv('VITE_LANEWAY_LIVE', 'true')
+    vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'valid-token')
     vi.stubGlobal('fetch', vi.fn()
       .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ networks: [{ network_id: 'one' }] }) })
@@ -67,7 +67,7 @@ describe('Laneway application shell', () => {
   })
 
   it('does not restore an operator identity from a rejected session', async () => {
-    vi.stubEnv('VITE_LANEWAY_LIVE', 'true')
+    vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'expired-token')
     window.sessionStorage.setItem('laneway-console-operator', 'Private operator')
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -84,7 +84,7 @@ describe('Laneway application shell', () => {
   })
 
   it('restores an operator identity only after the controller accepts the session', async () => {
-    vi.stubEnv('VITE_LANEWAY_LIVE', 'true')
+    vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'valid-token')
     window.sessionStorage.setItem('laneway-console-operator', 'Private operator')
     let acceptSession!: (response: unknown) => void
@@ -102,7 +102,7 @@ describe('Laneway application shell', () => {
   })
 
   it('does not let a stale restore invalidate a newer sign-in', async () => {
-    vi.stubEnv('VITE_LANEWAY_LIVE', 'true')
+    vi.stubEnv('MODE', 'live')
     window.sessionStorage.setItem('laneway-console-admin-token', 'expired-token')
     window.sessionStorage.setItem('laneway-console-operator', 'Previous operator')
     let rejectRestore!: (response: unknown) => void
@@ -128,7 +128,7 @@ describe('Laneway application shell', () => {
   })
 
   it('ignores inventory that finishes after signing into a newer session', async () => {
-    vi.stubEnv('VITE_LANEWAY_LIVE', 'true')
+    vi.stubEnv('MODE', 'live')
     let resolveOldInventory!: (response: unknown) => void
     let resolveNewInventory!: (response: unknown) => void
     const oldInventory = new Promise(resolve => { resolveOldInventory = resolve })
