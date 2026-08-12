@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
@@ -54,7 +55,13 @@ func newFixture(t *testing.T, maxBody int64, nodeAuth NodeAuthorizer) fixture {
 	}
 	service, err := New(Options{
 		Store: store, CACertificate: ca, CAKey: material.PrivateKey, LeafValidity: 24 * time.Hour,
-		MaxBodyBytes: maxBody, AdminAuthorizer: func(*http.Request) error { return nil },
+		MaxBodyBytes: maxBody, AdminAuthorizer: func(*http.Request) (adminauth.Actor, error) {
+			state, stateErr := store.AdministratorAuthState(context.Background())
+			if stateErr != nil {
+				return adminauth.Actor{}, stateErr
+			}
+			return adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID), nil
+		},
 		NodeAuthorizer: nodeAuth,
 	})
 	if err != nil {
@@ -78,7 +85,7 @@ func TestOperationalMetricsClassifySuccessMalformedAndAuthorizationFailure(t *te
 		t.Fatalf("missing status = %d", missing.Code)
 	}
 
-	f.service.authorizeAdm = func(*http.Request) error { return ErrUnauthenticated }
+	f.service.authorizeAdm = func(*http.Request) (adminauth.Actor, error) { return adminauth.Actor{}, ErrUnauthenticated }
 	denied := httptest.NewRecorder()
 	f.service.Handler().ServeHTTP(denied, httptest.NewRequest(http.MethodPost, "/v1/admin/enrollment-tokens", nil))
 	if denied.Code != http.StatusUnauthorized {
@@ -681,8 +688,14 @@ func TestEnrollmentAndRenewalReturnIntermediateChainForRootTrust(t *testing.T) {
 	service, err := New(Options{
 		Store: store, CACertificate: issuer, CAKey: issuerMaterial.PrivateKey,
 		IssuerChain: []*x509.Certificate{issuer, root}, LeafValidity: 24 * time.Hour,
-		AdminAuthorizer: func(*http.Request) error { return nil },
-		NodeAuthorizer:  func(*http.Request) (identity.NodeIdentity, error) { return authenticated, nil },
+		AdminAuthorizer: func(*http.Request) (adminauth.Actor, error) {
+			state, stateErr := store.AdministratorAuthState(context.Background())
+			if stateErr != nil {
+				return adminauth.Actor{}, stateErr
+			}
+			return adminauth.IDActor(adminauth.ActorServicePrincipal, state.RootServicePrincipalID), nil
+		},
+		NodeAuthorizer: func(*http.Request) (identity.NodeIdentity, error) { return authenticated, nil },
 	})
 	if err != nil {
 		t.Fatal(err)

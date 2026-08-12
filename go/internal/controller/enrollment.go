@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/protocol"
 )
@@ -43,7 +44,7 @@ func insertInvitedExitRouteTx(ctx context.Context, tx *sql.Tx, networkID identit
 		return fmt.Errorf("create invited exit route: %w", err)
 	}
 	target := routeID
-	return auditTx(ctx, tx, networkID, nil, "route.invited_exit.approve", "route", &target, fmt.Sprintf(`{"prefix":%q,"metric":%d}`, prefix.String(), metric), now)
+	return auditActorTx(ctx, tx, &networkID, adminauth.SystemActor(), "route.invited_exit.approve", "route", &target, fmt.Sprintf(`{"prefix":%q,"metric":%d}`, prefix.String(), metric), now)
 }
 
 func tokenDigest(secret string) ([32]byte, error) {
@@ -335,7 +336,7 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	if leaseExpiresAt != nil {
 		details = strings.TrimSuffix(details, "}") + fmt.Sprintf(`,"lease_expires_at":%d}`, leaseExpiresAt.Unix())
 	}
-	if err := auditTx(ctx, tx, networkID, nil, "node.enroll", "node", &target, details, now); err != nil {
+	if err := auditTx(ctx, tx, networkID, &nodeID, "node.enroll", "node", &target, details, now); err != nil {
 		return Enrollment{}, err
 	}
 	node := Node{ID: nodeID, NetworkID: networkID, Name: name, EnabledCapabilities: enabledCapabilities, IPv4Address: address, IPv6Address: address6, CreatedAt: now,

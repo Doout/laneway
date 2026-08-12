@@ -153,7 +153,7 @@ func addCertificateTx(ctx context.Context, tx *sql.Tx, networkID identity.Networ
 		return Certificate{}, fmt.Errorf("insert certificate: %w", err)
 	}
 	target := id
-	if err := auditTx(ctx, tx, networkID, nil, "certificate.issue", "certificate", &target, `{}`, now); err != nil {
+	if err := auditTx(ctx, tx, networkID, &nodeID, "certificate.issue", "certificate", &target, `{}`, now); err != nil {
 		return Certificate{}, err
 	}
 	return Certificate{

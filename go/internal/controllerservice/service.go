@@ -30,6 +30,7 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
@@ -130,7 +131,9 @@ func New(opts Options) (*Service, error) {
 	}
 	if opts.AdminAuthorizer == nil {
 		// Administrative access is fail-closed until explicitly configured.
-		opts.AdminAuthorizer = func(*http.Request) error { return ErrUnauthenticated }
+		opts.AdminAuthorizer = func(*http.Request) (adminauth.Actor, error) {
+			return adminauth.Actor{}, ErrUnauthenticated
+		}
 	}
 	verifyPeerCertificate := opts.NodeAuthorizer == nil
 	if opts.NodeAuthorizer == nil {
@@ -185,6 +188,21 @@ func New(opts Options) (*Service, error) {
 }
 
 func (s *Service) Handler() http.Handler { return s.handler }
+
+func (s *Service) authorizeAdministrator(request *http.Request) (adminauth.Actor, error) {
+	actor, err := s.authorizeAdm(request)
+	if err != nil {
+		return adminauth.Actor{}, err
+	}
+	if !actor.Valid() || actor.Kind != adminauth.ActorServicePrincipal {
+		return adminauth.Actor{}, ErrPermissionDenied
+	}
+	return actor, nil
+}
+
+func (s *Service) administratorMutationContext(request *http.Request, actor adminauth.Actor, operation adminauth.Operation, networkID *identity.NetworkID) (context.Context, error) {
+	return controller.WithAdministratorMutationActor(request.Context(), actor, operation, networkID)
+}
 
 func (s *Service) Metrics() Metrics {
 	if s == nil {
@@ -278,7 +296,8 @@ type tokenResponse struct {
 }
 
 func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
-	if err := s.authorizeAdm(r); err != nil {
+	actor, err := s.authorizeAdministrator(r)
+	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
@@ -296,7 +315,12 @@ func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
 	if class == "" {
 		class = controller.EnrollmentClassDurable
 	}
-	token, err := s.store.IssueEnrollmentTokenWithOptions(r.Context(), networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
+	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationEnrollmentIssue, &networkID)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	token, err := s.store.IssueEnrollmentTokenWithOptions(mutationContext, networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
 		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second, RequestedName: req.RequestedName, EnabledCapabilities: req.EnabledCapabilities,
 	})
 	if err != nil {
@@ -1048,7 +1072,11 @@ func (s *Service) writeError(w http.ResponseWriter, err error, protobuf bool) {
 	switch {
 	case errors.As(err, &requestErr):
 		status, code, detail, retryable = requestErr.status, requestErr.code, requestErr.detail, requestErr.retryable
-	case errors.Is(err, ErrUnauthenticated), errors.Is(err, controller.ErrTokenInvalid):
+	case errors.Is(err, ErrUnauthenticated),
+		errors.Is(err, controller.ErrTokenInvalid),
+		errors.Is(err, controller.ErrCredentialInvalid),
+		errors.Is(err, controller.ErrSessionInvalid),
+		errors.Is(err, controller.ErrSessionExpired):
 		status, code, detail, retryable = http.StatusUnauthorized, lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "authentication failed", false
 	case errors.Is(err, controller.ErrTokenExpired):
 		status, code, detail, retryable = http.StatusUnauthorized, lanewayv1.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "enrollment code has expired", false

@@ -11,18 +11,22 @@ import (
 	"net/netip"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/identity"
 )
 
 const (
-	MaxNameLength        = 253
-	MaxTokenLabelLength  = 256
-	MaxAuditDetailLength = 16 << 10
-	MaxRouteMetric       = 1_000_000
-	MaxTokenLifetime     = 30 * 24 * time.Hour
-	MinEphemeralLifetime = 5 * time.Minute
-	MaxEphemeralLifetime = 24 * time.Hour
-	MaxActiveEphemeral   = 4096
+	MaxNameLength                       = 253
+	MaxTokenLabelLength                 = 256
+	MaxAuditDetailLength                = 16 << 10
+	MaxRouteMetric                      = 1_000_000
+	MaxTokenLifetime                    = 30 * 24 * time.Hour
+	MinEphemeralLifetime                = 5 * time.Minute
+	MaxEphemeralLifetime                = 24 * time.Hour
+	MaxActiveEphemeral                  = 4096
+	DefaultAdministratorIdleTimeout     = adminauth.DefaultSessionIdleLifetime
+	DefaultAdministratorAbsoluteTimeout = adminauth.DefaultSessionAbsoluteLifetime
+	DefaultMaxAdministratorSessions     = adminauth.DefaultMaximumSessions
 )
 
 type EnrollmentClass string
@@ -38,18 +42,25 @@ func (c EnrollmentClass) Valid() bool {
 }
 
 var (
-	ErrNotFound        = errors.New("controller record not found")
-	ErrConflict        = errors.New("controller record conflicts with existing state")
-	ErrInvalid         = errors.New("invalid controller input")
-	ErrTokenInvalid    = errors.New("invalid enrollment token")
-	ErrTokenExpired    = errors.New("enrollment token expired")
-	ErrTokenConsumed   = errors.New("enrollment token already consumed")
-	ErrTokenNetwork    = errors.New("enrollment token belongs to a different network")
-	ErrTokenName       = errors.New("enrollment token is bound to a different name")
-	ErrTokenClass      = errors.New("enrollment token has a different enrollment class")
-	ErrPoolExhausted   = errors.New("overlay address pool exhausted")
-	ErrAlreadyApproved = errors.New("route already approved")
-	ErrUnsupportedDB   = errors.New("database schema is newer than this controller")
+	ErrNotFound          = errors.New("controller record not found")
+	ErrConflict          = errors.New("controller record conflicts with existing state")
+	ErrInvalid           = errors.New("invalid controller input")
+	ErrTokenInvalid      = errors.New("invalid enrollment token")
+	ErrTokenExpired      = errors.New("enrollment token expired")
+	ErrTokenConsumed     = errors.New("enrollment token already consumed")
+	ErrTokenNetwork      = errors.New("enrollment token belongs to a different network")
+	ErrTokenName         = errors.New("enrollment token is bound to a different name")
+	ErrTokenClass        = errors.New("enrollment token has a different enrollment class")
+	ErrPoolExhausted     = errors.New("overlay address pool exhausted")
+	ErrAlreadyApproved   = errors.New("route already approved")
+	ErrUnsupportedDB     = errors.New("database schema is newer than this controller")
+	ErrBootstrapComplete = errors.New("administrator bootstrap is already complete")
+	ErrCredentialInvalid = errors.New("administrator credential is invalid")
+	ErrSessionInvalid    = errors.New("administrator session is invalid")
+	ErrSessionExpired    = errors.New("administrator session has expired")
+	ErrRecoveryInvalid   = errors.New("administrator recovery grant is invalid")
+	ErrRecoveryExpired   = errors.New("administrator recovery grant has expired")
+	ErrRecoveryConsumed  = errors.New("administrator recovery grant is already consumed")
 )
 
 type Network struct {
@@ -183,14 +194,89 @@ type NodeRenewal struct {
 }
 
 type AuditEvent struct {
-	ID          identity.ID
-	NetworkID   identity.NetworkID
-	ActorNodeID *identity.NodeID
-	Action      string
-	TargetType  string
-	TargetID    *identity.ID
-	Details     string
-	CreatedAt   time.Time
+	ID           identity.ID
+	NetworkID    identity.NetworkID
+	NetworkScope *identity.NetworkID
+	Actor        adminauth.Actor
+	ActorNodeID  *identity.NodeID
+	Action       string
+	TargetType   string
+	TargetID     *identity.ID
+	Details      string
+	CreatedAt    time.Time
+}
+
+type AdministratorAuthState struct {
+	RootServicePrincipalID  identity.ID
+	InitialOwnerPrincipalID *identity.ID
+	BootstrapCompletedAt    *time.Time
+	RecoveryGeneration      uint64
+	LastRecoveredAt         *time.Time
+}
+
+type AdministratorCredential struct {
+	ID               identity.ID
+	PrincipalID      identity.ID
+	Type             string
+	SecretHash       string
+	CreatedAt        time.Time
+	RevokedAt        *time.Time
+	RevocationReason string
+}
+
+type AdministratorRecord struct {
+	Principal  adminauth.Principal
+	Credential AdministratorCredential
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+	DisabledAt *time.Time
+}
+
+type AdministratorSession struct {
+	ID                identity.ID
+	PrincipalID       identity.ID
+	CredentialID      identity.ID
+	TokenHash         [32]byte
+	CSRFHash          [32]byte
+	PreviousSessionID *identity.ID
+	CreatedAt         time.Time
+	LastSeenAt        time.Time
+	IdleTimeout       time.Duration
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
+	RevokedAt         *time.Time
+	RevocationReason  string
+}
+
+type AdministratorSessionOptions struct {
+	IdleTimeout       time.Duration
+	AbsoluteTimeout   time.Duration
+	MaxActive         int
+	PreviousSessionID *identity.ID
+}
+
+type AdministratorRecoveryPurpose string
+
+const (
+	AdministratorRecoveryBootstrapOwner AdministratorRecoveryPurpose = "bootstrap_owner"
+	AdministratorRecoveryOwner          AdministratorRecoveryPurpose = "owner_recovery"
+)
+
+func (p AdministratorRecoveryPurpose) Valid() bool {
+	return p == AdministratorRecoveryBootstrapOwner || p == AdministratorRecoveryOwner
+}
+
+type AdministratorRecoveryGrant struct {
+	ID                 identity.ID
+	SecretHash         [32]byte
+	Purpose            AdministratorRecoveryPurpose
+	TargetPrincipalID  *identity.ID
+	RecoveryGeneration uint64
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	ConsumedAt         *time.Time
+	RevokedAt          *time.Time
+	RevocationReason   string
 }
 
 type ACLAction string

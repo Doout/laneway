@@ -23,49 +23,98 @@ import (
 	"testing"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/controllerservice"
+	"laneway.dev/laneway/internal/identity"
 )
 
-func TestBearerAuthorizerFromFile(t *testing.T) {
+func TestAdminBearerCredentialFromFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "admin.token")
 	token := strings.Repeat("a", 48)
 	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	authorize, err := bearerAuthorizerFromFile(path)
+	credential, err := adminBearerCredentialFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer credential.clear()
+
+	// Binding the database-backed identity must not reread a credential that
+	// may have changed after startup validation.
+	replacement := strings.Repeat("b", 48)
+	if err := os.WriteFile(path, []byte(replacement+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servicePrincipal := identity.ID{1}
+	authorize, err := credential.authorizer(servicePrincipal)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request, _ := http.NewRequest(http.MethodPost, "https://controller/v1/admin/enrollment-tokens", nil)
-	if err := authorize(request); !errors.Is(err, controllerservice.ErrUnauthenticated) {
+	if _, err := authorize(request); !errors.Is(err, controllerservice.ErrUnauthenticated) {
 		t.Fatalf("missing credential error = %v", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
-	if err := authorize(request); err != nil {
+	actor, err := authorize(request)
+	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+token+"x")
-	if err := authorize(request); !errors.Is(err, controllerservice.ErrUnauthenticated) {
+	if actor.Kind != adminauth.ActorServicePrincipal || actor.ID == nil || *actor.ID != servicePrincipal {
+		t.Fatalf("authenticated actor = %+v", actor)
+	}
+	request.Header.Set("Authorization", "Bearer "+replacement)
+	if _, err := authorize(request); !errors.Is(err, controllerservice.ErrUnauthenticated) {
 		t.Fatalf("wrong credential error = %v", err)
 	}
 }
 
-func TestBearerAuthorizerRejectsWeakAndOversizeFiles(t *testing.T) {
+func TestAdminBearerCredentialRejectsWeakAndOversizeFiles(t *testing.T) {
 	dir := t.TempDir()
 	weak := filepath.Join(dir, "weak")
 	if err := os.WriteFile(weak, []byte("short"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bearerAuthorizerFromFile(weak); err == nil {
+	if _, err := adminBearerCredentialFromFile(weak); err == nil {
 		t.Fatal("weak token accepted")
 	}
 	large := filepath.Join(dir, "large")
 	if err := os.WriteFile(large, []byte(strings.Repeat("x", maxAdminTokenFile+1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bearerAuthorizerFromFile(large); err == nil {
+	if _, err := adminBearerCredentialFromFile(large); err == nil {
 		t.Fatal("oversized token accepted")
+	}
+}
+
+func TestRunRejectsInvalidAdminTokenBeforeCreatingDatabase(t *testing.T) {
+	tests := []struct {
+		name  string
+		write bool
+		value string
+	}{
+		{name: "missing"},
+		{name: "weak", write: true, value: "short"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			database := filepath.Join(directory, "state", "controller.db")
+			tokenFile := filepath.Join(directory, "admin.token")
+			if test.write {
+				if err := os.WriteFile(tokenFile, []byte(test.value), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			configPath := writeControllerConfigWithAdminToken(t, database, tokenFile)
+			if err := run(configPath, "", "", "", "", ""); err == nil {
+				t.Fatal("run accepted an invalid administrator token")
+			}
+			if _, err := os.Stat(database); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid administrator token created controller database: %v", err)
+			}
+		})
 	}
 }
 
@@ -266,6 +315,10 @@ func TestMaintenanceRestoreRefusesActiveController(t *testing.T) {
 }
 
 func writeControllerConfig(t *testing.T, database string) string {
+	return writeControllerConfigWithAdminToken(t, database, "unused-token")
+}
+
+func writeControllerConfigWithAdminToken(t *testing.T, database, adminTokenFile string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "controller.toml")
 	contents := fmt.Sprintf(`mode = "controller"
@@ -282,9 +335,9 @@ listen = ":8443"
 quic_listen = ":8443"
 database = %q
 ca_private_key = "unused-ca.key"
-admin_token_file = "unused-token"
+admin_token_file = %q
 leaf_validity = "720h"
-`, filepath.Dir(database), filepath.Join(filepath.Dir(database), "controller.sock"), database)
+`, filepath.Dir(database), filepath.Join(filepath.Dir(database), "controller.sock"), database, adminTokenFile)
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}

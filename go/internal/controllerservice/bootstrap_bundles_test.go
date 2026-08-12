@@ -2,6 +2,7 @@ package controllerservice
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/bootstrap"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
@@ -49,6 +51,24 @@ func TestBootstrapBundleIsBoundedSingleUseAndExpires(t *testing.T) {
 	}
 
 	first := create(now.Add(bootstrap.MaxBundleLifetime))
+	authState, err := f.store.AdministratorAuthState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := f.store.GlobalAuditEvents(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCreateAudit := false
+	for _, event := range events {
+		if event.Action == "bootstrap_bundle.create" && event.Actor.Kind == adminauth.ActorServicePrincipal &&
+			event.Actor.ID != nil && *event.Actor.ID == authState.RootServicePrincipalID {
+			foundCreateAudit = true
+		}
+	}
+	if !foundCreateAudit {
+		t.Fatal("bootstrap bundle creation omitted stable root service-principal audit")
+	}
 	privateRequest := httptest.NewRecorder()
 	f.service.Handler().ServeHTTP(privateRequest, httptest.NewRequest(http.MethodGet, "/v1/bootstrap-bundles/"+first.BundleID, nil))
 	if privateRequest.Code != http.StatusUnauthorized {

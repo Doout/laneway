@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"laneway.dev/laneway/internal/adminauth"
 	"laneway.dev/laneway/internal/bootstrap"
 )
 
@@ -76,6 +77,15 @@ func (s *bootstrapBundleStore) take(id string) ([]byte, bool) {
 	return payload, true
 }
 
+func (s *bootstrapBundleStore) discard(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if bundle, exists := s.entries[id]; exists {
+		clear(bundle.payload)
+		delete(s.entries, id)
+	}
+}
+
 type bootstrapBundleRequest struct {
 	Payload       string `json:"payload"`
 	ExpiresAtUnix int64  `json:"expires_at_unix_seconds"`
@@ -88,7 +98,8 @@ type bootstrapBundleResponse struct {
 }
 
 func (s *Service) createBootstrapBundle(w http.ResponseWriter, r *http.Request) {
-	if err := s.authorizeAdm(r); err != nil {
+	actor, err := s.authorizeAdministrator(r)
+	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
@@ -113,6 +124,16 @@ func (s *Service) createBootstrapBundle(w http.ResponseWriter, r *http.Request) 
 	clear(payload)
 	if err != nil {
 		http.Error(w, "bootstrap service temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	mutationContext, err := s.administratorMutationContext(r, actor, adminauth.OperationBootstrapCreate, nil)
+	if err == nil {
+		err = s.store.AuditAdministratorMutation(mutationContext, "bootstrap_bundle.create", "bootstrap_bundle",
+			`{"storage":"ephemeral"}`)
+	}
+	if err != nil {
+		s.bootstrapBundles.discard(id)
+		s.writeError(w, err, false)
 		return
 	}
 	s.writeJSON(w, http.StatusCreated, bootstrapBundleResponse{
