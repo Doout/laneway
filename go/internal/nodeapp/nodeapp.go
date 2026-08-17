@@ -42,6 +42,7 @@ import (
 	"github.com/Doout/laneway/go/internal/transport"
 	"github.com/Doout/laneway/go/internal/userspaceproxy"
 	"github.com/Doout/laneway/go/internal/wireguard"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -1105,6 +1106,45 @@ func samePrefixes(left, right []netip.Prefix) bool {
 	return true
 }
 
+func validateEphemeralExitLeaseRenewal(previous, next *lanewayv1.NodeConfiguration, local identity.NodeIdentity,
+	expectedAddresses []netip.Prefix, previousDeadline, now time.Time,
+) (time.Time, error) {
+	if previous == nil || next == nil || previous.GetEphemeralExitLeaseGeneration() == 0 ||
+		next.GetEphemeralExitLeaseGeneration() != previous.GetEphemeralExitLeaseGeneration() ||
+		next.GetConfigurationEpoch() != previous.GetConfigurationEpoch() {
+		return time.Time{}, errors.New("controller returned an invalid ephemeral Exit lease renewal")
+	}
+	receivedAddresses, err := controllerOverlayAddresses(next, local, now)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !samePrefixes(receivedAddresses, expectedAddresses) {
+		return time.Time{}, errors.New("controller attempted to change the active TUN overlay assignment")
+	}
+	if next.GetEphemeralExitSuspectAtUnixSeconds() < previous.GetEphemeralExitSuspectAtUnixSeconds() ||
+		next.GetEphemeralExitRevokeAtUnixSeconds() < previous.GetEphemeralExitRevokeAtUnixSeconds() {
+		return time.Time{}, errors.New("controller ephemeral Exit lease moved backwards")
+	}
+	previousStable := proto.Clone(previous).(*lanewayv1.NodeConfiguration)
+	nextStable := proto.Clone(next).(*lanewayv1.NodeConfiguration)
+	for _, configuration := range []*lanewayv1.NodeConfiguration{previousStable, nextStable} {
+		configuration.ValidUntilUnixSeconds = 0
+		configuration.EphemeralExitSuspectAtUnixSeconds = 0
+		configuration.EphemeralExitRevokeAtUnixSeconds = 0
+	}
+	if !proto.Equal(previousStable, nextStable) {
+		return time.Time{}, errors.New("controller changed configuration without advancing its epoch")
+	}
+	deadline, err := configurationDeadline(next.GetValidUntilUnixSeconds(), now)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if deadline.Before(previousDeadline) {
+		return time.Time{}, errors.New("controller lease deadline moved backwards")
+	}
+	return deadline, nil
+}
+
 func runConfigurationUpdates(ctx context.Context, interval time.Duration, source configurationSource, local identity.NodeIdentity,
 	expectedAddresses []netip.Prefix, initial *lanewayv1.NodeConfiguration, routeTable *routing.Table, routeManager platform.RouteManager, bypass []netip.Addr, policyTable *policy.Table,
 	subnetManager *daemonSubnetManager, ipForwardManager *daemonIPForwardManager, exitManagers *daemonExitManagers,
@@ -1162,6 +1202,16 @@ func runConfigurationUpdates(ctx context.Context, interval time.Duration, source
 				if updateErr == nil {
 					deadline = renewedDeadline
 					last.ValidUntilUnixSeconds = configuration.GetValidUntilUnixSeconds()
+					if failClosed {
+						updateErr = applyControllerConfiguration(ctx, last, local, routeTable, routeManager, bypass, policyTable, subnetManager, ipForwardManager, exitManagers, applyState)
+						failClosed = updateErr != nil
+					}
+				}
+			} else if configuration.GetConfigurationEpoch() == epoch && last.GetEphemeralExitLeaseGeneration() != 0 {
+				var renewedDeadline time.Time
+				renewedDeadline, updateErr = validateEphemeralExitLeaseRenewal(last, configuration, local, expectedAddresses, deadline, time.Now())
+				if updateErr == nil {
+					last, deadline = configuration, renewedDeadline
 					if failClosed {
 						updateErr = applyControllerConfiguration(ctx, last, local, routeTable, routeManager, bypass, policyTable, subnetManager, ipForwardManager, exitManagers, applyState)
 						failClosed = updateErr != nil

@@ -21,6 +21,7 @@ import (
 	"github.com/Doout/laneway/go/internal/protocol"
 	"github.com/Doout/laneway/go/internal/routing"
 	"github.com/Doout/laneway/go/internal/wireguard"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestControllerPacketPolicyAllowsOnlyAuthorizedBidirectionalTraffic(t *testing.T) {
@@ -442,6 +443,45 @@ func TestEphemeralExitConfigurationRequiresExactLeaseWindow(t *testing.T) {
 	configuration.ValidUntilUnixSeconds++
 	if err := validateConfigurationIdentityLease(configuration, now); err == nil {
 		t.Fatal("snapshot beyond suspect boundary accepted")
+	}
+}
+
+func TestEphemeralExitLeaseRenewalRequiresStableSnapshot(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	local := identity.NodeIdentity{NetworkID: identity.NetworkID(testID(1)), NodeID: identity.NodeID(testID(2))}
+	peer := identity.NodeID(testID(3))
+	previous := controllerTestConfiguration(local, peer, uint64(now.Add(20*time.Second).Unix()))
+	previous.EnrollmentClass = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER
+	previous.EnabledCapabilities = uint64(protocol.CapabilityExitNodeV1)
+	previous.IdentityLeaseExpiresAtUnixSeconds = uint64(now.Add(time.Hour).Unix())
+	previous.EphemeralExitLeaseGeneration = 7
+	previous.EphemeralExitSuspectAtUnixSeconds = uint64(now.Add(20 * time.Second).Unix())
+	previous.EphemeralExitRevokeAtUnixSeconds = uint64(now.Add(60 * time.Second).Unix())
+	next := proto.Clone(previous).(*lanewayv1.NodeConfiguration)
+	next.ValidUntilUnixSeconds = uint64(now.Add(25 * time.Second).Unix())
+	next.EphemeralExitSuspectAtUnixSeconds = uint64(now.Add(25 * time.Second).Unix())
+	next.EphemeralExitRevokeAtUnixSeconds = uint64(now.Add(65 * time.Second).Unix())
+	expected := []netip.Prefix{netip.MustParsePrefix("100.96.0.2/32")}
+	deadline, err := validateEphemeralExitLeaseRenewal(previous, next, local, expected, now.Add(20*time.Second), now)
+	if err != nil || !deadline.Equal(now.Add(25*time.Second)) {
+		t.Fatalf("valid renewal deadline=%v error=%v", deadline, err)
+	}
+
+	changed := proto.Clone(next).(*lanewayv1.NodeConfiguration)
+	changed.Routes.Routes[0].Metric++
+	if _, err := validateEphemeralExitLeaseRenewal(previous, changed, local, expected, now.Add(20*time.Second), now); err == nil {
+		t.Fatal("same-epoch route change accepted as an ephemeral Exit lease renewal")
+	}
+	changed = proto.Clone(next).(*lanewayv1.NodeConfiguration)
+	changed.EphemeralExitLeaseGeneration++
+	if _, err := validateEphemeralExitLeaseRenewal(previous, changed, local, expected, now.Add(20*time.Second), now); err == nil {
+		t.Fatal("changed ephemeral Exit generation accepted as a renewal")
+	}
+	changed = proto.Clone(next).(*lanewayv1.NodeConfiguration)
+	changed.EphemeralExitSuspectAtUnixSeconds = previous.EphemeralExitSuspectAtUnixSeconds - 1
+	changed.EphemeralExitRevokeAtUnixSeconds = previous.EphemeralExitRevokeAtUnixSeconds - 1
+	if _, err := validateEphemeralExitLeaseRenewal(previous, changed, local, expected, now.Add(20*time.Second), now); err == nil {
+		t.Fatal("backwards ephemeral Exit lease accepted")
 	}
 }
 
