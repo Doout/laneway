@@ -16,6 +16,7 @@ import (
 	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
 	"github.com/Doout/laneway/go/internal/adminauth"
 	"github.com/Doout/laneway/go/internal/controller"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 const (
@@ -266,7 +267,7 @@ func clearAdministratorSessionCookies(w http.ResponseWriter) {
 }
 
 func (s *Service) administratorAuthState(w http.ResponseWriter, r *http.Request) {
-	remote, err := directRemoteAddress(r.RemoteAddr)
+	remote, err := administratorRemoteAddress(r)
 	if err != nil {
 		s.writeError(w, ErrUnauthenticated, false)
 		return
@@ -316,7 +317,7 @@ func (s *Service) administratorLogin(w http.ResponseWriter, r *http.Request) {
 	password := []byte(request.Password)
 	request.Password = ""
 	defer clear(password)
-	remote, err := directRemoteAddress(r.RemoteAddr)
+	remote, err := administratorRemoteAddress(r)
 	if err != nil {
 		s.writeError(w, ErrUnauthenticated, false)
 		return
@@ -562,6 +563,24 @@ func directRemoteAddress(remote string) (netip.Addr, error) {
 	return netip.ParseAddr(host)
 }
 
+func administratorRemoteAddress(request *http.Request) (netip.Addr, error) {
+	if request == nil {
+		return netip.Addr{}, errors.New("administrator request is required")
+	}
+	values := request.Header.Values(adminauth.PublicClientAddressHeader)
+	if len(values) == 0 {
+		return directRemoteAddress(request.RemoteAddr)
+	}
+	if len(values) != 1 || request.TLS == nil || len(request.TLS.VerifiedChains) == 0 || len(request.TLS.VerifiedChains[0]) == 0 {
+		return netip.Addr{}, errors.New("administrator public client address is not authenticated")
+	}
+	authenticated, err := identity.AuthenticatedIdentityFromCertificate(request.TLS.VerifiedChains[0][0])
+	if err != nil || authenticated.RequireRole(identity.IdentityRoleRelay) != nil {
+		return netip.Addr{}, errors.New("administrator public client address requires an authenticated relay")
+	}
+	return netip.ParseAddr(values[0])
+}
+
 func tooManyAdministratorAttempts() error {
 	return &requestError{status: http.StatusTooManyRequests, code: lanewayv1.ErrorCode_ERROR_CODE_RESOURCE_EXHAUSTED,
 		detail: "authentication temporarily unavailable", retryable: true}
@@ -692,7 +711,7 @@ func (s *Service) recoverAdministrator(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) allowRecoveryAttempt(w http.ResponseWriter, r *http.Request, bucket string) bool {
-	remote, err := directRemoteAddress(r.RemoteAddr)
+	remote, err := administratorRemoteAddress(r)
 	if err != nil {
 		s.writeError(w, ErrUnauthenticated, false)
 		return false

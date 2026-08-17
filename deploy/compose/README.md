@@ -74,6 +74,12 @@ The browser console supports password-backed administrator sessions only.
 OIDC/SAML SSO and SCIM are unavailable and must remain disabled. Never expose
 the static root bearer to a browser.
 
+Open the console at `https://lane.example.com/` with no port suffix. The relay
+terminates public Web-PKI HTTPS on TCP `443` and carries console and
+administrator API requests to the controller over its authenticated internal
+connection. TCP+UDP `8443` is the private controller transport for Laneway
+identities; ordinary browsers must not connect to it directly.
+
 ## Update
 
 ```sh

@@ -13,6 +13,7 @@ const (
 	SessionCookieName              = "__Host-laneway_admin_session"
 	CSRFCookieName                 = "__Host-laneway_admin_csrf"
 	CSRFHeaderName                 = "X-Laneway-CSRF"
+	PublicClientAddressHeader      = "X-Laneway-Public-Client-IP"
 )
 
 type SessionPolicy struct {

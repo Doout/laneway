@@ -17,6 +17,19 @@ type bootstrapSourceFixture struct {
 	bundle   []byte
 	err      error
 	calls    int
+	console  http.Handler
+}
+
+func (f *bootstrapSourceFixture) PublicConsole(request *http.Request) (*http.Response, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.console == nil {
+		return nil, errors.New("console unavailable")
+	}
+	response := httptest.NewRecorder()
+	f.console.ServeHTTP(response, request)
+	return response.Result(), nil
 }
 
 func (f *bootstrapSourceFixture) BootstrapMetadata(context.Context) ([]byte, error) {
@@ -43,7 +56,7 @@ func TestPublicBootstrapHandlerProxiesOnlyExactBundleCapabilities(t *testing.T) 
 		t.Fatalf("bundle headers = %v", response.Header())
 	}
 
-	for _, path := range []string{bootstrap.BundlePathPrefix + strings.Repeat("A", bootstrap.BundleIDLength-1), "/unrelated"} {
+	for _, path := range []string{bootstrap.BundlePathPrefix + strings.Repeat("A", bootstrap.BundleIDLength-1)} {
 		result := httptest.NewRecorder()
 		handler.ServeHTTP(result, httptest.NewRequest(http.MethodGet, path, nil))
 		if result.Code != http.StatusNotFound {
@@ -94,5 +107,44 @@ func TestPublicBootstrapBundleUsesRateLimiterBeforeController(t *testing.T) {
 	}
 	if source.calls != 10 {
 		t.Fatalf("controller fetches=%d, want 10", source.calls)
+	}
+}
+
+func TestPublicHTTPSProxiesConsoleAndAdministratorOnly(t *testing.T) {
+	source := &bootstrapSourceFixture{console: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Host != "console.example.test" {
+			t.Errorf("upstream Host = %q", request.Host)
+		}
+		if request.URL.Path == "/v1/admin/auth/state" {
+			writer.Header().Add("Set-Cookie", "__Host-session=opaque; Secure; Path=/")
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"state":"sign_in"}`))
+			return
+		}
+		writer.Header().Set("Content-Security-Policy", "default-src 'self'")
+		_, _ = writer.Write([]byte("<main>console</main>"))
+	})}
+	handler := publicBootstrapHandlerFromSource(source, newPublicRateLimiter())
+
+	console := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "https://console.example.test/", nil)
+	handler.ServeHTTP(console, request)
+	if console.Code != http.StatusOK || !strings.Contains(console.Body.String(), "console") || console.Header().Get("Content-Security-Policy") != "default-src 'self'" {
+		t.Fatalf("console status=%d headers=%v body=%q", console.Code, console.Header(), console.Body.String())
+	}
+
+	administrator := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "https://console.example.test/v1/admin/auth/state", nil)
+	handler.ServeHTTP(administrator, request)
+	if administrator.Code != http.StatusOK || len(administrator.Result().Cookies()) != 1 || !strings.Contains(administrator.Body.String(), "sign_in") {
+		t.Fatalf("administrator status=%d cookies=%v body=%q", administrator.Code, administrator.Result().Cookies(), administrator.Body.String())
+	}
+
+	for _, path := range []string{"/v1/enroll", "/v1/configuration", "/.well-known/unrelated"} {
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, httptest.NewRequest(http.MethodGet, "https://console.example.test"+path, nil))
+		if result.Code != http.StatusNotFound {
+			t.Fatalf("private path %q status=%d", path, result.Code)
+		}
 	}
 }

@@ -3,10 +3,13 @@ package controllerservice
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,6 +20,51 @@ import (
 	"github.com/Doout/laneway/go/internal/controller"
 	"github.com/Doout/laneway/go/internal/identity"
 )
+
+func TestAdministratorRemoteAddressTrustsOnlyAuthenticatedRelay(t *testing.T) {
+	direct := httptest.NewRequest(http.MethodGet, "https://controller.example/v1/admin/auth/state", nil)
+	direct.RemoteAddr = "192.0.2.10:43210"
+	if address, err := administratorRemoteAddress(direct); err != nil || address.String() != "192.0.2.10" {
+		t.Fatalf("direct administrator address = %v, %v", address, err)
+	}
+
+	spoofed := direct.Clone(direct.Context())
+	spoofed.Header.Set(adminauth.PublicClientAddressHeader, "198.51.100.7")
+	if _, err := administratorRemoteAddress(spoofed); err == nil {
+		t.Fatal("unauthenticated public client address accepted")
+	}
+
+	networkID, err := identity.NewNetworkID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayID, err := identity.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayURI, err := (identity.AuthenticatedIdentity{NetworkID: networkID, Role: identity.IdentityRoleRelay, SubjectID: relayID}).URI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxied := spoofed.Clone(spoofed.Context())
+	proxied.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{{URIs: []*url.URL{relayURI}}}}}
+	if address, err := administratorRemoteAddress(proxied); err != nil || address.String() != "198.51.100.7" {
+		t.Fatalf("relay administrator address = %v, %v", address, err)
+	}
+	nodeURI, err := (identity.AuthenticatedIdentity{NetworkID: networkID, Role: identity.IdentityRoleNode, SubjectID: relayID}).URI()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := spoofed.Clone(spoofed.Context())
+	node.TLS = &tls.ConnectionState{VerifiedChains: [][]*x509.Certificate{{{URIs: []*url.URL{nodeURI}}}}}
+	if _, err := administratorRemoteAddress(node); err == nil {
+		t.Fatal("node-authenticated public client address accepted")
+	}
+	proxied.Header.Add(adminauth.PublicClientAddressHeader, "198.51.100.8")
+	if _, err := administratorRemoteAddress(proxied); err == nil {
+		t.Fatal("duplicate public client address accepted")
+	}
+}
 
 const testRootBearer = "root-automation-secret"
 
