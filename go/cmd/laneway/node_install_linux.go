@@ -503,6 +503,13 @@ func managedNodePreflight() (int, error) {
 }
 
 func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, requestedName string) (connectEnrollment, error) {
+	return enrollManagedNode(ctx, metadata, code, requestedName, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE)
+}
+
+func enrollManagedNode(ctx context.Context, metadata bootstrap.Metadata, code, requestedName string, expectedClass lanewayv1.EnrollmentClass) (connectEnrollment, error) {
+	if expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE && expectedClass != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER {
+		return connectEnrollment{}, errors.New("managed enrollment class is invalid")
+	}
 	expectedNetwork, err := identity.ParseNetworkID(metadata.NetworkID)
 	if err != nil {
 		return connectEnrollment{}, err
@@ -519,7 +526,11 @@ func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, r
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "laneway-persistent-node"}}, private)
+	commonName := "laneway-persistent-node"
+	if expectedClass == lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER {
+		commonName = "laneway-ephemeral-exit"
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: commonName}}, private)
 	if err != nil {
 		return connectEnrollment{}, err
 	}
@@ -527,12 +538,20 @@ func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, r
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	response, err := client.EnrollForNetworkAndClass(ctx, code, requestedName, csrDER, wireGuardPublicKey.Bytes(), expectedNetwork, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE)
+	defer client.Close()
+	response, err := client.EnrollForNetworkAndClass(ctx, code, requestedName, csrDER, wireGuardPublicKey.Bytes(), expectedNetwork, expectedClass)
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	if len(response.GetNetworkId()) != identity.IDSize || len(response.GetNodeId()) != identity.IDSize || response.GetCertificateChain() == nil || len(response.GetCertificateChain().GetCertificatesDer()) == 0 || len(response.GetOverlayAddresses()) == 0 || response.GetEnrollmentClass() != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE || response.GetLeaseExpiresAtUnixSeconds() != 0 {
-		return connectEnrollment{}, errors.New("controller returned an incomplete or non-durable enrollment response")
+	if len(response.GetNetworkId()) != identity.IDSize || len(response.GetNodeId()) != identity.IDSize || response.GetCertificateChain() == nil || len(response.GetCertificateChain().GetCertificatesDer()) == 0 || len(response.GetOverlayAddresses()) == 0 || response.GetEnrollmentClass() != expectedClass {
+		return connectEnrollment{}, errors.New("controller returned an incomplete or wrong-class managed enrollment response")
+	}
+	if expectedClass == lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE && (response.GetLeaseExpiresAtUnixSeconds() != 0 || response.GetEphemeralExitLeaseGeneration() != 0) {
+		return connectEnrollment{}, errors.New("controller returned lease state for a durable enrollment")
+	}
+	if expectedClass == lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER &&
+		(response.GetLeaseExpiresAtUnixSeconds() <= uint64(time.Now().Unix()) || response.GetEphemeralExitLeaseGeneration() == 0) {
+		return connectEnrollment{}, errors.New("controller returned no bounded ephemeral Exit lease")
 	}
 	leaf, err := x509.ParseCertificate(response.GetCertificateChain().GetCertificatesDer()[0])
 	if err != nil {
@@ -569,7 +588,13 @@ func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, r
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	return connectEnrollment{identity: authenticated, certificatePEM: certificatePEM, privateKeyPEM: privatePEM, overlays: overlays, class: response.GetEnrollmentClass(), wireGuardPrivateKey: wireGuardPrivateKey}, nil
+	leaseExpiresAt := time.Time{}
+	if response.GetLeaseExpiresAtUnixSeconds() != 0 {
+		leaseExpiresAt = time.Unix(int64(response.GetLeaseExpiresAtUnixSeconds()), 0).UTC()
+	}
+	return connectEnrollment{identity: authenticated, certificatePEM: certificatePEM, privateKeyPEM: privatePEM, overlays: overlays,
+		class: response.GetEnrollmentClass(), leaseExpiresAt: leaseExpiresAt,
+		wireGuardPrivateKey: wireGuardPrivateKey, ephemeralExitLeaseGeneration: response.GetEphemeralExitLeaseGeneration()}, nil
 }
 
 func managedNodeRelayFromConfiguration(configuration *lanewayv1.NodeConfiguration) (managedNodeRelay, error) {

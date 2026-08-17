@@ -34,6 +34,7 @@ type linuxGatewayManager struct {
 	ownershipMarked   bool
 	plan              GatewayPlan
 	active            bool
+	drained           bool
 	closed            bool
 }
 
@@ -74,7 +75,7 @@ func (m *linuxGatewayManager) Apply(ctx context.Context, plan GatewayPlan) error
 	if !enabled {
 		return m.restoreLocked(ctx)
 	}
-	if m.active && gatewayPlansEqual(m.plan, normalized) {
+	if m.active && !m.drained && gatewayPlansEqual(m.plan, normalized) {
 		return nil
 	}
 	previous, hadPrevious := cloneGatewayPlan(m.plan), m.active
@@ -124,10 +125,34 @@ func (m *linuxGatewayManager) activateLocked(ctx context.Context, plan GatewayPl
 		}
 		m.forwardingTouched = true
 	}
-	if err := m.installTable(ctx, plan); err != nil {
+	if err := m.installTable(ctx, plan, false); err != nil {
 		return m.rollbackActivation(err)
 	}
 	m.plan = cloneGatewayPlan(plan)
+	m.drained = false
+	return nil
+}
+
+func (m *linuxGatewayManager) Drain(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrClosed
+	}
+	if !m.active || m.drained {
+		return nil
+	}
+	plan := cloneGatewayPlan(m.plan)
+	if err := m.deleteOwnedTable(ctx); err != nil {
+		return err
+	}
+	if err := m.installTable(ctx, plan, true); err != nil {
+		return m.rollbackActivation(fmt.Errorf("exitnode: install draining gateway: %w", err))
+	}
+	m.drained = true
 	return nil
 }
 func (m *linuxGatewayManager) rollbackActivation(cause error) error {
@@ -172,6 +197,7 @@ func (m *linuxGatewayManager) restoreLocked(ctx context.Context) error {
 	}
 	if result == nil && !m.tableOwned && !m.forwardingTouched {
 		m.active = false
+		m.drained = false
 		m.priorForwarding = ""
 		m.plan = GatewayPlan{}
 	}
@@ -224,7 +250,7 @@ func (m *linuxGatewayManager) tableExists(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-func (m *linuxGatewayManager) installTable(ctx context.Context, plan GatewayPlan) error {
+func (m *linuxGatewayManager) installTable(ctx context.Context, plan GatewayPlan, draining bool) error {
 	c := m.config
 	m.ownerSession = m.newSessionMarker()
 	commands := [][]string{{"add", "table", gatewayNFTFamily, c.TableName}, {"add", "chain", gatewayNFTFamily, c.TableName, c.OwnerChain}, {"add", "rule", gatewayNFTFamily, c.TableName, c.OwnerChain, "counter", "comment", m.ownershipMarker}, {"add", "rule", gatewayNFTFamily, c.TableName, c.OwnerChain, "counter", "comment", m.ownerSession}, {"add", "chain", gatewayNFTFamily, c.TableName, c.ForwardChain, "{ type filter hook forward priority 0; policy accept; }"}, {"add", "chain", gatewayNFTFamily, c.TableName, c.NATChain, "{ type nat hook postrouting priority 100; policy accept; }"}}
@@ -245,7 +271,12 @@ func (m *linuxGatewayManager) installTable(ctx context.Context, plan GatewayPlan
 		if prefix.Addr().Is6() {
 			addressExpression = "ip6"
 		}
-		if _, err := m.run(ctx, c.NFTCommand, "add", "rule", gatewayNFTFamily, c.TableName, c.ForwardChain, "iifname", c.InputInterface, "oifname", c.OutputInterface, addressExpression, "saddr", p, "accept", "comment", "laneway-exit-out"); err != nil {
+		outbound := []string{"add", "rule", gatewayNFTFamily, c.TableName, c.ForwardChain, "iifname", c.InputInterface, "oifname", c.OutputInterface, addressExpression, "saddr", p}
+		if draining {
+			outbound = append(outbound, "ct", "state", "established,related")
+		}
+		outbound = append(outbound, "accept", "comment", "laneway-exit-out")
+		if _, err := m.run(ctx, c.NFTCommand, outbound...); err != nil {
 			return err
 		}
 		if _, err := m.run(ctx, c.NFTCommand, "add", "rule", gatewayNFTFamily, c.TableName, c.ForwardChain, "iifname", c.OutputInterface, "oifname", c.InputInterface, addressExpression, "daddr", p, "ct", "state", "established,related", "accept", "comment", "laneway-exit-in"); err != nil {
@@ -254,6 +285,14 @@ func (m *linuxGatewayManager) installTable(ctx context.Context, plan GatewayPlan
 		if _, err := m.run(ctx, c.NFTCommand, "add", "rule", gatewayNFTFamily, c.TableName, c.NATChain, "oifname", c.OutputInterface, addressExpression, "saddr", p, "masquerade", "comment", "laneway-exit-nat"); err != nil {
 			return err
 		}
+	}
+	if _, err := m.run(ctx, c.NFTCommand, "add", "rule", gatewayNFTFamily, c.TableName, c.ForwardChain,
+		"iifname", c.InputInterface, "oifname", c.OutputInterface, "drop", "comment", "laneway-exit-out-deny"); err != nil {
+		return err
+	}
+	if _, err := m.run(ctx, c.NFTCommand, "add", "rule", gatewayNFTFamily, c.TableName, c.ForwardChain,
+		"iifname", c.OutputInterface, "oifname", c.InputInterface, "drop", "comment", "laneway-exit-in-deny"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -293,7 +332,10 @@ func (m *linuxGatewayManager) recoverStaleTable(ctx context.Context, plan Gatewa
 	if err != nil {
 		return "", fmt.Errorf("%w: inspect stale gateway table: %v", ErrOwnership, err)
 	}
-	session, err := nftstate.Validate(out, m.tableShape(plan))
+	session, err := nftstate.Validate(out, m.tableShape(plan, false))
+	if err != nil {
+		session, err = nftstate.Validate(out, m.tableShape(plan, true))
+	}
 	if err != nil {
 		return "", fmt.Errorf("%w: existing gateway table does not exactly match Laneway state: %v", ErrOwnership, err)
 	}
@@ -317,7 +359,7 @@ func (m *linuxGatewayManager) recoverStaleTable(ctx context.Context, plan Gatewa
 	return prior, nil
 }
 
-func (m *linuxGatewayManager) tableShape(plan GatewayPlan) nftstate.Shape {
+func (m *linuxGatewayManager) tableShape(plan GatewayPlan, draining bool) nftstate.Shape {
 	c := m.config
 	chains := []nftstate.Chain{{Name: c.OwnerChain},
 		{Name: c.ForwardChain, Type: "filter", Hook: "forward", Policy: "accept", Priority: 0, Base: true},
@@ -328,11 +370,14 @@ func (m *linuxGatewayManager) tableShape(plan GatewayPlan) nftstate.Shape {
 		if prefix.Addr().Is6() {
 			protocol = "ip6"
 		}
+		outbound := []any{nftstate.MatchMeta("iifname", c.InputInterface), nftstate.MatchMeta("oifname", c.OutputInterface),
+			nftstate.MatchPrefix(protocol, "saddr", prefix.Addr().String(), prefix.Bits())}
+		if draining {
+			outbound = append(outbound, nftstate.MatchCTStates("established", "related"))
+		}
+		outbound = append(outbound, nftstate.Accept())
 		rules = append(rules,
-			nftstate.Rule{Chain: c.ForwardChain, Comment: "laneway-exit-out", Expr: []any{
-				nftstate.MatchMeta("iifname", c.InputInterface), nftstate.MatchMeta("oifname", c.OutputInterface),
-				nftstate.MatchPrefix(protocol, "saddr", prefix.Addr().String(), prefix.Bits()), nftstate.Accept(),
-			}},
+			nftstate.Rule{Chain: c.ForwardChain, Comment: "laneway-exit-out", Expr: outbound},
 			nftstate.Rule{Chain: c.ForwardChain, Comment: "laneway-exit-in", Expr: []any{
 				nftstate.MatchMeta("iifname", c.OutputInterface), nftstate.MatchMeta("oifname", c.InputInterface),
 				nftstate.MatchPrefix(protocol, "daddr", prefix.Addr().String(), prefix.Bits()),
@@ -344,6 +389,14 @@ func (m *linuxGatewayManager) tableShape(plan GatewayPlan) nftstate.Shape {
 			}},
 		)
 	}
+	rules = append(rules,
+		nftstate.Rule{Chain: c.ForwardChain, Comment: "laneway-exit-out-deny", Expr: []any{
+			nftstate.MatchMeta("iifname", c.InputInterface), nftstate.MatchMeta("oifname", c.OutputInterface), nftstate.Drop(),
+		}},
+		nftstate.Rule{Chain: c.ForwardChain, Comment: "laneway-exit-in-deny", Expr: []any{
+			nftstate.MatchMeta("iifname", c.OutputInterface), nftstate.MatchMeta("oifname", c.InputInterface), nftstate.Drop(),
+		}},
+	)
 	return nftstate.Shape{Family: gatewayNFTFamily, Table: c.TableName, OwnerChain: c.OwnerChain,
 		Marker: m.ownershipMarker, SessionPrefix: gatewaySessionPrefix, Chains: chains, Rules: rules}
 }

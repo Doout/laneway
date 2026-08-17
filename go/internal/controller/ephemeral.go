@@ -99,6 +99,10 @@ func (s *Store) ExpireEphemeral(ctx context.Context, limit int) (int, error) {
 		if changed != 1 {
 			continue
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE ephemeral_exit_sessions SET terminated_at=?
+			WHERE node_id=? AND terminated_at IS NULL`, unix(now), idBytes(item.node)); err != nil {
+			return 0, fmt.Errorf("terminate expired ephemeral Exit session: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE overlay_addresses SET released_at=? WHERE node_id=? AND released_at IS NULL`, unix(now), idBytes(item.node)); err != nil {
 			return 0, fmt.Errorf("release expired ephemeral addresses: %w", err)
 		}

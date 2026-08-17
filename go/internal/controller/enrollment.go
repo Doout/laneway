@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -19,6 +20,26 @@ import (
 )
 
 const enrollmentSecretBytes = 32
+
+func validateEphemeralExitCapabilities(class EnrollmentClass, capabilities uint64) error {
+	if class == EnrollmentClassEphemeral && protocol.Capability(capabilities).Has(protocol.CapabilityExitNodeV1) &&
+		capabilities != uint64(protocol.CapabilityExitNodeV1) {
+		return fmt.Errorf("%w: ephemeral Exit enrollment grants only exit-node-v1", ErrInvalid)
+	}
+	return nil
+}
+
+func newEphemeralExitGeneration() (uint64, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return 0, fmt.Errorf("generate ephemeral Exit lease generation: %w", err)
+	}
+	value := binary.BigEndian.Uint64(raw[:]) & uint64(math.MaxInt64)
+	if value == 0 {
+		value = 1
+	}
+	return value, nil
+}
 
 func insertInvitedExitRouteTx(ctx context.Context, tx *sql.Tx, networkID identity.NetworkID, nodeID identity.NodeID, validUntil *time.Time, now time.Time) error {
 	var active int
@@ -82,6 +103,9 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 	}
 	if options.EnabledCapabilities > math.MaxInt64 || protocol.Capability(options.EnabledCapabilities)&^NodePolicyCapabilities != 0 {
 		return EnrollmentToken{}, fmt.Errorf("%w: enrollment token contains unsupported policy capabilities", ErrInvalid)
+	}
+	if err := validateEphemeralExitCapabilities(options.Class, options.EnabledCapabilities); err != nil {
+		return EnrollmentToken{}, err
 	}
 	if options.Class == EnrollmentClassEphemeral {
 		options.SessionLifetime = options.SessionLifetime.Truncate(time.Second)
@@ -158,6 +182,9 @@ func (s *Store) AdministratorIssueEnrollmentTokenWithOptions(ctx context.Context
 	}
 	if options.EnabledCapabilities > math.MaxInt64 || protocol.Capability(options.EnabledCapabilities)&^NodePolicyCapabilities != 0 {
 		return EnrollmentToken{}, fmt.Errorf("%w: enrollment token contains unsupported policy capabilities", ErrInvalid)
+	}
+	if err := validateEphemeralExitCapabilities(options.Class, options.EnabledCapabilities); err != nil {
+		return EnrollmentToken{}, err
 	}
 	if options.Class == EnrollmentClassEphemeral {
 		options.SessionLifetime = options.SessionLifetime.Truncate(time.Second)
@@ -394,6 +421,24 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 			return Enrollment{}, err
 		}
 	}
+	var ephemeralExitSession *EphemeralExitSession
+	if enrollmentClass == EnrollmentClassEphemeral && protocol.Capability(enabledCapabilities).Has(protocol.CapabilityExitNodeV1) {
+		if err := validateEphemeralExitCapabilities(enrollmentClass, enabledCapabilities); err != nil {
+			return Enrollment{}, err
+		}
+		generation, err := newEphemeralExitGeneration()
+		if err != nil {
+			return Enrollment{}, err
+		}
+		suspectAt, revokeAt := now.Add(20*time.Second), now.Add(60*time.Second)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO ephemeral_exit_sessions
+			(node_id,network_id,generation,last_heartbeat_at,suspect_at,revoke_at,created_at)
+			VALUES(?,?,?,?,?,?,?)`, idBytes(nodeID), idBytes(networkID), int64(generation), unix(now), unix(suspectAt), unix(revokeAt), unix(now)); err != nil {
+			return Enrollment{}, fmt.Errorf("create ephemeral Exit session: %w", err)
+		}
+		ephemeralExitSession = &EphemeralExitSession{NodeID: nodeID, NetworkID: networkID, Generation: generation,
+			LastHeartbeatAt: now, SuspectAt: suspectAt, RevokeAt: revokeAt, CreatedAt: now}
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE enrollment_tokens SET consumed_at=?,consumed_by=?
         WHERE id=? AND consumed_at IS NULL AND expires_at>?`, unix(now), idBytes(nodeID), idBytes(tokenID), unix(now))
 	if err != nil {
@@ -423,6 +468,13 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	if err := auditTx(ctx, tx, networkID, &nodeID, "node.enroll", "node", &target, details, now); err != nil {
 		return Enrollment{}, err
 	}
+	if ephemeralExitSession != nil {
+		if err := auditActorTx(ctx, tx, &networkID, adminauth.SystemActor(), "ephemeral_exit.session.start", "node", &target,
+			fmt.Sprintf(`{"generation":%d,"suspect_at":%d,"revoke_at":%d}`, ephemeralExitSession.Generation,
+				ephemeralExitSession.SuspectAt.Unix(), ephemeralExitSession.RevokeAt.Unix()), now); err != nil {
+			return Enrollment{}, err
+		}
+	}
 	node := Node{ID: nodeID, NetworkID: networkID, Name: name, EnabledCapabilities: enabledCapabilities, IPv4Address: address, IPv6Address: address6, CreatedAt: now,
 		EnrollmentClass: enrollmentClass, LeaseExpiresAt: leaseExpiresAt, WireGuardPublicKey: wireGuardPublicKey}
 	var certificate Certificate
@@ -449,5 +501,5 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	if err := tx.Commit(); err != nil {
 		return Enrollment{}, fmt.Errorf("commit enrollment: %w", err)
 	}
-	return Enrollment{Node: node, Certificate: certificate}, nil
+	return Enrollment{Node: node, Certificate: certificate, EphemeralExitSession: ephemeralExitSession}, nil
 }

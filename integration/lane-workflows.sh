@@ -257,6 +257,20 @@ if grep -F '<--profile> <tools>' "$log" >/dev/null; then
   exit 1
 fi
 
+shared_exit_token=$test_dir/shared-exit-token
+shared_exit_instructions=$test_dir/shared-exit-instructions
+"$compose_dir/laneway-control" invite --name borrowed-egress --shared-host-exit > "$shared_exit_token" 2> "$shared_exit_instructions"
+grep -Fx 'single_use_secret' "$shared_exit_token" >/dev/null
+grep -F '<--class> <ephemeral>' "$log" >/dev/null
+grep -F '<--session-lifetime> <8h>' "$log" >/dev/null
+grep -F '<--exit-node>' "$log" >/dev/null
+grep -F "releases/download/v1.0.0/ephemeral-exit-bootstrap.sh" "$shared_exit_instructions" >/dev/null
+grep -F -- "--authority 'lane.example.test:8443' --name 'borrowed-egress' --max-runtime '8h'" "$shared_exit_instructions" >/dev/null
+if grep -F 'single_use_secret' "$shared_exit_instructions" >/dev/null; then
+  echo "shared-host Exit invitation leaked into its bootstrap command" >&2
+  exit 1
+fi
+
 "$compose_dir/laneway-control" user-token --name remembered-laptop
 grep -F '<--requested-name> <remembered-laptop>' "$log" >/dev/null
 grep -F '<--class> <remembered>' "$log" >/dev/null

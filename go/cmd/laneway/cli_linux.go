@@ -59,6 +59,9 @@ func addPlatformCommands(root *cobra.Command) {
 		forwarded("uninstall", "Remove command-owned node state", "uninstall", runNodeDispatch),
 	)
 	node.AddCommand(localAliases...)
+	ephemeralExitPrepare := forwarded("ephemeral-exit-prepare", "Prepare a RAM-only ephemeral Exit runtime", "ephemeral-exit-prepare", runNodeDispatch)
+	ephemeralExitPrepare.Hidden = true
+	node.AddCommand(ephemeralExitPrepare)
 	node.AddCommand(group("exit", "Configure exit-node routing", runExit,
 		forwarded("enable", "Advertise this gateway as an exit node", "enable", runExit),
 		forwarded("use NAME_OR_NODE_ID", "Select an authorized exit node", "use", runExit),

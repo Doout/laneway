@@ -35,6 +35,7 @@ import (
 	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/pki"
+	"laneway.dev/laneway/internal/protocol"
 )
 
 const (
@@ -591,6 +592,9 @@ func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
 		CertificateChain: s.certificateChain(cert), OverlayAddresses: nodeOverlayAddresses(node), EnrollmentClass: enrollmentClassProto(node.EnrollmentClass),
 		WireguardPublicKey: node.WireGuardPublicKey.Bytes(),
 	}
+	if enrollment.EphemeralExitSession != nil {
+		resp.EphemeralExitLeaseGeneration = enrollment.EphemeralExitSession.Generation
+	}
 	if node.LeaseExpiresAt != nil {
 		resp.LeaseExpiresAtUnixSeconds = uint64(node.LeaseExpiresAt.Unix())
 	}
@@ -825,6 +829,10 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, true)
 		return
 	}
+	if _, err := s.store.ExpireDisconnectedEphemeralExits(r.Context(), controller.MaxExpireBatch); err != nil {
+		s.writeError(w, err, true)
+		return
+	}
 	network, err := s.store.Network(r.Context(), caller.NetworkID)
 	if err != nil {
 		s.writeError(w, err, true)
@@ -833,6 +841,24 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 	node, err := s.store.Node(r.Context(), caller.NodeID)
 	if err != nil || node.RevokedAt != nil {
 		s.writeError(w, ErrPermissionDenied, true)
+		return
+	}
+	isEphemeralExit := node.EnrollmentClass == controller.EnrollmentClassEphemeral &&
+		protocol.Capability(node.EnabledCapabilities) == protocol.CapabilityExitNodeV1
+	var exitSession *controller.EphemeralExitSession
+	if isEphemeralExit {
+		if !isControllerQUICRequest(r.Context()) {
+			s.writeError(w, ErrPermissionDenied, true)
+			return
+		}
+		session, heartbeatErr := s.store.HeartbeatEphemeralExit(r.Context(), caller.NodeID, req.GetEphemeralExitLeaseGeneration())
+		if heartbeatErr != nil {
+			s.writeError(w, ErrPermissionDenied, true)
+			return
+		}
+		exitSession = &session
+	} else if req.GetEphemeralExitLeaseGeneration() != 0 {
+		s.writeError(w, malformed("ephemeral Exit lease generation is not valid for this identity"), true)
 		return
 	}
 	validUntil := s.now().Add(s.snapshotValidity).UTC().Unix()
@@ -847,7 +873,10 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 	if nextEphemeralExpiry != nil && nextEphemeralExpiry.Unix() < validUntil {
 		validUntil = nextEphemeralExpiry.Unix()
 	}
-	if req.GetKnownConfigurationEpoch() == network.ConfigurationEpoch {
+	if exitSession != nil && exitSession.SuspectAt.Unix() < validUntil {
+		validUntil = exitSession.SuspectAt.Unix()
+	}
+	if req.GetKnownConfigurationEpoch() == network.ConfigurationEpoch && exitSession == nil {
 		w.Header().Set(SnapshotValidityHeader, strconv.FormatInt(validUntil, 10))
 		w.WriteHeader(http.StatusNotModified)
 		return
@@ -886,6 +915,11 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, err, true)
 		return
+	}
+	if exitSession != nil {
+		resp.EphemeralExitLeaseGeneration = exitSession.Generation
+		resp.EphemeralExitSuspectAtUnixSeconds = uint64(exitSession.SuspectAt.Unix())
+		resp.EphemeralExitRevokeAtUnixSeconds = uint64(exitSession.RevokeAt.Unix())
 	}
 	relays, err := s.store.ActiveRelays(r.Context(), caller.NetworkID)
 	if err != nil {

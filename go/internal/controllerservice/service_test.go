@@ -190,6 +190,20 @@ func protobufRequest(t *testing.T, handler http.Handler, method, path string, me
 	return result
 }
 
+func protobufQUICRequest(t *testing.T, handler http.Handler, method, path string, message proto.Message) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := proto.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	req = req.WithContext(withControllerQUICContext(req.Context()))
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, req)
+	return result
+}
+
 func mtlsRequest(t *testing.T, handler http.Handler, method, path string, message proto.Message, certificate *x509.Certificate) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := proto.Marshal(message)
@@ -487,6 +501,85 @@ func TestEphemeralEnrollmentCertificateAndResponseAreLeaseBound(t *testing.T) {
 	f.service.now = func() time.Time { return wantExpiry }
 	if _, err := f.service.issueCertificate(node, csr); err == nil {
 		t.Fatal("renewal at exact lease expiry unexpectedly succeeded")
+	}
+}
+
+func TestEphemeralExitEnrollmentAndHeartbeatLease(t *testing.T) {
+	var authenticated identity.NodeIdentity
+	f := newFixture(t, DefaultMaxBodyBytes, func(*http.Request) (identity.NodeIdentity, error) {
+		return authenticated, nil
+	})
+	token, err := f.store.IssueEnrollmentTokenWithOptions(context.Background(), f.network.ID, "borrowed-egress", time.Now().Add(time.Minute), controller.EnrollmentTokenOptions{
+		Class: controller.EnrollmentClassEphemeral, SessionLifetime: controller.MinEphemeralLifetime,
+		RequestedName: "borrowed-egress", EnabledCapabilities: uint64(protocol.CapabilityExitNodeV1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, result := enrollClass(t, f, token.Secret, csrDER(t, ""), "borrowed-egress", lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER)
+	if result.Code != http.StatusCreated || response.GetEphemeralExitLeaseGeneration() == 0 {
+		t.Fatalf("ephemeral Exit enrollment status=%d response=%+v", result.Code, response)
+	}
+	copy(authenticated.NetworkID[:], response.GetNetworkId())
+	copy(authenticated.NodeID[:], response.GetNodeId())
+
+	missing := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", &lanewayv1.ConfigurationRequest{})
+	if missing.Code != http.StatusForbidden {
+		t.Fatalf("missing generation status=%d body=%x", missing.Code, missing.Body.Bytes())
+	}
+	request := &lanewayv1.ConfigurationRequest{EphemeralExitLeaseGeneration: response.GetEphemeralExitLeaseGeneration()}
+	plainHTTP := protobufRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", request)
+	if plainHTTP.Code != http.StatusForbidden {
+		t.Fatalf("ephemeral Exit heartbeat accepted outside exclusive QUIC session: status=%d", plainHTTP.Code)
+	}
+	heartbeat := protobufQUICRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", request)
+	if heartbeat.Code != http.StatusOK {
+		t.Fatalf("heartbeat status=%d body=%x", heartbeat.Code, heartbeat.Body.Bytes())
+	}
+	configuration := new(lanewayv1.NodeConfiguration)
+	if err := proto.Unmarshal(heartbeat.Body.Bytes(), configuration); err != nil {
+		t.Fatal(err)
+	}
+	if configuration.GetEphemeralExitLeaseGeneration() != request.GetEphemeralExitLeaseGeneration() ||
+		configuration.GetEphemeralExitSuspectAtUnixSeconds() == 0 || configuration.GetEphemeralExitRevokeAtUnixSeconds() == 0 ||
+		configuration.GetEphemeralExitRevokeAtUnixSeconds()-configuration.GetEphemeralExitSuspectAtUnixSeconds() != 40 ||
+		configuration.GetValidUntilUnixSeconds() > configuration.GetEphemeralExitSuspectAtUnixSeconds() {
+		t.Fatalf("heartbeat lease metadata=%+v", configuration)
+	}
+	request.KnownConfigurationEpoch = configuration.GetConfigurationEpoch()
+	renewed := protobufQUICRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", request)
+	if renewed.Code != http.StatusOK {
+		t.Fatalf("ephemeral Exit heartbeat incorrectly returned unchanged status=%d", renewed.Code)
+	}
+	request.EphemeralExitLeaseGeneration++
+	wrong := protobufQUICRequest(t, f.service.Handler(), http.MethodPost, "/v1/configuration", request)
+	if wrong.Code != http.StatusForbidden {
+		t.Fatalf("wrong generation status=%d body=%x", wrong.Code, wrong.Body.Bytes())
+	}
+}
+
+func TestEphemeralExitControlSessionIsExclusive(t *testing.T) {
+	server := &QUICServer{activeEphemeralExits: make(map[identity.NodeID]ephemeralExitConnection)}
+	var nodeID identity.NodeID
+	nodeID[0] = 1
+	first, _, claimed := server.claimEphemeralExit(nodeID, nil, false)
+	if !claimed {
+		t.Fatal("initial ephemeral Exit control session was rejected")
+	}
+	if _, _, claimed := server.claimEphemeralExit(nodeID, nil, false); claimed {
+		t.Fatal("duplicate ephemeral Exit control session was accepted")
+	}
+	second, _, claimed := server.claimEphemeralExit(nodeID, nil, true)
+	if !claimed || second == first {
+		t.Fatal("fresh proof-of-possession session was not accepted after suspect boundary")
+	}
+	server.releaseEphemeralExit(nodeID, first)
+	if _, _, claimed := server.claimEphemeralExit(nodeID, nil, false); claimed {
+		t.Fatal("superseded session release removed the fresh session")
+	}
+	server.releaseEphemeralExit(nodeID, second)
+	if _, _, claimed := server.claimEphemeralExit(nodeID, nil, false); !claimed {
+		t.Fatal("fresh proof-of-possession session was not accepted after disconnect")
 	}
 }
 

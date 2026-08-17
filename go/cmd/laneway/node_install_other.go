@@ -15,3 +15,7 @@ func runManagedNodeRenew([]string) error {
 func runNodeUninstall([]string) error {
 	return errors.New("managed node uninstall requires Linux and systemd")
 }
+
+func runEphemeralExitPrepare([]string) error {
+	return errors.New("ephemeral Exit preparation requires Linux and systemd")
+}

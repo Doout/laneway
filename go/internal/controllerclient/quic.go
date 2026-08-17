@@ -22,15 +22,16 @@ import (
 const controllerSchemaVersion = 1
 
 type quicControllerClient struct {
-	address   string
-	tls       *tls.Config
-	timeout   time.Duration
-	mu        sync.Mutex
-	conn      *quic.Conn
-	requestID atomic.Uint64
+	address                 string
+	tls                     *tls.Config
+	timeout                 time.Duration
+	mu                      sync.Mutex
+	conn                    *quic.Conn
+	requestID               atomic.Uint64
+	ephemeralExitGeneration uint64
 }
 
-func newQUICControllerClient(address, dialAddress string, tlsConfig *tls.Config, timeout time.Duration) (*quicControllerClient, error) {
+func newQUICControllerClient(address, dialAddress string, tlsConfig *tls.Config, timeout time.Duration, ephemeralExitGeneration uint64) (*quicControllerClient, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || host == "" || port == "" {
 		return nil, errors.New("controller client: QUIC endpoint must be host:port")
@@ -48,7 +49,7 @@ func newQUICControllerClient(address, dialAddress string, tlsConfig *tls.Config,
 	config := tlsConfig.Clone()
 	config.NextProtos = []string{controllerservice.ControllerALPN}
 	config.MinVersion, config.MaxVersion = tls.VersionTLS13, tls.VersionTLS13
-	return &quicControllerClient{address: address, tls: config, timeout: timeout}, nil
+	return &quicControllerClient{address: address, tls: config, timeout: timeout, ephemeralExitGeneration: ephemeralExitGeneration}, nil
 }
 
 func (c *quicControllerClient) renew(ctx context.Context, csr, wireGuardPublicKey []byte) (*lanewayv1.RenewalResponse, error) {
@@ -65,7 +66,9 @@ func (c *quicControllerClient) renew(ctx context.Context, csr, wireGuardPublicKe
 }
 
 func (c *quicControllerClient) configuration(ctx context.Context, known uint64) (*lanewayv1.NodeConfiguration, bool, error) {
-	request := &lanewayv1.ControllerEnvelope{Body: &lanewayv1.ControllerEnvelope_ConfigurationRequest{ConfigurationRequest: &lanewayv1.ConfigurationRequest{KnownConfigurationEpoch: known}}}
+	request := &lanewayv1.ControllerEnvelope{Body: &lanewayv1.ControllerEnvelope_ConfigurationRequest{ConfigurationRequest: &lanewayv1.ConfigurationRequest{
+		KnownConfigurationEpoch: known, EphemeralExitLeaseGeneration: c.ephemeralExitGeneration,
+	}}}
 	response, err := c.request(ctx, request)
 	if err != nil {
 		return nil, false, err
@@ -74,11 +77,18 @@ func (c *quicControllerClient) configuration(ctx context.Context, known uint64) 
 		if lease.ConfigurationEpoch != known || lease.ValidUntilUnixSeconds == 0 {
 			return nil, false, errors.New("controller QUIC: configuration lease omitted deadline")
 		}
+		if c.ephemeralExitGeneration != 0 && (lease.GetEphemeralExitLeaseGeneration() != c.ephemeralExitGeneration ||
+			lease.GetEphemeralExitSuspectAtUnixSeconds() == 0 || lease.GetEphemeralExitRevokeAtUnixSeconds() == 0) {
+			return nil, false, errors.New("controller QUIC: ephemeral Exit lease metadata is incomplete")
+		}
 		return &lanewayv1.NodeConfiguration{ConfigurationEpoch: known, ValidUntilUnixSeconds: lease.ValidUntilUnixSeconds}, true, nil
 	}
 	value := response.GetNodeConfiguration()
 	if value == nil {
 		return nil, false, errors.New("controller QUIC: expected node configuration")
+	}
+	if c.ephemeralExitGeneration != 0 && value.GetEphemeralExitLeaseGeneration() != c.ephemeralExitGeneration {
+		return nil, false, errors.New("controller QUIC: ephemeral Exit lease generation changed")
 	}
 	return value, false, nil
 }
@@ -181,6 +191,15 @@ func (c *quicControllerClient) request(ctx context.Context, envelope *lanewayv1.
 func (c *quicControllerClient) discardConnection() {
 	if c.conn != nil {
 		_ = c.conn.CloseWithError(0, "reconnect")
+		c.conn = nil
+	}
+}
+
+func (c *quicControllerClient) close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conn != nil {
+		_ = c.conn.CloseWithError(0, "client closed")
 		c.conn = nil
 	}
 }

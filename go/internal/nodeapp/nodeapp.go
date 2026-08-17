@@ -20,6 +20,7 @@ import (
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
 	"laneway.dev/laneway/internal/buildinfo"
 	"laneway.dev/laneway/internal/config"
+	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/controllerclient"
 	"laneway.dev/laneway/internal/dataplane"
 	"laneway.dev/laneway/internal/directpath"
@@ -104,6 +105,11 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	if cfg.Mode != config.ModeNode {
 		return fmt.Errorf("configuration mode is %q, want %q", cfg.Mode, config.ModeNode)
 	}
+	if cfg.Exit.LeaseGeneration != 0 {
+		if err := resolveEphemeralExitCredentials(&cfg); err != nil {
+			return fmt.Errorf("resolve ephemeral Exit credentials: %w", err)
+		}
+	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
@@ -116,6 +122,11 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 	}
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("validate configuration with persisted exit intent: %w", err)
+	}
+	if cfg.Exit.LeaseGeneration != 0 {
+		if err := hardenEphemeralExitProcess(); err != nil {
+			return fmt.Errorf("harden ephemeral Exit process: %w", err)
+		}
 	}
 	if cfg.WireGuard.Enabled && cfg.Controller.Endpoint == "" {
 		return errors.New("WireGuard runtime requires controller authority")
@@ -186,6 +197,7 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 			CertificateFile: cfg.TLS.CertificateFile, PrivateKeyFile: cfg.TLS.PrivateKeyFile,
 			ServerName: cfg.Controller.ServerName, DialAddress: controllerEndpoint.DialAddress,
 			ExpectedNetworkID: controllerNetworkID, ExpectedServiceID: controllerServiceID,
+			EphemeralExitLeaseGeneration: cfg.Exit.LeaseGeneration,
 		})
 		if err != nil {
 			return err
@@ -1016,6 +1028,10 @@ func controllerOverlayAddresses(configuration *lanewayv1.NodeConfiguration, loca
 func validateConfigurationIdentityLease(configuration *lanewayv1.NodeConfiguration, now time.Time) error {
 	class := configuration.GetEnrollmentClass()
 	lease := configuration.GetIdentityLeaseExpiresAtUnixSeconds()
+	exitGeneration := configuration.GetEphemeralExitLeaseGeneration()
+	exitSuspect := configuration.GetEphemeralExitSuspectAtUnixSeconds()
+	exitRevoke := configuration.GetEphemeralExitRevokeAtUnixSeconds()
+	isEphemeralExit := protocol.Capability(configuration.GetEnabledCapabilities()) == protocol.CapabilityExitNodeV1
 	switch class {
 	case lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_UNSPECIFIED, lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE,
 		lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER:
@@ -1029,10 +1045,36 @@ func validateConfigurationIdentityLease(configuration *lanewayv1.NodeConfigurati
 		if configuration.GetValidUntilUnixSeconds() > lease {
 			return errors.New("controller snapshot exceeds the ephemeral identity lease")
 		}
+		if isEphemeralExit {
+			if exitGeneration == 0 || exitSuspect == 0 || exitRevoke == 0 || exitSuspect >= exitRevoke ||
+				exitRevoke-exitSuspect != uint64((controller.EphemeralExitRevokeAfter-controller.EphemeralExitSuspectAfter)/time.Second) ||
+				configuration.GetValidUntilUnixSeconds() > exitSuspect || !time.Unix(int64(exitSuspect), 0).After(now) {
+				return errors.New("ephemeral Exit controller lease is missing, expired, or inconsistent")
+			}
+		} else if exitGeneration != 0 || exitSuspect != 0 || exitRevoke != 0 {
+			return errors.New("non-Exit ephemeral identity has unexpected Exit lease state")
+		}
 	default:
 		return errors.New("controller returned an unknown enrollment class")
 	}
+	if class != lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER && (exitGeneration != 0 || exitSuspect != 0 || exitRevoke != 0) {
+		return errors.New("non-ephemeral identity has unexpected Exit lease state")
+	}
 	return nil
+}
+
+func ephemeralExitTerminalDeadline(configuration *lanewayv1.NodeConfiguration) time.Time {
+	if configuration == nil || configuration.GetEphemeralExitLeaseGeneration() == 0 {
+		return time.Time{}
+	}
+	revoke := time.Unix(int64(configuration.GetEphemeralExitRevokeAtUnixSeconds()), 0).UTC()
+	if absolute := configuration.GetIdentityLeaseExpiresAtUnixSeconds(); absolute != 0 {
+		identityDeadline := time.Unix(int64(absolute), 0).UTC()
+		if identityDeadline.Before(revoke) {
+			return identityDeadline
+		}
+	}
+	return revoke
 }
 
 func configurationDeadline(seconds uint64, now time.Time) (time.Time, error) {
@@ -1085,21 +1127,23 @@ func runConfigurationUpdates(ctx context.Context, interval time.Duration, source
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	for {
+		if terminal := ephemeralExitTerminalDeadline(last); !terminal.IsZero() && !terminal.After(time.Now()) {
+			return errors.New("ephemeral Exit lease is terminal")
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-timer.C:
 		}
 		if !failClosed && !deadline.After(time.Now()) {
-			expired := failClosedNodeConfiguration(last, local)
-			if closeErr := applyControllerConfiguration(ctx, expired, local, routeTable, routeManager, bypass, policyTable, subnetManager, ipForwardManager, exitManagers, applyState); closeErr != nil {
-				if ctx.Err() == nil {
-					fmt.Fprintln(os.Stderr, "lanewayd: expire controller snapshot:", closeErr)
-				}
-			}
+			failCloseControllerSnapshot(ctx, last, local, routeTable, routeManager, bypass, policyTable,
+				subnetManager, ipForwardManager, exitManagers, applyState)
 			// The fail-close apply publishes empty userspace routes, forwarding
 			// authorization, and deny policy before returning cleanup errors.
 			failClosed = true
+		}
+		if terminal := ephemeralExitTerminalDeadline(last); !terminal.IsZero() && !terminal.After(time.Now()) {
+			return errors.New("ephemeral Exit lease is terminal")
 		}
 		requestCtx := ctx
 		cancelRequest := func() {}
@@ -1155,12 +1199,8 @@ func runConfigurationUpdates(ctx context.Context, interval time.Duration, source
 			failClosed = true
 		}
 		if !failClosed && !deadline.After(time.Now()) {
-			expired := failClosedNodeConfiguration(last, local)
-			if closeErr := applyControllerConfiguration(ctx, expired, local, routeTable, routeManager, bypass, policyTable, subnetManager, ipForwardManager, exitManagers, applyState); closeErr != nil {
-				if ctx.Err() == nil {
-					fmt.Fprintln(os.Stderr, "lanewayd: expire controller snapshot:", closeErr)
-				}
-			}
+			failCloseControllerSnapshot(ctx, last, local, routeTable, routeManager, bypass, policyTable,
+				subnetManager, ipForwardManager, exitManagers, applyState)
 			failClosed = true
 		}
 		next := interval
@@ -1170,7 +1210,34 @@ func runConfigurationUpdates(ctx context.Context, interval time.Duration, source
 		if next <= 0 {
 			next = min(interval, time.Second)
 		}
+		if terminal := ephemeralExitTerminalDeadline(last); !terminal.IsZero() {
+			if until := time.Until(terminal); until > 0 && until < next {
+				next = until
+			}
+		}
 		timer.Reset(next)
+	}
+}
+
+func failCloseControllerSnapshot(ctx context.Context, last *lanewayv1.NodeConfiguration, local identity.NodeIdentity,
+	routeTable *routing.Table, routeManager platform.RouteManager, bypass []netip.Addr, policyTable *policy.Table,
+	subnetManager *daemonSubnetManager, ipForwardManager *daemonIPForwardManager, exitManagers *daemonExitManagers,
+	applyState *controllerApplyState,
+) {
+	// A disconnected ephemeral Exit enters a bounded drain phase: kernel
+	// conntrack admits only established/related flows until the terminal
+	// controller deadline. All other identities withdraw authority immediately.
+	if last.GetEphemeralExitLeaseGeneration() != 0 && exitManagers != nil {
+		if err := exitManagers.Drain(ctx); err == nil {
+			return
+		} else if ctx.Err() == nil {
+			fmt.Fprintln(os.Stderr, "lanewayd: drain ephemeral Exit:", err)
+		}
+	}
+	expired := failClosedNodeConfiguration(last, local)
+	if err := applyControllerConfiguration(ctx, expired, local, routeTable, routeManager, bypass, policyTable,
+		subnetManager, ipForwardManager, exitManagers, applyState); err != nil && ctx.Err() == nil {
+		fmt.Fprintln(os.Stderr, "lanewayd: expire controller snapshot:", err)
 	}
 }
 
@@ -1510,6 +1577,23 @@ func (m *daemonExitManagers) Restore(ctx context.Context) error {
 		m.cleanupFailures++
 	}
 	return result
+}
+
+func (m *daemonExitManagers) Drain(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gateway == nil {
+		return errors.New("ephemeral Exit gateway is unavailable")
+	}
+	if err := m.gateway.Drain(ctx); err != nil {
+		m.cleanupFailures++
+		return err
+	}
+	m.gatewayReady = false
+	return nil
 }
 
 type daemonExitPlan struct {

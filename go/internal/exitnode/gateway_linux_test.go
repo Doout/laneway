@@ -123,6 +123,22 @@ func TestLinuxGatewayNATAndRestore(t *testing.T) {
 	if !nat {
 		t.Fatal("NAT rule not installed")
 	}
+	beforeDrain := len(r.calls)
+	if err := manager.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var establishedOnly bool
+	for _, args := range r.calls[beforeDrain:] {
+		line := strings.Join(args, " ")
+		establishedOnly = establishedOnly || strings.Contains(line, "laneway_forward") &&
+			strings.Contains(line, "iifname lane0") && strings.Contains(line, "ct state established,related")
+	}
+	if !establishedOnly {
+		t.Fatalf("drain did not replace outbound admission with conntrack-only rule: %v", r.calls[beforeDrain:])
+	}
+	if err := manager.Apply(context.Background(), gatewayPlan()); err != nil {
+		t.Fatalf("restore full gateway after reconnect: %v", err)
+	}
 	if err := manager.Restore(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -213,9 +229,15 @@ func gatewayRulesetJSON(marker, session string, extra bool) []byte {
 		identity("laneway_nat", "laneway-exit-nat", 9, []any{
 			nftstate.MatchMeta("oifname", "eth0"), nftstate.MatchPrefix("ip", "saddr", prefix.Addr().String(), prefix.Bits()), nftstate.Masquerade(),
 		}),
+		identity("laneway_forward", "laneway-exit-out-deny", 10, []any{
+			nftstate.MatchMeta("iifname", "lane0"), nftstate.MatchMeta("oifname", "eth0"), nftstate.Drop(),
+		}),
+		identity("laneway_forward", "laneway-exit-in-deny", 11, []any{
+			nftstate.MatchMeta("iifname", "eth0"), nftstate.MatchMeta("oifname", "lane0"), nftstate.Drop(),
+		}),
 	}
 	if extra {
-		objects = append(objects, identity("laneway_forward", "foreign", 10, []any{nftstate.Accept()}))
+		objects = append(objects, identity("laneway_forward", "foreign", 12, []any{nftstate.Accept()}))
 	}
 	raw, _ := json.Marshal(map[string]any{"nftables": objects})
 	return raw

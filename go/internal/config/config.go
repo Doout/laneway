@@ -200,6 +200,9 @@ type Exit struct {
 	FailureMode      string   `toml:"failure_mode"`
 	DNSServers       []string `toml:"dns_servers"`
 	LocalLANBypasses []string `toml:"local_lan_bypasses"`
+	// LeaseGeneration is present only in a RAM-backed ephemeral Exit runtime.
+	// It binds controller heartbeats to one run and must never be persisted.
+	LeaseGeneration uint64 `toml:"lease_generation"`
 }
 
 type AuthorizedPeer struct {
@@ -450,6 +453,12 @@ func (c Config) Validate() error {
 	}
 	if c.Exit.Serve && c.Controller.Endpoint == "" {
 		return errors.New("controller.endpoint is required when serving as an exit node")
+	}
+	if c.Exit.LeaseGeneration != 0 {
+		if !c.Exit.Serve || c.Exit.Enabled || c.Exit.FailureMode != "closed" ||
+			c.Controller.Endpoint == "" || c.Controller.PollInterval > Duration(10*time.Second) {
+			return errors.New("an ephemeral Exit lease requires serve-only fail-closed mode and a controller poll interval no greater than 10s")
+		}
 	}
 	for _, value := range c.Exit.DNSServers {
 		address, err := netip.ParseAddr(value)

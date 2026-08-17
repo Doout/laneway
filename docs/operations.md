@@ -143,6 +143,13 @@ Use an ephemeral session when no identity should be saved:
 laneway connect lane.example.com --ephemeral
 ```
 
+To borrow a systemd Linux host as a RAM-only Exit, use
+`laneway control invite --name NAME --shared-host-exit` on the controller and
+follow the generated immutable bootstrap command. See
+[`ephemeral-shared-host-exit.md`](ephemeral-shared-host-exit.md) for the
+security boundary, heartbeat/revocation timing, and cleanup behavior. Durable
+Docker Exit Nodes remain the default.
+
 Remove a saved login with `laneway logout lane.example.com`. This does not
 revoke the device; revoke its NodeID at the controller when it is retired, lost,
 or compromised.

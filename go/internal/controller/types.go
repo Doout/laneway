@@ -176,8 +176,24 @@ type CertificateMaterial struct {
 
 // Enrollment contains every durable record created by one atomic enrollment.
 type Enrollment struct {
-	Node        Node
-	Certificate Certificate
+	Node                 Node
+	Certificate          Certificate
+	EphemeralExitSession *EphemeralExitSession
+}
+
+// EphemeralExitSession is controller-authoritative live lease state for an
+// ephemeral identity granted exactly the Exit capability. Its generation is
+// bound to the in-memory runtime; certificate possession is still proved by
+// mTLS on every heartbeat.
+type EphemeralExitSession struct {
+	NodeID          identity.NodeID
+	NetworkID       identity.NetworkID
+	Generation      uint64
+	LastHeartbeatAt time.Time
+	SuspectAt       time.Time
+	RevokeAt        time.Time
+	CreatedAt       time.Time
+	TerminatedAt    *time.Time
 }
 
 // EnrollmentCertificateIssuer is called exactly once after the prospective
