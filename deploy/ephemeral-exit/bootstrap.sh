@@ -92,7 +92,9 @@ cleanup_failed_bootstrap() {
 	exit "$status"
 }
 trap cleanup_failed_bootstrap EXIT HUP INT TERM
-[ ! -e "$cleanup_path" ] && [ ! -L "$cleanup_path" ] || die 'random cleanup path already exists'
+if [[ -e $cleanup_path || -L $cleanup_path ]]; then
+	die 'random cleanup path already exists'
+fi
 cat > "$work/cleanup" <<EOF
 #!/bin/sh
 set -eu

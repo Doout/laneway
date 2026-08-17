@@ -185,6 +185,7 @@ impl Client {
         }
         let request = ConfigurationRequest {
             known_configuration_epoch: known_epoch,
+            ephemeral_exit_lease_generation: 0,
         }
         .encode_to_vec();
         let mut response = self
@@ -360,6 +361,7 @@ impl QuicControl {
             body: Some(controller_envelope::Body::ConfigurationRequest(
                 ConfigurationRequest {
                     known_configuration_epoch: known_epoch,
+                    ephemeral_exit_lease_generation: 0,
                 },
             )),
         };
@@ -1232,6 +1234,9 @@ mod tests {
             }),
             enrollment_class: EnrollmentClass::DurableNode as i32,
             identity_lease_expires_at_unix_seconds: 0,
+            ephemeral_exit_lease_generation: 0,
+            ephemeral_exit_suspect_at_unix_seconds: 0,
+            ephemeral_exit_revoke_at_unix_seconds: 0,
         }
     }
 
