@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/revocation"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/revocation"
 )
 
 // ALPN is the TLS application protocol negotiated by Laneway peers.

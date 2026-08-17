@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/adminauth"
 )
 
 var (

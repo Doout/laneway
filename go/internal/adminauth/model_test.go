@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func TestPermissionMatrixAndNetworkScope(t *testing.T) {

@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Doout/laneway/go/internal/exitnode"
+	"github.com/Doout/laneway/go/internal/platform"
 	"golang.org/x/sys/unix"
-	"laneway.dev/laneway/internal/exitnode"
-	"laneway.dev/laneway/internal/platform"
 )
 
 type unixPacketConn struct {

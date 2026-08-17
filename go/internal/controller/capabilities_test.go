@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 func TestNodePolicyCapabilitiesGateAdvertisementAndApproval(t *testing.T) {

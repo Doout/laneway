@@ -577,7 +577,7 @@ const file_laneway_v1_routes_proto_rawDesc = "" +
 	"\x16RouteAdvertisementMode\x12(\n" +
 	"$ROUTE_ADVERTISEMENT_MODE_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cROUTE_ADVERTISEMENT_MODE_NAT\x10\x01\x12#\n" +
-	"\x1fROUTE_ADVERTISEMENT_MODE_ROUTED\x10\x02B.Z,laneway.dev/laneway/api/laneway/v1;lanewayv1b\x06proto3"
+	"\x1fROUTE_ADVERTISEMENT_MODE_ROUTED\x10\x02B6Z4github.com/Doout/laneway/go/api/laneway/v1;lanewayv1b\x06proto3"
 
 var (
 	file_laneway_v1_routes_proto_rawDescOnce sync.Once

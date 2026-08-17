@@ -10,9 +10,9 @@ import (
 	"net/netip"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/netvalidate"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/netvalidate"
 )
 
 func CreateNetwork(ctx context.Context, s *Store, name string, pool netip.Prefix) (Network, error) {

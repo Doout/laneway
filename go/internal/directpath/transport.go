@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/revocation"
+	relaytransport "github.com/Doout/laneway/go/internal/transport"
 	"github.com/quic-go/quic-go"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/revocation"
-	relaytransport "laneway.dev/laneway/internal/transport"
 )
 
 const (

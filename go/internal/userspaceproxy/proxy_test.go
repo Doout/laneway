@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Doout/laneway/go/internal/protocol"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"laneway.dev/laneway/internal/protocol"
 )
 
 func TestAuthorizedPacketsDialFromUserspaceWithoutHostPrivileges(t *testing.T) {

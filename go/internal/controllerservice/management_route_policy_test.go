@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"laneway.dev/laneway/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/adminauth"
 )
 
 func TestManagementRoutePoliciesCoverEveryRegisteredAdminHandler(t *testing.T) {

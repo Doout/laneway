@@ -9,10 +9,10 @@ COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway ./cmd/${BINARY}
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
 RUN mkdir -p /out/connector-state /out/connector-run && chown 65532:65532 /out/connector-state /out/connector-run
 

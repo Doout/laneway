@@ -15,7 +15,7 @@ COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
 RUN mkdir -p /out/controller-state /out/relay-state /out/relay-public && chown 65532:65532 /out/controller-state /out/relay-state /out/relay-public
 
@@ -23,21 +23,21 @@ FROM build-base AS build-controller
 ARG BINARY=laneway-controller
 RUN test "${BINARY}" = laneway-controller && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway ./cmd/laneway-controller
 
 FROM build-base AS build-admin
 ARG BINARY=laneway
 RUN test "${BINARY}" = laneway && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway ./cmd/laneway
 
 FROM build-base AS build-relay
 ARG BINARY=laneway-relay
 RUN test "${BINARY}" = laneway-relay && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
+    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway ./cmd/laneway-relay
 
 FROM scratch AS runtime

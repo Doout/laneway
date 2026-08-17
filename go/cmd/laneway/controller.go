@@ -14,12 +14,12 @@ import (
 	"strings"
 	"time"
 
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/controllerclient"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/protocol"
 	"google.golang.org/protobuf/encoding/protojson"
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/controllerclient"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/protocol"
 )
 
 const controllerCommandTimeout = 30 * time.Second

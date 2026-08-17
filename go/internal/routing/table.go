@@ -10,7 +10,7 @@ import (
 	"sort"
 	"sync/atomic"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 var (

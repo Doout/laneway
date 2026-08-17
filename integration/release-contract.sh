@@ -208,7 +208,7 @@ for path in "$dockerfile" "$connector_dockerfile" "$exit_dockerfile"; do
   require 'ARG TARGETOS' "$path"
   require 'ARG TARGETARCH' "$path"
   require "CGO_ENABLED=0 GOOS=\${TARGETOS} GOARCH=\${TARGETARCH}" "$path"
-  require "laneway.dev/laneway/internal/buildinfo.Version=\${VERSION}" "$path"
+  require "github.com/Doout/laneway/go/internal/buildinfo.Version=\${VERSION}" "$path"
 done
 require 'RUN pnpm build:live' "$dockerfile"
 require 'FROM scratch AS runtime' "$dockerfile"

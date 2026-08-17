@@ -17,12 +17,12 @@ import (
 	"strings"
 	"time"
 
-	"laneway.dev/laneway/internal/netvalidate"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/netvalidate"
+	"github.com/Doout/laneway/go/internal/protocol"
 
 	"github.com/pelletier/go-toml/v2"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 const MaxFileSize = 1 << 20

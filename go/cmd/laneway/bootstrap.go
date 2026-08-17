@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"laneway.dev/laneway/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/bootstrap"
 )
 
 func runBootstrap(args []string) error {

@@ -1683,7 +1683,7 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x1cENROLLMENT_CLASS_UNSPECIFIED\x10\x00\x12!\n" +
 	"\x1dENROLLMENT_CLASS_DURABLE_NODE\x10\x01\x12#\n" +
 	"\x1fENROLLMENT_CLASS_EPHEMERAL_USER\x10\x02\x12$\n" +
-	" ENROLLMENT_CLASS_REMEMBERED_USER\x10\x03B.Z,laneway.dev/laneway/api/laneway/v1;lanewayv1b\x06proto3"
+	" ENROLLMENT_CLASS_REMEMBERED_USER\x10\x03B6Z4github.com/Doout/laneway/go/api/laneway/v1;lanewayv1b\x06proto3"
 
 var (
 	file_laneway_v1_controller_proto_rawDescOnce sync.Once

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 func openRelayKernelSocket(t *testing.T) *net.UDPConn {

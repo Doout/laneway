@@ -11,8 +11,8 @@ import (
 	"os"
 	"time"
 
-	"laneway.dev/laneway/internal/directpath"
-	"laneway.dev/laneway/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/directpath"
+	"github.com/Doout/laneway/go/internal/pathmanager"
 )
 
 func runDirectQUIC(parent context.Context, args []string) error {

@@ -20,16 +20,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/config"
+	"github.com/Doout/laneway/go/internal/controllerclient"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/localapi"
+	"github.com/Doout/laneway/go/internal/nethelper"
+	"github.com/Doout/laneway/go/internal/nodeapp"
+	"github.com/Doout/laneway/go/internal/pki"
+	"github.com/Doout/laneway/go/internal/wireguard"
 	"golang.org/x/term"
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/config"
-	"laneway.dev/laneway/internal/controllerclient"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/localapi"
-	"laneway.dev/laneway/internal/nethelper"
-	"laneway.dev/laneway/internal/nodeapp"
-	"laneway.dev/laneway/internal/pki"
-	"laneway.dev/laneway/internal/wireguard"
 )
 
 func main() {

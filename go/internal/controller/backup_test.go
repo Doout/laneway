@@ -16,7 +16,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"laneway.dev/laneway/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/adminauth"
 )
 
 func TestBackupAndFreshRestore(t *testing.T) {

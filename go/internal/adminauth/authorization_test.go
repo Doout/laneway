@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func TestSubjectConstructionAndDefensiveValues(t *testing.T) {

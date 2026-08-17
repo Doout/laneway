@@ -9,8 +9,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"laneway.dev/laneway/internal/config"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/config"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 const (

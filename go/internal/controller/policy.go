@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func (s *Store) AddACLRule(ctx context.Context, networkID identity.NetworkID, priority uint32, action ACLAction, selectorJSON, description string) (ACLRule, uint64, error) {

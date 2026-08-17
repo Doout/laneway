@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pathmanager"
-	"laneway.dev/laneway/internal/platform"
-	"laneway.dev/laneway/internal/policy"
-	"laneway.dev/laneway/internal/routing"
-	"laneway.dev/laneway/internal/wireguard"
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/platform"
+	"github.com/Doout/laneway/go/internal/policy"
+	"github.com/Doout/laneway/go/internal/routing"
+	"github.com/Doout/laneway/go/internal/wireguard"
 )
 
 type fakeNodeWireGuard struct {

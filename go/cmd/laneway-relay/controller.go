@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/policy"
-	"laneway.dev/laneway/internal/relayservice"
-	"laneway.dev/laneway/internal/revocation"
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/policy"
+	"github.com/Doout/laneway/go/internal/relayservice"
+	"github.com/Doout/laneway/go/internal/revocation"
 )
 
 type relayConfigurationSource interface {

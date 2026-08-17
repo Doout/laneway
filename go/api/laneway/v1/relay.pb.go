@@ -507,7 +507,7 @@ const file_laneway_v1_relay_proto_rawDesc = "" +
 	"\x11EndpointTransport\x12\"\n" +
 	"\x1eENDPOINT_TRANSPORT_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bENDPOINT_TRANSPORT_QUIC_UDP\x10\x01\x12\x1e\n" +
-	"\x1aENDPOINT_TRANSPORT_TLS_TCP\x10\x02B.Z,laneway.dev/laneway/api/laneway/v1;lanewayv1b\x06proto3"
+	"\x1aENDPOINT_TRANSPORT_TLS_TCP\x10\x02B6Z4github.com/Doout/laneway/go/api/laneway/v1;lanewayv1b\x06proto3"
 
 var (
 	file_laneway_v1_relay_proto_rawDescOnce sync.Once

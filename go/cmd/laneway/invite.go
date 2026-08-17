@@ -9,9 +9,9 @@ import (
 	"os"
 	"time"
 
-	"laneway.dev/laneway/internal/config"
-	"laneway.dev/laneway/internal/controllerclient"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/config"
+	"github.com/Doout/laneway/go/internal/controllerclient"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func runInvite(args []string) error {

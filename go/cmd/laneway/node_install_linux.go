@@ -27,14 +27,14 @@ import (
 	"syscall"
 	"time"
 
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/config"
+	"github.com/Doout/laneway/go/internal/controllerclient"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pki"
+	"github.com/Doout/laneway/go/internal/wireguard"
 	"github.com/pelletier/go-toml/v2"
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/config"
-	"laneway.dev/laneway/internal/controllerclient"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pki"
-	"laneway.dev/laneway/internal/wireguard"
 )
 
 const managedNodeManifestVersion = 1

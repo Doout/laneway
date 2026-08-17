@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"laneway.dev/laneway/internal/config"
+	"github.com/Doout/laneway/go/internal/config"
 )
 
 func TestResolveEphemeralExitCredentialsIncludesWireGuardKey(t *testing.T) {

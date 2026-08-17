@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/revocation"
 	"github.com/quic-go/quic-go"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/revocation"
 )
 
 const testNetworkID = "000102030405060708090a0b0c0d0e0f"

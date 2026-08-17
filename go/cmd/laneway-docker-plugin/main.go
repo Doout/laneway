@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"laneway.dev/laneway/internal/buildinfo"
-	"laneway.dev/laneway/internal/dockerplugin"
+	"github.com/Doout/laneway/go/internal/buildinfo"
+	"github.com/Doout/laneway/go/internal/dockerplugin"
 )
 
 func main() {

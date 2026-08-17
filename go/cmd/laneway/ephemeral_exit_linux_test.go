@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/config"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/config"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func TestRenderEphemeralExitConfigIsRAMCredentialBound(t *testing.T) {

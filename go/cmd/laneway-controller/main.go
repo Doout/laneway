@@ -21,15 +21,15 @@ import (
 	"syscall"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/buildinfo"
-	"laneway.dev/laneway/internal/config"
-	"laneway.dev/laneway/internal/controller"
-	"laneway.dev/laneway/internal/controllerservice"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/observability"
-	"laneway.dev/laneway/internal/pki"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/buildinfo"
+	"github.com/Doout/laneway/go/internal/config"
+	"github.com/Doout/laneway/go/internal/controller"
+	"github.com/Doout/laneway/go/internal/controllerservice"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/observability"
+	"github.com/Doout/laneway/go/internal/pki"
 )
 
 const maxAdminTokenFile = 4096

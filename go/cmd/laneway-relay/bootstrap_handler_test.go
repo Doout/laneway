@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/bootstrap"
 )
 
 type bootstrapSourceFixture struct {

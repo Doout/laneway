@@ -5,10 +5,10 @@ import (
 	"crypto/tls"
 	"io"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/packetbuffer"
-	"laneway.dev/laneway/internal/tcpfallback"
-	"laneway.dev/laneway/internal/transport"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/packetbuffer"
+	"github.com/Doout/laneway/go/internal/tcpfallback"
+	"github.com/Doout/laneway/go/internal/transport"
 )
 
 type nodeConnection interface {

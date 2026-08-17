@@ -5,8 +5,8 @@ import (
 	"net/netip"
 	"time"
 
-	"laneway.dev/laneway/internal/exitnode"
-	"laneway.dev/laneway/internal/platform"
+	"github.com/Doout/laneway/go/internal/exitnode"
+	"github.com/Doout/laneway/go/internal/platform"
 )
 
 const managerCloseTimeout = 5 * time.Second

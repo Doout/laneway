@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Doout/laneway/go/internal/identity"
 	"github.com/quic-go/quic-go"
-	"laneway.dev/laneway/internal/identity"
 )
 
 const (

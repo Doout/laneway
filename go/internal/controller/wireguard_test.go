@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func generatedWireGuardPublicKey(t *testing.T) WireGuardPublicKey {

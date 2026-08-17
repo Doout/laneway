@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Doout/laneway/go/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/protocol"
 	"github.com/quic-go/quic-go"
-	"laneway.dev/laneway/internal/pathmanager"
-	"laneway.dev/laneway/internal/protocol"
 )
 
 // Path adapts an authenticated QUIC peer connection to pathmanager.PacketPath.

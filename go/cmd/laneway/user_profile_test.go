@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/wireguard"
+	"github.com/Doout/laneway/go/internal/wireguard"
 )
 
 func TestUserProfileRoundTripUsesPrivateGeneration(t *testing.T) {

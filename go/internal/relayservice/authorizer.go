@@ -8,7 +8,7 @@ import (
 	"net/netip"
 	"sync/atomic"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 var ErrUnauthorized = errors.New("relay service: identity is not authorized")

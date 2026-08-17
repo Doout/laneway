@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/controller"
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/controller"
 )
 
 const (

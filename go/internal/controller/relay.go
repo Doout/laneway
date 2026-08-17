@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/netvalidate"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/netvalidate"
 )
 
 func (s *Store) RegisterRelay(ctx context.Context, networkID identity.NetworkID, serviceID identity.ID, nodeID *identity.NodeID, name, endpoint string) (Relay, uint64, error) {

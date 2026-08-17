@@ -28,8 +28,8 @@ import (
 	"syscall"
 	"time"
 
-	"laneway.dev/laneway/internal/exitnode"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/exitnode"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func main() {

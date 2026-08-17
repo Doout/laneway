@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/Doout/laneway/go/internal/identity"
 	"github.com/spf13/cobra"
-	"laneway.dev/laneway/internal/identity"
 )
 
 func addPlatformCommands(root *cobra.Command) {

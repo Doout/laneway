@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/nftstate"
+	"github.com/Doout/laneway/go/internal/nftstate"
 )
 
 type fakeRunner struct {

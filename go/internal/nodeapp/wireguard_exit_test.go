@@ -5,11 +5,11 @@ import (
 	"net/netip"
 	"testing"
 
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/exitnode"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/routing"
-	"laneway.dev/laneway/internal/wireguard"
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/exitnode"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/routing"
+	"github.com/Doout/laneway/go/internal/wireguard"
 )
 
 func TestWireGuardExitSelectionCommitsPartitionBeforeNativeDefault(t *testing.T) {
