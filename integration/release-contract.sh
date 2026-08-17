@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2016 # Source-contract fragments intentionally stay literal.
 set -eu
 
 repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -24,6 +25,7 @@ preparer=$repo_dir/deploy/compose/prepare-control-plane.sh
 upgrader=$repo_dir/deploy/compose/upgrade-control-plane.sh
 package_workflow=$repo_dir/scripts/package.sh
 package_installer=$repo_dir/scripts/install-package.sh
+ephemeral_exit_bootstrap=$repo_dir/deploy/ephemeral-exit/bootstrap.sh
 client_installer=$repo_dir/install.sh
 web_package=$repo_dir/web/package.json
 vite_config=$repo_dir/web/vite.config.ts
@@ -135,6 +137,17 @@ done
 for value in '.env.example' 'install-control-plane.sh' 'prepare-control-plane.sh' 'upgrade-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
   require "$value" "$package_workflow"
 done
+for value in \
+  'PrivateNetwork=yes' 'DynamicUser=yes' 'RuntimeMaxSec=' 'StandardOutput=null' \
+  'LoadCredential=' 'LoadCredential=wireguard.key:' '/run is not RAM-backed tmpfs' \
+  'release checksum signature verification failed' 'One-use Exit invitation:' \
+  'ip link set "$peer_if" netns "$pid"' 'nft delete table inet' \
+  'while kill -0 $$' 'find $runtime_dir -depth -delete' 'find $work -depth -delete'
+do
+  require "$value" "$ephemeral_exit_bootstrap"
+done
+require 'ephemeral-exit-bootstrap.sh' "$workflow"
+require 'ephemeral-exit' "$package_workflow"
 for value in 'releases/latest' "laneway_\${operating_system}_\${architecture}.tar.gz" 'shasum -a 256 -c' 'configure --yes' 'configure --check' 'normal macOS user'; do
   require "$value" "$client_installer"
 done
@@ -172,7 +185,7 @@ for value in \
 do
   require "$value" "$workflow"
 done
-require 'bootstrap-artifacts.toml image-digests.txt install.sh' "$workflow"
+require 'bootstrap-artifacts.toml ephemeral-exit-bootstrap.sh image-digests.txt install.sh' "$workflow"
 
 for value in \
   'LANEWAY_CONTROLLER_IMAGE_DIGEST' \

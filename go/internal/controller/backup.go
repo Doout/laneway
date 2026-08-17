@@ -281,6 +281,9 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	if version >= 9 {
 		requiredTables = append(requiredTables, "administrator_root_token_rotations")
 	}
+	if version >= 10 {
+		requiredTables = append(requiredTables, "ephemeral_exit_sessions")
+	}
 	for _, table := range requiredTables {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
@@ -340,6 +343,7 @@ var administratorSchemaTables = map[string]struct{}{
 	"administrator_recovery_grants":      {},
 	"administrator_auth_state":           {},
 	"administrator_root_token_rotations": {},
+	"ephemeral_exit_sessions":            {},
 	"audit_events":                       {},
 }
 

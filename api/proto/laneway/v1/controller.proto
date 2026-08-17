@@ -52,6 +52,11 @@ message EnrollmentResponse {
   // The controller-authoritative key bound to network_id and node_id. Clients
   // must compare this with the locally generated public key before use.
   bytes wireguard_public_key = 7;
+  // Nonzero only when an ephemeral identity was granted Exit capability.
+  // The value is bound to the in-memory runtime and must accompany every
+  // controller heartbeat. It is not a bearer credential: mTLS proof of the
+  // enrollment private key remains mandatory.
+  uint64 ephemeral_exit_lease_generation = 8;
 }
 
 message RenewalRequest {
@@ -94,6 +99,9 @@ message NodeConfiguration {
   CertificateHealth certificate_health = 12;
   EnrollmentClass enrollment_class = 13;
   uint64 identity_lease_expires_at_unix_seconds = 14;
+  uint64 ephemeral_exit_lease_generation = 15;
+  uint64 ephemeral_exit_suspect_at_unix_seconds = 16;
+  uint64 ephemeral_exit_revoke_at_unix_seconds = 17;
 }
 
 message NodePeer {
@@ -129,6 +137,11 @@ message CertificateHealth {
 
 message ConfigurationRequest {
   uint64 known_configuration_epoch = 1;
+  // Required for an ephemeral Exit heartbeat and rejected for every other
+  // identity. The TLS 1.3 connection supplies the fresh proof-of-possession
+  // challenge; this generation prevents a copied certificate from creating a
+  // new logical lease.
+  uint64 ephemeral_exit_lease_generation = 2;
 }
 
 message RelayConfigurationRequest {
@@ -156,6 +169,9 @@ message RelayConfiguration {
 message ConfigurationLease {
   uint64 configuration_epoch = 1;
   uint64 valid_until_unix_seconds = 2;
+  uint64 ephemeral_exit_lease_generation = 3;
+  uint64 ephemeral_exit_suspect_at_unix_seconds = 4;
+  uint64 ephemeral_exit_revoke_at_unix_seconds = 5;
 }
 
 message CertificateRevocation {

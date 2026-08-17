@@ -62,6 +62,10 @@ type Options struct {
 	DialAddress    string
 	AdminTokenFile string
 	Timeout        time.Duration
+	// EphemeralExitLeaseGeneration is the non-secret generation returned by
+	// the one-time enrollment. It is meaningful only with an ephemeral Exit
+	// certificate and is sent exclusively inside authenticated QUIC requests.
+	EphemeralExitLeaseGeneration uint64
 }
 
 // BootstrapMetadata fetches the non-secret discovery document over the
@@ -125,6 +129,22 @@ type Client struct {
 	http        *http.Client
 	adminBearer string
 	quic        *quicControllerClient
+}
+
+// Close releases the reusable QUIC control session and idle HTTPS
+// connections. Callers that hand an ephemeral identity to another process
+// must close first so the controller can enforce one active session.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	if c.quic != nil {
+		c.quic.close()
+	}
+	if transport, ok := c.http.Transport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
+	return nil
 }
 
 func New(options Options) (*Client, error) {
@@ -226,7 +246,7 @@ func New(options Options) (*Client, error) {
 		if len(tlsConfig.Certificates) == 0 {
 			return nil, errors.New("controller client: QUIC control requires a client certificate")
 		}
-		control, err = newQUICControllerClient(options.QUICEndpoint, options.QUICDialAddress, tlsConfig, options.Timeout)
+		control, err = newQUICControllerClient(options.QUICEndpoint, options.QUICDialAddress, tlsConfig, options.Timeout, options.EphemeralExitLeaseGeneration)
 		if err != nil {
 			return nil, err
 		}

@@ -363,6 +363,39 @@ poll_interval = "10s"
 	}
 }
 
+func TestEphemeralExitConfigurationIsServeOnlyAndFailClosed(t *testing.T) {
+	cfg, err := Decode(strings.NewReader(validNode))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Controller.Endpoint = "https://controller.example.test:8443"
+	cfg.Controller.QUICEndpoint = "controller.example.test:8443"
+	cfg.Controller.NetworkID = "000102030405060708090a0b0c0d0e0f"
+	cfg.Controller.ServiceID = "303132333435363738393a3b3c3d3e3f"
+	cfg.Controller.PollInterval = Duration(10 * time.Second)
+	cfg.Peers = nil
+	cfg.Node.OverlayAddresses = nil
+	cfg.Routing.OutputInterface = "eth0"
+	cfg.Exit = Exit{Serve: true, FailureMode: "closed", LeaseGeneration: 7}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid ephemeral Exit rejected: %v", err)
+	}
+	for name, edit := range map[string]func(*Config){
+		"client selection": func(value *Config) { value.Exit.Enabled = true },
+		"not serving":      func(value *Config) { value.Exit.Serve = false },
+		"open failure":     func(value *Config) { value.Exit.FailureMode = "open" },
+		"slow heartbeat":   func(value *Config) { value.Controller.PollInterval = Duration(11 * time.Second) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := cfg
+			edit(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid ephemeral Exit configuration accepted")
+			}
+		})
+	}
+}
+
 func TestValidationFailures(t *testing.T) {
 	tests := []struct {
 		name string

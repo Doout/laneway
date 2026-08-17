@@ -118,6 +118,8 @@ jobs:
       - name: Validate Compose security, storage, health, and port model
         run: |
           ./integration/compose-config.sh
+          bash -n deploy/ephemeral-exit/bootstrap.sh
+          shellcheck deploy/ephemeral-exit/bootstrap.sh
           ./integration/release-contract.sh
           ./integration/connector-updater.sh
           ./integration/control-plane-prepare.sh

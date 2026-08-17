@@ -28,6 +28,9 @@ func ValidateGatewayPlan(plan GatewayPlan) error {
 
 type GatewayManager interface {
 	Apply(context.Context, GatewayPlan) error
+	// Drain preserves only established/related conntrack flows. It rejects new
+	// outbound flows until Apply restores an authoritative full plan.
+	Drain(context.Context) error
 	Restore(context.Context) error
 	Close() error
 }

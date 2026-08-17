@@ -420,6 +420,45 @@ func TestControllerOverlayAddressesEnforcesEphemeralIdentityLease(t *testing.T) 
 	}
 }
 
+func TestEphemeralExitConfigurationRequiresExactLeaseWindow(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	configuration := &lanewayv1.NodeConfiguration{
+		EnrollmentClass:                   lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER,
+		EnabledCapabilities:               uint64(protocol.CapabilityExitNodeV1),
+		IdentityLeaseExpiresAtUnixSeconds: uint64(now.Add(time.Hour).Unix()),
+		ValidUntilUnixSeconds:             uint64(now.Add(20 * time.Second).Unix()),
+		EphemeralExitLeaseGeneration:      7,
+		EphemeralExitSuspectAtUnixSeconds: uint64(now.Add(20 * time.Second).Unix()),
+		EphemeralExitRevokeAtUnixSeconds:  uint64(now.Add(60 * time.Second).Unix()),
+	}
+	if err := validateConfigurationIdentityLease(configuration, now); err != nil {
+		t.Fatalf("valid ephemeral Exit lease rejected: %v", err)
+	}
+	configuration.EphemeralExitRevokeAtUnixSeconds--
+	if err := validateConfigurationIdentityLease(configuration, now); err == nil {
+		t.Fatal("noncanonical revoke window accepted")
+	}
+	configuration.EphemeralExitRevokeAtUnixSeconds++
+	configuration.ValidUntilUnixSeconds++
+	if err := validateConfigurationIdentityLease(configuration, now); err == nil {
+		t.Fatal("snapshot beyond suspect boundary accepted")
+	}
+}
+
+func TestEphemeralExitSnapshotExpiryDrainsBeforeTerminalRevocation(t *testing.T) {
+	gateway := exitnode.NewMemoryGatewayManager()
+	if err := gateway.Apply(context.Background(), exitnode.GatewayPlan{Enabled: true, Authorized: true,
+		OverlaySources: []netip.Prefix{netip.MustParsePrefix("100.96.0.0/16")}}); err != nil {
+		t.Fatal(err)
+	}
+	managers := &daemonExitManagers{gateway: gateway, gatewayReady: true}
+	failCloseControllerSnapshot(context.Background(), &lanewayv1.NodeConfiguration{EphemeralExitLeaseGeneration: 1},
+		identity.NodeIdentity{}, nil, nil, nil, nil, nil, nil, managers, nil)
+	if !gateway.Draining() || managers.gatewayReady {
+		t.Fatalf("suspect Exit draining=%t gatewayReady=%t", gateway.Draining(), managers.gatewayReady)
+	}
+}
+
 func TestControllerOverlayAddressesAcceptsDualStackAssignment(t *testing.T) {
 	local := identity.NodeIdentity{NetworkID: identity.NetworkID(testID(1)), NodeID: identity.NodeID(testID(2))}
 	configuration := controllerTestConfiguration(local, identity.NodeID(testID(3)), uint64(time.Now().Unix()+60))
@@ -708,6 +747,7 @@ func TestGatewayActivationFailureNeverAuthorizesExitForwarding(t *testing.T) {
 type failingGatewayManager struct{ err error }
 
 func (m failingGatewayManager) Apply(context.Context, exitnode.GatewayPlan) error { return m.err }
+func (failingGatewayManager) Drain(context.Context) error                         { return nil }
 func (failingGatewayManager) Restore(context.Context) error                       { return nil }
 func (failingGatewayManager) Close() error                                        { return nil }
 

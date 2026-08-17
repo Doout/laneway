@@ -72,6 +72,8 @@ func runNode(args []string) error {
 		return runManagedNodeRenew(args[1:])
 	case "uninstall":
 		return runNodeUninstall(args[1:])
+	case "ephemeral-exit-prepare":
+		return runEphemeralExitPrepare(args[1:])
 	default:
 		return fmt.Errorf("unknown node command %q; usage: laneway node run [-config path]", args[0])
 	}

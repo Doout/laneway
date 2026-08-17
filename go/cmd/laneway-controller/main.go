@@ -294,6 +294,23 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	go func() { serveErr <- server.ServeTLS(listener, "", "") }()
 	quicServeErr := make(chan error, 1)
 	go func() { quicServeErr <- quicServer.Serve(ctx) }()
+	ephemeralExitSweepErr := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				ephemeralExitSweepErr <- ctx.Err()
+				return
+			case <-ticker.C:
+				if _, sweepErr := store.ExpireDisconnectedEphemeralExits(ctx, controller.MaxExpireBatch); sweepErr != nil {
+					ephemeralExitSweepErr <- sweepErr
+					return
+				}
+			}
+		}
+	}()
 	diagnosticsDone, err := observability.Start(ctx, observability.Config{Listen: diagnostics, Snapshot: func() map[string]uint64 {
 		metrics := service.Metrics()
 		return map[string]uint64{
@@ -336,6 +353,17 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 			return nil
 		}
 		return err
+	case err := <-ephemeralExitSweepErr:
+		_ = server.Close()
+		_ = quicServer.Close()
+		if bootstrapServer != nil {
+			_ = bootstrapServer.Close()
+		}
+		<-serveErr
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return fmt.Errorf("expire disconnected ephemeral Exit leases: %w", err)
 	case err := <-bootstrapServeErr:
 		_ = server.Close()
 		_ = quicServer.Close()

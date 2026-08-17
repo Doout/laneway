@@ -513,6 +513,31 @@ CREATE TABLE administrator_root_token_rotations (
         (complete_audit_event_id IS NOT NULL AND completed_at IS NOT NULL AND completed_at >= begun_at)
     )
 ) STRICT;
+`, `
+CREATE TABLE ephemeral_exit_sessions (
+    node_id BLOB PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE
+        CHECK(length(node_id) = 16 AND node_id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    generation INTEGER NOT NULL CHECK(generation BETWEEN 1 AND 9223372036854775807),
+    last_heartbeat_at INTEGER NOT NULL,
+    suspect_at INTEGER NOT NULL,
+    revoke_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    terminated_at INTEGER,
+    CHECK(last_heartbeat_at >= created_at),
+    CHECK(suspect_at = last_heartbeat_at + 20),
+    CHECK(revoke_at = last_heartbeat_at + 60),
+    CHECK(terminated_at IS NULL OR terminated_at >= created_at),
+    FOREIGN KEY(network_id,node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX ephemeral_exit_sessions_revoke
+    ON ephemeral_exit_sessions(revoke_at,node_id) WHERE terminated_at IS NULL;
+CREATE TRIGGER ephemeral_exit_sessions_identity_immutable
+    BEFORE UPDATE OF node_id,network_id,generation,created_at ON ephemeral_exit_sessions
+BEGIN
+    SELECT RAISE(ABORT, 'ephemeral Exit session identity is immutable');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

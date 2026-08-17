@@ -38,7 +38,7 @@ usage: laneway-control <init|user-token|invite|route|status|administrator|update
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
-  invite --name NAME [--ephemeral|--remembered] [--docker --connector [--bootstrap]]
+  invite --name NAME [--ephemeral|--remembered] [--docker --connector [--bootstrap] | --shared-host-exit]
   route add --connector NAME --to IP_OR_PREFIX [--allow USER] [--mode nat|routed] [--metric NUMBER]
   administrator bootstrap --username USERNAME
   administrator recover --username USERNAME
@@ -1424,7 +1424,7 @@ run_production_check() {
 }
 
 run_invite() {
-  name=; class=durable; expires=10m; expires_set=false; session=; docker_install=false; exit_node=false; bootstrap_install=false
+  name=; class=durable; expires=10m; expires_set=false; session=; docker_install=false; exit_node=false; bootstrap_install=false; shared_host_exit=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --name) [ "$#" -ge 2 ] || die "--name requires a value"; name=$2; shift 2 ;;
@@ -1435,12 +1435,12 @@ run_invite() {
       --docker) docker_install=true; shift ;;
       --connector) exit_node=true; shift ;;
 			--bootstrap) bootstrap_install=true; shift ;;
+			--shared-host-exit) shared_host_exit=true; shift ;;
       --exit-node|--exit) die "full Exit Nodes use the privileged exit-node deployment; use --connector for the unprivileged Docker Connector" ;;
       *) die "unknown invite option: $1" ;;
     esac
   done
   case "$name" in ''|*[!A-Za-z0-9._-]*) die "invite requires a safe --name NAME" ;; esac
-  [ "$class" = ephemeral ] || [ -z "$session" ] || die "--session-lifetime requires --ephemeral"
   if [ "$docker_install" != "$exit_node" ]; then
     die "--docker and --connector must be used together"
   fi
@@ -1450,6 +1450,14 @@ run_invite() {
 		[ "$expires_set" = false ] || die "--bootstrap uses a fixed 10-minute lifetime; omit --expires-in"
 		expires=10m
 	fi
+  if [ "$shared_host_exit" = true ]; then
+    [ "$docker_install" = false ] && [ "$exit_node" = false ] && [ "$bootstrap_install" = false ] || \
+      die "--shared-host-exit cannot be combined with Docker Connector options"
+    [ "$class" = durable ] || die "--shared-host-exit selects its own ephemeral enrollment class"
+    class=ephemeral
+    [ -n "$session" ] || session=8h
+  fi
+  [ "$class" = ephemeral ] || [ -z "$session" ] || die "--session-lifetime requires an ephemeral invite"
   network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
   controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
   server_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
@@ -1461,6 +1469,18 @@ run_invite() {
     --class "$class" --expires-in "$expires" "$@"
   if [ "$class" = ephemeral ]; then
     set -- "$@" --session-lifetime "$session"
+  fi
+  if [ "$shared_host_exit" = true ]; then
+    result=$(admin "$@" --exit-node)
+    enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
+    [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
+    version=$(read_setting "$env_file" LANEWAY_VERSION)
+    controller_port=$(read_setting "$env_file" LANEWAY_CONTROLLER_PORT)
+    printf '%s\n' "Run this immutable, RAM-only bootstrap on the shared Linux host; it prompts for the invitation:" >&2
+    printf "curl --fail --location --proto '=https' --proto-redir '=https' 'https://github.com/Doout/laneway/releases/download/v%s/ephemeral-exit-bootstrap.sh' | sudo env -i PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' /bin/bash -p -s -- --version 'v%s' --authority '%s:%s' --name '%s' --max-runtime '%s'\n" \
+      "$version" "$version" "$server_name" "$controller_port" "$name" "$session" >&2
+    printf '%s\n' "$enrollment_token"
+    return
   fi
   if [ "$docker_install" = true ]; then
     result=$(admin "$@" --connector)

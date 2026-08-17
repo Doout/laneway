@@ -182,6 +182,12 @@ func TestGatewayPlanAuthorization(t *testing.T) {
 	if !active || len(snapshot.OverlaySources) != 1 {
 		t.Fatalf("snapshot=%+v active=%v", snapshot, active)
 	}
+	if err := g.Drain(context.Background()); err != nil || !g.Draining() {
+		t.Fatalf("gateway drain state=%t err=%v", g.Draining(), err)
+	}
+	if err := g.Apply(context.Background(), p); err != nil || g.Draining() {
+		t.Fatalf("gateway reconnect did not restore full admission state=%t err=%v", g.Draining(), err)
+	}
 	if err := g.Apply(context.Background(), GatewayPlan{}); err != nil {
 		t.Fatal(err)
 	}

@@ -21,6 +21,13 @@ full Exit Nodes require `/dev/net/tun` and `NET_ADMIN` in the namespace they
 manage. Host firewalls must allow reply and peer traffic on ephemeral
 direct-path sockets.
 
+For a deliberately temporary Exit on a shared systemd Linux host, issue
+`laneway control invite --name NAME --shared-host-exit` on the control plane.
+The generated signed-release bootstrap runs from `/run` in a private network
+namespace and leaves the durable Docker Exit deployment unchanged. See the
+[ephemeral shared-host Exit guide](../docs/ephemeral-shared-host-exit.md) for
+lease, cleanup, and host-administrator trust boundaries.
+
 For the supplied systemd units, install credentials as `root:laneway` mode
 `0640`. Container mounts must be readable by UID/GID `65532` without making
 credentials world-readable. See the [operations runbook](../docs/operations.md)

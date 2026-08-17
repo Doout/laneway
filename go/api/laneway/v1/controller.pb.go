@@ -233,8 +233,13 @@ type EnrollmentResponse struct {
 	// The controller-authoritative key bound to network_id and node_id. Clients
 	// must compare this with the locally generated public key before use.
 	WireguardPublicKey []byte `protobuf:"bytes,7,opt,name=wireguard_public_key,json=wireguardPublicKey,proto3" json:"wireguard_public_key,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Nonzero only when an ephemeral identity was granted Exit capability.
+	// The value is bound to the in-memory runtime and must accompany every
+	// controller heartbeat. It is not a bearer credential: mTLS proof of the
+	// enrollment private key remains mandatory.
+	EphemeralExitLeaseGeneration uint64 `protobuf:"varint,8,opt,name=ephemeral_exit_lease_generation,json=ephemeralExitLeaseGeneration,proto3" json:"ephemeral_exit_lease_generation,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *EnrollmentResponse) Reset() {
@@ -314,6 +319,13 @@ func (x *EnrollmentResponse) GetWireguardPublicKey() []byte {
 		return x.WireguardPublicKey
 	}
 	return nil
+}
+
+func (x *EnrollmentResponse) GetEphemeralExitLeaseGeneration() uint64 {
+	if x != nil {
+		return x.EphemeralExitLeaseGeneration
+	}
+	return 0
 }
 
 type RenewalRequest struct {
@@ -451,6 +463,9 @@ type NodeConfiguration struct {
 	CertificateHealth                 *CertificateHealth `protobuf:"bytes,12,opt,name=certificate_health,json=certificateHealth,proto3" json:"certificate_health,omitempty"`
 	EnrollmentClass                   EnrollmentClass    `protobuf:"varint,13,opt,name=enrollment_class,json=enrollmentClass,proto3,enum=laneway.v1.EnrollmentClass" json:"enrollment_class,omitempty"`
 	IdentityLeaseExpiresAtUnixSeconds uint64             `protobuf:"varint,14,opt,name=identity_lease_expires_at_unix_seconds,json=identityLeaseExpiresAtUnixSeconds,proto3" json:"identity_lease_expires_at_unix_seconds,omitempty"`
+	EphemeralExitLeaseGeneration      uint64             `protobuf:"varint,15,opt,name=ephemeral_exit_lease_generation,json=ephemeralExitLeaseGeneration,proto3" json:"ephemeral_exit_lease_generation,omitempty"`
+	EphemeralExitSuspectAtUnixSeconds uint64             `protobuf:"varint,16,opt,name=ephemeral_exit_suspect_at_unix_seconds,json=ephemeralExitSuspectAtUnixSeconds,proto3" json:"ephemeral_exit_suspect_at_unix_seconds,omitempty"`
+	EphemeralExitRevokeAtUnixSeconds  uint64             `protobuf:"varint,17,opt,name=ephemeral_exit_revoke_at_unix_seconds,json=ephemeralExitRevokeAtUnixSeconds,proto3" json:"ephemeral_exit_revoke_at_unix_seconds,omitempty"`
 	unknownFields                     protoimpl.UnknownFields
 	sizeCache                         protoimpl.SizeCache
 }
@@ -579,6 +594,27 @@ func (x *NodeConfiguration) GetEnrollmentClass() EnrollmentClass {
 func (x *NodeConfiguration) GetIdentityLeaseExpiresAtUnixSeconds() uint64 {
 	if x != nil {
 		return x.IdentityLeaseExpiresAtUnixSeconds
+	}
+	return 0
+}
+
+func (x *NodeConfiguration) GetEphemeralExitLeaseGeneration() uint64 {
+	if x != nil {
+		return x.EphemeralExitLeaseGeneration
+	}
+	return 0
+}
+
+func (x *NodeConfiguration) GetEphemeralExitSuspectAtUnixSeconds() uint64 {
+	if x != nil {
+		return x.EphemeralExitSuspectAtUnixSeconds
+	}
+	return 0
+}
+
+func (x *NodeConfiguration) GetEphemeralExitRevokeAtUnixSeconds() uint64 {
+	if x != nil {
+		return x.EphemeralExitRevokeAtUnixSeconds
 	}
 	return 0
 }
@@ -887,8 +923,13 @@ func (x *CertificateHealth) GetRevoked() bool {
 type ConfigurationRequest struct {
 	state                   protoimpl.MessageState `protogen:"open.v1"`
 	KnownConfigurationEpoch uint64                 `protobuf:"varint,1,opt,name=known_configuration_epoch,json=knownConfigurationEpoch,proto3" json:"known_configuration_epoch,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// Required for an ephemeral Exit heartbeat and rejected for every other
+	// identity. The TLS 1.3 connection supplies the fresh proof-of-possession
+	// challenge; this generation prevents a copied certificate from creating a
+	// new logical lease.
+	EphemeralExitLeaseGeneration uint64 `protobuf:"varint,2,opt,name=ephemeral_exit_lease_generation,json=ephemeralExitLeaseGeneration,proto3" json:"ephemeral_exit_lease_generation,omitempty"`
+	unknownFields                protoimpl.UnknownFields
+	sizeCache                    protoimpl.SizeCache
 }
 
 func (x *ConfigurationRequest) Reset() {
@@ -924,6 +965,13 @@ func (*ConfigurationRequest) Descriptor() ([]byte, []int) {
 func (x *ConfigurationRequest) GetKnownConfigurationEpoch() uint64 {
 	if x != nil {
 		return x.KnownConfigurationEpoch
+	}
+	return 0
+}
+
+func (x *ConfigurationRequest) GetEphemeralExitLeaseGeneration() uint64 {
+	if x != nil {
+		return x.EphemeralExitLeaseGeneration
 	}
 	return 0
 }
@@ -1127,11 +1175,14 @@ func (x *RelayConfiguration) GetCertificateHealth() *CertificateHealth {
 // A successful conditional request whose immutable configuration epoch did
 // not change. The fresh deadline extends the fail-closed snapshot lease.
 type ConfigurationLease struct {
-	state                 protoimpl.MessageState `protogen:"open.v1"`
-	ConfigurationEpoch    uint64                 `protobuf:"varint,1,opt,name=configuration_epoch,json=configurationEpoch,proto3" json:"configuration_epoch,omitempty"`
-	ValidUntilUnixSeconds uint64                 `protobuf:"varint,2,opt,name=valid_until_unix_seconds,json=validUntilUnixSeconds,proto3" json:"valid_until_unix_seconds,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	state                             protoimpl.MessageState `protogen:"open.v1"`
+	ConfigurationEpoch                uint64                 `protobuf:"varint,1,opt,name=configuration_epoch,json=configurationEpoch,proto3" json:"configuration_epoch,omitempty"`
+	ValidUntilUnixSeconds             uint64                 `protobuf:"varint,2,opt,name=valid_until_unix_seconds,json=validUntilUnixSeconds,proto3" json:"valid_until_unix_seconds,omitempty"`
+	EphemeralExitLeaseGeneration      uint64                 `protobuf:"varint,3,opt,name=ephemeral_exit_lease_generation,json=ephemeralExitLeaseGeneration,proto3" json:"ephemeral_exit_lease_generation,omitempty"`
+	EphemeralExitSuspectAtUnixSeconds uint64                 `protobuf:"varint,4,opt,name=ephemeral_exit_suspect_at_unix_seconds,json=ephemeralExitSuspectAtUnixSeconds,proto3" json:"ephemeral_exit_suspect_at_unix_seconds,omitempty"`
+	EphemeralExitRevokeAtUnixSeconds  uint64                 `protobuf:"varint,5,opt,name=ephemeral_exit_revoke_at_unix_seconds,json=ephemeralExitRevokeAtUnixSeconds,proto3" json:"ephemeral_exit_revoke_at_unix_seconds,omitempty"`
+	unknownFields                     protoimpl.UnknownFields
+	sizeCache                         protoimpl.SizeCache
 }
 
 func (x *ConfigurationLease) Reset() {
@@ -1174,6 +1225,27 @@ func (x *ConfigurationLease) GetConfigurationEpoch() uint64 {
 func (x *ConfigurationLease) GetValidUntilUnixSeconds() uint64 {
 	if x != nil {
 		return x.ValidUntilUnixSeconds
+	}
+	return 0
+}
+
+func (x *ConfigurationLease) GetEphemeralExitLeaseGeneration() uint64 {
+	if x != nil {
+		return x.EphemeralExitLeaseGeneration
+	}
+	return 0
+}
+
+func (x *ConfigurationLease) GetEphemeralExitSuspectAtUnixSeconds() uint64 {
+	if x != nil {
+		return x.EphemeralExitSuspectAtUnixSeconds
+	}
+	return 0
+}
+
+func (x *ConfigurationLease) GetEphemeralExitRevokeAtUnixSeconds() uint64 {
+	if x != nil {
+		return x.EphemeralExitRevokeAtUnixSeconds
 	}
 	return 0
 }
@@ -1503,7 +1575,7 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x14wireguard_public_key\x18\x06 \x01(\fR\x12wireguardPublicKey\"r\n" +
 	"\x10CertificateChain\x12)\n" +
 	"\x10certificates_der\x18\x01 \x03(\fR\x0fcertificatesDer\x123\n" +
-	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\x80\x03\n" +
+	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\"\xc7\x03\n" +
 	"\x12EnrollmentResponse\x12\x1d\n" +
 	"\n" +
 	"network_id\x18\x01 \x01(\fR\tnetworkId\x12\x17\n" +
@@ -1512,13 +1584,14 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x11overlay_addresses\x18\x04 \x03(\fR\x10overlayAddresses\x12F\n" +
 	"\x10enrollment_class\x18\x05 \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x0fenrollmentClass\x12@\n" +
 	"\x1dlease_expires_at_unix_seconds\x18\x06 \x01(\x04R\x19leaseExpiresAtUnixSeconds\x120\n" +
-	"\x14wireguard_public_key\x18\a \x01(\fR\x12wireguardPublicKey\"h\n" +
+	"\x14wireguard_public_key\x18\a \x01(\fR\x12wireguardPublicKey\x12E\n" +
+	"\x1fephemeral_exit_lease_generation\x18\b \x01(\x04R\x1cephemeralExitLeaseGeneration\"h\n" +
 	"\x0eRenewalRequest\x12$\n" +
 	"\x0epkcs10_csr_der\x18\x01 \x01(\fR\fpkcs10CsrDer\x120\n" +
 	"\x14wireguard_public_key\x18\x02 \x01(\fR\x12wireguardPublicKey\"\x8e\x01\n" +
 	"\x0fRenewalResponse\x12I\n" +
 	"\x11certificate_chain\x18\x01 \x01(\v2\x1c.laneway.v1.CertificateChainR\x10certificateChain\x120\n" +
-	"\x14wireguard_public_key\x18\x02 \x01(\fR\x12wireguardPublicKey\"\xdd\x06\n" +
+	"\x14wireguard_public_key\x18\x02 \x01(\fR\x12wireguardPublicKey\"\xc8\b\n" +
 	"\x11NodeConfiguration\x12/\n" +
 	"\x13configuration_epoch\x18\x01 \x01(\x04R\x12configurationEpoch\x12+\n" +
 	"\x11overlay_addresses\x18\x02 \x03(\fR\x10overlayAddresses\x121\n" +
@@ -1535,7 +1608,10 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"exitPolicy\x12L\n" +
 	"\x12certificate_health\x18\f \x01(\v2\x1d.laneway.v1.CertificateHealthR\x11certificateHealth\x12F\n" +
 	"\x10enrollment_class\x18\r \x01(\x0e2\x1b.laneway.v1.EnrollmentClassR\x0fenrollmentClass\x12Q\n" +
-	"&identity_lease_expires_at_unix_seconds\x18\x0e \x01(\x04R!identityLeaseExpiresAtUnixSeconds\"\x96\x01\n" +
+	"&identity_lease_expires_at_unix_seconds\x18\x0e \x01(\x04R!identityLeaseExpiresAtUnixSeconds\x12E\n" +
+	"\x1fephemeral_exit_lease_generation\x18\x0f \x01(\x04R\x1cephemeralExitLeaseGeneration\x12Q\n" +
+	"&ephemeral_exit_suspect_at_unix_seconds\x18\x10 \x01(\x04R!ephemeralExitSuspectAtUnixSeconds\x12O\n" +
+	"%ephemeral_exit_revoke_at_unix_seconds\x18\x11 \x01(\x04R ephemeralExitRevokeAtUnixSeconds\"\x96\x01\n" +
 	"\bNodePeer\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\fR\x06nodeId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12+\n" +
@@ -1556,9 +1632,10 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x10presented_serial\x18\x01 \x01(\fR\x0fpresentedSerial\x123\n" +
 	"\x16not_after_unix_seconds\x18\x02 \x01(\x04R\x13notAfterUnixSeconds\x127\n" +
 	"\x18renew_after_unix_seconds\x18\x03 \x01(\x04R\x15renewAfterUnixSeconds\x12\x18\n" +
-	"\arevoked\x18\x04 \x01(\bR\arevoked\"R\n" +
+	"\arevoked\x18\x04 \x01(\bR\arevoked\"\x99\x01\n" +
 	"\x14ConfigurationRequest\x12:\n" +
-	"\x19known_configuration_epoch\x18\x01 \x01(\x04R\x17knownConfigurationEpoch\"W\n" +
+	"\x19known_configuration_epoch\x18\x01 \x01(\x04R\x17knownConfigurationEpoch\x12E\n" +
+	"\x1fephemeral_exit_lease_generation\x18\x02 \x01(\x04R\x1cephemeralExitLeaseGeneration\"W\n" +
 	"\x19RelayConfigurationRequest\x12:\n" +
 	"\x19known_configuration_epoch\x18\x01 \x01(\x04R\x17knownConfigurationEpoch\"\xa5\x01\n" +
 	"\x16RelayPeerAuthorization\x12\x17\n" +
@@ -1573,10 +1650,13 @@ const file_laneway_v1_controller_proto_rawDesc = "" +
 	"\x06policy\x18\x04 \x01(\v2\x1a.laneway.v1.PolicySnapshotR\x06policy\x127\n" +
 	"\x18valid_until_unix_seconds\x18\x05 \x01(\x04R\x15validUntilUnixSeconds\x12>\n" +
 	"\x1brevoked_certificate_serials\x18\x06 \x03(\fR\x19revokedCertificateSerials\x12L\n" +
-	"\x12certificate_health\x18\a \x01(\v2\x1d.laneway.v1.CertificateHealthR\x11certificateHealth\"~\n" +
+	"\x12certificate_health\x18\a \x01(\v2\x1d.laneway.v1.CertificateHealthR\x11certificateHealth\"\xe9\x02\n" +
 	"\x12ConfigurationLease\x12/\n" +
 	"\x13configuration_epoch\x18\x01 \x01(\x04R\x12configurationEpoch\x127\n" +
-	"\x18valid_until_unix_seconds\x18\x02 \x01(\x04R\x15validUntilUnixSeconds\"\xa9\x01\n" +
+	"\x18valid_until_unix_seconds\x18\x02 \x01(\x04R\x15validUntilUnixSeconds\x12E\n" +
+	"\x1fephemeral_exit_lease_generation\x18\x03 \x01(\x04R\x1cephemeralExitLeaseGeneration\x12Q\n" +
+	"&ephemeral_exit_suspect_at_unix_seconds\x18\x04 \x01(\x04R!ephemeralExitSuspectAtUnixSeconds\x12O\n" +
+	"%ephemeral_exit_revoke_at_unix_seconds\x18\x05 \x01(\x04R ephemeralExitRevokeAtUnixSeconds\"\xa9\x01\n" +
 	"\x15CertificateRevocation\x12-\n" +
 	"\x12certificate_serial\x18\x01 \x01(\fR\x11certificateSerial\x12\x17\n" +
 	"\anode_id\x18\x02 \x01(\fR\x06nodeId\x120\n" +

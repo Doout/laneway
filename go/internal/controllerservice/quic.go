@@ -12,11 +12,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/proto"
 	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	"laneway.dev/laneway/internal/controller"
 	"laneway.dev/laneway/internal/identity"
 	"laneway.dev/laneway/internal/protocol"
 )
@@ -33,11 +36,53 @@ const (
 // reliable QUIC request/response streams. Enrollment is intentionally absent:
 // a joining node has no certificate with which to authenticate mTLS.
 type QUICServer struct {
-	service     *Service
-	handler     http.Handler
-	listener    *quic.Listener
-	local       identity.AuthenticatedIdentity
-	connections chan struct{}
+	service              *Service
+	handler              http.Handler
+	listener             *quic.Listener
+	local                identity.AuthenticatedIdentity
+	connections          chan struct{}
+	ephemeralExitMu      sync.Mutex
+	activeEphemeralExits map[identity.NodeID]ephemeralExitConnection
+	nextEphemeralExitID  atomic.Uint64
+}
+
+type ephemeralExitConnection struct {
+	id   uint64
+	conn *quic.Conn
+}
+
+type controllerQUICContextKey struct{}
+
+func withControllerQUICContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, controllerQUICContextKey{}, true)
+}
+
+func isControllerQUICRequest(ctx context.Context) bool {
+	value, _ := ctx.Value(controllerQUICContextKey{}).(bool)
+	return value
+}
+
+func (s *QUICServer) claimEphemeralExit(nodeID identity.NodeID, conn *quic.Conn, allowSuspectTakeover bool) (uint64, *quic.Conn, bool) {
+	s.ephemeralExitMu.Lock()
+	defer s.ephemeralExitMu.Unlock()
+	previous, exists := s.activeEphemeralExits[nodeID]
+	if exists && !allowSuspectTakeover {
+		return 0, nil, false
+	}
+	id := s.nextEphemeralExitID.Add(1)
+	if id == 0 {
+		id = s.nextEphemeralExitID.Add(1)
+	}
+	s.activeEphemeralExits[nodeID] = ephemeralExitConnection{id: id, conn: conn}
+	return id, previous.conn, true
+}
+
+func (s *QUICServer) releaseEphemeralExit(nodeID identity.NodeID, id uint64) {
+	s.ephemeralExitMu.Lock()
+	if active, exists := s.activeEphemeralExits[nodeID]; exists && active.id == id {
+		delete(s.activeEphemeralExits, nodeID)
+	}
+	s.ephemeralExitMu.Unlock()
 }
 
 // ListenQUIC opens the production controller UDP listener. The supplied TLS
@@ -90,7 +135,8 @@ func (s *Service) ListenQUICWithMiddleware(address string, tlsConfig *tls.Config
 	if middleware != nil {
 		handler = middleware(handler)
 	}
-	return &QUICServer{service: s, handler: handler, listener: listener, local: local, connections: make(chan struct{}, maxControllerConnections)}, nil
+	return &QUICServer{service: s, handler: handler, listener: listener, local: local,
+		connections: make(chan struct{}, maxControllerConnections), activeEphemeralExits: make(map[identity.NodeID]ephemeralExitConnection)}, nil
 }
 
 func (s *QUICServer) Addr() net.Addr { return s.listener.Addr() }
@@ -130,6 +176,31 @@ func (s *QUICServer) serveConnection(ctx context.Context, conn *quic.Conn) {
 	if err != nil || peer.NetworkID != s.local.NetworkID || (peer.Role != identity.IdentityRoleNode && peer.Role != identity.IdentityRoleRelay) {
 		_ = conn.CloseWithError(0x102, "client identity is outside controller network or role")
 		return
+	}
+	if peer.Role == identity.IdentityRoleNode {
+		nodeID := identity.NodeID(peer.SubjectID)
+		node, nodeErr := s.service.store.Node(ctx, nodeID)
+		if nodeErr != nil || node.NetworkID != peer.NetworkID || node.RevokedAt != nil {
+			_ = conn.CloseWithError(0x102, "node identity is not active")
+			return
+		}
+		if node.EnrollmentClass == controller.EnrollmentClassEphemeral &&
+			protocol.Capability(node.EnabledCapabilities) == protocol.CapabilityExitNodeV1 {
+			session, sessionErr := s.service.store.EphemeralExitSession(ctx, nodeID)
+			if sessionErr != nil {
+				_ = conn.CloseWithError(0x102, "ephemeral Exit lease is unavailable")
+				return
+			}
+			connectionID, previous, claimed := s.claimEphemeralExit(nodeID, conn, !session.SuspectAt.After(s.service.now()))
+			if !claimed {
+				_ = conn.CloseWithError(0x104, "ephemeral Exit identity already has an active control session")
+				return
+			}
+			if previous != nil {
+				_ = previous.CloseWithError(0x105, "ephemeral Exit suspect session replaced by fresh proof of possession")
+			}
+			defer s.releaseEphemeralExit(nodeID, connectionID)
+		}
 	}
 	for {
 		stream, err := conn.AcceptStream(ctx)
@@ -183,7 +254,7 @@ func (s *QUICServer) handleStream(ctx context.Context, stream io.ReadWriter, sta
 	if peer.Role != requiredRole {
 		return errors.New("controller operation is not permitted for client certificate role")
 	}
-	requestContext, cancel := context.WithTimeout(ctx, controllerRequestTimeout)
+	requestContext, cancel := context.WithTimeout(withControllerQUICContext(ctx), controllerRequestTimeout)
 	defer cancel()
 	httpRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, "https://controller.invalid"+path, bytes.NewReader(body))
 	if err != nil {

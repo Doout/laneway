@@ -34,13 +34,14 @@ import (
 )
 
 type connectEnrollment struct {
-	identity            identity.NodeIdentity
-	certificatePEM      []byte
-	privateKeyPEM       []byte
-	overlays            []netip.Prefix
-	class               lanewayv1.EnrollmentClass
-	leaseExpiresAt      time.Time
-	wireGuardPrivateKey wireguard.PrivateKey
+	identity                     identity.NodeIdentity
+	certificatePEM               []byte
+	privateKeyPEM                []byte
+	overlays                     []netip.Prefix
+	class                        lanewayv1.EnrollmentClass
+	leaseExpiresAt               time.Time
+	wireGuardPrivateKey          wireguard.PrivateKey
+	ephemeralExitLeaseGeneration uint64
 }
 
 type runtimeCredentialFiles struct {

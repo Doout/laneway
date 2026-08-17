@@ -81,6 +81,7 @@ func (m *failOnceGatewayManager) Apply(ctx context.Context, plan exitnode.Gatewa
 	return m.inner.Apply(ctx, plan)
 }
 func (m *failOnceGatewayManager) Restore(ctx context.Context) error { return m.inner.Restore(ctx) }
+func (m *failOnceGatewayManager) Drain(ctx context.Context) error   { return m.inner.Drain(ctx) }
 func (m *failOnceGatewayManager) Close() error                      { return m.inner.Close() }
 
 func nextControllerConfiguration(local identity.NodeIdentity, peer identity.NodeID) *lanewayv1.NodeConfiguration {
