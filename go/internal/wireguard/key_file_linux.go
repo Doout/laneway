@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -34,8 +35,10 @@ func LoadPrivateKeyFile(path string) (PrivateKey, PublicKey, error) {
 		return PrivateKey{}, PublicKey{}, fmt.Errorf("wireguard: stat private key: %w", err)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.Mode().IsRegular() || info.Size() != KeySize || info.Mode().Perm()&0o027 != 0 || stat.Uid != uint32(os.Geteuid()) {
-		return PrivateKey{}, PublicKey{}, fmt.Errorf("%w: private key must be an owned regular %d-byte file with mode 0600 or 0640", ErrInvalidDevice, KeySize)
+	owned := ok && stat.Uid == uint32(os.Geteuid())
+	systemdCredential := ok && stat.Uid == 0 && info.Mode().Perm() == 0o440 && strings.HasPrefix(path, "/run/credentials/")
+	if !ok || !info.Mode().IsRegular() || info.Size() != KeySize || info.Mode().Perm()&0o027 != 0 || (!owned && !systemdCredential) {
+		return PrivateKey{}, PublicKey{}, fmt.Errorf("%w: private key must be an owned regular %d-byte file with mode 0600 or 0640, or a protected systemd credential", ErrInvalidDevice, KeySize)
 	}
 	var raw [KeySize]byte
 	defer clear(raw[:])

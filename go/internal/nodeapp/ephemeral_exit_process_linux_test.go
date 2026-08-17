@@ -12,14 +12,22 @@ import (
 
 func TestResolveEphemeralExitCredentialsIncludesWireGuardKey(t *testing.T) {
 	directory := t.TempDir()
-	if err := os.Chmod(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	for _, name := range []string{"ca.crt", "node.crt", "node.key", "wireguard.key"} {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte(name), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chmod(filepath.Join(directory, name), 0o440); err != nil {
+			t.Fatal(err)
+		}
 	}
+	if err := os.Chmod(directory, 0o550); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(directory, 0o700); err != nil {
+			t.Errorf("restore credential directory permissions: %v", err)
+		}
+	})
 	t.Setenv("CREDENTIALS_DIRECTORY", directory)
 	value := config.Config{TLS: config.TLS{CAFile: "@credential/ca.crt", CertificateFile: "@credential/node.crt",
 		PrivateKeyFile: "@credential/node.key"}, WireGuard: config.WireGuard{PrivateKeyFile: "@credential/wireguard.key"}}

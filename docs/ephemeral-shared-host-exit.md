@@ -18,9 +18,10 @@ an environment variable, shell history, or a pipe shared with another user.
 
 ## Runtime and failure semantics
 
-The bootstrap verifies the signed release manifest, extracts only the Laneway
-binary beneath tmpfs `/run`, and enrolls with a fresh Ed25519 key and WireGuard
-key. It starts a collected transient systemd unit with `DynamicUser`,
+The bootstrap verifies the signed release manifest, creates a bounded executable
+tmpfs beneath `/run` (without changing `/run`'s own mount policy), extracts only
+the Laneway binary there, and enrolls with a fresh Ed25519 key and WireGuard key.
+It starts a collected transient systemd unit with `DynamicUser`,
 `PrivateNetwork`, a strict capability and device allowlist, no application
 stdout/stderr, no core dumps, locked memory, and an absolute runtime limit.
 Credentials are copied through systemd's credential directory and the source

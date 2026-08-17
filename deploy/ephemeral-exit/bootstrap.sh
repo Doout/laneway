@@ -35,7 +35,7 @@ for variable in TAR_OPTIONS CURL_HOME CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR 
 	COSIGN_REPOSITORY SIGSTORE_ROOT_FILE SIGSTORE_REKOR_PUBLIC_KEY SIGSTORE_CT_LOG_PUBLIC_KEY_FILE TUF_MIRROR TUF_ROOT TUF_ROOT_JSON; do
 	[[ ! -v $variable ]] || die "refusing ambient $variable"
 done
-for command in awk curl find grep install ip nft nsenter od readlink rm sed seq sha256sum stat stty sysctl systemctl systemd-run tar tr uname; do
+for command in awk curl find findmnt grep install ip mount nft nsenter od readlink rm sed seq sha256sum stat stty sysctl systemctl systemd-run tar tr umount uname; do
 	command -v "$command" >/dev/null || die "required command is unavailable: $command"
 done
 systemd_state=$(systemctl is-system-running 2>/dev/null || true)
@@ -56,6 +56,7 @@ runtime_dir=/run/$runtime_name
 unit=$runtime_name.service
 cleanup_unit=$runtime_name-cleanup.service
 cleanup_path=/run/.$runtime_name.cleanup
+cleanup_ready_path=/run/.$runtime_name.cleanup.ready
 host_if=lxe${random:0:12}
 peer_if=lxp${random:0:12}
 nft_table=lxe_${random:0:12}
@@ -71,8 +72,10 @@ mkdir "$work/home"
 HOME=$work/home
 export HOME
 claimed_runtime=false
+runtime_mounted=false
 unit_started=false
 carrier_created=false
+docker_user_rules=false
 terminal_echo_disabled=false
 
 cleanup_failed_bootstrap() {
@@ -81,28 +84,36 @@ cleanup_failed_bootstrap() {
 	if [[ $terminal_echo_disabled == true ]]; then stty echo </dev/tty >/dev/null 2>&1 || true; fi
 	if [[ $unit_started == true ]]; then systemctl stop "$unit" >/dev/null 2>&1 || true; fi
 	if [[ $carrier_created == true ]]; then
+		if [[ $docker_user_rules == true ]]; then
+			iptables -D DOCKER-USER -i "$host_if" -m comment --comment "$marker" -j ACCEPT >/dev/null 2>&1 || true
+			iptables -D DOCKER-USER -o "$host_if" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$marker" -j ACCEPT >/dev/null 2>&1 || true
+		fi
 		if nft list chain inet "$nft_table" owner 2>/dev/null | grep -F -- "comment \"$marker\"" >/dev/null; then
 			nft delete table inet "$nft_table" >/dev/null 2>&1 || true
 		fi
 		ip link delete "$host_if" >/dev/null 2>&1 || true
 	fi
 	find "$work" -depth -delete >/dev/null 2>&1 || true
-	if [[ $claimed_runtime == true ]]; then find "$runtime_dir" -depth -delete >/dev/null 2>&1 || true; fi
-	rm -f "$cleanup_path" >/dev/null 2>&1 || true
+	if [[ $claimed_runtime == true ]]; then
+		find "$runtime_dir" -mindepth 1 -depth -delete >/dev/null 2>&1 || true
+		if [[ $runtime_mounted == true ]]; then umount "$runtime_dir" >/dev/null 2>&1 || true; fi
+		rmdir "$runtime_dir" >/dev/null 2>&1 || true
+	fi
+	rm -f "$cleanup_path" "$cleanup_ready_path" >/dev/null 2>&1 || true
 	exit "$status"
 }
 trap cleanup_failed_bootstrap EXIT HUP INT TERM
-if [[ -e $cleanup_path || -L $cleanup_path ]]; then
+if [[ -e $cleanup_path || -L $cleanup_path || -e $cleanup_ready_path || -L $cleanup_ready_path ]]; then
 	die 'random cleanup path already exists'
 fi
 cat > "$work/cleanup" <<EOF
 #!/bin/sh
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
-while kill -0 $$ >/dev/null 2>&1 && ! systemctl show $unit >/dev/null 2>&1; do
+while kill -0 $$ >/dev/null 2>&1 && [ ! -e $cleanup_ready_path ]; do
   sleep 0.1
 done
-if systemctl show $unit >/dev/null 2>&1; then
+if [ -e $cleanup_ready_path ]; then
   while :; do
     state=\$(systemctl is-active $unit 2>/dev/null || true)
     case "\$state" in active|activating) sleep 1 ;; *) break ;; esac
@@ -114,30 +125,41 @@ fi
 if nft list chain inet $nft_table owner 2>/dev/null | grep -F -- 'comment "$marker"' >/dev/null; then
   nft delete table inet $nft_table || true
 fi
-find $runtime_dir -depth -delete 2>/dev/null || true
+if command -v iptables >/dev/null 2>&1; then
+  iptables -D DOCKER-USER -i $host_if -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
+  iptables -D DOCKER-USER -o $host_if -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
+fi
+find $runtime_dir -mindepth 1 -depth -delete 2>/dev/null || true
+umount $runtime_dir 2>/dev/null || true
+rmdir $runtime_dir 2>/dev/null || true
 find $work -depth -delete 2>/dev/null || true
-rm -f $cleanup_path
+rm -f $cleanup_path $cleanup_ready_path
 EOF
 install -m 0500 "$work/cleanup" "$cleanup_path"
 systemd-run --unit="$cleanup_unit" --collect --quiet --property=Type=exec --property=StandardOutput=null \
-	--property=StandardError=null --property=NoNewPrivileges=yes "$cleanup_path"
+	--property=StandardError=null --property=NoNewPrivileges=yes /bin/sh "$cleanup_path"
 mkdir "$runtime_dir"
 claimed_runtime=true
-chmod 0700 "$runtime_dir"
+mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"
+runtime_mounted=true
+[[ $(stat -f -c %T "$runtime_dir") == tmpfs ]] || die 'runtime directory is not a dedicated tmpfs'
+runtime_options=$(findmnt -no OPTIONS "$runtime_dir")
+case ",$runtime_options," in *,noexec,*) die 'runtime tmpfs is not executable' ;; esac
 
 base=https://github.com/Doout/laneway/releases/download/$version
 archive=laneway_linux_${release_arch}.tar.gz
 for asset in checksums.txt checksums.sigstore.json "$archive"; do
 	curl --disable --fail --location --silent --show-error --proto '=https' --proto-redir '=https' "$base/$asset" -o "$work/$asset"
 done
-cosign=$work/cosign-v3.1.3
+cosign=$runtime_dir/cosign-v3.1.3
 curl --disable --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
 	"https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-$release_arch" -o "$cosign"
 printf '%s  %s\n' "$cosign_sha" "$cosign" | sha256sum -c - >/dev/null || die 'pinned Cosign checksum failed'
 chmod 0500 "$cosign"
-[[ $($cosign version --json 2>/dev/null | sed -n 's/.*"gitVersion":"\([^"]*\)".*/\1/p' | head -1) == v3.1.3 ]] || die 'pinned Cosign reported an unexpected version'
+cosign_version=$($cosign version --json 2>/dev/null | sed -n 's/.*"gitVersion":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+[[ $cosign_version == v3.1.3 ]] || die 'pinned Cosign reported an unexpected version'
 "$cosign" verify-blob --bundle "$work/checksums.sigstore.json" \
-	--certificate-identity 'https://github.com/Doout/laneway/.github/workflows/release.yml@refs/heads/main' \
+	--certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$version" \
 	--certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$work/checksums.txt" >/dev/null 2>&1 || die 'release checksum signature verification failed'
 (
 	cd "$work"
@@ -166,6 +188,10 @@ rm -f "$work/invitation"
 exec 3<&-
 invitation=
 grep -Fq '"runtime_name":"'"$runtime_name"'"' "$work/prepared.json" || die 'preparation returned an unexpected runtime identity'
+mkdir "$work/credentials"
+for credential in ca.crt node.crt node.key wireguard.key laneway.toml; do
+	mv "$runtime_dir/$credential" "$work/credentials/$credential"
+done
 
 resolver_source=/etc/resolv.conf
 if [[ -f /run/systemd/resolve/resolv.conf && ! -L /run/systemd/resolve/resolv.conf ]]; then
@@ -185,17 +211,17 @@ while [ ! -e /run/$runtime_name/network.ready ]; do
   [ \$attempt -le 600 ] || exit 1
   sleep 0.05
 done
-exec /run/$runtime_name/laneway node run -config \"\$CREDENTIALS_DIRECTORY/config\"
+exec /run/$runtime_name/laneway node run -config "\$CREDENTIALS_DIRECTORY/config"
 EOF
 chmod 0555 "$runtime_dir/entrypoint"
 systemd-run --unit="$unit" --collect --quiet \
 	--property=Type=exec --property=DynamicUser=yes --property=PrivateNetwork=yes \
 	--property=RuntimeDirectory="$runtime_name" --property=RuntimeDirectoryMode=0700 \
-	--property=LoadCredential=ca.crt:"$runtime_dir/ca.crt" \
-	--property=LoadCredential=node.crt:"$runtime_dir/node.crt" \
-	--property=LoadCredential=node.key:"$runtime_dir/node.key" \
-	--property=LoadCredential=wireguard.key:"$runtime_dir/wireguard.key" \
-	--property=LoadCredential=config:"$runtime_dir/laneway.toml" \
+	--property=LoadCredential=ca.crt:"$work/credentials/ca.crt" \
+	--property=LoadCredential=node.crt:"$work/credentials/node.crt" \
+	--property=LoadCredential=node.key:"$work/credentials/node.key" \
+	--property=LoadCredential=wireguard.key:"$work/credentials/wireguard.key" \
+	--property=LoadCredential=config:"$work/credentials/laneway.toml" \
 	--property=BindReadOnlyPaths="$runtime_dir/resolv.conf:/etc/resolv.conf" \
 	--property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=ProtectSystem=strict \
 	--property=ProtectHome=yes --property=ProtectKernelTunables=no --property=ProtectKernelModules=yes \
@@ -232,12 +258,18 @@ nsenter -t "$pid" -n ip link set uplink0 up
 nsenter -t "$pid" -n ip route add default via "$carrier_host" dev uplink0
 nft add table inet "$nft_table"
 nft add chain inet "$nft_table" owner || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not claim carrier firewall state'; }
-nft add rule inet "$nft_table" owner counter comment "$marker" || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not mark carrier firewall ownership'; }
+nft "add rule inet $nft_table owner counter comment \"$marker\"" || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not mark carrier firewall ownership'; }
 nft "add chain inet $nft_table forward { type filter hook forward priority 100; policy accept; }"
 nft add rule inet "$nft_table" forward iifname "$host_if" accept
 nft add rule inet "$nft_table" forward oifname "$host_if" ct state established,related accept
 nft "add chain inet $nft_table postrouting { type nat hook postrouting priority srcnat; policy accept; }"
 nft add rule inet "$nft_table" postrouting ip saddr "$carrier_prefix" masquerade
+if nft list chain ip filter DOCKER-USER >/dev/null 2>&1; then
+	command -v iptables >/dev/null || die 'Docker forwarding requires iptables'
+	iptables -I DOCKER-USER 1 -o "$host_if" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$marker" -j ACCEPT
+	docker_user_rules=true
+	iptables -I DOCKER-USER 1 -i "$host_if" -m comment --comment "$marker" -j ACCEPT
+fi
 touch "$runtime_dir/network.ready"
 
 executed=false
@@ -251,11 +283,13 @@ for _ in $(seq 1 200); do
 done
 [[ $executed == true ]] || die 'transient Exit did not exec the verified binary'
 
+install -m 0600 /dev/null "$cleanup_ready_path"
 rm -f "$runtime_dir/ca.crt" "$runtime_dir/node.crt" "$runtime_dir/node.key" "$runtime_dir/wireguard.key" "$runtime_dir/laneway.toml" "$runtime_dir/resolv.conf" \
-	"$runtime_dir/entrypoint" "$runtime_dir/laneway" "$runtime_dir/network.ready"
+	"$runtime_dir/cosign-v3.1.3" "$runtime_dir/entrypoint" "$runtime_dir/laneway" "$runtime_dir/network.ready"
 find "$work" -depth -delete
 claimed_runtime=false
 carrier_created=false
+docker_user_rules=false
 unit_started=false
 trap - EXIT HUP INT TERM
 printf 'Ephemeral Exit started as transient unit %s; it will stop no later than %s.\n' "$unit" "$max_runtime" >&2

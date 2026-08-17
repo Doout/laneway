@@ -142,12 +142,17 @@ for value in \
   'LoadCredential=' 'LoadCredential=wireguard.key:' '/run is not RAM-backed tmpfs' \
   'release checksum signature verification failed' 'One-use Exit invitation:' \
   'ip link set "$peer_if" netns "$pid"' 'nft delete table inet' \
-  'while kill -0 $$' 'find $runtime_dir -depth -delete' 'find $work -depth -delete'
+  'while kill -0 $$' 'find $runtime_dir -mindepth 1 -depth -delete' 'find $work -depth -delete'
 do
   require "$value" "$ephemeral_exit_bootstrap"
 done
 require 'ephemeral-exit-bootstrap.sh' "$workflow"
 require 'ephemeral-exit' "$package_workflow"
+require 'mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"' "$ephemeral_exit_bootstrap"
+require 'systemd-run --unit="$cleanup_unit"' "$ephemeral_exit_bootstrap"
+require '/bin/sh "$cleanup_path"' "$ephemeral_exit_bootstrap"
+require 'cleanup_ready_path=/run/.$runtime_name.cleanup.ready' "$ephemeral_exit_bootstrap"
+require 'https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$version' "$ephemeral_exit_bootstrap"
 for value in 'releases/latest' "laneway_\${operating_system}_\${architecture}.tar.gz" 'shasum -a 256 -c' 'configure --yes' 'configure --check' 'normal macOS user'; do
   require "$value" "$client_installer"
 done

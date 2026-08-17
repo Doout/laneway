@@ -84,6 +84,55 @@ func TestExitCapabilityBoundInviteCreatesApprovedDefault(t *testing.T) {
 	}
 }
 
+func TestInvitedExitUsesFirstFreeDefaultRouteMetric(t *testing.T) {
+	store, _ := openTestStore(t)
+	network := createTestNetwork(t, store, "10.52.0.0/24")
+	durable, err := store.EnrollNode(context.Background(), issueToken(t, store, network.ID, "durable-exit").Secret, "durable-exit", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetNodeCapabilities(context.Background(), durable.ID, protocol.CapabilityExitNodeV1); err != nil {
+		t.Fatal(err)
+	}
+	route, err := store.AdvertiseRoute(context.Background(), durable.ID, netip.MustParsePrefix("0.0.0.0/0"), RouteKindExit, RouteModeNAT, 101, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApproveRoute(context.Background(), route.ID); err != nil {
+		t.Fatal(err)
+	}
+	token, err := store.IssueEnrollmentTokenWithOptions(context.Background(), network.ID, "ephemeral-exit", time.Now().Add(time.Hour), EnrollmentTokenOptions{
+		Class: EnrollmentClassEphemeral, SessionLifetime: MinEphemeralLifetime, RequestedName: "ephemeral-exit",
+		EnabledCapabilities: uint64(protocol.CapabilityExitNodeV1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnrollNode(context.Background(), token.Secret, "ephemeral-exit", 0); err != nil {
+		t.Fatal(err)
+	}
+	routes, err := store.ApprovedRoutes(context.Background(), network.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := make(map[uint32]struct{}, len(routes))
+	for _, route := range routes {
+		if route.Prefix.String() != "0.0.0.0/0" {
+			continue
+		}
+		if _, exists := metrics[route.Metric]; exists {
+			t.Fatalf("duplicate default route metric %d in %+v", route.Metric, routes)
+		}
+		metrics[route.Metric] = struct{}{}
+	}
+	if _, ok := metrics[100]; !ok {
+		t.Fatalf("invited Exit did not use first free metric: %+v", routes)
+	}
+	if _, ok := metrics[101]; !ok {
+		t.Fatalf("durable Exit metric changed: %+v", routes)
+	}
+}
+
 func TestControllerRejectsSpecialUsePoolsAndAdvertisements(t *testing.T) {
 	store, _ := openTestStore(t)
 	for _, pool := range []string{"127.0.0.0/24", "169.254.0.0/24", "224.0.0.0/24"} {

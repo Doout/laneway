@@ -1476,10 +1476,9 @@ run_invite() {
     enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
     [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
     version=$(read_setting "$env_file" LANEWAY_VERSION)
-    controller_port=$(read_setting "$env_file" LANEWAY_CONTROLLER_PORT)
     printf '%s\n' "Run this immutable, RAM-only bootstrap on the shared Linux host; it prompts for the invitation:" >&2
-    printf "curl --fail --location --proto '=https' --proto-redir '=https' 'https://github.com/Doout/laneway/releases/download/v%s/ephemeral-exit-bootstrap.sh' | sudo env -i PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' /bin/bash -p -s -- --version 'v%s' --authority '%s:%s' --name '%s' --max-runtime '%s'\n" \
-      "$version" "$version" "$server_name" "$controller_port" "$name" "$session" >&2
+    printf "curl --fail --location --proto '=https' --proto-redir '=https' 'https://github.com/Doout/laneway/releases/download/v%s/ephemeral-exit-bootstrap.sh' | sudo env -i PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' /bin/bash -p -s -- --version 'v%s' --authority '%s' --name '%s' --max-runtime '%s'\n" \
+      "$version" "$version" "$server_name" "$name" "$session" >&2
     printf '%s\n' "$enrollment_token"
     return
   fi
