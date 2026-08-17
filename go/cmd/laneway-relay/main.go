@@ -6,10 +6,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/Doout/laneway/go/internal/bootstrap"
@@ -290,6 +292,7 @@ func run(path, diagnostics string) error {
 type publicBootstrapSource interface {
 	BootstrapMetadata(context.Context) ([]byte, error)
 	BootstrapBundle(context.Context, string) ([]byte, error)
+	PublicConsole(*http.Request) (*http.Response, error)
 }
 
 func publicBootstrapHandler(client *controllerclient.Client, limiter *publicRateLimiter) http.Handler {
@@ -301,6 +304,12 @@ func publicBootstrapHandler(client *controllerclient.Client, limiter *publicRate
 
 func publicBootstrapHandlerFromSource(client publicBootstrapSource, limiter *publicRateLimiter) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		bundleID, bundlePath := bootstrap.BundleIDFromPath(request.URL.Path)
+		bootstrapPath := request.URL.Path == bootstrap.WellKnownPath || bundlePath
+		if !bootstrapPath {
+			proxyPublicConsole(writer, request, client)
+			return
+		}
 		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
 		writer.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
@@ -309,8 +318,7 @@ func publicBootstrapHandlerFromSource(client publicBootstrapSource, limiter *pub
 			http.Error(writer, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}
-		bundleID, bundlePath := bootstrap.BundleIDFromPath(request.URL.Path)
-		if request.Method != http.MethodGet || (request.URL.Path != bootstrap.WellKnownPath && !bundlePath) || request.URL.RawQuery != "" {
+		if request.Method != http.MethodGet || request.URL.RawQuery != "" {
 			http.NotFound(writer, request)
 			return
 		}
@@ -342,6 +350,34 @@ func publicBootstrapHandlerFromSource(client publicBootstrapSource, limiter *pub
 		_, _ = writer.Write(contents)
 		clear(contents)
 	})
+}
+
+func proxyPublicConsole(writer http.ResponseWriter, request *http.Request, client publicBootstrapSource) {
+	path := request.URL.Path
+	administrator := path == "/v1/admin" || strings.HasPrefix(path, "/v1/admin/")
+	reserved := path == "/v1" || strings.HasPrefix(path, "/v1/") ||
+		path == "/.well-known" || strings.HasPrefix(path, "/.well-known/")
+	if !administrator && reserved {
+		http.NotFound(writer, request)
+		return
+	}
+	if client == nil {
+		http.Error(writer, "console temporarily unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	response, err := client.PublicConsole(request)
+	if err != nil {
+		http.Error(writer, "console temporarily unavailable", http.StatusBadGateway)
+		return
+	}
+	defer response.Body.Close()
+	for name, values := range response.Header {
+		for _, value := range values {
+			writer.Header().Add(name, value)
+		}
+	}
+	writer.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(writer, response.Body)
 }
 
 func staticAuthorizer(peers []config.AuthorizedPeer) (relayservice.StaticAuthorizer, error) {

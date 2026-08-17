@@ -124,6 +124,69 @@ func (c *Client) BootstrapBundle(ctx context.Context, id string) ([]byte, error)
 	return contents, nil
 }
 
+// PublicConsole forwards one browser console or administrator request over the
+// relay's authenticated controller connection. Node APIs, root bearer
+// credentials, and public bootstrap paths are deliberately outside this
+// boundary.
+func (c *Client) PublicConsole(request *http.Request) (*http.Response, error) {
+	if request == nil || request.URL == nil {
+		return nil, errors.New("controller client: public console request is required")
+	}
+	path := request.URL.Path
+	administrator := path == "/v1/admin" || strings.HasPrefix(path, "/v1/admin/")
+	reserved := path == "/v1" || strings.HasPrefix(path, "/v1/") ||
+		path == "/.well-known" || strings.HasPrefix(path, "/.well-known/")
+	if !administrator && reserved {
+		return nil, errors.New("controller client: public console request path is not allowed")
+	}
+	if len(request.Header.Values("Authorization")) != 0 || len(request.Header.Values("Proxy-Authorization")) != 0 {
+		return nil, errors.New("controller client: public console request contains a forbidden credential")
+	}
+	upstreamURL, err := url.Parse(c.endpoint)
+	if err != nil {
+		return nil, errors.New("controller client: invalid configured endpoint")
+	}
+	forwarded := request.Clone(request.Context())
+	forwarded.URL.Scheme = upstreamURL.Scheme
+	forwarded.URL.Host = upstreamURL.Host
+	forwarded.RequestURI = ""
+	removeProxyHeaders(forwarded.Header)
+	clientAddress, err := remoteAddress(request.RemoteAddr)
+	if err != nil {
+		return nil, errors.New("controller client: public console client address is invalid")
+	}
+	forwarded.Header.Set(adminauth.PublicClientAddressHeader, clientAddress.String())
+	response, err := c.http.Do(forwarded)
+	if err != nil {
+		return nil, fmt.Errorf("controller public console request: %w", err)
+	}
+	removeProxyHeaders(response.Header)
+	return response, nil
+}
+
+func removeProxyHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			header.Del(strings.TrimSpace(name))
+		}
+	}
+	for _, name := range []string{
+		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade", "Forwarded",
+		"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", adminauth.PublicClientAddressHeader,
+	} {
+		header.Del(name)
+	}
+}
+
+func remoteAddress(remote string) (netip.Addr, error) {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return netip.ParseAddr(host)
+}
+
 type Client struct {
 	endpoint    string
 	http        *http.Client
@@ -251,7 +314,9 @@ func New(options Options) (*Client, error) {
 			return nil, err
 		}
 	}
-	return &Client{endpoint: endpoint, http: &http.Client{Transport: transport, Timeout: options.Timeout}, adminBearer: adminBearer, quic: control}, nil
+	return &Client{endpoint: endpoint, http: &http.Client{Transport: transport, Timeout: options.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}, adminBearer: adminBearer, quic: control}, nil
 }
 
 func validatePinnedDialAddress(address string) error {

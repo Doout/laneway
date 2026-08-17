@@ -22,6 +22,7 @@ import (
 	"time"
 
 	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/adminauth"
 	"github.com/Doout/laneway/go/internal/bootstrap"
 	"github.com/Doout/laneway/go/internal/identity"
 	"github.com/Doout/laneway/go/internal/pki"
@@ -42,6 +43,50 @@ func TestNormalizeEndpoint(t *testing.T) {
 	}
 	if got, err := normalizeEndpoint("https://controller.example/"); err != nil || got != "https://controller.example" {
 		t.Fatalf("normalize endpoint = %q, %v", got, err)
+	}
+}
+
+func TestPublicConsoleUsesAuthenticatedTransportAndNarrowSurface(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Host != "public.example.test" || request.Header.Get("Origin") != "https://public.example.test" {
+			t.Errorf("forwarded authority/origin = %q / %q", request.Host, request.Header.Get("Origin"))
+		}
+		if request.Header.Get("Forwarded") != "" || request.Header.Get("X-Forwarded-For") != "" || request.Header.Get("X-Hop") != "" {
+			t.Errorf("proxy headers reached controller: %v", request.Header)
+		}
+		if request.Header.Get(adminauth.PublicClientAddressHeader) != "192.0.2.1" {
+			t.Errorf("authenticated public client address = %q", request.Header.Get(adminauth.PublicClientAddressHeader))
+		}
+		writer.Header().Set("X-Upstream", "controller")
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client := &Client{endpoint: server.URL, http: server.Client()}
+
+	request := httptest.NewRequest(http.MethodPost, "https://public.example.test/v1/admin/auth/logout", strings.NewReader("{}"))
+	request.Header.Set("Origin", "https://public.example.test")
+	request.Header.Set("Forwarded", "for=192.0.2.1")
+	request.Header.Set("X-Forwarded-For", "192.0.2.1")
+	request.Header.Set("Connection", "X-Hop")
+	request.Header.Set("X-Hop", "secret")
+	request.Header.Set(adminauth.PublicClientAddressHeader, "198.51.100.9")
+	request.RemoteAddr = "192.0.2.1:43210"
+	response, err := client.PublicConsole(request)
+	if err != nil || response.StatusCode != http.StatusNoContent || response.Header.Get("X-Upstream") != "controller" {
+		t.Fatalf("PublicConsole = %#v, %v", response, err)
+	}
+	response.Body.Close()
+
+	for _, path := range []string{"/v1/enroll", "/v1/configuration", "/.well-known/laneway/bootstrap.json"} {
+		request := httptest.NewRequest(http.MethodGet, "https://public.example.test"+path, nil)
+		if _, err := client.PublicConsole(request); err == nil {
+			t.Fatalf("public console accepted private path %q", path)
+		}
+	}
+	authorized := httptest.NewRequest(http.MethodGet, "https://public.example.test/v1/admin/networks", nil)
+	authorized.Header.Set("Authorization", "Bearer root-secret")
+	if _, err := client.PublicConsole(authorized); err == nil {
+		t.Fatal("public console accepted a root bearer credential")
 	}
 }
 

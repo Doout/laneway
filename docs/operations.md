@@ -7,8 +7,8 @@ Use the [root README](../README.md) for first-time setup and the
 
 | Component | Listener | Host access |
 | --- | --- | --- |
-| Relay | UDP `4433`; TCP `443` fallback | Public; no network-admin capability |
-| Controller | TCP+UDP `8443` | No network-admin capability |
+| Relay | UDP `4433`; TCP `443` public HTTPS and fallback | Public; no network-admin capability |
+| Controller | TCP+UDP `8443` private mTLS | No network-admin capability |
 | Docker Connector | None | Outbound only; no capabilities or TUN |
 | Host Node | `/run/laneway/lanewayd.sock` | `/dev/net/tun` and `NET_ADMIN` |
 | Diagnostics | Disabled | Loopback only |
@@ -39,6 +39,10 @@ sudo laneway-update-connector laneway-connector-office
 The browser console uses revocable administrator sessions. The static root
 bearer is reserved for bootstrap, recovery, root-token rotation, and deliberate
 non-browser automation.
+
+Open the console at the control-plane HTTPS origin on TCP `443`, for example
+`https://lane.example.com/`. Port `8443` is the private controller endpoint and
+will intentionally reject an ordinary browser TLS handshake.
 
 ### First owner and owner recovery
 
