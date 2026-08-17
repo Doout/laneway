@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -19,7 +20,7 @@ func resolveEphemeralExitCredentials(cfg *config.Config) error {
 		return fmt.Errorf("CREDENTIALS_DIRECTORY is not a clean absolute path")
 	}
 	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o500 != 0o500 || info.Mode().Perm()&0o027 != 0 {
 		return fmt.Errorf("credential directory is missing or unsafe")
 	}
 	resolve := func(value string) (string, error) {
@@ -33,7 +34,7 @@ func resolveEphemeralExitCredentials(cfg *config.Config) error {
 		}
 		path := filepath.Join(directory, name)
 		fileInfo, statErr := os.Lstat(path)
-		if statErr != nil || fileInfo == nil || !fileInfo.Mode().IsRegular() || fileInfo.Mode().Perm()&0o077 != 0 {
+		if statErr != nil || fileInfo == nil || !fileInfo.Mode().IsRegular() || fileInfo.Mode().Perm()&0o400 == 0 || fileInfo.Mode().Perm()&0o037 != 0 {
 			return "", fmt.Errorf("credential %s is missing or unsafe", name)
 		}
 		stat, ok := fileInfo.Sys().(*syscall.Stat_t)
@@ -64,17 +65,33 @@ func hardenEphemeralExitProcess() error {
 	if err := unix.Mlockall(unix.MCL_CURRENT | unix.MCL_FUTURE); err != nil {
 		return fmt.Errorf("lock runtime memory: %w", err)
 	}
-	entries, err := os.ReadDir("/proc/self/fd")
+	directory, err := os.Open("/proc/self/fd")
+	if err != nil {
+		return fmt.Errorf("enumerate inherited descriptors: %w", err)
+	}
+	directoryDescriptor := strconv.FormatUint(uint64(directory.Fd()), 10)
+	entries, err := directory.ReadDir(-1)
+	if closeErr := directory.Close(); err == nil {
+		err = closeErr
+	}
 	if err != nil {
 		return fmt.Errorf("enumerate inherited descriptors: %w", err)
 	}
 	for _, entry := range entries {
-		if entry.Name() == "0" || entry.Name() == "1" || entry.Name() == "2" {
+		if entry.Name() == "0" || entry.Name() == "1" || entry.Name() == "2" || entry.Name() == directoryDescriptor {
+			continue
+		}
+		descriptor, parseErr := strconv.Atoi(entry.Name())
+		if parseErr != nil {
+			continue
+		}
+		flags, flagErr := unix.FcntlInt(uintptr(descriptor), unix.F_GETFD, 0)
+		if flagErr != nil || flags&unix.FD_CLOEXEC != 0 {
 			continue
 		}
 		target, readErr := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
 		if readErr == nil && (strings.HasPrefix(target, "/") || strings.HasPrefix(target, "pipe:")) {
-			return fmt.Errorf("unexpected inherited file descriptor")
+			return fmt.Errorf("unexpected inherited file descriptor %s (%s)", entry.Name(), target)
 		}
 	}
 	os.Clearenv()

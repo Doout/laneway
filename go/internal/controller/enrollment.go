@@ -42,11 +42,31 @@ func newEphemeralExitGeneration() (uint64, error) {
 }
 
 func insertInvitedExitRouteTx(ctx context.Context, tx *sql.Tx, networkID identity.NetworkID, nodeID identity.NodeID, validUntil *time.Time, now time.Time) error {
-	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM routes WHERE network_id=? AND kind='exit' AND state='approved'`, idBytes(networkID)).Scan(&active); err != nil {
-		return fmt.Errorf("count existing invited exit routes: %w", err)
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT metric FROM routes
+		WHERE network_id=? AND state='approved' AND prefix_address=? AND prefix_length=0 AND metric>=100
+		ORDER BY metric`, idBytes(networkID), netip.IPv4Unspecified().AsSlice())
+	if err != nil {
+		return fmt.Errorf("read existing default route metrics: %w", err)
 	}
-	metric := 100 + active
+	metric := uint32(100)
+	for rows.Next() {
+		var used uint32
+		if err := rows.Scan(&used); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan existing default route metric: %w", err)
+		}
+		if used == metric {
+			metric++
+		} else if used > metric {
+			break
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close existing default route metrics: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate existing default route metrics: %w", err)
+	}
 	if metric > MaxRouteMetric {
 		return fmt.Errorf("%w: too many active exit routes", ErrConflict)
 	}

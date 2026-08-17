@@ -265,7 +265,7 @@ grep -F '<--class> <ephemeral>' "$log" >/dev/null
 grep -F '<--session-lifetime> <8h>' "$log" >/dev/null
 grep -F '<--exit-node>' "$log" >/dev/null
 grep -F "releases/download/v1.0.0/ephemeral-exit-bootstrap.sh" "$shared_exit_instructions" >/dev/null
-grep -F -- "--authority 'lane.example.test:8443' --name 'borrowed-egress' --max-runtime '8h'" "$shared_exit_instructions" >/dev/null
+grep -F -- "--authority 'lane.example.test' --name 'borrowed-egress' --max-runtime '8h'" "$shared_exit_instructions" >/dev/null
 if grep -F 'single_use_secret' "$shared_exit_instructions" >/dev/null; then
   echo "shared-host Exit invitation leaked into its bootstrap command" >&2
   exit 1
