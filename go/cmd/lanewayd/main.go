@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"laneway.dev/laneway/internal/nodeapp"
+	"github.com/Doout/laneway/go/internal/nodeapp"
 )
 
 func main() {

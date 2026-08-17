@@ -16,15 +16,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"laneway.dev/laneway/internal/agent"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/nodeservice"
-	"laneway.dev/laneway/internal/pki"
-	"laneway.dev/laneway/internal/relay"
-	"laneway.dev/laneway/internal/relayservice"
-	"laneway.dev/laneway/internal/routing"
-	"laneway.dev/laneway/internal/tcpfallback"
-	"laneway.dev/laneway/internal/transport"
+	"github.com/Doout/laneway/go/internal/agent"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/nodeservice"
+	"github.com/Doout/laneway/go/internal/pki"
+	"github.com/Doout/laneway/go/internal/relay"
+	"github.com/Doout/laneway/go/internal/relayservice"
+	"github.com/Doout/laneway/go/internal/routing"
+	"github.com/Doout/laneway/go/internal/tcpfallback"
+	"github.com/Doout/laneway/go/internal/transport"
 )
 
 const (

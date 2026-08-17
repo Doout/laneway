@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"laneway.dev/laneway/internal/nftstate"
+	"github.com/Doout/laneway/go/internal/nftstate"
 )
 
 type fakeGatewayRunner struct {

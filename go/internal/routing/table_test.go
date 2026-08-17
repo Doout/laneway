@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func node(last byte) identity.NodeID {

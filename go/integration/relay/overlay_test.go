@@ -9,15 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/nodeservice"
-	"laneway.dev/laneway/internal/pki"
-	"laneway.dev/laneway/internal/platform"
-	"laneway.dev/laneway/internal/protocol"
-	"laneway.dev/laneway/internal/relay"
-	"laneway.dev/laneway/internal/relayservice"
-	"laneway.dev/laneway/internal/routing"
-	"laneway.dev/laneway/internal/transport"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/nodeservice"
+	"github.com/Doout/laneway/go/internal/pki"
+	"github.com/Doout/laneway/go/internal/platform"
+	"github.com/Doout/laneway/go/internal/protocol"
+	"github.com/Doout/laneway/go/internal/relay"
+	"github.com/Doout/laneway/go/internal/relayservice"
+	"github.com/Doout/laneway/go/internal/routing"
+	"github.com/Doout/laneway/go/internal/transport"
 )
 
 func TestTwoNodesExchangePacketThroughRelay(t *testing.T) {

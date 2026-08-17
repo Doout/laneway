@@ -18,17 +18,17 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/agent"
-	"laneway.dev/laneway/internal/dataplane"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/packetbuffer"
-	"laneway.dev/laneway/internal/pathmanager"
-	"laneway.dev/laneway/internal/protocol"
-	"laneway.dev/laneway/internal/routing"
-	"laneway.dev/laneway/internal/tcpfallback"
-	"laneway.dev/laneway/internal/transport"
-	"laneway.dev/laneway/internal/wireguard"
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/agent"
+	"github.com/Doout/laneway/go/internal/dataplane"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/packetbuffer"
+	"github.com/Doout/laneway/go/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/protocol"
+	"github.com/Doout/laneway/go/internal/routing"
+	"github.com/Doout/laneway/go/internal/tcpfallback"
+	"github.com/Doout/laneway/go/internal/transport"
+	"github.com/Doout/laneway/go/internal/wireguard"
 )
 
 const DefaultMaxRoutes = 4096

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"net/netip"
 
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 // Forward validates and queues a single Laneway packet frame received from the

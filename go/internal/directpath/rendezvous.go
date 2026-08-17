@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 type rendezvousKey struct {

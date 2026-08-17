@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/controller"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pki"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/controller"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pki"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 func validMetadata(t *testing.T, now time.Time) Metadata {

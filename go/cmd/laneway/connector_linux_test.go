@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/bootstrapsecret"
-	"laneway.dev/laneway/internal/config"
+	"github.com/Doout/laneway/go/internal/bootstrapsecret"
+	"github.com/Doout/laneway/go/internal/config"
 )
 
 func TestParseConnectorSetupToken(t *testing.T) {

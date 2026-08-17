@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/exitnode"
-	"laneway.dev/laneway/internal/platform"
-	"laneway.dev/laneway/internal/subnet"
+	"github.com/Doout/laneway/go/internal/exitnode"
+	"github.com/Doout/laneway/go/internal/platform"
+	"github.com/Doout/laneway/go/internal/subnet"
 )
 
 const privilegedGate = "LANEWAY_PRIVILEGED_INTEGRATION"

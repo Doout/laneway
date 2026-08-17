@@ -21,15 +21,15 @@ import (
 	"testing"
 	"time"
 
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/controller"
+	"github.com/Doout/laneway/go/internal/controllerservice"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/nodeservice"
+	"github.com/Doout/laneway/go/internal/pki"
+	"github.com/Doout/laneway/go/internal/platform"
+	"github.com/Doout/laneway/go/internal/transport"
 	"google.golang.org/protobuf/proto"
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/controller"
-	"laneway.dev/laneway/internal/controllerservice"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/nodeservice"
-	"laneway.dev/laneway/internal/pki"
-	"laneway.dev/laneway/internal/platform"
-	"laneway.dev/laneway/internal/transport"
 )
 
 type relayPollObservation struct {

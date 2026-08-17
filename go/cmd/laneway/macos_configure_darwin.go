@@ -19,8 +19,8 @@ import (
 	"syscall"
 	"time"
 
-	"laneway.dev/laneway/internal/buildinfo"
-	"laneway.dev/laneway/internal/releaseupdate"
+	"github.com/Doout/laneway/go/internal/buildinfo"
+	"github.com/Doout/laneway/go/internal/releaseupdate"
 )
 
 const (

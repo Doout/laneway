@@ -5,7 +5,7 @@ package nodeapp
 import (
 	"errors"
 
-	"laneway.dev/laneway/internal/config"
+	"github.com/Doout/laneway/go/internal/config"
 )
 
 func resolveEphemeralExitCredentials(*config.Config) error {

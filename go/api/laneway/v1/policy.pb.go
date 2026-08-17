@@ -451,7 +451,7 @@ const file_laneway_v1_policy_proto_rawDesc = "" +
 	"\x0fIP_PROTOCOL_TCP\x10\x06\x12\x13\n" +
 	"\x0fIP_PROTOCOL_UDP\x10\x11\x12\x16\n" +
 	"\x12IP_PROTOCOL_ICMPV6\x10:\x12\x14\n" +
-	"\x0fIP_PROTOCOL_ANY\x10\x80\x02B.Z,laneway.dev/laneway/api/laneway/v1;lanewayv1b\x06proto3"
+	"\x0fIP_PROTOCOL_ANY\x10\x80\x02B6Z4github.com/Doout/laneway/go/api/laneway/v1;lanewayv1b\x06proto3"
 
 var (
 	file_laneway_v1_policy_proto_rawDescOnce sync.Once

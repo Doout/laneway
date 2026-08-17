@@ -13,9 +13,9 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/netvalidate"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/netvalidate"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 func openTestStore(t *testing.T) (*Store, string) {

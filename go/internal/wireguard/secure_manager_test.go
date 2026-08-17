@@ -6,8 +6,8 @@ import (
 	"net/netip"
 	"testing"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pathmanager"
 )
 
 type fakeSecureDevice struct {

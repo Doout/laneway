@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/localapi"
-	"laneway.dev/laneway/internal/pki"
+	"github.com/Doout/laneway/go/internal/localapi"
+	"github.com/Doout/laneway/go/internal/pki"
 )
 
 func TestWritePairExclusiveAndPermissions(t *testing.T) {

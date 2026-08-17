@@ -8,7 +8,7 @@ import (
 	"net/netip"
 	"sort"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 type RelayAuthorization struct {

@@ -6,7 +6,7 @@ import (
 	"slices"
 	"strings"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 const (

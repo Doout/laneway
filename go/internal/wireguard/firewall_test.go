@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func firewallID(value byte) identity.ID {

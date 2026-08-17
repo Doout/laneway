@@ -5,8 +5,8 @@ import (
 	"context"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/packetbuffer"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/packetbuffer"
 )
 
 // PeerID is the authenticated node identity used by routing and transport.

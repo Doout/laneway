@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pathmanager"
-	"laneway.dev/laneway/internal/routing"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/routing"
 )
 
 func nodeID(last byte) identity.NodeID {

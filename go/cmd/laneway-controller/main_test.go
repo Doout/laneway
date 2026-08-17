@@ -23,10 +23,10 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/controller"
-	"laneway.dev/laneway/internal/controllerservice"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/controller"
+	"github.com/Doout/laneway/go/internal/controllerservice"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func TestAdminBearerCredentialFromFile(t *testing.T) {

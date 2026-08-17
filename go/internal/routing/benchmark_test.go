@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 func BenchmarkLookup4096Routes(b *testing.B) {

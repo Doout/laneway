@@ -34,7 +34,7 @@ if [ "$package_goos" = linux ]; then
 		"$package_dir/nftables" "$package_dir/spec" "$package_dir/deploy" "$package_dir/integration"
 fi
 
-ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=$version"
+ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$version"
 (
   cd "$project_dir/go"
   CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \

@@ -10,17 +10,17 @@ import (
 	"testing"
 	"time"
 
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/config"
-	"laneway.dev/laneway/internal/exitnode"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/nodeservice"
-	"laneway.dev/laneway/internal/pathmanager"
-	"laneway.dev/laneway/internal/platform"
-	"laneway.dev/laneway/internal/policy"
-	"laneway.dev/laneway/internal/protocol"
-	"laneway.dev/laneway/internal/routing"
-	"laneway.dev/laneway/internal/wireguard"
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/config"
+	"github.com/Doout/laneway/go/internal/exitnode"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/nodeservice"
+	"github.com/Doout/laneway/go/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/platform"
+	"github.com/Doout/laneway/go/internal/policy"
+	"github.com/Doout/laneway/go/internal/protocol"
+	"github.com/Doout/laneway/go/internal/routing"
+	"github.com/Doout/laneway/go/internal/wireguard"
 )
 
 func TestControllerPacketPolicyAllowsOnlyAuthorizedBidirectionalTraffic(t *testing.T) {

@@ -938,7 +938,7 @@ const file_laneway_v1_control_proto_rawDesc = "" +
 	"\x1cERROR_CODE_PERMISSION_DENIED\x10\x04\x12\x1a\n" +
 	"\x16ERROR_CODE_STALE_EPOCH\x10\x05\x12!\n" +
 	"\x1dERROR_CODE_RESOURCE_EXHAUSTED\x10\x06\x12\x17\n" +
-	"\x13ERROR_CODE_INTERNAL\x10\aB.Z,laneway.dev/laneway/api/laneway/v1;lanewayv1b\x06proto3"
+	"\x13ERROR_CODE_INTERNAL\x10\aB6Z4github.com/Doout/laneway/go/api/laneway/v1;lanewayv1b\x06proto3"
 
 var (
 	file_laneway_v1_control_proto_rawDescOnce sync.Once

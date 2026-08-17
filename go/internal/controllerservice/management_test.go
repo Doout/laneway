@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 func jsonRequest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {

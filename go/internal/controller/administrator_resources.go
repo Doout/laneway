@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"net/http"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 var (

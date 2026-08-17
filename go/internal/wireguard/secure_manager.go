@@ -7,8 +7,8 @@ import (
 	"net/netip"
 	"sync"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pathmanager"
 )
 
 type SecureManagerConfig struct {

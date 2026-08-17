@@ -5,7 +5,7 @@ package nethelper
 import (
 	"context"
 
-	"laneway.dev/laneway/internal/platform"
+	"github.com/Doout/laneway/go/internal/platform"
 )
 
 type ServiceConfig struct{}

@@ -13,10 +13,10 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
 )
 
 var (

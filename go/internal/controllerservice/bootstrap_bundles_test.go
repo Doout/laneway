@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pki"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pki"
 )
 
 func TestBootstrapBundleIsBoundedSingleUseAndExpires(t *testing.T) {

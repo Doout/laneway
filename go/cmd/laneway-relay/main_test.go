@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"laneway.dev/laneway/internal/config"
+	"github.com/Doout/laneway/go/internal/config"
 )
 
 func TestStaticAuthorizer(t *testing.T) {

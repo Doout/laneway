@@ -7,9 +7,9 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/buildinfo"
 	"github.com/spf13/cobra"
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/buildinfo"
 )
 
 type commandHandler func([]string) error

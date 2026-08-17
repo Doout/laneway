@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package laneway.v1;
 
-option go_package = "laneway.dev/laneway/api/laneway/v1;lanewayv1";
+option go_package = "github.com/Doout/laneway/go/api/laneway/v1;lanewayv1";
 
 // Opaque identifiers are exactly 16 bytes. Receivers MUST reject other sizes.
 message NetworkRef {

@@ -11,15 +11,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/agent"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/protocol"
+	"github.com/Doout/laneway/go/internal/relay"
+	"github.com/Doout/laneway/go/internal/revocation"
+	"github.com/Doout/laneway/go/internal/tcpfallback"
+	"github.com/Doout/laneway/go/internal/transport"
 	"google.golang.org/protobuf/proto"
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/agent"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/protocol"
-	"laneway.dev/laneway/internal/relay"
-	"laneway.dev/laneway/internal/revocation"
-	"laneway.dev/laneway/internal/tcpfallback"
-	"laneway.dev/laneway/internal/transport"
 )
 
 const (

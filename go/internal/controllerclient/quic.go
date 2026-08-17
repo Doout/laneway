@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/controllerservice"
+	"github.com/Doout/laneway/go/internal/protocol"
 	"github.com/quic-go/quic-go"
 	"google.golang.org/protobuf/proto"
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/controllerservice"
-	"laneway.dev/laneway/internal/protocol"
 )
 
 const controllerSchemaVersion = 1

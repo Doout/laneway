@@ -21,11 +21,11 @@ import (
 	"testing"
 	"time"
 
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pki"
 	"google.golang.org/protobuf/proto"
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pki"
 )
 
 type controllerClientRoundTripFunc func(*http.Request) (*http.Response, error)

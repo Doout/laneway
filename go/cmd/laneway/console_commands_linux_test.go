@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"laneway.dev/laneway/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/bootstrap"
 )
 
 func TestConsoleEnrollmentCommandSurface(t *testing.T) {

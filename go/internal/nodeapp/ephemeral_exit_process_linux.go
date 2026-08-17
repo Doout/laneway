@@ -9,8 +9,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/Doout/laneway/go/internal/config"
 	"golang.org/x/sys/unix"
-	"laneway.dev/laneway/internal/config"
 )
 
 func resolveEphemeralExitCredentials(cfg *config.Config) error {

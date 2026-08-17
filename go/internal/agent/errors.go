@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
 )
 
 var (

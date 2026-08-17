@@ -21,11 +21,11 @@ import (
 	"syscall"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/controller"
-	"laneway.dev/laneway/internal/controllerservice"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pki"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/controller"
+	"github.com/Doout/laneway/go/internal/controllerservice"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pki"
 )
 
 const maxAdminTokenBytes = 4096

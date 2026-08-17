@@ -1,4 +1,4 @@
-module laneway.dev/laneway
+module github.com/Doout/laneway/go
 
 go 1.26
 

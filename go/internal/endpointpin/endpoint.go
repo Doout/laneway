@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"sort"
 
-	"laneway.dev/laneway/internal/netvalidate"
+	"github.com/Doout/laneway/go/internal/netvalidate"
 )
 
 var ErrInvalidEndpoint = errors.New("endpoint pin: invalid endpoint")

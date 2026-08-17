@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/wireguard"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/wireguard"
 )
 
 // setWireGuardExitSelection changes cryptographic ownership and native default

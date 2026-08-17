@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/controller"
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/controller"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 const administratorRecoveryGrantLifetime = 10 * time.Minute

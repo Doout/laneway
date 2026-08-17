@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/protocol"
 	"google.golang.org/protobuf/proto"
-	lanewayv1 "laneway.dev/laneway/api/laneway/v1"
-	"laneway.dev/laneway/internal/protocol"
 )
 
 func TestPacketGoldenVector(t *testing.T) {

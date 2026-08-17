@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"laneway.dev/laneway/internal/pathmanager"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 type fakeManagedDevice struct {

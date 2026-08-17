@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"laneway.dev/laneway/internal/nftstate"
+	"github.com/Doout/laneway/go/internal/nftstate"
 )
 
 const (

@@ -18,7 +18,7 @@ import (
 	"net/url"
 	"time"
 
-	"laneway.dev/laneway/internal/identity"
+	"github.com/Doout/laneway/go/internal/identity"
 )
 
 const DefaultLeafValidity = 30 * 24 * time.Hour

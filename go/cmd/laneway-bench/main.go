@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 const (

@@ -6,8 +6,8 @@ import (
 	"errors"
 	"flag"
 
-	"laneway.dev/laneway/internal/bootstrap"
-	"laneway.dev/laneway/internal/nethelper"
+	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/nethelper"
 )
 
 const credentialDescriptorDirectory = "/dev/fd"

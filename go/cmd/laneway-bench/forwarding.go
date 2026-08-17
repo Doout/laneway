@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"laneway.dev/laneway/internal/dataplane"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/pathmanager"
-	"laneway.dev/laneway/internal/routing"
+	"github.com/Doout/laneway/go/internal/dataplane"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/pathmanager"
+	"github.com/Doout/laneway/go/internal/routing"
 )
 
 func runForwarding(parent context.Context, args []string, exit bool) error {

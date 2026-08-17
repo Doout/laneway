@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"laneway.dev/laneway/internal/routing"
-	"laneway.dev/laneway/internal/tcpfallback"
+	"github.com/Doout/laneway/go/internal/routing"
+	"github.com/Doout/laneway/go/internal/tcpfallback"
 )
 
 type rustRelayProcess struct {

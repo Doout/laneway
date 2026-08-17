@@ -9,9 +9,9 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"laneway.dev/laneway/internal/controllerclient"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/controllerclient"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 type controllerOverview struct {

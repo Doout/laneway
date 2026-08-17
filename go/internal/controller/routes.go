@@ -8,10 +8,10 @@ import (
 	"net/netip"
 	"time"
 
-	"laneway.dev/laneway/internal/adminauth"
-	"laneway.dev/laneway/internal/identity"
-	"laneway.dev/laneway/internal/netvalidate"
-	"laneway.dev/laneway/internal/protocol"
+	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/netvalidate"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 func validateRoute(prefix netip.Prefix, kind RouteKind, mode RouteMode, metric uint32, validUntil *time.Time, now time.Time) error {

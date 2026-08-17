@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"laneway.dev/laneway/internal/exitnode"
-	"laneway.dev/laneway/internal/platform"
+	"github.com/Doout/laneway/go/internal/exitnode"
+	"github.com/Doout/laneway/go/internal/platform"
 )
 
 func decodeStrict(data []byte, target any) error {
