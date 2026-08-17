@@ -1449,10 +1449,11 @@ run_invite() {
 		[ "$class" = durable ] || die "--bootstrap supports durable Connectors only"
 		[ "$expires_set" = false ] || die "--bootstrap uses a fixed 10-minute lifetime; omit --expires-in"
 		expires=10m
-	fi
+  fi
   if [ "$shared_host_exit" = true ]; then
-    [ "$docker_install" = false ] && [ "$exit_node" = false ] && [ "$bootstrap_install" = false ] || \
+    if [ "$docker_install" != false ] || [ "$exit_node" != false ] || [ "$bootstrap_install" != false ]; then
       die "--shared-host-exit cannot be combined with Docker Connector options"
+    fi
     [ "$class" = durable ] || die "--shared-host-exit selects its own ephemeral enrollment class"
     class=ephemeral
     [ -n "$session" ] || session=8h
