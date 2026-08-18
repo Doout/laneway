@@ -332,7 +332,7 @@ func TestExactV8BackupAndRestoreUpgradePrivateCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 10 || sessions != 0 || pending != 0 || state.RecoveryGeneration != 2 {
+	if version != 11 || sessions != 0 || pending != 0 || state.RecoveryGeneration != 2 {
 		t.Fatalf("restored version=%d sessions=%d pending=%d state=%+v", version, sessions, pending, state)
 	}
 }
@@ -450,7 +450,7 @@ func TestRestoreRejectsMalformedCurrentAdministratorScopeTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(directory, "restored.db")
-	if err := RestoreDatabase(ctx, validBackup, destination); err == nil || !strings.Contains(err.Error(), "canonical v10 definition") {
+	if err := RestoreDatabase(ctx, validBackup, destination); err == nil || !strings.Contains(err.Error(), "canonical v11 definition") {
 		t.Fatalf("malformed current-schema restore error=%v, want canonical-schema rejection", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
@@ -509,7 +509,7 @@ func TestRestoreRejectsWeakenedCurrentAdministratorDDL(t *testing.T) {
 				t.Fatal(err)
 			}
 			destination := filepath.Join(directory, "restored.db")
-			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v10 definition") {
+			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v11 definition") {
 				t.Fatalf("weakened restore error=%v, want canonical-schema rejection", err)
 			}
 			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
@@ -540,7 +540,7 @@ func TestRestoreRejectsUnexpectedTriggerThatMutatesAdministratorState(t *testing
 		t.Fatal(err)
 	}
 	destination := filepath.Join(directory, "restored.db")
-	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v10 definition") {
+	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v11 definition") {
 		t.Fatalf("unexpected-trigger restore error=%v, want canonical-schema rejection", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {

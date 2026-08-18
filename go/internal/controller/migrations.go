@@ -538,6 +538,113 @@ CREATE TRIGGER ephemeral_exit_sessions_identity_immutable
 BEGIN
     SELECT RAISE(ABORT, 'ephemeral Exit session identity is immutable');
 END;
+`, `
+CREATE TABLE access_users (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253 AND name = trim(name)),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    UNIQUE(network_id,name),
+    UNIQUE(network_id,id)
+) STRICT;
+
+CREATE TABLE access_teams (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253 AND name = trim(name)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    UNIQUE(network_id,name),
+    UNIQUE(network_id,id)
+) STRICT;
+
+CREATE TABLE access_team_members (
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    team_id BLOB NOT NULL CHECK(length(team_id) = 16 AND team_id <> zeroblob(16)),
+    user_id BLOB NOT NULL CHECK(length(user_id) = 16 AND user_id <> zeroblob(16)),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(team_id,user_id),
+    FOREIGN KEY(network_id,team_id) REFERENCES access_teams(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,user_id) REFERENCES access_users(network_id,id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX access_team_members_user ON access_team_members(network_id,user_id,team_id);
+
+CREATE TABLE access_grants (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('user','team')),
+    user_id BLOB CHECK(user_id IS NULL OR (length(user_id) = 16 AND user_id <> zeroblob(16))),
+    team_id BLOB CHECK(team_id IS NULL OR (length(team_id) = 16 AND team_id <> zeroblob(16))),
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('network','node','exit')),
+    node_id BLOB CHECK(node_id IS NULL OR (length(node_id) = 16 AND node_id <> zeroblob(16))),
+    created_at INTEGER NOT NULL,
+    CHECK((subject_kind='user' AND user_id IS NOT NULL AND team_id IS NULL) OR
+          (subject_kind='team' AND team_id IS NOT NULL AND user_id IS NULL)),
+    CHECK((target_kind='network' AND node_id IS NULL) OR
+          (target_kind IN ('node','exit') AND node_id IS NOT NULL)),
+    FOREIGN KEY(network_id,user_id) REFERENCES access_users(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,team_id) REFERENCES access_teams(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX access_grants_user_target ON access_grants(
+    network_id,user_id,target_kind,COALESCE(node_id,zeroblob(16))) WHERE subject_kind='user';
+CREATE UNIQUE INDEX access_grants_team_target ON access_grants(
+    network_id,team_id,target_kind,COALESCE(node_id,zeroblob(16))) WHERE subject_kind='team';
+CREATE INDEX access_grants_node ON access_grants(network_id,node_id) WHERE node_id IS NOT NULL;
+
+ALTER TABLE nodes ADD COLUMN user_id BLOB REFERENCES access_users(id) ON DELETE SET NULL
+    CHECK(user_id IS NULL OR (length(user_id) = 16 AND user_id <> zeroblob(16)));
+ALTER TABLE enrollment_tokens ADD COLUMN user_id BLOB REFERENCES access_users(id) ON DELETE SET NULL
+    CHECK(user_id IS NULL OR (length(user_id) = 16 AND user_id <> zeroblob(16)));
+CREATE INDEX nodes_access_user ON nodes(network_id,user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX enrollment_tokens_access_user ON enrollment_tokens(network_id,user_id) WHERE user_id IS NOT NULL;
+
+CREATE TRIGGER nodes_access_user_network_insert
+    BEFORE INSERT ON nodes WHEN NEW.user_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM access_users WHERE id=NEW.user_id AND network_id=NEW.network_id)
+BEGIN
+    SELECT RAISE(ABORT, 'node access user must belong to the same network');
+END;
+CREATE TRIGGER nodes_access_user_network_update
+    BEFORE UPDATE OF network_id,user_id ON nodes WHEN NEW.user_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM access_users WHERE id=NEW.user_id AND network_id=NEW.network_id)
+BEGIN
+    SELECT RAISE(ABORT, 'node access user must belong to the same network');
+END;
+CREATE TRIGGER enrollment_tokens_access_user_network_insert
+    BEFORE INSERT ON enrollment_tokens WHEN NEW.user_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM access_users WHERE id=NEW.user_id AND network_id=NEW.network_id AND enabled=1)
+BEGIN
+    SELECT RAISE(ABORT, 'enrollment token access user must be enabled in the same network');
+END;
+CREATE TRIGGER enrollment_tokens_access_user_network_update
+    BEFORE UPDATE OF network_id,user_id ON enrollment_tokens WHEN NEW.user_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM access_users WHERE id=NEW.user_id AND network_id=NEW.network_id AND enabled=1)
+BEGIN
+    SELECT RAISE(ABORT, 'enrollment token access user must be enabled in the same network');
+END;
+
+CREATE TRIGGER access_users_identity_immutable
+    BEFORE UPDATE OF id,network_id,created_at ON access_users
+BEGIN
+    SELECT RAISE(ABORT, 'access user identity is immutable');
+END;
+CREATE TRIGGER access_teams_identity_immutable
+    BEFORE UPDATE OF id,network_id,created_at ON access_teams
+BEGIN
+    SELECT RAISE(ABORT, 'access team identity is immutable');
+END;
+CREATE TRIGGER access_grants_immutable
+    BEFORE UPDATE ON access_grants
+BEGIN
+    SELECT RAISE(ABORT, 'access grant is immutable');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

@@ -201,6 +201,14 @@ const validRoute = (value: { prefix: string; kind: string; mode: string }): bool
 
 export const zAclAction = z.enum(['accept', 'deny']);
 
+export const zAccessSubjectKind = z.enum(['user', 'team']);
+
+export const zAccessTargetKind = z.enum([
+    'network',
+    'node',
+    'exit'
+]);
+
 export const zActorKind = z.enum([
     'system',
     'node',
@@ -250,6 +258,21 @@ export const zIpProtocol = z.enum([
  * Canonical nonzero 128-bit identifier in lowercase hexadecimal.
  */
 export const zIdentifier = z.string().regex(/^(?!0{32}$)[0-9a-f]{32}$/);
+
+export const zCreateAccessGrantRequest = z.intersection(z.union([
+    z.object({
+        target_kind: z.literal('network').optional()
+    }).strict(),
+    z.object({
+        target_kind: z.enum(['node', 'exit']).optional(),
+        node_id: zIdentifier
+    }).strict()
+]), z.object({
+    subject_kind: zAccessSubjectKind,
+    subject_id: zIdentifier,
+    target_kind: zAccessTargetKind,
+    node_id: zIdentifier.optional()
+}).strict());
 
 export const zMutableRouteMode = z.enum(['nat', 'routed']);
 
@@ -396,6 +419,10 @@ export const zErrorEnvelope = z.object({
  */
 export const zResourceName = z.string().refine((value) => trimmedBytes(value, 253), 'name must be 1..253 trimmed UTF-8 bytes without NUL');
 
+export const zCreateAccessSubjectRequest = z.object({
+    name: zResourceName
+}).strict();
+
 export const zNetworkRequest = z.object({
     network_id: zIdentifier.nullish(),
     name: zResourceName,
@@ -526,6 +553,47 @@ export const zEpoch = z.object({
  */
 export const zUnixSeconds = z.int().gte(-9007199254740991).lte(9007199254740991);
 
+export const zAccessGrant = z.object({
+    grant_id: zIdentifier,
+    network_id: zIdentifier,
+    subject_kind: zAccessSubjectKind,
+    subject_id: zIdentifier,
+    target_kind: zAccessTargetKind,
+    node_id: zIdentifier.optional(),
+    created_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zAccessTeam = z.object({
+    team_id: zIdentifier,
+    network_id: zIdentifier,
+    name: zResourceName,
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zAccessTeamMember = z.object({
+    network_id: zIdentifier,
+    team_id: zIdentifier,
+    user_id: zIdentifier,
+    created_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zAccessUser = z.object({
+    user_id: zIdentifier,
+    network_id: zIdentifier,
+    name: zResourceName,
+    enabled: z.boolean(),
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zAccessInventory = z.object({
+    users: z.array(zAccessUser),
+    teams: z.array(zAccessTeam),
+    memberships: z.array(zAccessTeamMember),
+    grants: z.array(zAccessGrant)
+}).strict();
+
 export const zAdministratorSession = z.object({
     session_id: zIdentifier,
     principal_id: zIdentifier,
@@ -595,6 +663,7 @@ export const zCertificates = z.object({
 export const zEnrollmentToken = z.object({
     token_id: zIdentifier,
     enrollment_token: zSecret,
+    user_id: zIdentifier.optional(),
     expires_at_unix_seconds: zUnixSeconds,
     enrollment_class: zEnrollmentClass,
     session_lifetime_seconds: z.int().gte(300).lte(86400).optional(),
@@ -610,6 +679,7 @@ export const zEnrollmentToken = z.object({
 
 export const zEnrollmentTokenRequest = z.object({
     network_id: zIdentifier,
+    user_id: zIdentifier.nullish(),
     label: z.string().nullish().default('').refine((value) => value == null || trimmedBytes(value, 256, true), 'label must be trimmed and at most 256 UTF-8 bytes without NUL'),
     expires_at_unix_seconds: zUnixSeconds,
     enrollment_class: zEnrollmentClass.nullish(),
@@ -644,6 +714,7 @@ export const zNetworks = z.object({
 export const zNode = z.object({
     node_id: zIdentifier,
     network_id: zIdentifier,
+    user_id: zIdentifier.optional(),
     name: zResourceName,
     enabled_capabilities: zUint64,
     ipv4_address: z.ipv4().optional(),
@@ -702,6 +773,10 @@ export const zUpdateAclRuleRequest = z.object({
     selector: zTrafficSelectorInput,
     description: z.string().nullish().default('').refine((value) => value == null || utf8ByteLength(value) <= 1024 && !value.includes('\0'), 'description must occupy at most 1024 UTF-8 bytes without NUL'),
     enabled: z.boolean().nullish().default(false)
+}).strict();
+
+export const zUpdateAccessUserRequest = z.object({
+    enabled: z.boolean()
 }).strict();
 
 /**
@@ -1043,6 +1118,88 @@ export const zCreateNetworkAclRulePath = z.object({
  * ACL rule.
  */
 export const zCreateNetworkAclRuleResponse = zAclRule;
+
+export const zGetNetworkAccessInventoryPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Users, Teams, memberships, and effective grant definitions for one Network.
+ */
+export const zGetNetworkAccessInventoryResponse = zAccessInventory;
+
+export const zCreateNetworkAccessUserBody = zCreateAccessSubjectRequest;
+
+export const zCreateNetworkAccessUserPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Network-scoped person identity.
+ */
+export const zCreateNetworkAccessUserResponse = zAccessUser;
+
+export const zUpdateAccessUserBody = zUpdateAccessUserRequest;
+
+export const zUpdateAccessUserPath = z.object({
+    user_id: zIdentifier
+}).strict();
+
+/**
+ * Network-scoped person identity.
+ */
+export const zUpdateAccessUserResponse = zAccessUser;
+
+export const zCreateNetworkAccessTeamBody = zCreateAccessSubjectRequest;
+
+export const zCreateNetworkAccessTeamPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Network-scoped Team.
+ */
+export const zCreateNetworkAccessTeamResponse = zAccessTeam;
+
+export const zRemoveAccessTeamMemberPath = z.object({
+    team_id: zIdentifier,
+    user_id: zIdentifier
+}).strict();
+
+/**
+ * Updated network configuration epoch.
+ */
+export const zRemoveAccessTeamMemberResponse = zEpoch;
+
+export const zAddAccessTeamMemberPath = z.object({
+    team_id: zIdentifier,
+    user_id: zIdentifier
+}).strict();
+
+/**
+ * Updated network configuration epoch.
+ */
+export const zAddAccessTeamMemberResponse = zEpoch;
+
+export const zCreateNetworkAccessGrantBody = zCreateAccessGrantRequest;
+
+export const zCreateNetworkAccessGrantPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Direct User or Team access grant.
+ */
+export const zCreateNetworkAccessGrantResponse = zAccessGrant;
+
+export const zDeleteAccessGrantPath = z.object({
+    grant_id: zIdentifier
+}).strict();
+
+/**
+ * Updated network configuration epoch.
+ */
+export const zDeleteAccessGrantResponse = zEpoch;
 
 export const zListNetworkCertificatesPath = z.object({
     network_id: zIdentifier

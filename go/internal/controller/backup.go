@@ -274,6 +274,9 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 		return errors.New("backup schema history is incomplete")
 	}
 	requiredTables := []string{"networks", "nodes", "certificates", "overlay_addresses", "routes", "acl_rules", "relays", "enrollment_tokens", "audit_events", "schema_versions"}
+	if version >= 11 {
+		requiredTables = append(requiredTables, "access_users", "access_teams", "access_team_members", "access_grants")
+	}
 	if version >= 8 {
 		requiredTables = append(requiredTables, "administrator_principals", "administrator_principal_networks",
 			"administrator_credentials", "administrator_sessions", "administrator_recovery_grants", "administrator_auth_state")

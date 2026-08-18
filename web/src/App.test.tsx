@@ -119,6 +119,7 @@ describe('Laneway browser sessions', () => {
       if (path.endsWith('/auth/login')) return Promise.resolve(jsonResponse(sessionView()))
       if (path.includes('/v1/admin/networks?')) return Promise.resolve(managementResponse({ networks: [{ network_id: networkId, name: 'Private network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 }] }))
       if (path.includes('/nodes?')) return Promise.resolve(managementResponse({ nodes: [] }))
+      if (path.includes('/access-subjects')) return Promise.resolve(managementResponse({ users: [], teams: [], memberships: [], grants: [] }))
       if (path.includes('/routes?')) return Promise.resolve(managementResponse({ routes: [] }))
       if (path.includes('/acl-rules?')) return Promise.resolve(managementResponse({ acl_rules: [] }))
       if (path.includes('/relays?')) return Promise.resolve(managementResponse({ relays: [] }))

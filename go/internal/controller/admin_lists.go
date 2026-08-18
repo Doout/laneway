@@ -122,7 +122,7 @@ func (s *Store) NetworkNodes(ctx context.Context, networkID identity.NetworkID, 
 	if err := validateListLimit(limit); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key
+	rows, err := s.db.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key,n.user_id
 		FROM nodes n LEFT JOIN overlay_addresses a ON a.id=(SELECT oa.id FROM overlay_addresses oa
 			WHERE oa.node_id=n.id AND oa.released_at IS NULL AND length(oa.address)=4 ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
 		LEFT JOIN overlay_addresses a6 ON a6.id=(SELECT oa.id FROM overlay_addresses oa
@@ -149,7 +149,7 @@ func (s *Store) AdministratorNetworkNodes(ctx context.Context, decision adminaut
 	if err := administratorNetworkExistsTx(ctx, tx, networkID); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key
+	rows, err := tx.QueryContext(ctx, `SELECT n.id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key,n.user_id
 		FROM nodes n LEFT JOIN overlay_addresses a ON a.id=(SELECT oa.id FROM overlay_addresses oa
 			WHERE oa.node_id=n.id AND oa.released_at IS NULL AND length(oa.address)=4 ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
 		LEFT JOIN overlay_addresses a6 ON a6.id=(SELECT oa.id FROM overlay_addresses oa
@@ -172,14 +172,14 @@ func scanNodeInventory(rows *sql.Rows, networkID identity.NetworkID) ([]Node, er
 	defer rows.Close()
 	var result []Node
 	for rows.Next() {
-		var idRaw, address4, address6, wireGuardPublicKey []byte
+		var idRaw, address4, address6, wireGuardPublicKey, userRaw []byte
 		var name string
 		var capabilities uint64
 		var created int64
 		var revoked sql.NullInt64
 		var class string
 		var lease sql.NullInt64
-		if err := rows.Scan(&idRaw, &name, &capabilities, &created, &revoked, &address4, &address6, &class, &lease, &wireGuardPublicKey); err != nil {
+		if err := rows.Scan(&idRaw, &name, &capabilities, &created, &revoked, &address4, &address6, &class, &lease, &wireGuardPublicKey, &userRaw); err != nil {
 			return nil, fmt.Errorf("scan node inventory: %w", err)
 		}
 		id, err := scanID(idRaw)
@@ -195,6 +195,13 @@ func scanNodeInventory(rows *sql.Rows, networkID identity.NetworkID) ([]Node, er
 			return nil, err
 		}
 		node := Node{ID: identity.NodeID(id), NetworkID: networkID, Name: name, EnabledCapabilities: capabilities, CreatedAt: fromUnix(created), RevokedAt: nullableTime(revoked), EnrollmentClass: enrollmentClass, LeaseExpiresAt: nullableTime(lease), WireGuardPublicKey: wireGuardKey}
+		if len(userRaw) != 0 {
+			userID, err := scanID(userRaw)
+			if err != nil {
+				return nil, err
+			}
+			node.UserID = &userID
+		}
 		if len(address4) != 0 {
 			node.IPv4Address, _ = netip.AddrFromSlice(address4)
 			if !node.IPv4Address.Is4() {

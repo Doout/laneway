@@ -10,9 +10,11 @@ import {
   LiveApproveRoutePage,
   LiveAuditPage,
   LiveCreateAccessPage,
+  LiveCreateGrantPage,
   LiveCreateRoutePage,
+  LiveCreateTeamPage,
+  LiveCreateUserPage,
   LiveInfrastructurePage,
-  LiveIssueUserPage,
   LiveNetworkPage,
   LiveNodeCapabilitiesPage,
   LiveNodeDetailPage,
@@ -24,7 +26,10 @@ import {
   LiveRoutesPage,
   LiveSecurityPage,
   LiveTokenPage,
+  LiveTeamDetailPage,
+  LiveTeamsPage,
   LiveUserDetailPage,
+  LiveUserEnrollmentPage,
   LiveUsersPage,
 } from './pages/live/LivePages'
 
@@ -81,13 +86,14 @@ export function App() {
     <Route path="/setup" element={<SetupRequiredPage />} />
     <Route element={<RequireSession />}><Route element={<LiveAppShell />}>
       <Route element={<RequirePermission permission="network.list" />}><Route path="/overview" element={<LiveOverviewPage />} /><Route path="/infrastructure" element={<LiveInfrastructurePage />} /></Route>
-      <Route element={<RequirePermission permission="node.read" />}><Route path="/nodes" element={<LiveNodesPage />} /><Route path="/nodes/:nodeId" element={<LiveNodeDetailPage />} /><Route path="/users" element={<LiveUsersPage />} /><Route path="/users/:userId" element={<LiveUserDetailPage />} /></Route>
-      <Route element={<RequirePermission permission="enrollment.issue" />}><Route path="/nodes/new" element={<LiveAddNodePage />} /><Route path="/nodes/new/token" element={<LiveTokenPage user={false} />} /><Route path="/users/new" element={<LiveIssueUserPage />} /><Route path="/users/new/token" element={<LiveTokenPage user />} /></Route>
+      <Route element={<RequirePermission permission="node.read" />}><Route path="/nodes" element={<LiveNodesPage />} /><Route path="/nodes/:nodeId" element={<LiveNodeDetailPage />} /></Route>
+      <Route element={<RequirePermission permission="acl.read" />}><Route path="/users" element={<LiveUsersPage />} /><Route path="/users/:userId" element={<LiveUserDetailPage />} /><Route path="/teams" element={<LiveTeamsPage />} /><Route path="/teams/:teamId" element={<LiveTeamDetailPage />} /></Route>
+      <Route element={<RequirePermission permission="enrollment.issue" />}><Route path="/nodes/new" element={<LiveAddNodePage />} /><Route path="/nodes/new/token" element={<LiveTokenPage />} /><Route path="/users/:userId/enroll" element={<LiveUserEnrollmentPage />} /><Route path="/users/:userId/enroll/token" element={<LiveTokenPage user />} /></Route>
       <Route element={<RequirePermission permission="node.manage" />}><Route path="/nodes/:nodeId/capabilities" element={<LiveNodeCapabilitiesPage />} /><Route path="/nodes/:nodeId/revoke" element={<LiveNodeRevokePage />} /></Route>
       <Route element={<RequirePermission permission="route.read" />}><Route path="/routes" element={<LiveRoutesPage />} /><Route path="/routes/:routeId" element={<LiveRouteDetailPage />} /></Route>
       <Route element={<RequirePermission permission="route.manage" />}><Route path="/routes/new" element={<LiveCreateRoutePage />} /><Route path="/routes/:routeId/approve" element={<LiveApproveRoutePage />} /></Route>
       <Route element={<RequirePermission permission="acl.read" />}><Route path="/access" element={<LiveAccessPage />} /><Route path="/access/:ruleId" element={<LiveAccessDetailPage />} /></Route>
-      <Route element={<RequirePermission permission="acl.manage" />}><Route path="/access/new" element={<LiveCreateAccessPage />} /></Route>
+      <Route element={<RequirePermission permission="acl.manage" />}><Route path="/access/new" element={<LiveCreateAccessPage />} /><Route path="/users/new" element={<LiveCreateUserPage />} /><Route path="/teams/new" element={<LiveCreateTeamPage />} /><Route path="/users/:userId/grants/new" element={<LiveCreateGrantPage subjectKind="user" />} /><Route path="/teams/:teamId/grants/new" element={<LiveCreateGrantPage subjectKind="team" />} /></Route>
       <Route element={<RequirePermission permission="network.read" />}><Route path="/infrastructure/networks/:networkId" element={<LiveNetworkPage />} /></Route>
       <Route element={<RequirePermission permission="relay.read" />}><Route path="/infrastructure/relays/:relayId" element={<LiveRelayPage />} /></Route>
       <Route element={<RequirePermission permission="relay.manage" />}><Route path="/infrastructure/relays/new" element={<LiveRelayPage />} /></Route>

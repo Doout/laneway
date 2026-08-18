@@ -134,6 +134,7 @@ func (s *Service) readNetworks(w http.ResponseWriter, r *http.Request) {
 type nodeResponse struct {
 	NodeID                    string `json:"node_id"`
 	NetworkID                 string `json:"network_id"`
+	UserID                    string `json:"user_id,omitempty"`
 	Name                      string `json:"name"`
 	EnabledCapabilities       uint64 `json:"enabled_capabilities"`
 	IPv4Address               string `json:"ipv4_address,omitempty"`
@@ -175,6 +176,9 @@ func (s *Service) readNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		if value.IPv6Address.IsValid() {
 			item.IPv6Address = value.IPv6Address.String()
+		}
+		if value.UserID != nil {
+			item.UserID = value.UserID.String()
 		}
 		response = append(response, item)
 	}

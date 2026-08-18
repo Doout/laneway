@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"mime"
 	"net/http"
@@ -229,6 +230,7 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/certificates", s.readCertificates)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/routes", s.readRoutes)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/audit", s.readAudit)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/access-subjects", s.readAccessInventory)
 	mux.HandleFunc("POST /v1/routes", s.advertiseRoute)
 	mux.HandleFunc("DELETE /v1/routes/{route_id}", s.withdrawRoute)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/routes/assign", s.assignRoute)
@@ -243,6 +245,13 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/relays", s.registerRelay)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/relays/{relay_id}/disable", s.disableRelay)
 	s.registerManagementRoute(mux, http.MethodPut, "/v1/admin/relays/{relay_id}", s.updateRelay)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/users", s.createAccessUser)
+	s.registerManagementRoute(mux, http.MethodPatch, "/v1/admin/users/{user_id}", s.updateAccessUser)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/teams", s.createAccessTeam)
+	s.registerManagementRoute(mux, http.MethodPut, "/v1/admin/teams/{team_id}/members/{user_id}", s.addAccessTeamMember)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/teams/{team_id}/members/{user_id}", s.removeAccessTeamMember)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/access-grants", s.createAccessGrant)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/access-grants/{grant_id}", s.deleteAccessGrant)
 	s.handler = s.observe(securityHeaders(s.administratorHTTPContract(mux)))
 	return s, nil
 }
@@ -459,6 +468,7 @@ func (s *Service) health(w http.ResponseWriter, _ *http.Request) {
 
 type tokenRequest struct {
 	NetworkID              string `json:"network_id"`
+	UserID                 string `json:"user_id,omitempty"`
 	Label                  string `json:"label"`
 	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
 	EnrollmentClass        string `json:"enrollment_class,omitempty"`
@@ -469,6 +479,7 @@ type tokenRequest struct {
 
 type tokenResponse struct {
 	TokenID                string `json:"token_id"`
+	UserID                 string `json:"user_id,omitempty"`
 	EnrollmentToken        string `json:"enrollment_token"`
 	ExpiresAtUnix          int64  `json:"expires_at_unix_seconds"`
 	EnrollmentClass        string `json:"enrollment_class"`
@@ -492,20 +503,33 @@ func (s *Service) issueToken(w http.ResponseWriter, r *http.Request) {
 	if class == "" {
 		class = controller.EnrollmentClassDurable
 	}
+	var userID *identity.ID
+	if req.UserID != "" {
+		value, err := identity.ParseID(req.UserID)
+		if err != nil {
+			s.writeError(w, malformed("invalid user_id"), false)
+			return
+		}
+		userID = &value
+	}
 	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
 	token, err := s.store.AdministratorIssueEnrollmentTokenWithOptions(r.Context(), decision, networkID, req.Label, time.Unix(req.ExpiresAtUnix, 0), controller.EnrollmentTokenOptions{
-		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second, RequestedName: req.RequestedName, EnabledCapabilities: req.EnabledCapabilities,
+		Class: class, SessionLifetime: time.Duration(req.SessionLifetimeSeconds) * time.Second, RequestedName: req.RequestedName, EnabledCapabilities: req.EnabledCapabilities, UserID: userID,
 	})
 	if err != nil {
 		s.writeError(w, err, false)
 		return
 	}
-	s.writeJSON(w, http.StatusCreated, tokenResponse{TokenID: token.ID.String(), EnrollmentToken: token.Secret, ExpiresAtUnix: token.ExpiresAt.Unix(),
-		EnrollmentClass: string(token.EnrollmentClass), SessionLifetimeSeconds: int64(token.SessionLifetime / time.Second), RequestedName: token.RequestedName, EnabledCapabilities: token.EnabledCapabilities})
+	response := tokenResponse{TokenID: token.ID.String(), EnrollmentToken: token.Secret, ExpiresAtUnix: token.ExpiresAt.Unix(),
+		EnrollmentClass: string(token.EnrollmentClass), SessionLifetimeSeconds: int64(token.SessionLifetime / time.Second), RequestedName: token.RequestedName, EnabledCapabilities: token.EnabledCapabilities}
+	if token.UserID != nil {
+		response.UserID = token.UserID.String()
+	}
+	s.writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Service) enroll(w http.ResponseWriter, r *http.Request) {
@@ -901,6 +925,21 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, true)
 		return
 	}
+	managedAccess, err := s.store.ManagedAccessPolicyForNode(r.Context(), caller.NetworkID, caller.NodeID)
+	if err != nil {
+		s.writeError(w, err, true)
+		return
+	}
+	if managedAccess.Managed {
+		for index := range rules {
+			if rules[index].Priority > math.MaxUint32-2 {
+				rules[index].Priority = math.MaxUint32
+			} else {
+				rules[index].Priority += 2
+			}
+		}
+		rules = append(managedAccess.Rules, rules...)
+	}
 	revokedSerials, err := s.store.RevokedCertificateSerials(r.Context(), caller.NetworkID, s.now())
 	if err != nil {
 		s.writeError(w, err, true)
@@ -915,6 +954,12 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, err, true)
 		return
+	}
+	if managedAccess.Managed {
+		resp.ExitPolicy.AuthorizedNodeIds = resp.ExitPolicy.AuthorizedNodeIds[:0]
+		for _, exitNodeID := range managedAccess.AuthorizedExitNodes {
+			resp.ExitPolicy.AuthorizedNodeIds = append(resp.ExitPolicy.AuthorizedNodeIds, append([]byte(nil), exitNodeID[:]...))
+		}
 	}
 	if exitSession != nil {
 		resp.EphemeralExitLeaseGeneration = exitSession.Generation

@@ -85,6 +85,7 @@ type Node struct {
 	EnrollmentClass     EnrollmentClass
 	LeaseExpiresAt      *time.Time
 	WireGuardPublicKey  WireGuardPublicKey
+	UserID              *identity.ID
 }
 
 // EnrollmentToken contains the immutable token record and, only when returned
@@ -102,6 +103,7 @@ type EnrollmentToken struct {
 	SessionLifetime     time.Duration
 	RequestedName       string
 	EnabledCapabilities uint64
+	UserID              *identity.ID
 }
 
 type EnrollmentTokenOptions struct {
@@ -109,6 +111,71 @@ type EnrollmentTokenOptions struct {
 	SessionLifetime     time.Duration
 	RequestedName       string
 	EnabledCapabilities uint64
+	UserID              *identity.ID
+}
+
+type AccessSubjectKind string
+
+const (
+	AccessSubjectUser AccessSubjectKind = "user"
+	AccessSubjectTeam AccessSubjectKind = "team"
+)
+
+func (kind AccessSubjectKind) Valid() bool {
+	return kind == AccessSubjectUser || kind == AccessSubjectTeam
+}
+
+type AccessTargetKind string
+
+const (
+	AccessTargetNetwork AccessTargetKind = "network"
+	AccessTargetNode    AccessTargetKind = "node"
+	AccessTargetExit    AccessTargetKind = "exit"
+)
+
+func (kind AccessTargetKind) Valid() bool {
+	return kind == AccessTargetNetwork || kind == AccessTargetNode || kind == AccessTargetExit
+}
+
+type AccessUser struct {
+	ID        identity.ID
+	NetworkID identity.NetworkID
+	Name      string
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type AccessTeam struct {
+	ID        identity.ID
+	NetworkID identity.NetworkID
+	Name      string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type AccessTeamMember struct {
+	NetworkID identity.NetworkID
+	TeamID    identity.ID
+	UserID    identity.ID
+	CreatedAt time.Time
+}
+
+type AccessGrant struct {
+	ID          identity.ID
+	NetworkID   identity.NetworkID
+	SubjectKind AccessSubjectKind
+	SubjectID   identity.ID
+	TargetKind  AccessTargetKind
+	NodeID      *identity.NodeID
+	CreatedAt   time.Time
+}
+
+type AccessInventory struct {
+	Users       []AccessUser
+	Teams       []AccessTeam
+	Memberships []AccessTeamMember
+	Grants      []AccessGrant
 }
 
 type RouteKind string
