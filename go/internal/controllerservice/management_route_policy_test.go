@@ -147,7 +147,7 @@ func TestManagementHandlersDoNotCallLegacyAdministratorStoreMethods(t *testing.T
 	if len(managementHandlers) != len(ManagementRoutePolicies())+2 {
 		t.Fatalf("management handlers=%d policies=%d", len(managementHandlers)-2, len(ManagementRoutePolicies()))
 	}
-	for _, name := range []string{"service.go", "management.go", "bootstrap_bundles.go", "administrator_management_http.go"} {
+	for _, name := range []string{"service.go", "management.go", "access_management.go", "bootstrap_bundles.go", "administrator_management_http.go"} {
 		parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(directory, name), nil, 0)
 		if err != nil {
 			t.Fatal(err)

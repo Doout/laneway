@@ -22,6 +22,59 @@ export type AclRules = {
     acl_rules: Array<AclRule>;
 };
 
+export type AccessGrant = {
+    grant_id: Identifier;
+    network_id: Identifier;
+    subject_kind: AccessSubjectKind;
+    subject_id: Identifier;
+    target_kind: AccessTargetKind;
+    node_id?: Identifier;
+    created_at_unix_seconds: UnixSeconds;
+};
+
+export type AccessInventory = {
+    users: Array<AccessUser>;
+    teams: Array<AccessTeam>;
+    memberships: Array<AccessTeamMember>;
+    grants: Array<AccessGrant>;
+};
+
+export const AccessSubjectKind = { USER: 'user', TEAM: 'team' } as const;
+
+export type AccessSubjectKind = typeof AccessSubjectKind[keyof typeof AccessSubjectKind];
+
+export const AccessTargetKind = {
+    NETWORK: 'network',
+    NODE: 'node',
+    EXIT: 'exit'
+} as const;
+
+export type AccessTargetKind = typeof AccessTargetKind[keyof typeof AccessTargetKind];
+
+export type AccessTeam = {
+    team_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+export type AccessTeamMember = {
+    network_id: Identifier;
+    team_id: Identifier;
+    user_id: Identifier;
+    created_at_unix_seconds: UnixSeconds;
+};
+
+export type AccessUser = {
+    user_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
 export const ActorKind = {
     SYSTEM: 'system',
     NODE: 'node',
@@ -213,6 +266,22 @@ export type CreateAclRuleRequest = {
     description?: string | null;
 };
 
+export type CreateAccessGrantRequest = ({
+    target_kind?: 'network';
+} | {
+    target_kind?: 'node' | 'exit';
+    node_id: Identifier;
+}) & {
+    subject_kind: AccessSubjectKind;
+    subject_id: Identifier;
+    target_kind: AccessTargetKind;
+    node_id?: Identifier;
+};
+
+export type CreateAccessSubjectRequest = {
+    name: ResourceName;
+};
+
 export type CreateAdministratorRequest = unknown & {
     username: Username;
     password: Password;
@@ -238,6 +307,7 @@ export type EnrollmentClass = typeof EnrollmentClass[keyof typeof EnrollmentClas
 export type EnrollmentToken = {
     token_id: Identifier;
     enrollment_token: Secret;
+    user_id?: Identifier;
     expires_at_unix_seconds: UnixSeconds;
     enrollment_class: EnrollmentClass;
     session_lifetime_seconds?: number;
@@ -250,6 +320,10 @@ export type EnrollmentToken = {
 
 export type EnrollmentTokenRequest = unknown & {
     network_id: Identifier;
+    /**
+     * Optional Network User to bind to the enrolled node.
+     */
+    user_id?: Identifier | null;
     /**
      * Omission or null means an empty label. The value must be trimmed, contain no NUL byte, and occupy at most 256 UTF-8 bytes.
      */
@@ -351,6 +425,7 @@ export type Networks = {
 export type Node = {
     node_id: Identifier;
     network_id: Identifier;
+    user_id?: Identifier;
     name: ResourceName;
     enabled_capabilities: Uint64;
     ipv4_address?: string;
@@ -627,6 +702,10 @@ export type UpdateAclRuleRequest = {
      * Omission or null resets enabled to false.
      */
     enabled?: boolean | null;
+};
+
+export type UpdateAccessUserRequest = {
+    enabled: boolean;
 };
 
 /**
@@ -1363,6 +1442,224 @@ export type CreateNetworkAclRuleResponses = {
 };
 
 export type CreateNetworkAclRuleResponse = CreateNetworkAclRuleResponses[keyof CreateNetworkAclRuleResponses];
+
+export type GetNetworkAccessInventoryData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/access-subjects';
+};
+
+export type GetNetworkAccessInventoryErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type GetNetworkAccessInventoryError = GetNetworkAccessInventoryErrors[keyof GetNetworkAccessInventoryErrors];
+
+export type GetNetworkAccessInventoryResponses = {
+    /**
+     * Users, Teams, memberships, and effective grant definitions for one Network.
+     */
+    200: AccessInventory;
+};
+
+export type GetNetworkAccessInventoryResponse = GetNetworkAccessInventoryResponses[keyof GetNetworkAccessInventoryResponses];
+
+export type CreateNetworkAccessUserData = {
+    body: CreateAccessSubjectRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/users';
+};
+
+export type CreateNetworkAccessUserErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkAccessUserError = CreateNetworkAccessUserErrors[keyof CreateNetworkAccessUserErrors];
+
+export type CreateNetworkAccessUserResponses = {
+    /**
+     * Network-scoped person identity.
+     */
+    201: AccessUser;
+};
+
+export type CreateNetworkAccessUserResponse = CreateNetworkAccessUserResponses[keyof CreateNetworkAccessUserResponses];
+
+export type UpdateAccessUserData = {
+    body: UpdateAccessUserRequest;
+    path: {
+        user_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/users/{user_id}';
+};
+
+export type UpdateAccessUserErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type UpdateAccessUserError = UpdateAccessUserErrors[keyof UpdateAccessUserErrors];
+
+export type UpdateAccessUserResponses = {
+    /**
+     * Network-scoped person identity.
+     */
+    200: AccessUser;
+};
+
+export type UpdateAccessUserResponse = UpdateAccessUserResponses[keyof UpdateAccessUserResponses];
+
+export type CreateNetworkAccessTeamData = {
+    body: CreateAccessSubjectRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/teams';
+};
+
+export type CreateNetworkAccessTeamErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkAccessTeamError = CreateNetworkAccessTeamErrors[keyof CreateNetworkAccessTeamErrors];
+
+export type CreateNetworkAccessTeamResponses = {
+    /**
+     * Network-scoped Team.
+     */
+    201: AccessTeam;
+};
+
+export type CreateNetworkAccessTeamResponse = CreateNetworkAccessTeamResponses[keyof CreateNetworkAccessTeamResponses];
+
+export type RemoveAccessTeamMemberData = {
+    body?: never;
+    path: {
+        team_id: Identifier;
+        user_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/teams/{team_id}/members/{user_id}';
+};
+
+export type RemoveAccessTeamMemberErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type RemoveAccessTeamMemberError = RemoveAccessTeamMemberErrors[keyof RemoveAccessTeamMemberErrors];
+
+export type RemoveAccessTeamMemberResponses = {
+    /**
+     * Updated network configuration epoch.
+     */
+    200: Epoch;
+};
+
+export type RemoveAccessTeamMemberResponse = RemoveAccessTeamMemberResponses[keyof RemoveAccessTeamMemberResponses];
+
+export type AddAccessTeamMemberData = {
+    body?: never;
+    path: {
+        team_id: Identifier;
+        user_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/teams/{team_id}/members/{user_id}';
+};
+
+export type AddAccessTeamMemberErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type AddAccessTeamMemberError = AddAccessTeamMemberErrors[keyof AddAccessTeamMemberErrors];
+
+export type AddAccessTeamMemberResponses = {
+    /**
+     * Updated network configuration epoch.
+     */
+    200: Epoch;
+};
+
+export type AddAccessTeamMemberResponse = AddAccessTeamMemberResponses[keyof AddAccessTeamMemberResponses];
+
+export type CreateNetworkAccessGrantData = {
+    body: CreateAccessGrantRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/access-grants';
+};
+
+export type CreateNetworkAccessGrantErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkAccessGrantError = CreateNetworkAccessGrantErrors[keyof CreateNetworkAccessGrantErrors];
+
+export type CreateNetworkAccessGrantResponses = {
+    /**
+     * Direct User or Team access grant.
+     */
+    201: AccessGrant;
+};
+
+export type CreateNetworkAccessGrantResponse = CreateNetworkAccessGrantResponses[keyof CreateNetworkAccessGrantResponses];
+
+export type DeleteAccessGrantData = {
+    body?: never;
+    path: {
+        grant_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/access-grants/{grant_id}';
+};
+
+export type DeleteAccessGrantErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type DeleteAccessGrantError = DeleteAccessGrantErrors[keyof DeleteAccessGrantErrors];
+
+export type DeleteAccessGrantResponses = {
+    /**
+     * Updated network configuration epoch.
+     */
+    200: Epoch;
+};
+
+export type DeleteAccessGrantResponse = DeleteAccessGrantResponses[keyof DeleteAccessGrantResponses];
 
 export type ListNetworkCertificatesData = {
     body?: never;

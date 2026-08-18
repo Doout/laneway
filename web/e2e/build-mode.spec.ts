@@ -5,6 +5,8 @@ const password = 'compiled live password'
 const principalId = '1'.repeat(32)
 const sessionId = '2'.repeat(32)
 const networkId = '3'.repeat(32)
+const accessUserId = '6'.repeat(32)
+const accessTeamId = '7'.repeat(32)
 const csrfToken = 'c'.repeat(43)
 const browserSessionCookieName = '__Host-laneway_admin_session'
 const permissions = [
@@ -85,9 +87,15 @@ async function mockManagementApi(page: Page, networks: Network[]) {
 
     const prefix = `/v1/admin/networks/${networkId}`
     const responses: Record<string, unknown> = {
-      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, name: 'controller-node-canary', enabled_capabilities: 8, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable' }] },
+      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, user_id: accessUserId, name: 'controller-node-canary', enabled_capabilities: 8, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable' }] },
       [`${prefix}/routes`]: { routes: [] },
       [`${prefix}/acl-rules`]: { acl_rules: [] },
+      [`${prefix}/access-subjects`]: {
+        users: [{ user_id: accessUserId, network_id: networkId, name: 'Private operator', enabled: true, created_at_unix_seconds: 1_700_000_100, updated_at_unix_seconds: 1_700_000_100 }],
+        teams: [{ team_id: accessTeamId, network_id: networkId, name: 'Operations Team', created_at_unix_seconds: 1_700_000_100, updated_at_unix_seconds: 1_700_000_100 }],
+        memberships: [{ network_id: networkId, team_id: accessTeamId, user_id: accessUserId, created_at_unix_seconds: 1_700_000_100 }],
+        grants: [],
+      },
       [`${prefix}/relays`]: { relays: [] },
       [`${prefix}/certificates`]: { certificates: [] },
       [`${prefix}/audit`]: { events: [] },
@@ -169,6 +177,11 @@ test('compiled live artifact uses same-origin cookie transport and real permissi
   await page.getByRole('link', { name: 'Nodes' }).click()
   await expect(page.getByRole('heading', { name: 'Nodes' })).toBeVisible()
   await expect(page.getByText('controller-node-canary', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('Exit node', { exact: true })).toBeVisible()
+  await page.getByRole('link', { name: 'Users' }).click()
+  await expect(page.getByText('Private operator', { exact: true })).toBeVisible()
+  await page.getByRole('link', { name: 'Teams' }).click()
+  await expect(page.getByText('Operations Team', { exact: true })).toBeVisible()
 
   expect(requests.length).toBeGreaterThan(0)
   expect(requests.every((request) => request.authorization === undefined)).toBe(true)

@@ -130,6 +130,81 @@ func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 	}
 }
 
+func TestAccessSubjectManagementLifecycle(t *testing.T) {
+	f := newFixture(t, 0, nil)
+	handler := f.service.Handler()
+
+	createdUser := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/users", createAccessSubjectRequest{Name: "Ada"})
+	if createdUser.Code != http.StatusCreated {
+		t.Fatalf("create user status=%d body=%s", createdUser.Code, createdUser.Body.String())
+	}
+	var user accessUserResponse
+	decodeJSONResponse(t, createdUser, &user)
+	if user.Name != "Ada" || !user.Enabled || user.NetworkID != f.network.ID.String() {
+		t.Fatalf("created user=%+v", user)
+	}
+
+	createdTeam := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/teams", createAccessSubjectRequest{Name: "Operators"})
+	if createdTeam.Code != http.StatusCreated {
+		t.Fatalf("create team status=%d body=%s", createdTeam.Code, createdTeam.Body.String())
+	}
+	var team accessTeamResponse
+	decodeJSONResponse(t, createdTeam, &team)
+
+	memberPath := "/v1/admin/teams/" + team.TeamID + "/members/" + user.UserID
+	if result := jsonRequest(t, handler, http.MethodPut, memberPath, nil); result.Code != http.StatusOK {
+		t.Fatalf("add team member status=%d body=%s", result.Code, result.Body.String())
+	}
+
+	createdGrant := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/access-grants", createAccessGrantRequest{
+		SubjectKind: "team", SubjectID: team.TeamID, TargetKind: "network",
+	})
+	if createdGrant.Code != http.StatusCreated {
+		t.Fatalf("create grant status=%d body=%s", createdGrant.Code, createdGrant.Body.String())
+	}
+	var grant accessGrantResponse
+	decodeJSONResponse(t, createdGrant, &grant)
+	if grant.SubjectKind != "team" || grant.SubjectID != team.TeamID || grant.TargetKind != "network" || grant.NodeID != "" {
+		t.Fatalf("created grant=%+v", grant)
+	}
+
+	inventoryResult := jsonRequest(t, handler, http.MethodGet, "/v1/admin/networks/"+f.network.ID.String()+"/access-subjects", nil)
+	if inventoryResult.Code != http.StatusOK {
+		t.Fatalf("access inventory status=%d body=%s", inventoryResult.Code, inventoryResult.Body.String())
+	}
+	var inventory accessInventoryResponse
+	decodeJSONResponse(t, inventoryResult, &inventory)
+	if len(inventory.Users) != 1 || len(inventory.Teams) != 1 || len(inventory.Memberships) != 1 || len(inventory.Grants) != 1 {
+		t.Fatalf("access inventory=%+v", inventory)
+	}
+
+	issued := jsonRequest(t, handler, http.MethodPost, "/v1/admin/enrollment-tokens", tokenRequest{
+		NetworkID: f.network.ID.String(), UserID: user.UserID, Label: "Ada device", RequestedName: "Ada laptop",
+		ExpiresAtUnix: time.Now().Add(time.Hour).Unix(), EnrollmentClass: "ephemeral", SessionLifetimeSeconds: 3600,
+	})
+	if issued.Code != http.StatusCreated {
+		t.Fatalf("issue user enrollment status=%d body=%s", issued.Code, issued.Body.String())
+	}
+	var token tokenResponse
+	decodeJSONResponse(t, issued, &token)
+	if token.UserID != user.UserID || token.EnrollmentToken == "" {
+		t.Fatalf("issued user enrollment=%+v", token)
+	}
+
+	disabled := jsonRequest(t, handler, http.MethodPatch, "/v1/admin/users/"+user.UserID, updateAccessUserRequest{Enabled: boolPointer(false)})
+	if disabled.Code != http.StatusOK {
+		t.Fatalf("disable user status=%d body=%s", disabled.Code, disabled.Body.String())
+	}
+	if result := jsonRequest(t, handler, http.MethodDelete, "/v1/admin/access-grants/"+grant.GrantID, nil); result.Code != http.StatusOK {
+		t.Fatalf("delete grant status=%d body=%s", result.Code, result.Body.String())
+	}
+	if result := jsonRequest(t, handler, http.MethodDelete, memberPath, nil); result.Code != http.StatusOK {
+		t.Fatalf("remove team member status=%d body=%s", result.Code, result.Body.String())
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
 func TestAdminCreatesPreidentifiedNetworkForControllerBootstrap(t *testing.T) {
 	f := newFixture(t, 0, nil)
 	want := "101112131415161718191a1b1c1d1e1f"

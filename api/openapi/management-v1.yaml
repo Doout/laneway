@@ -26,6 +26,8 @@ tags:
     description: Managed route inventory and state transitions.
   - name: ACL
     description: Network ACL rules using strict TrafficSelector protobuf JSON.
+  - name: Access
+    description: Network-scoped Users, Teams, and explicit Network, Node, or Exit grants.
   - name: Relays
     description: Relay inventory and state.
   - name: Certificates
@@ -565,6 +567,181 @@ paths:
       responses:
         '201':
           $ref: './components.yaml#/components/responses/ACLRule'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/access-subjects:
+    get:
+      operationId: getNetworkAccessInventory
+      tags: [Access]
+      summary: Read Users, Teams, memberships, and grants for a Network.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AccessInventory'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/users:
+    post:
+      operationId: createNetworkAccessUser
+      tags: [Access]
+      summary: Create a User in a Network.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessSubjectRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessUser'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/users/{user_id}:
+    patch:
+      operationId: updateAccessUser
+      tags: [Access]
+      summary: Enable or disable a User and all of their access.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/UpdateAccessUserRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AccessUser'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/teams:
+    post:
+      operationId: createNetworkAccessTeam
+      tags: [Access]
+      summary: Create a Team in a Network.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessSubjectRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessTeam'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/teams/{team_id}/members/{user_id}:
+    parameters:
+      - name: team_id
+        in: path
+        required: true
+        schema:
+          $ref: './components.yaml#/components/schemas/Identifier'
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          $ref: './components.yaml#/components/schemas/Identifier'
+    put:
+      operationId: addAccessTeamMember
+      tags: [Access]
+      summary: Add a User to a Team.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    delete:
+      operationId: removeAccessTeamMember
+      tags: [Access]
+      summary: Remove a User from a Team.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/access-grants:
+    post:
+      operationId: createNetworkAccessGrant
+      tags: [Access]
+      summary: Grant a User or Team access to a Network, Node, or approved Exit.
+      description: >-
+        Network grants exclude Exit use. Node grants only cover the selected
+        node. Exit use requires an explicit Exit grant.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessGrantRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessGrant'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/access-grants/{grant_id}:
+    delete:
+      operationId: deleteAccessGrant
+      tags: [Access]
+      summary: Delete an access grant.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
         default:
           $ref: './components.yaml#/components/responses/Error'
   /v1/admin/networks/{network_id}/certificates:

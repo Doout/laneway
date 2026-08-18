@@ -71,6 +71,7 @@ export type ControllerNetwork = {
 export type ControllerNode = {
   node_id: string
   network_id: string
+  user_id?: string
   name: string
   enabled_capabilities: number
   ipv4_address?: string
@@ -79,6 +80,47 @@ export type ControllerNode = {
   revoked_at_unix_seconds?: number
   enrollment_class: 'durable' | 'ephemeral' | 'remembered'
   lease_expires_at_unix_seconds?: number
+}
+
+export type ControllerAccessUser = {
+  user_id: string
+  network_id: string
+  name: string
+  enabled: boolean
+  created_at_unix_seconds: number
+  updated_at_unix_seconds: number
+}
+
+export type ControllerAccessTeam = {
+  team_id: string
+  network_id: string
+  name: string
+  created_at_unix_seconds: number
+  updated_at_unix_seconds: number
+}
+
+export type ControllerAccessTeamMember = {
+  network_id: string
+  team_id: string
+  user_id: string
+  created_at_unix_seconds: number
+}
+
+export type ControllerAccessGrant = {
+  grant_id: string
+  network_id: string
+  subject_kind: 'user' | 'team'
+  subject_id: string
+  target_kind: 'network' | 'node' | 'exit'
+  node_id?: string
+  created_at_unix_seconds: number
+}
+
+export type ControllerAccessInventory = {
+  users: ControllerAccessUser[]
+  teams: ControllerAccessTeam[]
+  memberships: ControllerAccessTeamMember[]
+  grants: ControllerAccessGrant[]
 }
 
 export type ControllerRoute = {
@@ -148,6 +190,10 @@ export type ControllerInventory = {
   networks: ControllerNetwork[]
   network: ControllerNetwork | null
   nodes: ControllerNode[]
+  accessUsers: ControllerAccessUser[]
+  accessTeams: ControllerAccessTeam[]
+  accessMemberships: ControllerAccessTeamMember[]
+  accessGrants: ControllerAccessGrant[]
   routes: ControllerRoute[]
   aclRules: ControllerACLRule[]
   relays: ControllerRelay[]
@@ -190,7 +236,7 @@ type ControlPlaneContextValue = {
 }
 
 const emptyInventory: ControllerInventory = {
-  networks: [], network: null, nodes: [], routes: [], aclRules: [], relays: [], certificates: [], auditEvents: [],
+  networks: [], network: null, nodes: [], accessUsers: [], accessTeams: [], accessMemberships: [], accessGrants: [], routes: [], aclRules: [], relays: [], certificates: [], auditEvents: [],
 }
 
 const permissionNames = new Set<string>(administratorPermissions)
@@ -897,8 +943,9 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
       }
       const networkId = network.network_id
       const prefix = `/v1/admin/networks/${network.network_id}`
-      const [nodeResult, routeResult, ruleResult, relayResult, certificateResult, auditResult] = await Promise.all([
+      const [nodeResult, accessResult, routeResult, ruleResult, relayResult, certificateResult, auditResult] = await Promise.all([
         hasPermission('node.read', network.network_id) ? request<{ nodes: ControllerNode[] }>(`${prefix}/nodes?limit=1000`) : Promise.resolve({ nodes: [] }),
+        hasPermission('acl.read', network.network_id) ? request<ControllerAccessInventory>(`${prefix}/access-subjects`) : Promise.resolve({ users: [], teams: [], memberships: [], grants: [] }),
         hasPermission('route.read', network.network_id) ? request<{ routes: ControllerRoute[] }>(`${prefix}/routes?limit=1000`) : Promise.resolve({ routes: [] }),
         hasPermission('acl.read', network.network_id) ? request<{ acl_rules: ControllerACLRule[] }>(`${prefix}/acl-rules?limit=1000`) : Promise.resolve({ acl_rules: [] }),
         hasPermission('relay.read', network.network_id) ? request<{ relays: ControllerRelay[] }>(`${prefix}/relays?limit=1000`) : Promise.resolve({ relays: [] }),
@@ -907,6 +954,10 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
       ])
       const foreignInventory = [
         ...nodeResult.nodes,
+        ...accessResult.users,
+        ...accessResult.teams,
+        ...accessResult.memberships,
+        ...accessResult.grants,
         ...routeResult.routes,
         ...ruleResult.acl_rules,
         ...relayResult.relays,
@@ -923,6 +974,10 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
           networks: networkResult.networks,
           network,
           nodes: nodeResult.nodes,
+          accessUsers: accessResult.users,
+          accessTeams: accessResult.teams,
+          accessMemberships: accessResult.memberships,
+          accessGrants: accessResult.grants,
           routes: routeResult.routes,
           aclRules: ruleResult.acl_rules,
           relays: relayResult.relays,

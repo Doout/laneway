@@ -173,8 +173,8 @@ func TestVisibleNetworkIDs(t *testing.T) {
 
 func TestManagementRoutesAreCompleteAndUnique(t *testing.T) {
 	routes := ManagementRoutes()
-	if len(routes) != 35 {
-		t.Fatalf("management routes=%d want 35", len(routes))
+	if len(routes) != 43 {
+		t.Fatalf("management routes=%d want 43", len(routes))
 	}
 	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {

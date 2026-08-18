@@ -192,20 +192,20 @@ func networkByRow(row rowScanner, networkID identity.NetworkID) (Network, error)
 }
 
 func (s *Store) Node(ctx context.Context, nodeID identity.NodeID) (Node, error) {
-	var network, address, address6, wireGuardPublicKey []byte
+	var network, address, address6, wireGuardPublicKey, userRaw []byte
 	var name string
 	var capabilities, created int64
 	var revoked sql.NullInt64
 	var enrollmentClass string
 	var leaseExpires sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT n.network_id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key
+	err := s.db.QueryRowContext(ctx, `SELECT n.network_id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,a.address,a6.address,n.enrollment_class,n.lease_expires_at,n.wireguard_public_key,n.user_id
 		FROM nodes n LEFT JOIN overlay_addresses a ON a.id=(
 			SELECT oa.id FROM overlay_addresses oa WHERE oa.node_id=n.id AND length(oa.address)=4
 			ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
 		LEFT JOIN overlay_addresses a6 ON a6.id=(
 			SELECT oa.id FROM overlay_addresses oa WHERE oa.node_id=n.id AND length(oa.address)=16
 			ORDER BY oa.created_at DESC,oa.id DESC LIMIT 1)
-		WHERE n.id=?`, idBytes(nodeID)).Scan(&network, &name, &capabilities, &created, &revoked, &address, &address6, &enrollmentClass, &leaseExpires, &wireGuardPublicKey)
+		WHERE n.id=?`, idBytes(nodeID)).Scan(&network, &name, &capabilities, &created, &revoked, &address, &address6, &enrollmentClass, &leaseExpires, &wireGuardPublicKey, &userRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Node{}, ErrNotFound
 	}
@@ -225,6 +225,13 @@ func (s *Store) Node(ctx context.Context, nodeID identity.NodeID) (Node, error) 
 		return Node{}, err
 	}
 	result := Node{ID: nodeID, NetworkID: identity.NetworkID(nid), Name: name, EnabledCapabilities: uint64(capabilities), CreatedAt: fromUnix(created), RevokedAt: nullableTime(revoked), EnrollmentClass: class, LeaseExpiresAt: nullableTime(leaseExpires), WireGuardPublicKey: wireGuardKey}
+	if len(userRaw) != 0 {
+		userID, err := scanID(userRaw)
+		if err != nil {
+			return Node{}, err
+		}
+		result.UserID = &userID
+	}
 	if len(address) != 0 {
 		addr, ok := netip.AddrFromSlice(address)
 		if !ok || !addr.Is4() {

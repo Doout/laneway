@@ -97,6 +97,13 @@ func tokenDigest(secret string) ([32]byte, error) {
 	return sha256.Sum256(decoded), nil
 }
 
+func nullableIdentityID(value *identity.ID) any {
+	if value == nil {
+		return nil
+	}
+	return idBytes(*value)
+}
+
 func (s *Store) IssueEnrollmentToken(ctx context.Context, networkID identity.NetworkID, label string, expiresAt time.Time) (EnrollmentToken, error) {
 	return s.IssueEnrollmentTokenWithOptions(ctx, networkID, label, expiresAt, EnrollmentTokenOptions{Class: EnrollmentClassDurable})
 }
@@ -158,9 +165,24 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 	if options.RequestedName != "" {
 		requestedName = options.RequestedName
 	}
+	var userValue any
+	if options.UserID != nil {
+		if options.UserID.IsZero() {
+			return EnrollmentToken{}, fmt.Errorf("%w: access user ID is zero", ErrInvalid)
+		}
+		var enabled int
+		if err := tx.QueryRowContext(ctx, `SELECT enabled FROM access_users WHERE id=? AND network_id=?`, idBytes(*options.UserID), idBytes(networkID)).Scan(&enabled); errors.Is(err, sql.ErrNoRows) {
+			return EnrollmentToken{}, ErrNotFound
+		} else if err != nil {
+			return EnrollmentToken{}, fmt.Errorf("read enrollment access user: %w", err)
+		} else if enabled != 1 {
+			return EnrollmentToken{}, fmt.Errorf("%w: access user is disabled", ErrConflict)
+		}
+		userValue = idBytes(*options.UserID)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_tokens
-		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName, int64(options.EnabledCapabilities)); err != nil {
+		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities,user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName, int64(options.EnabledCapabilities), userValue); err != nil {
 		if isConstraint(err) {
 			return EnrollmentToken{}, fmt.Errorf("%w: network does not exist", ErrNotFound)
 		}
@@ -178,7 +200,7 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 		return EnrollmentToken{}, fmt.Errorf("commit enrollment token: %w", err)
 	}
 	return EnrollmentToken{ID: id, NetworkID: networkID, Label: label, Secret: secret, ExpiresAt: expiresAt, CreatedAt: now,
-		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName, EnabledCapabilities: options.EnabledCapabilities}, nil
+		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName, EnabledCapabilities: options.EnabledCapabilities, UserID: options.UserID}, nil
 }
 
 // AdministratorIssueEnrollmentTokenWithOptions revalidates the decision's
@@ -245,9 +267,24 @@ func (s *Store) AdministratorIssueEnrollmentTokenWithOptions(ctx context.Context
 	if options.RequestedName != "" {
 		requestedName = options.RequestedName
 	}
+	var userValue any
+	if options.UserID != nil {
+		if options.UserID.IsZero() {
+			return EnrollmentToken{}, fmt.Errorf("%w: access user ID is zero", ErrInvalid)
+		}
+		var enabled int
+		if err := tx.QueryRowContext(ctx, `SELECT enabled FROM access_users WHERE id=? AND network_id=?`, idBytes(*options.UserID), idBytes(networkID)).Scan(&enabled); errors.Is(err, sql.ErrNoRows) {
+			return EnrollmentToken{}, ErrNotFound
+		} else if err != nil {
+			return EnrollmentToken{}, fmt.Errorf("read authorized enrollment access user: %w", err)
+		} else if enabled != 1 {
+			return EnrollmentToken{}, fmt.Errorf("%w: access user is disabled", ErrConflict)
+		}
+		userValue = idBytes(*options.UserID)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO enrollment_tokens
-		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName, int64(options.EnabledCapabilities)); err != nil {
+		(id,network_id,token_hash,label,expires_at,created_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities,user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		idBytes(id), idBytes(networkID), digest[:], label, unix(expiresAt), unix(now), string(options.Class), sessionLifetime, requestedName, int64(options.EnabledCapabilities), userValue); err != nil {
 		if isConstraint(err) {
 			return EnrollmentToken{}, fmt.Errorf("%w: network does not exist", ErrNotFound)
 		}
@@ -265,7 +302,7 @@ func (s *Store) AdministratorIssueEnrollmentTokenWithOptions(ctx context.Context
 		return EnrollmentToken{}, fmt.Errorf("commit authorized enrollment token: %w", err)
 	}
 	return EnrollmentToken{ID: id, NetworkID: networkID, Label: label, Secret: secret, ExpiresAt: expiresAt, CreatedAt: now,
-		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName, EnabledCapabilities: options.EnabledCapabilities}, nil
+		EnrollmentClass: options.Class, SessionLifetime: options.SessionLifetime, RequestedName: options.RequestedName, EnabledCapabilities: options.EnabledCapabilities, UserID: options.UserID}, nil
 }
 
 // EnrollNode atomically consumes a single-use bearer token, creates a node and
@@ -350,7 +387,8 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	var sessionLifetime sql.NullInt64
 	var requestedName sql.NullString
 	var tokenCapabilities int64
-	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed, &class, &sessionLifetime, &requestedName, &tokenCapabilities)
+	var userRaw []byte
+	err = tx.QueryRowContext(ctx, `SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities,user_id FROM enrollment_tokens WHERE token_hash=?`, digest[:]).Scan(&tokenIDBytes, &networkIDBytes, &expires, &consumed, &class, &sessionLifetime, &requestedName, &tokenCapabilities, &userRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Enrollment{}, ErrTokenInvalid
 	}
@@ -397,6 +435,21 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 	}
 	enabledCapabilities |= uint64(tokenCapabilities)
 	var leaseExpiresAt *time.Time
+	var accessUserID *identity.ID
+	if len(userRaw) != 0 {
+		userID, err := scanID(userRaw)
+		if err != nil {
+			return Enrollment{}, err
+		}
+		var enabled int
+		if err := tx.QueryRowContext(ctx, `SELECT enabled FROM access_users WHERE id=? AND network_id=?`, idBytes(userID), idBytes(networkID)).Scan(&enabled); err != nil || enabled != 1 {
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return Enrollment{}, fmt.Errorf("revalidate enrollment access user: %w", err)
+			}
+			return Enrollment{}, fmt.Errorf("%w: access user is unavailable", ErrTokenInvalid)
+		}
+		accessUserID = &userID
+	}
 	if enrollmentClass == EnrollmentClassEphemeral {
 		lifetime := time.Duration(sessionLifetime.Int64) * time.Second
 		if lifetime < MinEphemeralLifetime || lifetime > MaxEphemeralLifetime {
@@ -421,8 +474,8 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		leaseUnix = unix(*leaseExpiresAt)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nodes
-        (id,network_id,name,enabled_capabilities,created_at,enrollment_class,lease_expires_at,wireguard_public_key) VALUES(?,?,?,?,?,?,?,?)`,
-		idBytes(nodeID), idBytes(networkID), name, int64(enabledCapabilities), unix(now), string(enrollmentClass), leaseUnix, nullableWireGuardKey(wireGuardPublicKey)); err != nil {
+		(id,network_id,name,enabled_capabilities,created_at,enrollment_class,lease_expires_at,wireguard_public_key,user_id) VALUES(?,?,?,?,?,?,?,?,?)`,
+		idBytes(nodeID), idBytes(networkID), name, int64(enabledCapabilities), unix(now), string(enrollmentClass), leaseUnix, nullableWireGuardKey(wireGuardPublicKey), nullableIdentityID(accessUserID)); err != nil {
 		if isConstraint(err) {
 			return Enrollment{}, fmt.Errorf("%w: node name or WireGuard public key already exists", ErrConflict)
 		}
@@ -496,7 +549,7 @@ func (s *Store) enrollNode(ctx context.Context, secret, name string, enabledCapa
 		}
 	}
 	node := Node{ID: nodeID, NetworkID: networkID, Name: name, EnabledCapabilities: enabledCapabilities, IPv4Address: address, IPv6Address: address6, CreatedAt: now,
-		EnrollmentClass: enrollmentClass, LeaseExpiresAt: leaseExpiresAt, WireGuardPublicKey: wireGuardPublicKey}
+		EnrollmentClass: enrollmentClass, LeaseExpiresAt: leaseExpiresAt, WireGuardPublicKey: wireGuardPublicKey, UserID: accessUserID}
 	var certificate Certificate
 	if issuer != nil {
 		material, err := issuer(ctx, node)

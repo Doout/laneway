@@ -375,6 +375,66 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Nodes'
+    AccessInventory:
+      description: Users, Teams, memberships, and effective grant definitions for one Network.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessInventory'
+    AccessUser:
+      description: Network-scoped person identity.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessUser'
+    AccessTeam:
+      description: Network-scoped Team.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessTeam'
+    AccessGrant:
+      description: Direct User or Team access grant.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessGrant'
     Relays:
       description: Bounded relay snapshot.
       headers:
@@ -905,6 +965,11 @@ components:
       properties:
         network_id:
           $ref: '#/components/schemas/Identifier'
+        user_id:
+          oneOf:
+            - $ref: '#/components/schemas/Identifier'
+            - type: 'null'
+          description: Optional Network User to bind to the enrolled node.
         label:
           type: [string, 'null']
           default: ''
@@ -960,6 +1025,8 @@ components:
           $ref: '#/components/schemas/Identifier'
         enrollment_token:
           $ref: '#/components/schemas/Secret'
+        user_id:
+          $ref: '#/components/schemas/Identifier'
         expires_at_unix_seconds:
           $ref: '#/components/schemas/UnixSeconds'
         enrollment_class:
@@ -1062,6 +1129,8 @@ components:
           $ref: '#/components/schemas/Identifier'
         network_id:
           $ref: '#/components/schemas/Identifier'
+        user_id:
+          $ref: '#/components/schemas/Identifier'
         name:
           $ref: '#/components/schemas/ResourceName'
         enabled_capabilities:
@@ -1089,6 +1158,136 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Node'
+    AccessUser:
+      type: object
+      additionalProperties: false
+      required: [user_id, network_id, name, enabled, created_at_unix_seconds, updated_at_unix_seconds]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        enabled:
+          type: boolean
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        updated_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    AccessTeam:
+      type: object
+      additionalProperties: false
+      required: [team_id, network_id, name, created_at_unix_seconds, updated_at_unix_seconds]
+      properties:
+        team_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        updated_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    AccessTeamMember:
+      type: object
+      additionalProperties: false
+      required: [network_id, team_id, user_id, created_at_unix_seconds]
+      properties:
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        team_id:
+          $ref: '#/components/schemas/Identifier'
+        user_id:
+          $ref: '#/components/schemas/Identifier'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    AccessSubjectKind:
+      type: string
+      enum: [user, team]
+    AccessTargetKind:
+      type: string
+      enum: [network, node, exit]
+    AccessGrant:
+      type: object
+      additionalProperties: false
+      required: [grant_id, network_id, subject_kind, subject_id, target_kind, created_at_unix_seconds]
+      properties:
+        grant_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        subject_kind:
+          $ref: '#/components/schemas/AccessSubjectKind'
+        subject_id:
+          $ref: '#/components/schemas/Identifier'
+        target_kind:
+          $ref: '#/components/schemas/AccessTargetKind'
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    AccessInventory:
+      type: object
+      additionalProperties: false
+      required: [users, teams, memberships, grants]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessUser'
+        teams:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessTeam'
+        memberships:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessTeamMember'
+        grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessGrant'
+    CreateAccessSubjectRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          $ref: '#/components/schemas/ResourceName'
+    UpdateAccessUserRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    CreateAccessGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [subject_kind, subject_id, target_kind]
+      properties:
+        subject_kind:
+          $ref: '#/components/schemas/AccessSubjectKind'
+        subject_id:
+          $ref: '#/components/schemas/Identifier'
+        target_kind:
+          $ref: '#/components/schemas/AccessTargetKind'
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+      allOf:
+        - oneOf:
+            - properties:
+                target_kind:
+                  const: network
+                node_id: false
+            - required: [node_id]
+              properties:
+                target_kind:
+                  enum: [node, exit]
+                node_id:
+                  $ref: '#/components/schemas/Identifier'
     RelayEndpoint:
       type: string
       description: >-
