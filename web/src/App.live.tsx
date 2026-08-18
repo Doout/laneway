@@ -86,7 +86,7 @@ export function App() {
     <Route path="/setup" element={<SetupRequiredPage />} />
     <Route element={<RequireSession />}><Route element={<LiveAppShell />}>
       <Route element={<RequirePermission permission="network.list" />}><Route path="/overview" element={<LiveOverviewPage />} /><Route path="/infrastructure" element={<LiveInfrastructurePage />} /></Route>
-      <Route element={<RequirePermission permission="node.read" />}><Route path="/nodes" element={<LiveNodesPage />} /><Route path="/nodes/:nodeId" element={<LiveNodeDetailPage />} /></Route>
+      <Route element={<RequirePermission permission="node.read" />}><Route path="/networks" element={<LiveNodesPage />} /><Route path="/nodes" element={<Navigate to="/networks" replace />} /><Route path="/nodes/:nodeId" element={<LiveNodeDetailPage />} /></Route>
       <Route element={<RequirePermission permission="acl.read" />}><Route path="/users" element={<LiveUsersPage />} /><Route path="/users/:userId" element={<LiveUserDetailPage />} /><Route path="/teams" element={<LiveTeamsPage />} /><Route path="/teams/:teamId" element={<LiveTeamDetailPage />} /></Route>
       <Route element={<RequirePermission permission="enrollment.issue" />}><Route path="/nodes/new" element={<LiveAddNodePage />} /><Route path="/nodes/new/token" element={<LiveTokenPage />} /><Route path="/users/:userId/enroll" element={<LiveUserEnrollmentPage />} /><Route path="/users/:userId/enroll/token" element={<LiveTokenPage user />} /></Route>
       <Route element={<RequirePermission permission="node.manage" />}><Route path="/nodes/:nodeId/capabilities" element={<LiveNodeCapabilitiesPage />} /><Route path="/nodes/:nodeId/revoke" element={<LiveNodeRevokePage />} /></Route>

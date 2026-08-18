@@ -87,8 +87,8 @@ async function mockManagementApi(page: Page, networks: Network[]) {
 
     const prefix = `/v1/admin/networks/${networkId}`
     const responses: Record<string, unknown> = {
-      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, user_id: accessUserId, name: 'controller-node-canary', enabled_capabilities: 8, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable' }] },
-      [`${prefix}/routes`]: { routes: [] },
+      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, user_id: accessUserId, name: 'controller-node-canary', enabled_capabilities: 16, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable' }] },
+      [`${prefix}/routes`]: { routes: [{ route_id: '5'.repeat(32), network_id: networkId, node_id: '4'.repeat(32), prefix: '0.0.0.0/0', kind: 'exit', mode: 'nat', metric: 100, state: 'approved', created_at_unix_seconds: 1_700_000_100 }] },
       [`${prefix}/acl-rules`]: { acl_rules: [] },
       [`${prefix}/access-subjects`]: {
         users: [{ user_id: accessUserId, network_id: networkId, name: 'Private operator', enabled: true, created_at_unix_seconds: 1_700_000_100, updated_at_unix_seconds: 1_700_000_100 }],
@@ -172,15 +172,25 @@ test('compiled live artifact uses same-origin cookie transport and real permissi
   await page.getByLabel('Password').fill(password)
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page).toHaveURL(/\/overview$/)
-  await expect(page.getByText(controllerNetwork.name, { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('1 Network', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Signed in administrator')).toContainText('console-owner')
-  await page.getByRole('link', { name: 'Nodes' }).click()
-  await expect(page.getByRole('heading', { name: 'Nodes' })).toBeVisible()
+  await page.getByRole('link', { name: 'Networks' }).click()
+  await expect(page.getByRole('heading', { name: 'Networks', exact: true, level: 1 })).toBeVisible()
   await expect(page.getByText('controller-node-canary', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Exit node', { exact: true })).toBeVisible()
-  await page.getByRole('link', { name: 'Users' }).click()
+  await expect(page.getByText('Network exit', { exact: true })).toBeVisible()
+  await expect(page.getByText('No connected Networks', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Add Network' }).click()
+  await expect(page.getByRole('heading', { name: 'Create Network' })).toBeVisible()
+  await expect(page.getByText('A new Network starts with no nodes, routes, exits, or connections.')).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await page.getByRole('link', { name: 'People' }).click()
+  await expect(page.getByRole('heading', { name: 'People' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Users' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByText('Private operator', { exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'Teams' }).click()
+  await expect(page.getByRole('heading', { name: 'People' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'People' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('link', { name: 'Teams' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByText('Operations Team', { exact: true })).toBeVisible()
 
   expect(requests.length).toBeGreaterThan(0)
@@ -189,16 +199,19 @@ test('compiled live artifact uses same-origin cookie transport and real permissi
   expect(requests.filter((request) => request.method === 'GET').every((request) => request.csrf === undefined)).toBe(true)
 })
 
-test('compiled live artifact requires an explicit selection for multi-network inventory', async ({ page }) => {
+test('compiled live artifact keeps multiple Networks in one workspace', async ({ page }) => {
   test.skip(expectedMode !== 'live', 'Live artifact contract')
   const requests = await mockManagementApi(page, [controllerNetwork, { ...controllerNetwork, network_id: '5'.repeat(32), name: 'Second controller canary' }])
 
   await signIn(page)
-  await expect(page.getByLabel('Selected network')).toBeVisible()
-  await expect(page.getByText('Select a network.')).toBeVisible()
-  await page.getByLabel('Selected network').selectOption(networkId)
-  await page.getByRole('link', { name: 'Nodes' }).click()
+  await expect(page.getByLabel('Selected network')).toHaveCount(0)
+  await page.getByRole('link', { name: 'Networks' }).click()
+  await expect(page.getByText('Node and policy groups in this workspace—not separate tenants.')).toBeVisible()
   await expect(page.getByText('controller-node-canary', { exact: true }).first()).toBeVisible()
+  await page.getByRole('button', { name: 'Connect Network' }).click()
+  await expect(page.getByLabel('Destination Network')).toHaveValue('5'.repeat(32))
+  await expect(page.getByLabel('Initial access')).toHaveValue('Deny all traffic')
+  await expect(page.getByText('Creating this draft does not route traffic. Gateway selection and explicit allow rules are required before activation.')).toBeVisible()
   expect(requests.some((request) => request.path === '/v1/admin/audit?limit=250')).toBe(true)
   expect(requests.some((request) => request.path.includes(`/networks/${networkId}/audit`))).toBe(false)
   await expect(page.getByRole('note', { name: 'Demo data notice' })).toHaveCount(0)

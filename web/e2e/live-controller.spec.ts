@@ -37,9 +37,8 @@ test.describe('live controller console', () => {
     expect(networkResult.networks.length).toBeGreaterThan(0)
     const selectedNetwork = requestedNetworkId
       ? networkResult.networks.find((network) => network.network_id === requestedNetworkId)
-      : networkResult.networks.length === 1 ? networkResult.networks.at(0) : undefined
-    expect(selectedNetwork, 'Set LANEWAY_LIVE_E2E_NETWORK_ID when the principal can see multiple networks.').toBeDefined()
-    if (networkResult.networks.length > 1) await page.getByLabel('Selected network').selectOption(selectedNetwork!.network_id)
+      : networkResult.networks.at(0)
+    expect(selectedNetwork).toBeDefined()
     await expect(page.getByText(selectedNetwork!.name, { exact: false }).first()).toBeVisible()
 
     await page.goto('/nodes/new')

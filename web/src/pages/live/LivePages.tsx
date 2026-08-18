@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { Ban, FileKey2, KeyRound, MonitorDot, Network, Plus, RadioTower, Route as RouteIcon, ShieldCheck, TriangleAlert, Users } from 'lucide-react'
-import { ActionPanel, Button, Callout, DataTable, DetailLayout, EmptyState, EntityTitle, Field, FilterSelect, FormStack, IdentityBlock, PageHeader, RecordList, ResourceLink, Section, Status, TokenBox, Toolbar, type DataColumn } from '../../components/ui'
-import { controllerOrigin, useControlPlane, type ControllerACLRule, type ControllerAccessGrant, type ControllerAccessTeam, type ControllerAccessUser, type ControllerAuditEvent, type ControllerCertificate, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
+import { NavLink, useNavigate, useParams } from 'react-router-dom'
+import { ArrowRight, Ban, FileKey2, KeyRound, Link2, MonitorDot, Network, Plus, RadioTower, Route as RouteIcon, ShieldCheck, TriangleAlert, Users } from 'lucide-react'
+import { ActionPanel, Button, Callout, DataTable, DetailLayout, EmptyState, EntityTitle, Field, FilterSelect, FormStack, IdentityBlock, PageHeader, RecordList, ResourceLink, SearchField, Section, Status, TokenBox, Toolbar, type DataColumn } from '../../components/ui'
+import { controllerOrigin, useControlPlane, type ControllerACLRule, type ControllerAccessGrant, type ControllerAccessTeam, type ControllerAccessUser, type ControllerAuditEvent, type ControllerCertificate, type ControllerNetwork, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
+import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
 import { durableNodeEnrollmentCommand, userEnrollmentCommand } from '../../lib/enrollment-commands'
 
 function time(seconds?: number) {
@@ -65,6 +66,34 @@ function Missing({ title, back }: { title: string; back: string }) {
 }
 
 type RecordVisibility = 'current' | 'all'
+const subnetRouterCapability = 1 << 3
+const exitNodeCapability = 1 << 4
+const emptyNodes: ControllerNode[] = []
+
+type NetworkConnection = {
+  connection_id: string
+  source_network_id: string
+  destination_network_id: string
+  direction: 'one_way' | 'two_way'
+  state: 'draft' | 'active' | 'disabled'
+  default_action: 'deny'
+  created_at_unix_seconds: number
+}
+
+type NetworkConnectionRule = {
+  rule_id: string
+  connection_id: string
+  source_kind: 'team' | 'user' | 'node'
+  source_id: string
+  target_kind: 'network' | 'node'
+  target_id?: string
+  protocol: 'any' | 'tcp' | 'udp' | 'icmp'
+  destination_ports?: string
+}
+
+function networkConnectionSourceId(kind: NetworkConnectionRule['source_kind'], choice: ControllerAccessTeam | ControllerAccessUser | ControllerNode) {
+  return kind === 'team' ? (choice as ControllerAccessTeam).team_id : kind === 'user' ? (choice as ControllerAccessUser).user_id : (choice as ControllerNode).node_id
+}
 
 function VisibilityToolbar({ value, onChange, currentLabel, visible, total }: {
   value: RecordVisibility
@@ -103,39 +132,195 @@ export function LiveOverviewPage() {
 }
 
 export function LiveNodesPage() {
-  const { inventory, hasPermission } = useControlPlane()
+  const { inventory, hasPermission, request, refresh } = useControlPlane()
   const networkId = inventory?.network?.network_id
-  const records = inventory?.nodes ?? []
+  const records = inventory?.nodes ?? emptyNodes
   const [visibility, setVisibility] = useState<RecordVisibility>('current')
-  const visibleRecords = visibility === 'all' ? records : records.filter((node) => !liveNodeState(node).inactive)
-  const columns: DataColumn<ControllerNode>[] = [
-    { key: 'node', label: 'Node', render: (node) => <EntityTitle icon={<MonitorDot size={16} />} subtitle={node.node_id}>{node.name || node.node_id}</EntityTitle> },
-    { key: 'network', label: 'Network', render: () => inventory?.network?.name ?? 'Unknown' },
-    { key: 'role', label: 'Role', render: (node) => node.enabled_capabilities & 8 ? <Status tone="warning">Exit node</Status> : 'Node' },
-    { key: 'class', label: 'Enrollment', render: (node) => node.enrollment_class },
-    { key: 'address', label: 'Address', render: (node) => <code>{[node.ipv4_address, node.ipv6_address].filter(Boolean).join(' · ') || 'Not assigned'}</code> },
-    { key: 'state', label: 'State', render: (node) => { const state = liveNodeState(node); return <Status tone={state.tone}>{state.label}</Status> } },
-    { key: 'open', label: '', render: (node) => <Button to={`/nodes/${node.node_id}`} variant="quiet">View</Button> },
-  ]
-  return <>
-    <PageHeader title="Nodes" description={`Enrolled devices inside ${inventory?.network?.name ?? 'the selected Network'}`} action={networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/nodes/new" variant="primary"><Plus size={16} />Add node</Button> : undefined} />
-    <VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Active only" visible={visibleRecords.length} total={records.length} />
-    <DataTable columns={columns} rows={visibleRecords} rowKey={(node) => node.node_id} empty={<p>No active nodes. Choose All records to view inactive nodes.</p>} />
-  </>
+  const [networkFilter, setNetworkFilter] = useState('all')
+  const [query, setQuery] = useState('')
+  const [otherNodes, setOtherNodes] = useState<ControllerNode[]>([])
+  const [otherRoutes, setOtherRoutes] = useState<ControllerRoute[]>([])
+  const [movingNodeId, setMovingNodeId] = useState('')
+  const [moveDestinationId, setMoveDestinationId] = useState('')
+  const [movePending, setMovePending] = useState(false)
+  const [moveError, setMoveError] = useState('')
+  const [creatingNetwork, setCreatingNetwork] = useState(false)
+  const [networkName, setNetworkName] = useState('')
+  const [ipv4Pool, setIPv4Pool] = useState('')
+  const [networkPending, setNetworkPending] = useState(false)
+  const [networkError, setNetworkError] = useState('')
+  const [creatingConnection, setCreatingConnection] = useState(false)
+  const [destinationNetworkId, setDestinationNetworkId] = useState('')
+  const [connectionDirection, setConnectionDirection] = useState<'one_way' | 'two_way'>('one_way')
+  const [connectionPending, setConnectionPending] = useState(false)
+  const [connectionError, setConnectionError] = useState('')
+  const [connections, setConnections] = useState<NetworkConnection[]>([])
+  const [configuringConnectionId, setConfiguringConnectionId] = useState('')
+  const [connectionRules, setConnectionRules] = useState<NetworkConnectionRule[]>([])
+  const [ruleSourceKind, setRuleSourceKind] = useState<NetworkConnectionRule['source_kind']>('team')
+  const [ruleSourceId, setRuleSourceId] = useState('')
+  const [ruleTargetKind, setRuleTargetKind] = useState<NetworkConnectionRule['target_kind']>('network')
+  const [ruleTargetId, setRuleTargetId] = useState('')
+  const [ruleProtocol, setRuleProtocol] = useState<NetworkConnectionRule['protocol']>('any')
+  const [rulePorts, setRulePorts] = useState('')
+  const [rulePending, setRulePending] = useState(false)
+  const [ruleError, setRuleError] = useState('')
+  const allNodes = useMemo(() => [...records, ...otherNodes].filter((node, index, nodes) => nodes.findIndex((candidate) => candidate.node_id === node.node_id) === index), [otherNodes, records])
+  const allRoutes = useMemo(() => [...(inventory?.routes ?? []), ...otherRoutes].filter((route, index, routes) => routes.findIndex((candidate) => candidate.route_id === route.route_id) === index), [inventory?.routes, otherRoutes])
+  const assignedRecords = networkFilter === 'all' ? allNodes : networkFilter === 'unassigned' ? [] : allNodes.filter((node) => node.network_id === networkFilter)
+  const normalizedQuery = query.trim().toLowerCase()
+  const visibleRecords = assignedRecords.filter((node) => (visibility === 'all' || !liveNodeState(node).inactive) && (!normalizedQuery || [node.name, node.node_id, node.ipv4_address, node.ipv6_address].some((value) => value?.toLowerCase().includes(normalizedQuery))))
+  const activeRoutes = allRoutes.filter((route) => liveRouteState(route).actionable)
+  const networkExits = activeRoutes.filter((route) => route.kind === 'exit' && route.state === 'approved')
+  const otherNetworks = (inventory?.networks ?? []).filter((network) => network.network_id !== networkId)
+  const configuringConnection = connections.find((connection) => connection.connection_id === configuringConnectionId)
+  const connectionDestination = inventory?.networks.find((network) => network.network_id === configuringConnection?.destination_network_id)
+  const sourceChoices = useMemo(() => ruleSourceKind === 'team' ? inventory?.accessTeams ?? [] : ruleSourceKind === 'user' ? inventory?.accessUsers ?? [] : records, [inventory?.accessTeams, inventory?.accessUsers, records, ruleSourceKind])
+  const sourceChoiceName = (choice: ControllerAccessTeam | ControllerAccessUser | ControllerNode) => choice.name || networkConnectionSourceId(ruleSourceKind, choice)
+  const movingNode = allNodes.find((node) => node.node_id === movingNodeId)
+  const moveDestinations = (inventory?.networks ?? []).filter((network) => network.network_id !== movingNode?.network_id)
+  useEffect(() => {
+    let current = true
+    const networks = inventory?.networks ?? []
+    const requests = networks.filter((network) => network.network_id !== networkId && hasPermission('node.read', network.network_id)).map(async (network) => {
+      const prefix = `/v1/admin/networks/${network.network_id}`
+      const [nodes, routes] = await Promise.all([
+        request<{ nodes: ControllerNode[] }>(`${prefix}/nodes?limit=1000`),
+        hasPermission('route.read', network.network_id) ? request<{ routes: ControllerRoute[] }>(`${prefix}/routes?limit=1000`) : Promise.resolve({ routes: [] }),
+      ])
+      return { nodes: nodes.nodes, routes: routes.routes }
+    })
+    void Promise.all(requests).then((results) => {
+      if (current) { setOtherNodes(results.flatMap((result) => result.nodes)); setOtherRoutes(results.flatMap((result) => result.routes)) }
+    }).catch(() => { if (current) { setOtherNodes([]); setOtherRoutes([]) } })
+    return () => { current = false }
+  }, [hasPermission, inventory?.networks, networkId, request])
+  useEffect(() => {
+    let current = true
+    if (!networkId) { setConnections([]); return () => { current = false } }
+    void request<{ connections: NetworkConnection[] }>(`/v1/admin/network-connections?network_id=${networkId}`).then((result) => {
+      if (current) setConnections(result.connections)
+    }).catch(() => { if (current) setConnections([]) })
+    return () => { current = false }
+  }, [networkId, request])
+  useEffect(() => {
+    if (!otherNetworks.some((network) => network.network_id === destinationNetworkId)) setDestinationNetworkId(otherNetworks[0]?.network_id ?? '')
+  }, [destinationNetworkId, otherNetworks])
+  useEffect(() => {
+    if (!sourceChoices.some((choice) => networkConnectionSourceId(ruleSourceKind, choice) === ruleSourceId)) setRuleSourceId(sourceChoices[0] ? networkConnectionSourceId(ruleSourceKind, sourceChoices[0]) : '')
+  }, [ruleSourceId, ruleSourceKind, sourceChoices])
+  useEffect(() => {
+    if (!moveDestinations.some((network) => network.network_id === moveDestinationId)) setMoveDestinationId(moveDestinations[0]?.network_id ?? '')
+  }, [moveDestinationId, moveDestinations])
+  async function createNetwork(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const name = networkName.trim()
+    const pool = ipv4Pool.trim()
+    if (name.length < 2) return setNetworkError('Enter a Network name with at least two characters.')
+    if (!isCanonicalIpPrefix(pool, { family: 'ipv4', minBits: 8, maxBits: 30 })) return setNetworkError('Use a canonical, routable IPv4 pool between /8 and /30.')
+    if (inventory?.networks.some((network) => network.name.toLowerCase() === name.toLowerCase())) return setNetworkError('A Network with this name already exists.')
+    setNetworkPending(true); setNetworkError('')
+    try {
+      await request<ControllerNetwork>('/v1/admin/networks', { method: 'POST', body: { name, ipv4_pool: pool } })
+      await refresh()
+      setCreatingNetwork(false); setNetworkName(''); setIPv4Pool('')
+    } catch (cause) { setNetworkError(cause instanceof Error ? cause.message : 'Network creation failed.') }
+    finally { setNetworkPending(false) }
+  }
+  async function createConnection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!networkId || !destinationNetworkId) return setConnectionError('Choose a destination Network.')
+    setConnectionPending(true); setConnectionError('')
+    try {
+      const created = await request<NetworkConnection>('/v1/admin/network-connections', { method: 'POST', body: { source_network_id: networkId, destination_network_id: destinationNetworkId, direction: connectionDirection, default_action: 'deny' } })
+      setConnections((current) => [...current.filter((connection) => connection.connection_id !== created.connection_id), created])
+      setCreatingConnection(false)
+    } catch (cause) { setConnectionError(cause instanceof Error ? cause.message : 'Connection creation failed.') }
+    finally { setConnectionPending(false) }
+  }
+  async function createConnectionRule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!configuringConnection || !ruleSourceId || (ruleTargetKind === 'node' && !ruleTargetId)) return setRuleError('Choose a source and destination for this rule.')
+    if ((ruleProtocol === 'tcp' || ruleProtocol === 'udp') && rulePorts.trim() && !/^\d+(?:-\d+)?(?:,\s*\d+(?:-\d+)?)*$/.test(rulePorts.trim())) return setRuleError('Use ports such as 443 or 80,443,8000-8100.')
+    setRulePending(true); setRuleError('')
+    try {
+      const created = await request<NetworkConnectionRule>(`/v1/admin/network-connections/${configuringConnection.connection_id}/rules`, { method: 'POST', body: { source_kind: ruleSourceKind, source_id: ruleSourceId, target_kind: ruleTargetKind, ...(ruleTargetKind === 'node' ? { target_id: ruleTargetId } : {}), protocol: ruleProtocol, ...((ruleProtocol === 'tcp' || ruleProtocol === 'udp') && rulePorts.trim() ? { destination_ports: rulePorts.trim() } : {}) } })
+      setConnectionRules((current) => [...current, created]); setRulePorts('')
+    } catch (cause) { setRuleError(cause instanceof Error ? cause.message : 'Connection rule creation failed.') }
+    finally { setRulePending(false) }
+  }
+  async function moveNode(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!movingNode || !moveDestinationId) return setMoveError('Choose a destination Network.')
+    if (networkExits.some((route) => route.node_id === movingNode.node_id)) return setMoveError('Remove the approved Network Exit route before moving this Node.')
+    setMovePending(true); setMoveError('')
+    try {
+      await request(`/v1/admin/nodes/${movingNode.node_id}/move`, { method: 'POST', body: { destination_network_id: moveDestinationId } })
+      setMovingNodeId(''); await refresh()
+    } catch (cause) { setMoveError(cause instanceof Error ? cause.message : 'Node move failed.') }
+    finally { setMovePending(false) }
+  }
+  function routingRole(node: ControllerNode) {
+    if (networkExits.some((route) => route.node_id === node.node_id)) return <Status tone="positive">Network exit</Status>
+    if (node.enabled_capabilities & exitNodeCapability) return <Status tone="warning">Exit eligible</Status>
+    if (activeRoutes.some((route) => route.node_id === node.node_id && route.kind === 'subnet') || node.enabled_capabilities & subnetRouterCapability) return 'Subnet router'
+    return 'Standard node'
+  }
+  return <div className="network-workspace-page">
+    <PageHeader title="Networks" description="Nodes, address space, and routing stay inside an explicit Network boundary" action={hasPermission('network.create') ? <Button variant="primary" onClick={() => { setCreatingNetwork((value) => !value); setNetworkError('') }}><Plus size={16} />Add Network</Button> : undefined} />
+    {creatingNetwork ? <form className="network-create" onSubmit={createNetwork}>
+      <header><div><span>New isolated boundary</span><h2>Create Network</h2><p>A new Network starts with no nodes, routes, exits, or connections.</p></div></header>
+      <div className="network-create__fields"><Field label="Network name"><input autoFocus maxLength={253} placeholder="Development" value={networkName} onChange={(event) => setNetworkName(event.target.value)} /></Field><Field label="IPv4 address pool" hint="Must not overlap an existing Network."><input placeholder="100.97.0.0/16" value={ipv4Pool} onChange={(event) => setIPv4Pool(event.target.value)} /></Field></div>
+      <ErrorMessage value={networkError} /><footer className="button-row"><Button type="submit" variant="primary" disabled={networkPending}>{networkPending ? 'Creating…' : 'Create isolated Network'}</Button><Button type="button" variant="quiet" disabled={networkPending} onClick={() => setCreatingNetwork(false)}>Cancel</Button></footer>
+    </form> : null}
+    {inventory?.network ? <>
+      <section className="network-groups" aria-labelledby="network-groups-title"><header><h2 id="network-groups-title">{inventory.networks.length} {inventory.networks.length === 1 ? 'Network' : 'Networks'}</h2><p>Node and policy groups in this workspace—not separate tenants.</p></header><div className="network-group-list">{inventory.networks.map((network) => { const nodes = allNodes.filter((node) => node.network_id === network.network_id); const exits = networkExits.filter((route) => route.network_id === network.network_id); return <article key={network.network_id}><span className="network-group-list__icon"><Network aria-hidden="true" size={18} /></span><div><strong>{network.name}</strong><code>{network.ipv4_pool}</code></div><div className="network-group-list__stats"><span><strong>{nodes.length}</strong> Nodes</span><span><strong>{exits.length}</strong> {exits.length === 1 ? 'Exit' : 'Exits'}</span></div></article> })}</div></section>
+      <section className="network-nodes" aria-labelledby="network-nodes-title">
+        <header className="network-nodes__header"><div><h2 id="network-nodes-title">Nodes</h2><p>Move regular Nodes between Networks. Exit Nodes stay locked until their Exit route is removed.</p></div>{networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/nodes/new" variant="primary"><Plus size={16} />Add node</Button> : null}</header>
+        <Toolbar filters={<><FilterSelect label="Network" value={networkFilter} onChange={setNetworkFilter}><option value="all">All Networks</option>{inventory.networks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}<option value="unassigned">Unassigned</option></FilterSelect><FilterSelect label="Record visibility" value={visibility} onChange={(value) => setVisibility(value as RecordVisibility)}><option value="current">Active only</option><option value="all">All records</option></FilterSelect><span className="inventory-result-count" aria-live="polite">{visibleRecords.length} of {assignedRecords.length} shown</span></>}><SearchField label="Search nodes" placeholder="Search name, address, or node ID" value={query} onChange={setQuery} /></Toolbar>
+        {visibleRecords.length ? <div className="node-list" role="list" aria-label="Nodes">{visibleRecords.map((node) => { const state = liveNodeState(node); const exitLocked = networkExits.some((route) => route.node_id === node.node_id); return <article className="node-list__row" role="listitem" key={node.node_id}>
+          <EntityTitle icon={<MonitorDot size={16} />} subtitle={node.node_id}>{node.name || node.node_id}</EntityTitle>
+          <div className="node-list__placement"><span>Placement</span><strong>{inventory.networks.find((network) => network.network_id === node.network_id)?.name ?? 'Unassigned'}</strong><code>{[node.ipv4_address, node.ipv6_address].filter(Boolean).join(' · ') || 'No address'}</code></div>
+          <div className="node-list__posture"><span>Role &amp; state</span><div>{routingRole(node)}<Status tone={state.tone}>{state.label}</Status></div><small>{node.enrollment_class} enrollment</small></div>
+          <div className="node-list__action">{exitLocked ? <span className="node-move-locked">Exit locked</span> : <Button variant="quiet" onClick={() => { setMovingNodeId(node.node_id); setMoveError('') }}>Move</Button>}</div>
+        </article> })}</div> : <div className="data-empty">{networkFilter === 'unassigned' ? <><MonitorDot aria-hidden="true" /><h2>No unassigned nodes</h2><p>Unassigned Nodes cannot connect or advertise routes. Move an eligible Node into any Network from this list.</p></> : <p>No nodes match the current filters.</p>}</div>}
+        {movingNode ? <form className="node-move" onSubmit={moveNode}><header><div><span>Move Node</span><h3>{movingNode.name || movingNode.node_id}</h3><p>The Node keeps its ownership, but receives new overlay addresses and must reconnect with identity for the destination Network.</p></div></header><div className="node-move__path"><strong>{inventory.networks.find((network) => network.network_id === movingNode.network_id)?.name ?? 'Unassigned'}</strong><ArrowRight aria-hidden="true" size={18} /><Field label="Destination Network"><select value={moveDestinationId} onChange={(event) => setMoveDestinationId(event.target.value)}>{moveDestinations.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</select></Field></div><Callout tone="warning">Existing non-Exit routes are withdrawn during the move. Access is recalculated from destination Network policy.</Callout><ErrorMessage value={moveError} /><div className="button-row"><Button type="submit" variant="primary" disabled={movePending || !moveDestinationId}>{movePending ? 'Moving…' : 'Move Node'}</Button><Button type="button" variant="quiet" disabled={movePending} onClick={() => setMovingNodeId('')}>Cancel</Button></div></form> : null}
+      </section>
+      <section className="network-connections" aria-labelledby="network-connections-title">
+        <header className="network-connections__header"><div><span>Explicit boundaries</span><h2 id="network-connections-title">Connected Networks</h2><p>Define possible reachability; traffic stays denied until routing and allow rules are configured.</p></div>{otherNetworks.length ? <Button onClick={() => { setCreatingConnection((value) => !value); setConnectionError('') }}><Link2 size={16} />Connect Network</Button> : null}</header>
+        {creatingConnection ? <form className="network-connection-form" onSubmit={createConnection}>
+          <div className="network-connection-form__path"><strong>{inventory.network.name}</strong><ArrowRight aria-hidden="true" size={18} /><Field label="Destination Network"><select value={destinationNetworkId} onChange={(event) => setDestinationNetworkId(event.target.value)}>{otherNetworks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</select></Field></div>
+          <div className="network-connection-form__controls"><Field label="Direction"><select value={connectionDirection} onChange={(event) => setConnectionDirection(event.target.value as typeof connectionDirection)}><option value="one_way">One way</option><option value="two_way">Both directions</option></select></Field><Field label="Initial access"><input readOnly value="Deny all traffic" /></Field><Field label="Route exposure"><input readOnly value="None until gateways are configured" /></Field></div>
+          <Callout tone="warning">Creating this draft does not route traffic. Gateway selection and explicit allow rules are required before activation.</Callout><ErrorMessage value={connectionError} /><div className="button-row"><Button type="submit" variant="primary" disabled={connectionPending || !destinationNetworkId}>{connectionPending ? 'Creating…' : 'Create draft connection'}</Button><Button type="button" variant="quiet" disabled={connectionPending} onClick={() => setCreatingConnection(false)}>Cancel</Button></div>
+        </form> : null}
+        {connections.length ? <div className="network-connection-list">{connections.map((connection) => { const source = inventory.networks.find((network) => network.network_id === connection.source_network_id); const destination = inventory.networks.find((network) => network.network_id === connection.destination_network_id); return <article key={connection.connection_id} className="network-connection"><span className="network-connection__icon"><Link2 aria-hidden="true" size={18} /></span><div><strong>{source?.name ?? 'Unknown Network'} <ArrowRight aria-hidden="true" size={14} /> {destination?.name ?? 'Unknown Network'}</strong><p>{connection.direction === 'two_way' ? 'Both directions' : 'One way'} · Default deny · No transitive access</p></div><Status tone={connection.state === 'active' ? 'positive' : 'warning'}>{connection.state === 'active' ? 'Active' : 'Routing inactive'}</Status><Button variant="quiet" onClick={() => { setConfiguringConnectionId((current) => current === connection.connection_id ? '' : connection.connection_id); setRuleError('') }}>Configure policy</Button></article> })}</div> : <div className="network-connections__empty"><Link2 aria-hidden="true" size={20} /><div><strong>No connected Networks</strong><p>{otherNetworks.length ? 'Create a draft connection to define direction, routing, and access.' : 'Add another Network before defining cross-Network access.'}</p></div></div>}
+        {configuringConnection ? <form className="network-policy-editor" onSubmit={createConnectionRule}>
+          <header><div><span>Default deny</span><h3>Connection policy</h3><p>Add only the traffic that should cross from {inventory.network.name} to {connectionDestination?.name ?? 'the destination Network'}.</p></div><Status tone="warning">0 implicit grants</Status></header>
+          <div className="network-policy-editor__fields"><Field label="Source type"><select value={ruleSourceKind} onChange={(event) => setRuleSourceKind(event.target.value as typeof ruleSourceKind)}><option value="team">Team</option><option value="user">User</option><option value="node">Node</option></select></Field><Field label={ruleSourceKind === 'team' ? 'Source Team' : ruleSourceKind === 'user' ? 'Source User' : 'Source Node'}><select value={ruleSourceId} onChange={(event) => setRuleSourceId(event.target.value)}><option value="">Choose source</option>{sourceChoices.map((choice) => <option key={networkConnectionSourceId(ruleSourceKind, choice)} value={networkConnectionSourceId(ruleSourceKind, choice)}>{sourceChoiceName(choice)}</option>)}</select></Field><Field label="Destination scope"><select value={ruleTargetKind} onChange={(event) => { setRuleTargetKind(event.target.value as typeof ruleTargetKind); setRuleTargetId('') }}><option value="network">Entire destination Network</option><option value="node">One destination Node</option></select></Field>{ruleTargetKind === 'node' ? <Field label="Destination Node" hint="Add and enroll destination Nodes before granting access."><select value={ruleTargetId} onChange={(event) => setRuleTargetId(event.target.value)}><option value="">No destination Nodes available</option></select></Field> : null}<Field label="Protocol"><select value={ruleProtocol} onChange={(event) => { setRuleProtocol(event.target.value as typeof ruleProtocol); if (event.target.value !== 'tcp' && event.target.value !== 'udp') setRulePorts('') }}><option value="any">Any protocol</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option></select></Field>{ruleProtocol === 'tcp' || ruleProtocol === 'udp' ? <Field label="Destination ports" hint="Comma-separated ports or ranges."><input placeholder="443,8000-8100" value={rulePorts} onChange={(event) => setRulePorts(event.target.value)} /></Field> : null}</div>
+          {ruleTargetKind === 'network' ? <Callout tone="warning">This target includes every Node in {connectionDestination?.name ?? 'the destination Network'}. Choose one destination Node for tighter access.</Callout> : null}<ErrorMessage value={ruleError} /><div className="button-row"><Button type="submit" variant="primary" disabled={rulePending || !ruleSourceId || (ruleTargetKind === 'node' && !ruleTargetId)}>{rulePending ? 'Adding…' : 'Add allow rule'}</Button><Button type="button" variant="quiet" onClick={() => setConfiguringConnectionId('')}>Done</Button></div>
+          {connectionRules.filter((rule) => rule.connection_id === configuringConnection.connection_id).length ? <div className="network-policy-rules">{connectionRules.filter((rule) => rule.connection_id === configuringConnection.connection_id).map((rule) => <div key={rule.rule_id}><Status tone="positive">Allow</Status><span>{rule.source_kind} → {rule.target_kind}</span><code>{rule.protocol.toUpperCase()}{rule.destination_ports ? ` · ${rule.destination_ports}` : ''}</code></div>)}</div> : <p className="network-policy-editor__empty">No allow rules. All cross-Network traffic is denied.</p>}
+          <footer><strong>Activation checklist</strong><span>Gateway pair</span><Status tone="muted">Required</Status><span>Route review</span><Status tone="muted">Required</Status><span>Allow rules</span><Status tone={connectionRules.some((rule) => rule.connection_id === configuringConnection.connection_id) ? 'positive' : 'muted'}>{connectionRules.some((rule) => rule.connection_id === configuringConnection.connection_id) ? 'Ready' : 'Required'}</Status></footer>
+        </form> : null}
+      </section>
+    </> : <EmptyState icon={<Network />} title="No Networks" description="Create a Network to begin organizing Nodes and policy." />}
+  </div>
 }
 
 export function LiveNodeDetailPage() {
   const { nodeId } = useParams()
   const { inventory, hasPermission } = useControlPlane()
   const node = inventory?.nodes.find((candidate) => candidate.node_id === nodeId)
-  if (!node) return <Missing title="Node not found" back="/nodes" />
+  if (!node) return <Missing title="Node not found" back="/networks" />
   const state = liveNodeState(node)
   const canManage = hasPermission('node.manage', node.network_id) && !state.inactive
+  const exitRoute = inventory?.routes.find((route) => route.node_id === node.node_id && route.kind === 'exit' && route.state === 'approved' && liveRouteState(route).actionable)
+  const subnetRoutes = (inventory?.routes ?? []).filter((route) => route.node_id === node.node_id && route.kind === 'subnet' && liveRouteState(route).actionable)
+  const routingRole = exitRoute ? 'Network exit' : node.enabled_capabilities & exitNodeCapability ? 'Eligible for Network Exit' : subnetRoutes.length || node.enabled_capabilities & subnetRouterCapability ? 'Subnet router' : 'Standard node'
   return <>
-    <PageHeader title="Node" action={<Button to="/nodes" variant="quiet">All nodes</Button>} />
+    <PageHeader title={node.name || 'Node'} description={`Node in ${inventory?.network?.name ?? 'the selected Network'}`} action={<Button to="/networks" variant="quiet">Back to Network</Button>} />
     <DetailLayout identity={<IdentityBlock icon={<MonitorDot size={30} />} title={node.name || node.node_id} state={<Status tone={state.tone}>{state.label}</Status>} actions={canManage ? <><Button to={`/nodes/${node.node_id}/capabilities`}>Capabilities</Button><Button to={`/nodes/${node.node_id}/revoke`} variant="danger">Revoke</Button></> : undefined} metadata={[["Node ID", <code>{node.node_id}</code>], ["Network ID", <code>{node.network_id}</code>], ["Created", time(node.created_at_unix_seconds)]]} />}>
       <Section title="Overlay addresses"><RecordList rows={[["IPv4", <code>{node.ipv4_address ?? 'Not assigned'}</code>], ["IPv6", <code>{node.ipv6_address ?? 'Not assigned'}</code>]]} /></Section>
-      <Section title="Network role"><RecordList rows={[["Network", inventory?.network?.name ?? node.network_id], ["Role", node.enabled_capabilities & 8 ? 'Exit node' : 'Node'], ["Capabilities", <code>{node.enabled_capabilities}</code>]]} /></Section>
+      <Section title="Network membership"><RecordList rows={[["Network", inventory?.network?.name ?? node.network_id], ["Routing role", routingRole], ["Network Exit route", exitRoute ? <code>{exitRoute.prefix}</code> : 'Not assigned'], ["Subnet routes", subnetRoutes.length]]} /></Section>
     </DetailLayout>
   </>
 }
@@ -189,7 +374,7 @@ function EnrollmentForm({ userId }: { userId?: string }) {
       {isUserEnrollment ? <><Field label="Enrollment"><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="ephemeral">Ephemeral</option><option value="remembered">Remembered</option></select></Field><Field label="Lease duration (hours)"><input type="number" min="1" max="24" disabled={kind !== 'ephemeral'} value={hours} onChange={(event) => setHours(event.target.value)} /></Field></> : null}
       <Field label="Network"><input readOnly value={inventory?.network?.name ?? 'No network'} /></Field>
       <ErrorMessage value={error} />
-      <div className="button-row"><Button type="submit" variant="primary" disabled={pending || !inventory?.network || (isUserEnrollment && !user)}><KeyRound size={16} />{pending ? 'Issuing…' : 'Issue token'}</Button><Button to={isUserEnrollment ? `/users/${userId}` : '/nodes'} variant="quiet">Cancel</Button></div>
+      <div className="button-row"><Button type="submit" variant="primary" disabled={pending || !inventory?.network || (isUserEnrollment && !user)}><KeyRound size={16} />{pending ? 'Issuing…' : 'Issue token'}</Button><Button to={isUserEnrollment ? `/users/${userId}` : '/networks'} variant="quiet">Cancel</Button></div>
     </FormStack>
   </>
 }
@@ -211,7 +396,7 @@ export function LiveTokenPage({ user = false, userId }: { user?: boolean; userId
     <Callout tone="warning">Copy this single-use token now.</Callout>
     <TokenBox label="Enrollment token" value={token.token} />
     <Section title="Command"><pre><code>{token.command}</code></pre></Section>
-    <Button to={user ? '/users' : '/nodes'} variant="primary">Done</Button>
+    <Button to={user ? '/users' : '/networks'} variant="primary">Done</Button>
   </>
 }
 
@@ -223,13 +408,14 @@ export function LiveNodeCapabilitiesPage() {
   const [mask, setMask] = useState(node?.enabled_capabilities ?? 0)
   const [error, setError] = useState('')
   useEffect(() => { if (node) setMask(node.enabled_capabilities) }, [node])
-  if (!node) return <Missing title="Node not found" back="/nodes" />
+  if (!node) return <Missing title="Node not found" back="/networks" />
   if (liveNodeState(node).inactive) return <PageHeader title={liveNodeState(node).label} action={<Button to={`/nodes/${node.node_id}`}>View node</Button>} />
   const activeNode = node
   async function save() {
     try { await request(`/v1/admin/nodes/${activeNode.node_id}/capabilities`, { method: 'PUT', body: { enabled_capabilities: mask } }); await refresh(); navigate(`/nodes/${activeNode.node_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Update failed.') }
   }
-  return <><PageHeader title="Edit capabilities" description={node.name || node.node_id} /><ActionPanel><Field label="Capability mask"><input type="number" min="0" value={mask} onChange={(event) => setMask(Number(event.target.value))} /></Field><ErrorMessage value={error} /><div className="button-row"><Button variant="primary" onClick={() => void save()}>Save changes</Button><Button to={`/nodes/${node.node_id}`} variant="quiet">Cancel</Button></div></ActionPanel></>
+  function setCapability(bit: number, enabled: boolean) { setMask((current) => enabled ? current | bit : current & ~bit) }
+  return <><PageHeader title="Routing capabilities" description={`${node.name || node.node_id} in ${inventory?.network?.name ?? 'the selected Network'}`} /><ActionPanel><div className="capability-options"><label className="capability-option"><input type="checkbox" checked={Boolean(mask & subnetRouterCapability)} onChange={(event) => setCapability(subnetRouterCapability, event.target.checked)} /><span><strong>Publish subnet routes</strong><small>Allow this node to advertise private destinations inside this Network.</small></span></label><label className="capability-option"><input type="checkbox" checked={Boolean(mask & exitNodeCapability)} onChange={(event) => setCapability(exitNodeCapability, event.target.checked)} /><span><strong>Eligible for Network Exit</strong><small>This only makes the node eligible. It does not become an Exit until a default route is explicitly assigned and approved.</small></span></label></div><Callout tone="warning">A node must belong to this Network before it can receive either routing capability.</Callout><ErrorMessage value={error} /><div className="button-row"><Button variant="primary" onClick={() => void save()}>Save capabilities</Button><Button to={`/nodes/${node.node_id}`} variant="quiet">Cancel</Button></div></ActionPanel></>
 }
 
 export function LiveNodeRevokePage() {
@@ -239,13 +425,21 @@ export function LiveNodeRevokePage() {
   const node = inventory?.nodes.find((candidate) => candidate.node_id === nodeId)
   const [confirmation, setConfirmation] = useState('')
   const [error, setError] = useState('')
-  if (!node) return <Missing title="Node not found" back="/nodes" />
+  if (!node) return <Missing title="Node not found" back="/networks" />
   if (liveNodeState(node).inactive) return <PageHeader title={liveNodeState(node).label} action={<Button to={`/nodes/${node.node_id}`}>View node</Button>} />
   const activeNode = node
   async function revoke() {
     try { await request(`/v1/admin/nodes/${activeNode.node_id}/revoke`, { method: 'POST', body: { reason: 'Revoked by administrator' } }); await refresh(); navigate(`/nodes/${activeNode.node_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Revocation failed.') }
   }
   return <><PageHeader title={`Revoke ${node.name || node.node_id}`} description="Disconnect this identity and prevent it from reconnecting" /><ActionPanel><Callout tone="danger">This action is permanent.</Callout><Field label={`Type ${node.name || node.node_id} to confirm`}><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field><ErrorMessage value={error} /><Button variant="danger" disabled={confirmation !== (node.name || node.node_id)} onClick={() => void revoke()}>Revoke node</Button></ActionPanel></>
+}
+
+function PeopleTabs() {
+  const { inventory } = useControlPlane()
+  return <nav className="people-tabs" aria-label="People views">
+    <NavLink to="/users" end><span>Users</span><span aria-hidden="true">{inventory?.accessUsers.length ?? 0}</span></NavLink>
+    <NavLink to="/teams" end><span>Teams</span><span aria-hidden="true">{inventory?.accessTeams.length ?? 0}</span></NavLink>
+  </nav>
 }
 
 export function LiveUsersPage() {
@@ -261,7 +455,7 @@ export function LiveUsersPage() {
     { key: 'state', label: 'State', render: (user) => <Status tone={user.enabled ? 'positive' : 'muted'}>{user.enabled ? 'Enabled' : 'Disabled'}</Status> },
     { key: 'open', label: '', render: (user) => <Button to={`/users/${user.user_id}`} variant="quiet">View</Button> },
   ]
-  return <><PageHeader title="Users" description="People with Network, Node, or Exit access" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/users/new" variant="primary"><Plus size={16} />Create user</Button> : undefined} /><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Enabled only" visible={visibleRecords.length} total={records.length} /><DataTable columns={columns} rows={visibleRecords} rowKey={(user) => user.user_id} empty={<p>No enabled Users. Choose All records to view disabled Users.</p>} /></>
+  return <><PageHeader title="People" description="Manage Users, Teams, and their access in this Network" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/users/new" variant="primary"><Plus size={16} />Create user</Button> : undefined} /><PeopleTabs /><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Enabled only" visible={visibleRecords.length} total={records.length} /><DataTable columns={columns} rows={visibleRecords} rowKey={(user) => user.user_id} empty={<p>No enabled Users. Choose All records to view disabled Users.</p>} /></>
 }
 
 export function LiveUserDetailPage() {
@@ -325,7 +519,7 @@ export function LiveTeamsPage() {
     { key: 'grants', label: 'Access grants', render: (team) => (inventory?.accessGrants ?? []).filter((grant) => grant.subject_kind === 'team' && grant.subject_id === team.team_id).length },
     { key: 'open', label: '', render: (team) => <Button to={`/teams/${team.team_id}`} variant="quiet">View</Button> },
   ]
-  return <><PageHeader title="Teams" description="Groups of Users with shared access" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/teams/new" variant="primary"><Plus size={16} />Create Team</Button> : undefined} /><DataTable columns={columns} rows={records} rowKey={(team) => team.team_id} empty={<p>No Teams in this Network.</p>} /></>
+  return <><PageHeader title="People" description="Manage Users, Teams, and their access in this Network" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/teams/new" variant="primary"><Plus size={16} />Create Team</Button> : undefined} /><PeopleTabs /><DataTable columns={columns} rows={records} rowKey={(team) => team.team_id} empty={<p>No Teams in this Network.</p>} /></>
 }
 
 export function LiveTeamDetailPage() {

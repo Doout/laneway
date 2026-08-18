@@ -407,7 +407,7 @@ describe('cookie session runtime races', () => {
     FakeBroadcastChannel.instances[0].emit({ type: 'session-changed', sessionId: newSessionId })
     expect(await screen.findByLabelText('session ID')).toHaveTextContent(newSessionId)
     resolveError({ error: 'stale permission error' })
-    expect(await screen.findByLabelText('result')).toHaveTextContent('The administrator session changed while the error response was being read.')
+    await waitFor(() => expect(screen.getByLabelText('result')).toHaveTextContent('The administrator session changed while the error response was being read.'))
     expect(screen.getByLabelText('auth state')).toHaveTextContent('authenticated')
     expect(screen.getByLabelText('auth error')).toBeEmptyDOMElement()
   })
@@ -534,9 +534,6 @@ describe('cookie session runtime races', () => {
     expect(await screen.findByLabelText('session ID')).toHaveTextContent(oldSessionId)
     await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input).includes('/v1/admin/networks?limit=100'))).toHaveLength(1))
     await waitFor(() => expect(screen.getByLabelText('network count')).toHaveTextContent('2'))
-    await waitFor(() => expect(screen.getByLabelText('selected network ID')).toHaveTextContent('none'))
-
-    fireEvent.click(screen.getByRole('button', { name: 'Select known network' }))
     await waitFor(() => expect(screen.getByLabelText('selected network ID')).toHaveTextContent(networkId))
     fireEvent.click(screen.getByRole('button', { name: 'Begin network token issue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Select other network' }))

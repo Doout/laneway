@@ -24,7 +24,7 @@ describe('shipped live application authorization', () => {
     }))
     renderPath('/routes/new')
     expect(await screen.findByRole('heading', { name: 'Access denied' })).toBeVisible()
-    expect(screen.queryByRole('link', { name: 'Nodes' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Networks' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Security' })).not.toBeInTheDocument()
   })
 
@@ -37,14 +37,14 @@ describe('shipped live application authorization', () => {
       if (path.includes('/nodes?')) return Promise.resolve(managementResponse({ nodes: [{ node_id: '4'.repeat(32), network_id: '5'.repeat(32), name: 'foreign-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' }] }))
       throw new Error(`Unexpected request ${path}`)
     }))
-    renderPath('/nodes')
+    renderPath('/networks')
     await waitFor(() => expect(screen.getByText('Controller returned inventory outside the selected network scope.')).toBeVisible())
     expect(screen.queryByText('foreign-node')).not.toBeInTheDocument()
   })
 
   it.each([
     {
-      page: 'nodes', path: '/nodes', permission: 'node.read', inventoryPath: '/nodes?', responseKey: 'nodes',
+      page: 'nodes', path: '/networks', permission: 'node.read', inventoryPath: '/nodes?', responseKey: 'nodes',
       records: [
         { node_id: '4'.repeat(32), network_id: networkId, name: 'healthy-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' },
         { node_id: '5'.repeat(32), network_id: networkId, name: 'expired-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'ephemeral', lease_expires_at_unix_seconds: 1 },
@@ -162,7 +162,7 @@ describe('shipped live application authorization', () => {
     renderPath('/audit')
     expect(await screen.findByText(`Recovery grant ${recoveryId}`)).toBeVisible()
     expect(screen.getByText('Global')).toBeVisible()
-    expect(screen.getByLabelText('Selected network')).toBeVisible()
+    expect(screen.queryByLabelText('Selected network')).not.toBeInTheDocument()
     const paths = fetchMock.mock.calls.map(([input]) => String(input))
     expect(paths.filter((path) => path.endsWith('/v1/admin/audit?limit=250'))).toHaveLength(1)
     expect(paths.some((path) => /\/networks\/[0-9a-f]{32}\/audit/.test(path))).toBe(false)

@@ -924,7 +924,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
         selectedNetworkIdRef.current = null
         setSelectedNetworkId(null)
       }
-      if (!network && networkResult.networks.length === 1) {
+      if (!network && networkResult.networks.length >= 1) {
         network = networkResult.networks[0]
         networkGenerationRef.current += 1
         selectedNetworkIdRef.current = network.network_id
