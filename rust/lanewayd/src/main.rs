@@ -67,7 +67,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
         if argument == "--check-config" {
             check = true;
         } else {
-            bail!("unexpected argument {:?}", argument);
+            bail!("unexpected argument {argument:?}");
         }
     }
     Ok(Arguments {
