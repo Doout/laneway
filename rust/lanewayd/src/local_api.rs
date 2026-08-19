@@ -323,32 +323,20 @@ async fn handle(
                 )
             }),
             ("POST", "/v1/exit") => {
-                if set_exit.is_none() {
-                    error_response(
-                        501,
-                        &request_id,
-                        ERROR_UNSUPPORTED_OPERATION,
-                        "exit selection is not configured",
-                        false,
-                    )
-                } else {
+                if let Some(set_exit) = set_exit.as_ref() {
                     match decode_selection(&request.body) {
-                        Ok(selection) => {
-                            match (set_exit.as_ref().expect("exit callback checked"))(selection)
-                                .await
-                            {
-                                Ok(()) => {
-                                    ReadyResponse::new(204, "text/plain; charset=utf-8", Vec::new())
-                                }
-                                Err(error) => error_response(
-                                    409,
-                                    &request_id,
-                                    ERROR_CONFLICT,
-                                    &error.to_string(),
-                                    false,
-                                ),
+                        Ok(selection) => match set_exit(selection).await {
+                            Ok(()) => {
+                                ReadyResponse::new(204, "text/plain; charset=utf-8", Vec::new())
                             }
-                        }
+                            Err(error) => error_response(
+                                409,
+                                &request_id,
+                                ERROR_CONFLICT,
+                                &error.to_string(),
+                                false,
+                            ),
+                        },
                         Err(_) => error_response(
                             400,
                             &request_id,
@@ -357,6 +345,14 @@ async fn handle(
                             false,
                         ),
                     }
+                } else {
+                    error_response(
+                        501,
+                        &request_id,
+                        ERROR_UNSUPPORTED_OPERATION,
+                        "exit selection is not configured",
+                        false,
+                    )
                 }
             }
             (_, "/v1/status" | "/v1/peers" | "/v1/routes" | "/v1/exit") => error_response(
