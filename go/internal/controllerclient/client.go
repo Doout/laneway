@@ -550,6 +550,13 @@ type AuditEvent struct {
 	CreatedAtUnixSeconds int64           `json:"created_at_unix_seconds"`
 }
 
+// AuditEventPage is one deterministic portion of an audit stream.
+// NextCursor is empty only when the controller proved no older events remain.
+type AuditEventPage struct {
+	Events     []AuditEvent `json:"events"`
+	NextCursor string       `json:"next_cursor,omitempty"`
+}
+
 func (c *Client) CreateNetwork(ctx context.Context, name string, pool netip.Prefix) (*Network, error) {
 	return c.CreateNetworkDualStack(ctx, name, pool, netip.Prefix{})
 }
@@ -891,6 +898,45 @@ func (c *Client) Audit(ctx context.Context, networkID identity.NetworkID, limit 
 	path := "/v1/admin/networks/" + networkID.String() + "/audit?limit=" + strconv.Itoa(limit)
 	err := c.json(ctx, http.MethodGet, path, nil, &response, true)
 	return response.Events, err
+}
+
+// AuditPage reads one network-scoped audit page. cursor must be empty for the
+// first request or copied verbatim from the preceding response.
+func (c *Client) AuditPage(ctx context.Context, networkID identity.NetworkID, limit int, cursor string) (*AuditEventPage, error) {
+	if networkID.IsZero() {
+		return nil, errors.New("controller client: audit network is required")
+	}
+	if limit < 1 || limit > 1000 {
+		return nil, errors.New("controller client: audit limit must be from 1 through 1000")
+	}
+	if len(cursor) > 512 {
+		return nil, errors.New("controller client: audit cursor exceeds limit")
+	}
+	query := url.Values{"limit": []string{strconv.Itoa(limit)}}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	response := new(AuditEventPage)
+	path := "/v1/admin/networks/" + networkID.String() + "/audit/page?" + query.Encode()
+	err := c.json(ctx, http.MethodGet, path, nil, response, true)
+	return response, err
+}
+
+// GlobalAuditPage reads one owner/root global audit page.
+func (c *Client) GlobalAuditPage(ctx context.Context, limit int, cursor string) (*AuditEventPage, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, errors.New("controller client: audit limit must be from 1 through 1000")
+	}
+	if len(cursor) > 512 {
+		return nil, errors.New("controller client: audit cursor exceeds limit")
+	}
+	query := url.Values{"limit": []string{strconv.Itoa(limit)}}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	response := new(AuditEventPage)
+	err := c.json(ctx, http.MethodGet, "/v1/admin/audit/page?"+query.Encode(), nil, response, true)
+	return response, err
 }
 
 // BootstrapFirstAdministrator issues and immediately consumes a bootstrap

@@ -390,6 +390,58 @@ func TestAuditDecodesDurableActorFieldsWithStrictJSON(t *testing.T) {
 	}
 }
 
+func TestAuditPageCarriesOpaqueNetworkAndGlobalCursors(t *testing.T) {
+	networkID, _ := identity.ParseNetworkID("000102030405060708090a0b0c0d0e0f")
+	var requests []string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/admin/networks/" + networkID.String() + "/audit/page":
+			if r.URL.Query().Get("cursor") == "" {
+				_, _ = io.WriteString(w, `{"events":[],"next_cursor":"network-next"}`)
+			} else {
+				_, _ = io.WriteString(w, `{"events":[]}`)
+			}
+		case "/v1/admin/audit/page":
+			_, _ = io.WriteString(w, `{"events":[],"next_cursor":"global-next"}`)
+		default:
+			t.Errorf("unexpected audit path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := &Client{endpoint: server.URL, http: server.Client(), adminBearer: "Bearer test-admin-token"}
+
+	first, err := client.AuditPage(context.Background(), networkID, 2, "")
+	if err != nil || first.NextCursor != "network-next" {
+		t.Fatalf("first audit page=%+v err=%v", first, err)
+	}
+	second, err := client.AuditPage(context.Background(), networkID, 2, first.NextCursor)
+	if err != nil || second.NextCursor != "" {
+		t.Fatalf("second audit page=%+v err=%v", second, err)
+	}
+	global, err := client.GlobalAuditPage(context.Background(), 3, "global input")
+	if err != nil || global.NextCursor != "global-next" {
+		t.Fatalf("global audit page=%+v err=%v", global, err)
+	}
+	want := []string{
+		"/v1/admin/networks/" + networkID.String() + "/audit/page?limit=2",
+		"/v1/admin/networks/" + networkID.String() + "/audit/page?cursor=network-next&limit=2",
+		"/v1/admin/audit/page?cursor=global+input&limit=3",
+	}
+	for i := range want {
+		if requests[i] != want[i] {
+			t.Errorf("request %d=%q want %q", i, requests[i], want[i])
+		}
+	}
+	if _, err := client.AuditPage(context.Background(), identity.NetworkID{}, 2, ""); err == nil {
+		t.Fatal("audit page accepted an empty network ID")
+	}
+	if _, err := client.GlobalAuditPage(context.Background(), 1, strings.Repeat("x", 513)); err == nil {
+		t.Fatal("global audit page accepted an oversized cursor")
+	}
+}
+
 func TestJSONAdminRequiredErrorsAndLimits(t *testing.T) {
 	client := &Client{endpoint: "https://unused.invalid", http: http.DefaultClient}
 	if _, err := client.Network(context.Background(), identity.NetworkID{}); err == nil || !strings.Contains(err.Error(), "admin token") {

@@ -209,6 +209,14 @@ export type AuditEvent = unknown & {
     created_at_unix_seconds: UnixSeconds;
 };
 
+export type AuditEventPage = {
+    events: Array<AuditEvent>;
+    /**
+     * Opaque continuation token. Omitted only when the controller proved that no older audit events remain in this scope.
+     */
+    next_cursor?: string;
+};
+
 export type AuditEvents = {
     events: Array<AuditEvent>;
 };
@@ -735,12 +743,17 @@ export type Username = string;
  * Static root service-principal credential for local file-based automation only. The controller rejects this credential when Origin or Sec-Fetch-* headers indicate a browser context. It is never a console credential.
  */
 /**
+ * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+ */
+export type AuditCursor = string;
+
+/**
  * Canonical lowercase, even-length hexadecimal without a leading zero byte.
  */
 export type CertificateSerial = string;
 
 /**
- * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+ * Maximum number of records in the response. Omission or an empty value uses 100.
  */
 export type Limit = number;
 
@@ -941,7 +954,7 @@ export type ListAdministratorsData = {
     path?: never;
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1079,7 +1092,7 @@ export type ListAdministratorSessionsData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1136,7 +1149,7 @@ export type ListGlobalAuditEventsData = {
     path?: never;
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1154,12 +1167,46 @@ export type ListGlobalAuditEventsError = ListGlobalAuditEventsErrors[keyof ListG
 
 export type ListGlobalAuditEventsResponses = {
     /**
-     * Bounded audit-event snapshot.
+     * Backward-compatible bounded audit-event snapshot.
      */
     200: AuditEvents;
 };
 
 export type ListGlobalAuditEventsResponse = ListGlobalAuditEventsResponses[keyof ListGlobalAuditEventsResponses];
+
+export type PageGlobalAuditEventsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+        /**
+         * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+         */
+        cursor?: string;
+    };
+    url: '/v1/admin/audit/page';
+};
+
+export type PageGlobalAuditEventsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type PageGlobalAuditEventsError = PageGlobalAuditEventsErrors[keyof PageGlobalAuditEventsErrors];
+
+export type PageGlobalAuditEventsResponses = {
+    /**
+     * One deterministic cursor page of the audit stream.
+     */
+    200: AuditEventPage;
+};
+
+export type PageGlobalAuditEventsResponse = PageGlobalAuditEventsResponses[keyof PageGlobalAuditEventsResponses];
 
 export type IssueEnrollmentTokenData = {
     body: EnrollmentTokenRequest;
@@ -1216,7 +1263,7 @@ export type ListNetworksData = {
     path?: never;
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1300,7 +1347,7 @@ export type ListNetworkNodesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1332,7 +1379,7 @@ export type ListNetworkRelaysData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1391,7 +1438,7 @@ export type ListNetworkAclRulesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1668,7 +1715,7 @@ export type ListNetworkCertificatesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1700,7 +1747,7 @@ export type ListNetworkRoutesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1732,7 +1779,7 @@ export type ListNetworkAuditEventsData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1750,12 +1797,48 @@ export type ListNetworkAuditEventsError = ListNetworkAuditEventsErrors[keyof Lis
 
 export type ListNetworkAuditEventsResponses = {
     /**
-     * Bounded audit-event snapshot.
+     * Backward-compatible bounded audit-event snapshot.
      */
     200: AuditEvents;
 };
 
 export type ListNetworkAuditEventsResponse = ListNetworkAuditEventsResponses[keyof ListNetworkAuditEventsResponses];
+
+export type PageNetworkAuditEventsData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+        /**
+         * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+         */
+        cursor?: string;
+    };
+    url: '/v1/admin/networks/{network_id}/audit/page';
+};
+
+export type PageNetworkAuditEventsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type PageNetworkAuditEventsError = PageNetworkAuditEventsErrors[keyof PageNetworkAuditEventsErrors];
+
+export type PageNetworkAuditEventsResponses = {
+    /**
+     * One deterministic cursor page of the audit stream.
+     */
+    200: AuditEventPage;
+};
+
+export type PageNetworkAuditEventsResponse = PageNetworkAuditEventsResponses[keyof PageNetworkAuditEventsResponses];
 
 export type RevokeNetworkCertificateData = {
     body: RevocationRequest;

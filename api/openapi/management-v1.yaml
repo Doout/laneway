@@ -8,9 +8,10 @@ info:
   summary: Versioned administrator management and browser-session contract.
   description: >-
     The current v1 administrator surface. It intentionally documents bounded
-    list snapshots and current mutation semantics without claiming cursors,
-    totals, entity tags, preconditions, or idempotency keys that are not yet
-    implemented. JSON request objects are strict and reject unknown fields.
+    list snapshots and cursor-paginated audit streams alongside current
+    mutation semantics without claiming totals, entity tags, preconditions, or
+    idempotency keys that are not yet implemented. JSON request objects are
+    strict and reject unknown fields.
 tags:
   - name: Authentication
     description: Browser administrator authentication and root automation probes.
@@ -33,7 +34,7 @@ tags:
   - name: Certificates
     description: Certificate inventory and revocation.
   - name: Audit
-    description: Global and network-scoped audit snapshots.
+    description: Global and network-scoped audit snapshots and cursor pages.
 
 paths:
   /v1/admin/auth/state:
@@ -381,6 +382,22 @@ paths:
       responses:
         '200':
           $ref: './components.yaml#/components/responses/AuditEvents'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/audit/page:
+    get:
+      operationId: pageGlobalAuditEvents
+      tags: [Audit]
+      summary: Read one cursor page of the global audit stream.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/Limit'
+        - $ref: './components.yaml#/components/parameters/AuditCursor'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AuditEventPage'
         default:
           $ref: './components.yaml#/components/responses/Error'
 
@@ -790,6 +807,23 @@ paths:
       responses:
         '200':
           $ref: './components.yaml#/components/responses/AuditEvents'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/audit/page:
+    get:
+      operationId: pageNetworkAuditEvents
+      tags: [Audit]
+      summary: Read one cursor page of a network audit stream.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+        - $ref: './components.yaml#/components/parameters/AuditCursor'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AuditEventPage'
         default:
           $ref: './components.yaml#/components/responses/Error'
   /v1/admin/networks/{network_id}/certificates/{serial}/revoke:

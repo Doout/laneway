@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,105 @@ func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 	invalidLimit := jsonRequest(t, f.service.Handler(), http.MethodGet, "/v1/admin/networks/"+network.NetworkID+"/audit?limit=1001", nil)
 	if invalidLimit.Code != http.StatusBadRequest {
 		t.Fatalf("invalid audit limit status=%d", invalidLimit.Code)
+	}
+}
+
+func TestAuditManagementCursorPaginationAndScopeBinding(t *testing.T) {
+	f := newFixture(t, 0, nil)
+	ctx := context.Background()
+	for i := range 5 {
+		if _, err := f.store.IssueEnrollmentToken(ctx, f.network.ID, string(rune('a'+i)), time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := f.store.AuditEvents(ctx, f.network.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []auditResponse
+	cursor := ""
+	for {
+		path := "/v1/admin/networks/" + f.network.ID.String() + "/audit/page?limit=2"
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		response := jsonRequest(t, f.service.Handler(), http.MethodGet, path, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("audit page status=%d body=%s", response.Code, response.Body.String())
+		}
+		var page auditPageResponse
+		decodeJSONResponse(t, response, &page)
+		if len(page.Events) == 0 || len(page.Events) > 2 {
+			t.Fatalf("audit page size=%d", len(page.Events))
+		}
+		for _, event := range page.Events {
+			if event.NetworkID != f.network.ID.String() {
+				t.Fatalf("network audit event scope=%q", event.NetworkID)
+			}
+		}
+		got = append(got, page.Events...)
+		cursor = page.NextCursor
+		if cursor == "" {
+			break
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("audit traversal count=%d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].EventID != want[i].ID.String() {
+			t.Fatalf("audit event %d=%s want %s", i, got[i].EventID, want[i].ID)
+		}
+	}
+
+	first := jsonRequest(t, f.service.Handler(), http.MethodGet,
+		"/v1/admin/networks/"+f.network.ID.String()+"/audit/page?limit=1", nil)
+	var page auditPageResponse
+	decodeJSONResponse(t, first, &page)
+	if page.NextCursor == "" {
+		t.Fatal("first audit page omitted continuation cursor")
+	}
+	other, err := f.store.CreateNetwork(ctx, "other-audit-scope", netip.MustParsePrefix("10.45.0.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		"/v1/admin/audit/page?limit=1&cursor=" + page.NextCursor,
+		"/v1/admin/networks/" + other.ID.String() + "/audit/page?limit=1&cursor=" + page.NextCursor,
+		"/v1/admin/networks/" + f.network.ID.String() + "/audit/page?cursor=invalid",
+		"/v1/admin/networks/" + f.network.ID.String() + "/audit/page?cursor=" + page.NextCursor + "&cursor=" + page.NextCursor,
+		"/v1/admin/networks/" + f.network.ID.String() + "/audit/page?unknown=value",
+		"/v1/admin/networks/" + f.network.ID.String() + "/audit/page?cursor=" + page.NextCursor + ";limit=2",
+	} {
+		response := jsonRequest(t, f.service.Handler(), http.MethodGet, path, nil)
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("invalid audit query %q status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+
+	global := jsonRequest(t, f.service.Handler(), http.MethodGet, "/v1/admin/audit/page?limit=1", nil)
+	if global.Code != http.StatusOK {
+		t.Fatalf("global audit status=%d body=%s", global.Code, global.Body.String())
+	}
+	decodeJSONResponse(t, global, &page)
+	if len(page.Events) != 1 || page.Events[0].NetworkID == "" || page.NextCursor == "" {
+		t.Fatalf("global audit page=%+v", page)
+	}
+
+	for _, path := range []string{
+		"/v1/admin/audit?limit=1",
+		"/v1/admin/networks/" + f.network.ID.String() + "/audit?limit=1",
+	} {
+		legacy := jsonRequest(t, f.service.Handler(), http.MethodGet, path, nil)
+		if legacy.Code != http.StatusOK {
+			t.Fatalf("legacy audit %q status=%d body=%s", path, legacy.Code, legacy.Body.String())
+		}
+		var object map[string]json.RawMessage
+		decodeJSONResponse(t, legacy, &object)
+		if len(object) != 1 || object["events"] == nil {
+			t.Fatalf("legacy audit response changed shape: %s", legacy.Body.String())
+		}
 	}
 }
 

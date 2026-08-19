@@ -629,6 +629,11 @@ export const zAuditEvent = z.object({
     return identified ? value.actor_id !== undefined : value.actor_id === undefined;
 }, 'actor_id presence must match actor_kind');
 
+export const zAuditEventPage = z.object({
+    events: z.array(zAuditEvent),
+    next_cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional()
+}).strict();
+
 export const zAuditEvents = z.object({
     events: z.array(zAuditEvent)
 }).strict();
@@ -857,12 +862,17 @@ export const zCreateAdministratorRequest = z.object({
  * Static root service-principal credential for local file-based automation only. The controller rejects this credential when Origin or Sec-Fetch-* headers indicate a browser context. It is never a console credential.
  */
 /**
+ * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+ */
+export const zAuditCursor = z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/);
+
+/**
  * Canonical lowercase, even-length hexadecimal without a leading zero byte.
  */
 export const zCertificateSerial = z.string().regex(/^(?!00)[0-9a-f]{2}(?:[0-9a-f]{2}){0,31}$/);
 
 /**
- * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+ * Maximum number of records in the response. Omission or an empty value uses 100.
  */
 export const zLimit = z.int().gte(1).lte(1000).default(100);
 
@@ -1015,9 +1025,19 @@ export const zListGlobalAuditEventsQuery = z.object({
 }).strict();
 
 /**
- * Bounded audit-event snapshot.
+ * Backward-compatible bounded audit-event snapshot.
  */
 export const zListGlobalAuditEventsResponse = zAuditEvents;
+
+export const zPageGlobalAuditEventsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100),
+    cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional()
+}).strict();
+
+/**
+ * One deterministic cursor page of the audit stream.
+ */
+export const zPageGlobalAuditEventsResponse = zAuditEventPage;
 
 export const zIssueEnrollmentTokenBody = zEnrollmentTokenRequest;
 
@@ -1236,9 +1256,23 @@ export const zListNetworkAuditEventsQuery = z.object({
 }).strict();
 
 /**
- * Bounded audit-event snapshot.
+ * Backward-compatible bounded audit-event snapshot.
  */
 export const zListNetworkAuditEventsResponse = zAuditEvents;
+
+export const zPageNetworkAuditEventsPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+export const zPageNetworkAuditEventsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100),
+    cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional()
+}).strict();
+
+/**
+ * One deterministic cursor page of the audit stream.
+ */
+export const zPageNetworkAuditEventsResponse = zAuditEventPage;
 
 export const zRevokeNetworkCertificateBody = zRevocationRequest;
 

@@ -482,7 +482,9 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 		administratorEnrollmentIssuePolicy, administratorNetworkCreatePolicy, administratorNetworkListPolicy,
 		administratorNetworkReadPolicy, administratorNodeListPolicy, administratorRelayListPolicy,
 		administratorACLListPolicy, administratorCertificateListPolicy, administratorRouteListPolicy,
-		administratorAuditListPolicy, administratorGlobalAuditListPolicy, administratorRouteAssignPolicy, administratorRouteApprovePolicy,
+		administratorAuditListPolicy, administratorAuditPageListPolicy,
+		administratorGlobalAuditListPolicy, administratorGlobalAuditPageListPolicy,
+		administratorRouteAssignPolicy, administratorRouteApprovePolicy,
 		administratorRouteWithdrawPolicy, administratorACLCreatePolicy, administratorACLUpdatePolicy,
 		administratorACLDeletePolicy, administratorNodeRevokePolicy, administratorNodeCapabilitiesPolicy,
 		administratorCertificateRevokePolicy, administratorRelayCreatePolicy, administratorRelayDisablePolicy,
@@ -490,8 +492,8 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 		administratorAccessUserUpdatePolicy, administratorAccessTeamCreatePolicy, administratorAccessMemberAddPolicy,
 		administratorAccessMemberDeletePolicy, administratorAccessGrantCreatePolicy, administratorAccessGrantDeletePolicy,
 	}
-	if len(resourcePolicies) != 31 {
-		t.Fatalf("resource policies=%d want 31 non-bootstrap routes", len(resourcePolicies))
+	if len(resourcePolicies) != 33 {
+		t.Fatalf("resource policies=%d want 33 non-bootstrap routes", len(resourcePolicies))
 	}
 	identityPolicies := []adminauth.RoutePolicy{
 		administratorCreatePolicy, administratorListPolicy, administratorReadPolicy,

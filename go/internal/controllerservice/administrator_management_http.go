@@ -2,7 +2,6 @@ package controllerservice
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -417,28 +416,27 @@ func (s *Service) readGlobalAudit(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	response := make([]auditResponse, 0, len(events))
-	for _, event := range events {
-		item := auditResponse{EventID: event.ID.String(), ActorKind: string(event.Actor.Kind), Action: event.Action,
-			TargetType: event.TargetType, Details: json.RawMessage(event.Details), CreatedAtUnixSeconds: event.CreatedAt.Unix()}
-		if event.NetworkScope != nil {
-			item.NetworkID = event.NetworkScope.String()
-		}
-		if event.Actor.ID != nil {
-			value := event.Actor.ID.String()
-			item.ActorID = &value
-		}
-		if event.ActorNodeID != nil {
-			value := event.ActorNodeID.String()
-			item.ActorNodeID = &value
-		}
-		if event.TargetID != nil {
-			value := event.TargetID.String()
-			item.TargetID = &value
-		}
-		response = append(response, item)
+	response := auditPageJSON(controller.AuditPage{Events: events}, nil, true)
+	s.writeJSON(w, http.StatusOK, map[string]any{"events": response.Events})
+}
+
+func (s *Service) readGlobalAuditPage(w http.ResponseWriter, r *http.Request) {
+	limit, cursor, err := parseAuditPageRequest(r, nil)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"events": response})
+	decision, err := s.administratorDecision(r, adminauth.GlobalTarget())
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	page, err := s.store.AdministratorGlobalAuditEventsPage(r.Context(), decision, limit, cursor)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, auditPageJSON(page, nil, true))
 }
 
 func parseAdministratorNetworkIDs(raw []string) ([]identity.NetworkID, error) {

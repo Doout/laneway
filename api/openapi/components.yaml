@@ -37,13 +37,25 @@ components:
       in: query
       required: false
       description: >-
-        Maximum number of records in the bounded snapshot. The current API has no
-        cursor or total count. Omission or an empty value uses 100.
+        Maximum number of records in the response. Omission or an empty value
+        uses 100.
       schema:
         type: integer
         minimum: 1
         maximum: 1000
         default: 100
+    AuditCursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque continuation token returned as next_cursor by the preceding page.
+        Clients must not inspect, modify, or reuse it with a different audit scope.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+        pattern: '^[A-Za-z0-9_-]+$'
     PrincipalID:
       name: principal_id
       in: path
@@ -286,7 +298,7 @@ components:
           schema:
             $ref: '#/components/schemas/AdministratorSessions'
     AuditEvents:
-      description: Bounded audit-event snapshot.
+      description: Backward-compatible bounded audit-event snapshot.
       headers:
         X-Laneway-Session-ID:
           $ref: '#/components/headers/SessionIDOptional'
@@ -300,6 +312,21 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/AuditEvents'
+    AuditEventPage:
+      description: One deterministic cursor page of the audit stream.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AuditEventPage'
     EnrollmentToken:
       description: Newly issued one-time enrollment token.
       headers:
@@ -1840,3 +1867,20 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AuditEvent'
+    AuditEventPage:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: >-
+            Opaque continuation token. Omitted only when the controller proved
+            that no older audit events remain in this scope.

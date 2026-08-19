@@ -38,7 +38,7 @@ and cannot be combined with `limit`.
 
 ## Current route inventory
 
-The contract contains exactly 43 operations:
+The contract contains exactly 53 operations:
 
 | Method | Path | Access class |
 | --- | --- | --- |
@@ -62,6 +62,7 @@ The contract contains exactly 43 operations:
 | `GET` | `/v1/admin/administrators/{principal_id}/sessions` | Safe protected read |
 | `POST` | `/v1/admin/sessions/{session_id}/revoke` | Protected mutation |
 | `GET` | `/v1/admin/audit` | Safe protected read |
+| `GET` | `/v1/admin/audit/page` | Safe protected read |
 | `POST` | `/v1/admin/enrollment-tokens` | Protected mutation |
 | `POST` | `/v1/admin/bootstrap-bundles` | Protected mutation |
 | `GET` | `/v1/admin/networks` | Safe protected read |
@@ -75,6 +76,15 @@ The contract contains exactly 43 operations:
 | `GET` | `/v1/admin/networks/{network_id}/certificates` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/routes` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/audit` | Safe protected read |
+| `GET` | `/v1/admin/networks/{network_id}/audit/page` | Safe protected read |
+| `GET` | `/v1/admin/networks/{network_id}/access-subjects` | Safe protected read |
+| `POST` | `/v1/admin/networks/{network_id}/users` | Protected mutation |
+| `PATCH` | `/v1/admin/users/{user_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/teams` | Protected mutation |
+| `PUT` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
+| `DELETE` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/access-grants` | Protected mutation |
+| `DELETE` | `/v1/admin/access-grants/{grant_id}` | Protected mutation |
 | `POST` | `/v1/admin/networks/{network_id}/certificates/{serial}/revoke` | Protected mutation |
 | `POST` | `/v1/admin/routes/assign` | Protected mutation |
 | `POST` | `/v1/admin/routes/{route_id}/approve` | Protected mutation |
@@ -86,7 +96,7 @@ The contract contains exactly 43 operations:
 | `POST` | `/v1/admin/relays/{relay_id}/disable` | Protected mutation |
 | `PUT` | `/v1/admin/relays/{relay_id}` | Protected mutation |
 
-## Bounded snapshots and mutation semantics
+## Collection pages and mutation semantics
 
 List operations return a bounded snapshot with one collection property and no
 pagination metadata:
@@ -102,11 +112,23 @@ pagination metadata:
 | Certificates | `{ "certificates": [...] }` |
 | Routes | `{ "routes": [...] }` |
 | Audit events | `{ "events": [...] }` |
+| Audit cursor pages | `{ "events": [...], "next_cursor": "..." }` |
 
 When supported, `limit` is between 1 and 1000; omission or an empty value uses
-100. There is currently no cursor, next-page token, total count, or snapshot
-revision. Clients must not infer that a short response is a durable end-of-list
-marker across later requests.
+100. Most collection operations, including the existing global and network
+`/audit` routes, remain bounded snapshots with no cursor, total count, or
+snapshot revision. Their exact `{ "events": [...] }` response stays unchanged
+for strict v1 clients. Clients must not infer that a short response is a
+durable end-of-list marker for those resources.
+
+The explicit global and network `/audit/page` operations are cursor-paginated
+in authoritative `created_at DESC, event_id DESC` order. A response includes
+`next_cursor` only when the controller proved that older rows remain. Clients
+continue by sending that opaque value as `cursor` with the same global or
+network scope and the same `limit` semantics. Audit cursors are versioned
+implementation details: clients must not decode, alter, or transfer them
+between scopes. Invalid, empty, repeated, or out-of-scope cursors fail as
+malformed requests rather than silently restarting pagination.
 
 The v1 surface does not claim entity tags, `If-Match` preconditions, or a general
 idempotency-key header. Two operations have narrower documented replay behavior:

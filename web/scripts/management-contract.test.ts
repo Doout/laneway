@@ -13,6 +13,8 @@ import {
   zAdministratorUpdateRequest,
   zAssignRouteRequest,
   zAuditEvent,
+  zAuditEventPage,
+  zAuditEvents,
   zBootstrapBundleRequest,
   zCreateAclRuleRequest,
   zCreateAdministratorRequest,
@@ -524,6 +526,15 @@ describe('administrator, enrollment, and audit invariants', () => {
       accepted(zAuditEvent, { ...base, actor_kind })
       rejected(zAuditEvent, { ...base, actor_kind, actor_id: principalId })
     }
+  })
+
+  it('keeps legacy audit snapshots strict while pagination is opt-in', () => {
+    accepted(zAuditEvents, { events: [] })
+    rejected(zAuditEvents, { events: [], next_cursor: 'A'.repeat(56) })
+
+    accepted(zAuditEventPage, { events: [] })
+    accepted(zAuditEventPage, { events: [], next_cursor: 'A'.repeat(56) })
+    rejected(zAuditEventPage, { events: [], next_cursor: 'not a cursor' })
   })
 })
 
