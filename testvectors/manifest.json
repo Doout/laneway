@@ -291,6 +291,14 @@
       "stored_byte_length": 2043,
       "sha256": "0edad9eea138f9693beaf53271a07260c2e345dce01a48bc3ad84640c1b50775",
       "expected": "per_case_go_and_rust"
+    },
+    {
+      "path": "local-api/desktop-snapshot-v1.json",
+      "kind": "local-daemon-api-v1:desktop-snapshot",
+      "encoding": "json-utf8",
+      "stored_byte_length": 2183,
+      "sha256": "8024d5ff4589b11d1157bfc9bf4167b7abf9c547c049be615c3455db11f96144",
+      "expected": "matches_go_rust_and_desktop"
     }
   ]
 }
