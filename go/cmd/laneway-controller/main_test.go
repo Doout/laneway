@@ -304,25 +304,11 @@ ipv4_pool = "100.96.0.0/16"
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := sql.Open("sqlite", database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`DROP TRIGGER controller_identity_state_immutable;
-		DROP TRIGGER controller_identity_state_undeletable;
-		DROP TABLE controller_identity_state;
-		DELETE FROM schema_versions WHERE version=12;
-		VACUUM`); err != nil {
-		raw.Close()
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	downgradeControllerDatabaseToV11(t, database)
 	if err := run(configPath, "", "", "", "", ""); err == nil || !strings.Contains(err.Error(), "does not match the verified controller certificate") {
 		t.Fatalf("existing-v11 initial-network/certificate mismatch error=%v", err)
 	}
-	raw, err = sql.Open("sqlite", database)
+	raw, err := sql.Open("sqlite", database)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,6 +418,40 @@ ipv4_pool = "100.96.0.0/16"
 	return configPath
 }
 
+// downgradeControllerDatabaseToV11 builds a genuine pre-controller-binding
+// fixture from a current empty database. Keep every post-v11 object here so a
+// newly integrated migration cannot accidentally turn the fixture into a
+// database with a sparse schema history.
+func downgradeControllerDatabaseToV11(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		PRAGMA foreign_keys=OFF;
+		DROP TABLE automation_service_access_tokens;
+		DROP TABLE automation_service_principal_permissions;
+		DROP TABLE automation_service_principal_networks;
+		DROP TABLE automation_service_principals;
+		DROP TABLE access_resource_grants;
+		DROP TABLE access_service_ports;
+		DROP TABLE access_services;
+		DROP TABLE access_resources;
+		DROP TRIGGER routes_identity_immutable;
+		DROP INDEX routes_network_identity;
+		DROP TABLE endpoint_status_latest;
+		DROP INDEX certificates_endpoint_status_validity;
+		DROP TRIGGER controller_identity_state_immutable;
+		DROP TRIGGER controller_identity_state_undeletable;
+		DROP TABLE controller_identity_state;
+		DELETE FROM schema_versions WHERE version > 11;
+		VACUUM`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunPreflightRejectsV11TopologyDriftWithoutMigration(t *testing.T) {
 	fixture := newRunPreflightFixture(t)
 	store, err := controller.Open(context.Background(), fixture.database)
@@ -445,21 +465,7 @@ func TestRunPreflightRejectsV11TopologyDriftWithoutMigration(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := sql.Open("sqlite", fixture.database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(`DROP TRIGGER controller_identity_state_immutable;
-		DROP TRIGGER controller_identity_state_undeletable;
-		DROP TABLE controller_identity_state;
-		DELETE FROM schema_versions WHERE version=12;
-		VACUUM`); err != nil {
-		raw.Close()
-		t.Fatal(err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	downgradeControllerDatabaseToV11(t, fixture.database)
 	before := fileDigest(t, fixture.database)
 	err = run(fixture.writeConfig(t, "", "", ""), "", "", "", "", "")
 	if err == nil || !strings.Contains(err.Error(), "existing initial network differs from configuration") {
@@ -469,7 +475,7 @@ func TestRunPreflightRejectsV11TopologyDriftWithoutMigration(t *testing.T) {
 	if before != after {
 		t.Fatal("read-only topology preflight changed the v11 database bytes")
 	}
-	raw, err = sql.Open("sqlite", fixture.database)
+	raw, err := sql.Open("sqlite", fixture.database)
 	if err != nil {
 		t.Fatal(err)
 	}
