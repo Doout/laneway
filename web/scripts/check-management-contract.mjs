@@ -98,8 +98,8 @@ const missing = difference(registered, documented);
 const extra = difference(documented, registered);
 const problems = [];
 if (duplicateYamlKeys.length) problems.push(`duplicate YAML mapping keys: ${duplicateYamlKeys.join(', ')}`);
-if (registered.size !== 60) problems.push(`controller registration count is ${registered.size}, expected 60`);
-if (documented.size !== 60) problems.push(`OpenAPI operation count is ${documented.size}, expected 60`);
+if (registered.size !== 66) problems.push(`controller registration count is ${registered.size}, expected 66`);
+if (documented.size !== 66) problems.push(`OpenAPI operation count is ${documented.size}, expected 66`);
 if (duplicateRegistrations.length) problems.push(`duplicate controller registrations: ${duplicateRegistrations.join(', ')}`);
 if (duplicateOperations.length) problems.push(`duplicate OpenAPI operations: ${duplicateOperations.join(', ')}`);
 if (missing.length) problems.push(`missing from OpenAPI: ${missing.join(', ')}`);
@@ -109,4 +109,4 @@ if (problems.length) {
   throw new Error(`management contract route drift:\n- ${problems.join('\n- ')}`);
 }
 
-console.log('Management contract has unique YAML keys and matches all 60 registered administrator routes.');
+console.log('Management contract has unique YAML keys and matches all 66 registered administrator routes.');

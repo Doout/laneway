@@ -291,6 +291,28 @@ export type AuthState = {
     state: 'bootstrap_required' | 'sign_in';
 };
 
+export const AutomationPermission = {
+    NETWORK_LIST: 'network.list',
+    NETWORK_READ: 'network.read',
+    NETWORK_CREATE: 'network.create',
+    ENROLLMENT_ISSUE: 'enrollment.issue',
+    BOOTSTRAP_BUNDLE_CREATE: 'bootstrap_bundle.create',
+    NODE_READ: 'node.read',
+    NODE_MANAGE: 'node.manage',
+    ROUTE_READ: 'route.read',
+    ROUTE_MANAGE: 'route.manage',
+    ACL_READ: 'acl.read',
+    ACL_MANAGE: 'acl.manage',
+    RELAY_READ: 'relay.read',
+    RELAY_MANAGE: 'relay.manage',
+    CERTIFICATE_READ: 'certificate.read',
+    CERTIFICATE_REVOKE: 'certificate.revoke',
+    AUDIT_READ: 'audit.read',
+    AUDIT_READ_GLOBAL: 'audit.read_global'
+} as const;
+
+export type AutomationPermission = typeof AutomationPermission[keyof typeof AutomationPermission];
+
 export type BootstrapBundle = {
     bundle_id: Secret;
     public_path: string;
@@ -426,6 +448,16 @@ export type CreateAdministratorRequest = unknown & {
      * Omission or null is normalized to an empty array.
      */
     network_ids?: Array<Identifier> | null;
+};
+
+/**
+ * Network-scoped permissions, including network.list, require either all_networks=true or at least one network_id. Global-only permission sets require all_networks=false and an empty network_ids array.
+ */
+export type CreateServicePrincipalRequest = {
+    name: ServicePrincipalName;
+    all_networks: boolean;
+    network_ids: Array<Identifier>;
+    permissions: Array<AutomationPermission>;
 };
 
 export const EndpointPlatform = {
@@ -577,6 +609,25 @@ export type IpProtocol = typeof IpProtocol[keyof typeof IpProtocol];
  */
 export type Identifier = string;
 
+/**
+ * Expiry must be in the future and no more than 365 days away.
+ */
+export type IssueServiceAccessTokenRequest = {
+    /**
+     * Trimmed human-readable token purpose; 1..64 UTF-8 bytes without NUL.
+     */
+    label: string;
+    expires_at_unix_seconds: UnixSeconds;
+};
+
+export type IssuedServiceAccessToken = {
+    /**
+     * Returned once. The controller never persists or returns it again.
+     */
+    readonly access_token: string;
+    token: ServiceAccessToken;
+};
+
 export const MutableRouteMode = { NAT: 'nat', ROUTED: 'routed' } as const;
 
 export type MutableRouteMode = typeof MutableRouteMode[keyof typeof MutableRouteMode];
@@ -667,6 +718,7 @@ export const Permission = {
     AUDIT_READ_GLOBAL: 'audit.read_global',
     PRINCIPAL_MANAGE: 'principal.manage',
     SESSION_MANAGE_OTHERS: 'session.manage_others',
+    SERVICE_PRINCIPAL_MANAGE: 'service_principal.manage',
     RECOVERY_MANAGE: 'recovery.manage',
     ROOT_TOKEN_ROTATE: 'root_token.rotate'
 } as const;
@@ -848,6 +900,59 @@ export const SelectedExitStatusState = {
 
 export type SelectedExitStatusState = typeof SelectedExitStatusState[keyof typeof SelectedExitStatusState];
 
+export type ServiceAccessToken = {
+    token_id: Identifier;
+    principal_id: Identifier;
+    /**
+     * Trimmed human-readable token purpose; 1..64 UTF-8 bytes without NUL.
+     */
+    label: string;
+    state: ServiceAccessTokenState;
+    created_at_unix_seconds: UnixSeconds;
+    expires_at_unix_seconds: UnixSeconds;
+    revoked_at_unix_seconds?: UnixSeconds;
+    /**
+     * Present only for revoked tokens; 1..256 trimmed UTF-8 bytes without NUL.
+     */
+    revocation_reason?: string;
+};
+
+export type ServiceAccessTokenRevocationRequest = {
+    /**
+     * 1..256 trimmed UTF-8 bytes without NUL.
+     */
+    reason: string;
+};
+
+export const ServiceAccessTokenState = {
+    ACTIVE: 'active',
+    EXPIRED: 'expired',
+    REVOKED: 'revoked'
+} as const;
+
+export type ServiceAccessTokenState = typeof ServiceAccessTokenState[keyof typeof ServiceAccessTokenState];
+
+export type ServiceAccessTokens = {
+    tokens: Array<ServiceAccessToken>;
+};
+
+export type ServicePrincipal = {
+    principal_id: Identifier;
+    name: ServicePrincipalName;
+    enabled: boolean;
+    all_networks: boolean;
+    network_ids: Array<Identifier>;
+    permissions: Array<AutomationPermission>;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+export type ServicePrincipalName = string;
+
+export type ServicePrincipals = {
+    service_principals: Array<ServicePrincipal>;
+};
+
 export type SessionRevocationRequest = {
     /**
      * The controller requires 1..256 UTF-8 bytes.
@@ -946,6 +1051,13 @@ export type Username = string;
  * Static root service-principal credential for local file-based automation only. The controller rejects this credential when Origin or Sec-Fetch-* headers indicate a browser context. It is never a console credential.
  */
 /**
+ * Automation-only bearer bound to one durable service principal, explicit operation grants, network scope, expiry, and revocation state. Origin or Sec-Fetch-* browser-context headers are rejected.
+ */
+export type IssuedServiceAccessTokenWritable = {
+    token: ServiceAccessToken;
+};
+
+/**
  * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
  */
 export type AuditCursor = string;
@@ -976,6 +1088,8 @@ export type RouteId = Identifier;
 export type RuleId = Identifier;
 
 export type SessionId = Identifier;
+
+export type TokenId = Identifier;
 
 export type GetAdministratorAuthStateData = {
     body?: never;
@@ -1346,6 +1460,174 @@ export type RevokeAdministratorSessionResponses = {
 };
 
 export type RevokeAdministratorSessionResponse = RevokeAdministratorSessionResponses[keyof RevokeAdministratorSessionResponses];
+
+export type ListServicePrincipalsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/service-principals';
+};
+
+export type ListServicePrincipalsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListServicePrincipalsError = ListServicePrincipalsErrors[keyof ListServicePrincipalsErrors];
+
+export type ListServicePrincipalsResponses = {
+    /**
+     * Bounded automation service-principal snapshot.
+     */
+    200: ServicePrincipals;
+};
+
+export type ListServicePrincipalsResponse = ListServicePrincipalsResponses[keyof ListServicePrincipalsResponses];
+
+export type CreateServicePrincipalData = {
+    body: CreateServicePrincipalRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/admin/service-principals';
+};
+
+export type CreateServicePrincipalErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateServicePrincipalError = CreateServicePrincipalErrors[keyof CreateServicePrincipalErrors];
+
+export type CreateServicePrincipalResponses = {
+    /**
+     * Newly created automation service principal.
+     */
+    201: ServicePrincipal;
+};
+
+export type CreateServicePrincipalResponse = CreateServicePrincipalResponses[keyof CreateServicePrincipalResponses];
+
+export type DisableServicePrincipalData = {
+    body?: never;
+    path: {
+        principal_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/service-principals/{principal_id}/disable';
+};
+
+export type DisableServicePrincipalErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type DisableServicePrincipalError = DisableServicePrincipalErrors[keyof DisableServicePrincipalErrors];
+
+export type DisableServicePrincipalResponses = {
+    /**
+     * Session operation completed with no response body.
+     */
+    204: void;
+};
+
+export type DisableServicePrincipalResponse = DisableServicePrincipalResponses[keyof DisableServicePrincipalResponses];
+
+export type ListServiceAccessTokensData = {
+    body?: never;
+    path: {
+        principal_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/service-principals/{principal_id}/tokens';
+};
+
+export type ListServiceAccessTokensErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListServiceAccessTokensError = ListServiceAccessTokensErrors[keyof ListServiceAccessTokensErrors];
+
+export type ListServiceAccessTokensResponses = {
+    /**
+     * Bounded safe service access-token metadata snapshot.
+     */
+    200: ServiceAccessTokens;
+};
+
+export type ListServiceAccessTokensResponse = ListServiceAccessTokensResponses[keyof ListServiceAccessTokensResponses];
+
+export type IssueServiceAccessTokenData = {
+    body: IssueServiceAccessTokenRequest;
+    path: {
+        principal_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/service-principals/{principal_id}/tokens';
+};
+
+export type IssueServiceAccessTokenErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type IssueServiceAccessTokenError = IssueServiceAccessTokenErrors[keyof IssueServiceAccessTokenErrors];
+
+export type IssueServiceAccessTokenResponses = {
+    /**
+     * One-time service access-token disclosure and safe metadata.
+     */
+    201: IssuedServiceAccessToken;
+};
+
+export type IssueServiceAccessTokenResponse = IssueServiceAccessTokenResponses[keyof IssueServiceAccessTokenResponses];
+
+export type RevokeServiceAccessTokenData = {
+    body: ServiceAccessTokenRevocationRequest;
+    path: {
+        token_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/service-access-tokens/{token_id}/revoke';
+};
+
+export type RevokeServiceAccessTokenErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type RevokeServiceAccessTokenError = RevokeServiceAccessTokenErrors[keyof RevokeServiceAccessTokenErrors];
+
+export type RevokeServiceAccessTokenResponses = {
+    /**
+     * Session operation completed with no response body.
+     */
+    204: void;
+};
+
+export type RevokeServiceAccessTokenResponse = RevokeServiceAccessTokenResponses[keyof RevokeServiceAccessTokenResponses];
 
 export type ListGlobalAuditEventsData = {
     body?: never;

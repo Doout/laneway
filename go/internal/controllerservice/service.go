@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
 	"github.com/Doout/laneway/go/internal/adminauth"
@@ -212,6 +213,12 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/administrators/{principal_id}/recovery-grants", s.issueAdministratorRecoveryGrant)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/administrators/{principal_id}/sessions", s.readAdministratorSessions)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/sessions/{session_id}/revoke", s.revokeAdministratorSession)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-principals", s.createServicePrincipal)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/service-principals", s.readServicePrincipals)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-principals/{principal_id}/disable", s.disableServicePrincipal)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-principals/{principal_id}/tokens", s.issueServiceAccessToken)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/service-principals/{principal_id}/tokens", s.readServiceAccessTokens)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-access-tokens/{token_id}/revoke", s.revokeServiceAccessToken)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/audit", s.readGlobalAudit)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/audit/page", s.readGlobalAuditPage)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/enrollment-tokens", s.issueToken)
@@ -1308,6 +1315,9 @@ func (s *Service) decodeJSON(w http.ResponseWriter, r *http.Request, value any) 
 		return err
 	}
 	defer clear(data)
+	if !utf8.Valid(data) {
+		return malformed("malformed JSON request")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {

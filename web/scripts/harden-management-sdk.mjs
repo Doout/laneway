@@ -33,6 +33,7 @@ const rootOnlyTypeNames = [
   'RecoveryGrant',
   'RootBearer',
   'RotationId',
+  'ServiceAccessToken2',
 ];
 const rootOnlyLowerPrefixes = rootOnlyTypeNames.map((name) => name.toLowerCase());
 const rootOnlyZodNames = [
@@ -41,6 +42,7 @@ const rootOnlyZodNames = [
   'zIssueAdministratorBootstrapGrant',
   'zIssueAdministratorRecoveryGrant',
   'zProbeRootAdministratorCredential',
+  'zServiceAccessToken2',
 ];
 
 const pruneNamedImports = (source) => source.replace(
@@ -91,6 +93,21 @@ const goTrimSpace = (value: string): string => value.replace(goSpace, '');
 const trimmedBytes = (value: string, maximum: number, allowEmpty = false): boolean =>
     (allowEmpty || value.length > 0) && value === goTrimSpace(value) && utf8ByteLength(value) <= maximum && !value.includes('\\0');
 const uniqueStrings = (values: ReadonlyArray<string>): boolean => new Set(values).size === values.length;
+const globalAutomationPermissions = new Set([
+    'network.create',
+    'bootstrap_bundle.create',
+    'audit.read_global',
+]);
+const validServicePrincipalScope = (value: {
+    all_networks: boolean;
+    network_ids: ReadonlyArray<string>;
+    permissions: ReadonlyArray<string>;
+}): boolean => {
+    if (!uniqueStrings(value.network_ids) || !uniqueStrings(value.permissions)) return false;
+    if (value.all_networks && value.network_ids.length > 0) return false;
+    const requiresNetworkScope = value.permissions.some((permission) => !globalAutomationPermissions.has(permission));
+    return requiresNetworkScope === (value.all_networks || value.network_ids.length > 0);
+};
 
 const decodeBase64 = (value: string): Uint8Array | undefined => {
     try {
@@ -331,6 +348,8 @@ const zodReplacements = [
   ["export const zAdministratorAccessPatch = z.intersection(z.unknown(), z.object({\n    role: zRole,\n    all_networks: z.boolean(),\n    network_ids: z.array(zIdentifier)\n}).strict());", "export const zAdministratorAccessPatch = z.object({\n    role: zRole,\n    all_networks: z.boolean(),\n    network_ids: z.array(zIdentifier)\n}).strict().refine(validAdministratorAccess, 'administrator scope is inconsistent with role or contains duplicate networks');"],
   ["export const zAdministratorUpdateRequest = z.intersection(z.union([\n    z.object({\n        access: z.unknown()\n    }).strict(),\n    z.object({\n        enabled: z.unknown()\n    }).strict()\n]), z.object({\n    access: zAdministratorAccessPatch.nullish(),\n    enabled: z.boolean().nullish()\n}).strict());", "export const zAdministratorUpdateRequest = z.object({\n    access: zAdministratorAccessPatch.nullish(),\n    enabled: z.boolean().nullish()\n}).strict().refine((value) => value.access != null || value.enabled != null, 'at least one non-null update member is required');"],
   ["export const zSessionRevocationRequest = z.object({\n    reason: z.string()\n}).strict();", "export const zSessionRevocationRequest = z.object({\n    reason: z.string().refine((value) => byteLengthBetween(value, 1, 256), 'reason must occupy 1..256 UTF-8 bytes')\n}).strict();"],
+  ["export const zServiceAccessTokenRevocationRequest = z.object({\n    reason: z.string().min(1).max(256)\n}).strict();", "export const zServiceAccessTokenRevocationRequest = z.object({\n    reason: z.string().refine((value) => trimmedBytes(value, 256), 'reason must be 1..256 trimmed UTF-8 bytes without NUL')\n}).strict();"],
+  ["export const zCreateServicePrincipalRequest = z.object({\n    name: zServicePrincipalName,\n    all_networks: z.boolean(),\n    network_ids: z.array(zIdentifier),\n    permissions: z.array(zAutomationPermission).min(1)\n}).strict();", "export const zCreateServicePrincipalRequest = z.object({\n    name: zServicePrincipalName,\n    all_networks: z.boolean(),\n    network_ids: z.array(zIdentifier),\n    permissions: z.array(zAutomationPermission).min(1)\n}).strict().refine(validServicePrincipalScope, 'service principal scope and permissions must be unique and consistent');"],
   ["export const zTrafficSelector = z.intersection(z.unknown(), z.object({", "export const zTrafficSelector = z.object({"],
   ["    destination_ports: z.array(zPortRange).optional()\n}).strict());", "    destination_ports: z.array(zPortRange).optional()\n}).strict().refine((value) => !value.destination_ports?.length || value.ip_protocol === 'IP_PROTOCOL_TCP' || value.ip_protocol === 'IP_PROTOCOL_UDP', 'destination ports require TCP or UDP');"],
   ["export const zTrafficSelectorInput = z.intersection(z.unknown(), z.object({", "export const zTrafficSelectorInput = z.object({"],
@@ -348,11 +367,14 @@ const zodReplacements = [
   ["export const zListAdministratorsQuery = z.object({\n    limit: z.int().gte(1).lte(1000).optional().default(100),\n    username: zUsername.optional()\n}).strict();", "export const zListAdministratorsQuery = z.object({\n    limit: z.int().gte(1).lte(1000).optional().default(100)\n}).strict();"],
   ["    withdrawn_at_unix_seconds: zUnixSeconds.optional()\n}).strict();\n\nexport const zRoutes", "    withdrawn_at_unix_seconds: zUnixSeconds.optional()\n}).strict().refine(validRoute, 'route kind, mode, and prefix must be consistent');\n\nexport const zRoutes"],
   ["export const zEnrollmentToken = z.object({\n    token_id: zIdentifier,\n    enrollment_token: zSecret,\n    user_id: zIdentifier.optional(),\n    expires_at_unix_seconds: zUnixSeconds,\n    enrollment_class: zEnrollmentClass,\n    session_lifetime_seconds: z.int().gte(300).lte(86400).optional(),\n    requested_name: z.string().optional(),", "export const zEnrollmentToken = z.object({\n    token_id: zIdentifier,\n    enrollment_token: zSecret,\n    user_id: zIdentifier.optional(),\n    expires_at_unix_seconds: zUnixSeconds,\n    enrollment_class: zEnrollmentClass,\n    session_lifetime_seconds: z.int().gte(300).lte(86400).optional(),\n    requested_name: zResourceName.optional(),"],
+  ["export const zIssueServiceAccessTokenRequest = z.object({\n    label: z.string().min(1).max(64),\n    expires_at_unix_seconds: zUnixSeconds\n}).strict();", "export const zIssueServiceAccessTokenRequest = z.object({\n    label: z.string().refine((value) => trimmedBytes(value, 64), 'label must be 1..64 trimmed UTF-8 bytes without NUL'),\n    expires_at_unix_seconds: zUnixSeconds\n}).strict();"],
   ["    ]).optional()\n}).strict();\n\nexport const zEnrollmentTokenRequest", "    ]).optional()\n}).strict().refine((value) => value.enrollment_class === 'ephemeral'\n    ? value.session_lifetime_seconds !== undefined\n    : value.session_lifetime_seconds === undefined, 'session lifetime must match enrollment class');\n\nexport const zEnrollmentTokenRequest"],
   ["export const zNetwork = z.object({\n    network_id: zIdentifier,\n    name: zResourceName,\n    ipv4_pool: z.string(),\n    ipv6_pool: z.string().optional(),", "export const zNetwork = z.object({\n    network_id: zIdentifier,\n    name: zResourceName,\n    ipv4_pool: z.string().refine((value) => routableCidr(value, 4, 8, 30, true), 'IPv4 pool must be a canonical routable /8../30'),\n    ipv6_pool: z.string().optional().refine((value) => value === undefined || routableCidr(value, 6, 64, 120, true), 'IPv6 pool must be a canonical routable /64../120'),"],
   ["    password_updated_at_unix_seconds: zUnixSeconds\n}).strict();\n\nexport const zAdministratorBootstrapRequest", "    password_updated_at_unix_seconds: zUnixSeconds\n}).strict().refine((value) => validAdministratorAccess(value), 'administrator scope is inconsistent with role or contains duplicate networks');\n\nexport const zAdministratorBootstrapRequest"],
   ["    report: zEndpointRuntimeReport.optional()\n}).strict();\n\nexport const zEndpointStatuses", "    report: zEndpointRuntimeReport.optional()\n}).strict().refine(validEndpointStatus, 'endpoint status freshness, evidence timestamps, and report must be consistent');\n\nexport const zEndpointStatuses"],
   ["    csrf_token: zSecret\n}).strict();\n\nexport const zAdministrators", "    csrf_token: zSecret\n}).strict().refine((value) => validAdministratorAccess(value), 'administrator scope is inconsistent with role or contains duplicate networks');\n\nexport const zAdministrators"],
+  ["export const zServiceAccessToken = z.object({\n    token_id: zIdentifier,\n    principal_id: zIdentifier,\n    label: z.string().min(1).max(64),\n    state: zServiceAccessTokenState,\n    created_at_unix_seconds: zUnixSeconds,\n    expires_at_unix_seconds: zUnixSeconds,\n    revoked_at_unix_seconds: zUnixSeconds.optional(),\n    revocation_reason: z.string().min(1).max(256).optional()\n}).strict();", "export const zServiceAccessToken = z.object({\n    token_id: zIdentifier,\n    principal_id: zIdentifier,\n    label: z.string().refine((value) => trimmedBytes(value, 64), 'label must be 1..64 trimmed UTF-8 bytes without NUL'),\n    state: zServiceAccessTokenState,\n    created_at_unix_seconds: zUnixSeconds,\n    expires_at_unix_seconds: zUnixSeconds,\n    revoked_at_unix_seconds: zUnixSeconds.optional(),\n    revocation_reason: z.string().optional().refine((value) => value === undefined || trimmedBytes(value, 256), 'reason must be 1..256 trimmed UTF-8 bytes without NUL')\n}).strict().refine((value) => value.state === 'revoked'\n    ? value.revoked_at_unix_seconds !== undefined && value.revocation_reason !== undefined\n    : value.revoked_at_unix_seconds === undefined && value.revocation_reason === undefined, 'revocation metadata must match token state');"],
+  ["export const zServicePrincipal = z.object({\n    principal_id: zIdentifier,\n    name: zServicePrincipalName,\n    enabled: z.boolean(),\n    all_networks: z.boolean(),\n    network_ids: z.array(zIdentifier),\n    permissions: z.array(zAutomationPermission).min(1),\n    created_at_unix_seconds: zUnixSeconds,\n    updated_at_unix_seconds: zUnixSeconds\n}).strict();", "export const zServicePrincipal = z.object({\n    principal_id: zIdentifier,\n    name: zServicePrincipalName,\n    enabled: z.boolean(),\n    all_networks: z.boolean(),\n    network_ids: z.array(zIdentifier),\n    permissions: z.array(zAutomationPermission).min(1),\n    created_at_unix_seconds: zUnixSeconds,\n    updated_at_unix_seconds: zUnixSeconds\n}).strict().refine(validServicePrincipalScope, 'service principal scope and permissions must be unique and consistent');"],
 ];
 for (const [before, after] of zodReplacements) zod = replaceRequired(zod, before, after, before.slice(0, 80));
 zod = removeDeclarations(zod, 'const', [
@@ -363,6 +385,7 @@ zod = removeDeclarations(zod, 'const', [
   'zRecoveryGrant',
   'zRootBearer',
   'zRotationId',
+  'zServiceAccessToken2',
 ]);
 await writeFile(zodPath, zod);
 

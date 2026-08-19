@@ -18,11 +18,11 @@ The credential and request classes are intentionally distinct:
 | Request class | Required authentication | Origin and CSRF rules |
 | --- | --- | --- |
 | Authentication state | None | `GET /auth/state` ignores supplied credentials and is direct-peer rate limited. |
-| Public account lifecycle | None | Login, bootstrap, and recovery require an HTTPS same-origin `Origin` and reject active administrator or root credentials. Login may replace a stale or expired session cookie. No CSRF header is required before a session exists. |
+| Public account lifecycle | None | Login, bootstrap, and recovery require an HTTPS same-origin `Origin`. They reject every supplied bearer; login also rejects an active administrator session but may replace a stale or expired session cookie. No CSRF header is required before a session exists. |
 | Current session read | Administrator session cookie and CSRF cookie | `GET /auth/session` requires both cookies but does not require `Origin` or `X-Laneway-CSRF`. |
-| Safe protected resource read | Administrator session cookie **or** root bearer | No CSRF header is required. Ordinary authorization and network scoping still apply. |
+| Safe protected resource read | Administrator session cookie, root bearer, **or scoped service access token** | No CSRF header is required. Ordinary authorization, explicit operation grants, expiry, revocation, and network scoping still apply. |
 | Session lifecycle mutation | Administrator session cookie, CSRF cookie, and `X-Laneway-CSRF` | Rotate and logout are same-origin, session-only operations. |
-| Protected resource mutation | Administrator session cookie, CSRF cookie, and `X-Laneway-CSRF`, **or** root bearer | Cookie-authenticated mutations must be same-origin. Root automation does not use CSRF. |
+| Protected resource mutation | Administrator session cookie, CSRF cookie, and `X-Laneway-CSRF`, **or** a root/scoped automation bearer | Cookie-authenticated mutations must be same-origin. Automation bearers do not use CSRF and are rejected in browser contexts. |
 | Root-only automation | Root bearer | Any `Origin` or `Sec-Fetch-*` header causes authentication failure. |
 
 The session and CSRF cookies are `Secure`, `HttpOnly`, `SameSite=Strict`, and
@@ -36,9 +36,24 @@ both root-token rotation journal operations, and administrator recovery-grant
 issue. The exact `username` filter on `GET /administrators` is also root-only
 and cannot be combined with `limit`.
 
+Service access tokens use the versioned `lnw_spat_v1.<token-id>.<secret>`
+format. The controller returns a bearer only once, persists a purpose-separated
+SHA-256 digest, and reloads the token, principal, explicit operation grant,
+network grant, expiry, and revocation state inside every protected Store
+transaction. Service principals cannot receive administrator, session,
+service-principal, recovery, or root-token management permissions. Restoring a
+database revokes every live service access token so a pre-restore bearer cannot
+replay against the restored control plane.
+
+The controller admits at most 100 enabled service principals and 100 unrevoked
+tokens per principal. Enabled principals and live tokens sort before inactive
+history, so the default 100-record inventory always contains every authority
+that can still authorize a request. Disabling a principal is irreversible in
+v1 and atomically revokes all of its tokens.
+
 ## Current route inventory
 
-The contract contains exactly 60 operations:
+The contract contains exactly 66 operations:
 
 | Method | Path | Access class |
 | --- | --- | --- |
@@ -61,6 +76,12 @@ The contract contains exactly 60 operations:
 | `POST` | `/v1/admin/administrators/{principal_id}/recovery-grants` | Root-only automation |
 | `GET` | `/v1/admin/administrators/{principal_id}/sessions` | Safe protected read |
 | `POST` | `/v1/admin/sessions/{session_id}/revoke` | Protected mutation |
+| `GET` | `/v1/admin/service-principals` | Owner/root safe read |
+| `POST` | `/v1/admin/service-principals` | Owner/root protected mutation |
+| `POST` | `/v1/admin/service-principals/{principal_id}/disable` | Owner/root protected mutation |
+| `GET` | `/v1/admin/service-principals/{principal_id}/tokens` | Owner/root safe read |
+| `POST` | `/v1/admin/service-principals/{principal_id}/tokens` | Owner/root protected mutation |
+| `POST` | `/v1/admin/service-access-tokens/{token_id}/revoke` | Owner/root protected mutation |
 | `GET` | `/v1/admin/audit` | Safe protected read |
 | `GET` | `/v1/admin/audit/page` | Safe protected read |
 | `POST` | `/v1/admin/enrollment-tokens` | Protected mutation |
@@ -112,6 +133,8 @@ pagination metadata:
 | --- | --- |
 | Administrators | `{ "administrators": [...] }` |
 | Administrator sessions | `{ "sessions": [...] }` |
+| Service principals | `{ "service_principals": [...] }` |
+| Service access tokens | `{ "tokens": [...] }` |
 | Networks | `{ "networks": [...] }` |
 | Nodes | `{ "nodes": [...] }` |
 | Endpoint status | `{ "endpoint_statuses": [...] }` |
@@ -180,7 +203,7 @@ Successful login, session read, and session rotation responses require:
 - `X-Laneway-Session-Absolute-Expires-At`
 
 Protected successes authenticated by a browser session carry the same renewal
-headers when a live session remains. Root-authenticated responses omit them, and
+headers when a live session remains. Automation-bearer responses omit them, and
 a self-revoking operation may omit them after invalidating the caller's session.
 Expiry values are Unix seconds encoded as JSON-safe integers.
 
@@ -229,7 +252,7 @@ corepack pnpm api:check
 ```
 
 `api:lint` applies strict OpenAPI linting. `api:routes` rejects duplicate YAML
-mapping keys and verifies parity with all 52 registered management operations.
+mapping keys and verifies parity with all 66 registered management operations.
 Generation is deterministic: CI regenerates the SDK and fails on a diff. The
 repository-level equivalent is `make management-api-check`; CI installs the
 pinned lockfile and runs the same gate.

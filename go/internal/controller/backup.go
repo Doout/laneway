@@ -183,6 +183,11 @@ func prepareRestoredDatabase(ctx context.Context, path string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM administrator_recovery_grants WHERE consumed_at IS NULL`); err != nil {
 		return fmt.Errorf("invalidate restored administrator recovery grants: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE automation_service_access_tokens
+		SET revoked_at=max(created_at,?),revocation_reason='controller database restored'
+		WHERE revoked_at IS NULL`, unix(now)); err != nil {
+		return fmt.Errorf("invalidate restored service access tokens: %w", err)
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE administrator_auth_state
 		SET recovery_generation=recovery_generation+1,last_recovered_at=? WHERE singleton=1`, unix(now))
 	if err != nil {
@@ -287,6 +292,11 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	}
 	if version >= namedAccessSchemaVersion {
 		requiredTables = append(requiredTables, "access_resources", "access_services", "access_service_ports", "access_resource_grants")
+	}
+	if version >= automationServicePrincipalSchemaVersion {
+		requiredTables = append(requiredTables, "automation_service_principals",
+			"automation_service_principal_networks", "automation_service_principal_permissions",
+			"automation_service_access_tokens")
 	}
 	if version >= 8 {
 		requiredTables = append(requiredTables, "administrator_principals", "administrator_principal_networks",
@@ -623,17 +633,21 @@ func validateControllerIdentityBackupState(ctx context.Context, db *sql.DB) erro
 }
 
 var administratorSchemaTables = map[string]struct{}{
-	"administrator_principals":           {},
-	"administrator_principal_networks":   {},
-	"administrator_credentials":          {},
-	"administrator_sessions":             {},
-	"administrator_recovery_grants":      {},
-	"administrator_auth_state":           {},
-	"administrator_root_token_rotations": {},
-	"ephemeral_exit_sessions":            {},
-	"controller_identity_state":          {},
-	"endpoint_status_latest":             {},
-	"audit_events":                       {},
+	"administrator_principals":                 {},
+	"administrator_principal_networks":         {},
+	"administrator_credentials":                {},
+	"administrator_sessions":                   {},
+	"administrator_recovery_grants":            {},
+	"administrator_auth_state":                 {},
+	"administrator_root_token_rotations":       {},
+	"ephemeral_exit_sessions":                  {},
+	"controller_identity_state":                {},
+	"endpoint_status_latest":                   {},
+	"automation_service_principals":            {},
+	"automation_service_principal_networks":    {},
+	"automation_service_principal_permissions": {},
+	"automation_service_access_tokens":         {},
+	"audit_events":                             {},
 }
 
 // administratorSchemaFingerprint covers the exact sqlite_schema text and

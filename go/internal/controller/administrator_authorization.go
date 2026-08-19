@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -12,8 +13,9 @@ import (
 )
 
 type administratorDecisionAuthorization struct {
-	actor     adminauth.Actor
-	principal *adminauth.Principal
+	actor            adminauth.Actor
+	principal        *adminauth.Principal
+	servicePrincipal *adminauth.ServicePrincipal
 }
 
 // authorizeAdministratorDecisionTx turns an early, immutable routing decision
@@ -35,22 +37,22 @@ func (s *Store) authorizeAdministratorDecisionTx(ctx context.Context, tx *sql.Tx
 	return authorization.actor, nil
 }
 
-// administratorDecisionPrincipalTx authorizes a filtered global list. A nil
-// principal identifies the root service principal and therefore no filtering;
-// a session principal contains its current durable grants.
-func (s *Store) administratorDecisionPrincipalTx(ctx context.Context, tx *sql.Tx, decision adminauth.Decision) (adminauth.Actor, *adminauth.Principal, error) {
+// administratorDecisionPrincipalTx authorizes a filtered global list. Nil
+// human and automation principals identify the root and therefore no filtering;
+// either returned principal contains its current durable network grants.
+func (s *Store) administratorDecisionPrincipalTx(ctx context.Context, tx *sql.Tx, decision adminauth.Decision) (adminauth.Actor, *adminauth.Principal, *adminauth.ServicePrincipal, error) {
 	if !decision.Valid() || decision.Target().Kind() != adminauth.DecisionTargetFiltered ||
 		decision.Operation() != adminauth.OperationNetworkList {
-		return adminauth.Actor{}, nil, fmt.Errorf("%w: invalid filtered administrator decision", ErrInvalid)
+		return adminauth.Actor{}, nil, nil, fmt.Errorf("%w: invalid filtered administrator decision", ErrInvalid)
 	}
 	authorization, err := s.authenticateAdministratorDecisionSubjectTx(ctx, tx, decision)
 	if err != nil {
-		return adminauth.Actor{}, nil, err
+		return adminauth.Actor{}, nil, nil, err
 	}
 	if err := authorizeAdministratorDecisionScope(authorization, decision, nil); err != nil {
-		return adminauth.Actor{}, nil, err
+		return adminauth.Actor{}, nil, nil, err
 	}
-	return authorization.actor, authorization.principal, nil
+	return authorization.actor, authorization.principal, authorization.servicePrincipal, nil
 }
 
 // authenticateAdministratorDecisionSubjectTx must run before an ObjectTarget
@@ -124,6 +126,37 @@ func (s *Store) authenticateAdministratorDecisionSubjectTx(ctx context.Context, 
 		result.actor, result.principal = subject.Actor(), &principal
 		return result, nil
 
+	case adminauth.SubjectServicePrincipalToken:
+		tokenID, ok := subject.TokenID()
+		if !ok {
+			return result, ErrCredentialInvalid
+		}
+		proof, ok := subject.TokenHash()
+		if !ok {
+			return result, ErrCredentialInvalid
+		}
+		token, storedHash, err := scanServiceAccessToken(tx.QueryRowContext(ctx, serviceTokenSelect, idBytes(tokenID)))
+		if err != nil || token.PrincipalID != subject.ActorID() || token.RevokedAt != nil ||
+			subtle.ConstantTimeCompare(proof[:], storedHash) != 1 {
+			return result, ErrCredentialInvalid
+		}
+		now := s.now()
+		if now.Before(token.CreatedAt) || !now.Before(token.ExpiresAt) {
+			return result, ErrCredentialInvalid
+		}
+		record, err := servicePrincipalRecord(ctx, tx, token.PrincipalID)
+		if err != nil || !record.Principal.Enabled {
+			return result, ErrCredentialInvalid
+		}
+		if !slices.Contains(record.Principal.Permissions, decision.Operation()) {
+			return result, ErrPermissionDenied
+		}
+		principal := record.Principal
+		principal.NetworkIDs = slices.Clone(principal.NetworkIDs)
+		principal.Permissions = slices.Clone(principal.Permissions)
+		result.actor, result.servicePrincipal = subject.Actor(), &principal
+		return result, nil
+
 	default:
 		return result, ErrCredentialInvalid
 	}
@@ -156,6 +189,10 @@ func authorizeAdministratorDecisionScope(authorization administratorDecisionAuth
 	}
 	if authorization.principal != nil &&
 		!adminauth.Authorize(*authorization.principal, decision.Operation(), canonicalNetworkID) {
+		return ErrPermissionDenied
+	}
+	if authorization.servicePrincipal != nil &&
+		!adminauth.AuthorizeServicePrincipal(*authorization.servicePrincipal, decision.Operation(), canonicalNetworkID) {
 		return ErrPermissionDenied
 	}
 	return nil

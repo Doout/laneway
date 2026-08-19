@@ -70,6 +70,7 @@ func TestPermissionMatrixIsExhaustive(t *testing.T) {
 		{OperationAuditReadGlobal, true, false, false},
 		{OperationPrincipalManage, true, false, false},
 		{OperationSessionManage, true, false, false},
+		{OperationServicePrincipalManage, true, false, false},
 		{OperationRecoveryManage, false, false, false},
 		{OperationRootTokenRotate, false, false, false},
 	}
@@ -173,8 +174,8 @@ func TestVisibleNetworkIDs(t *testing.T) {
 
 func TestManagementRoutesAreCompleteAndUnique(t *testing.T) {
 	routes := ManagementRoutes()
-	if len(routes) != 52 {
-		t.Fatalf("management routes=%d want 52", len(routes))
+	if len(routes) != 58 {
+		t.Fatalf("management routes=%d want 58", len(routes))
 	}
 	seen := make(map[string]struct{}, len(routes))
 	for _, route := range routes {
@@ -255,7 +256,7 @@ func TestOperationsAreExhaustivelyClassified(t *testing.T) {
 		OperationRouteManage, OperationACLRead, OperationACLManage, OperationRelayRead,
 		OperationRelayManage, OperationCertificateRead, OperationCertificateManage, OperationAuditRead,
 		OperationAuditReadGlobal, OperationPrincipalManage, OperationSessionManage, OperationRecoveryManage,
-		OperationRootTokenRotate,
+		OperationRootTokenRotate, OperationServicePrincipalManage,
 	}
 	if len(operations) != len(operationPolicies) {
 		t.Fatalf("declared operations=%d policies=%d", len(operations), len(operationPolicies))

@@ -12,6 +12,21 @@ const goTrimSpace = (value: string): string => value.replace(goSpace, '');
 const trimmedBytes = (value: string, maximum: number, allowEmpty = false): boolean =>
     (allowEmpty || value.length > 0) && value === goTrimSpace(value) && utf8ByteLength(value) <= maximum && !value.includes('\0');
 const uniqueStrings = (values: ReadonlyArray<string>): boolean => new Set(values).size === values.length;
+const globalAutomationPermissions = new Set([
+    'network.create',
+    'bootstrap_bundle.create',
+    'audit.read_global',
+]);
+const validServicePrincipalScope = (value: {
+    all_networks: boolean;
+    network_ids: ReadonlyArray<string>;
+    permissions: ReadonlyArray<string>;
+}): boolean => {
+    if (!uniqueStrings(value.network_ids) || !uniqueStrings(value.permissions)) return false;
+    if (value.all_networks && value.network_ids.length > 0) return false;
+    const requiresNetworkScope = value.permissions.some((permission) => !globalAutomationPermissions.has(permission));
+    return requiresNetworkScope === (value.all_networks || value.network_ids.length > 0);
+};
 
 const decodeBase64 = (value: string): Uint8Array | undefined => {
     try {
@@ -260,6 +275,26 @@ export const zAuthState = z.object({
     state: z.enum(['bootstrap_required', 'sign_in'])
 }).strict();
 
+export const zAutomationPermission = z.enum([
+    'network.list',
+    'network.read',
+    'network.create',
+    'enrollment.issue',
+    'bootstrap_bundle.create',
+    'node.read',
+    'node.manage',
+    'route.read',
+    'route.manage',
+    'acl.read',
+    'acl.manage',
+    'relay.read',
+    'relay.manage',
+    'certificate.read',
+    'certificate.revoke',
+    'audit.read',
+    'audit.read_global'
+]);
+
 export const zCarrierStatusState = z.enum([
     'direct',
     'relay_quic',
@@ -409,6 +444,7 @@ export const zPermission = z.enum([
     'audit.read_global',
     'principal.manage',
     'session.manage_others',
+    'service_principal.manage',
     'recovery.manage',
     'root_token.rotate'
 ]);
@@ -612,6 +648,28 @@ export const zSelectedExitStatusState = z.enum([
     'unavailable',
     'unknown'
 ]);
+
+export const zServiceAccessTokenRevocationRequest = z.object({
+    reason: z.string().refine((value) => trimmedBytes(value, 256), 'reason must be 1..256 trimmed UTF-8 bytes without NUL')
+}).strict();
+
+export const zServiceAccessTokenState = z.enum([
+    'active',
+    'expired',
+    'revoked'
+]);
+
+export const zServicePrincipalName = z.string().min(3).max(64).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/);
+
+/**
+ * Network-scoped permissions, including network.list, require either all_networks=true or at least one network_id. Global-only permission sets require all_networks=false and an empty network_ids array.
+ */
+export const zCreateServicePrincipalRequest = z.object({
+    name: zServicePrincipalName,
+    all_networks: z.boolean(),
+    network_ids: z.array(zIdentifier),
+    permissions: z.array(zAutomationPermission).min(1)
+}).strict().refine(validServicePrincipalScope, 'service principal scope and permissions must be unique and consistent');
 
 export const zSessionRevocationRequest = z.object({
     reason: z.string().refine((value) => byteLengthBetween(value, 1, 256), 'reason must occupy 1..256 UTF-8 bytes')
@@ -905,6 +963,14 @@ export const zEnrollmentTokenRequest = z.object({
         : value.session_lifetime_seconds == null || value.session_lifetime_seconds === 0;
 }, 'session lifetime must match enrollment class');
 
+/**
+ * Expiry must be in the future and no more than 365 days away.
+ */
+export const zIssueServiceAccessTokenRequest = z.object({
+    label: z.string().refine((value) => trimmedBytes(value, 64), 'label must be 1..64 trimmed UTF-8 bytes without NUL'),
+    expires_at_unix_seconds: zUnixSeconds
+}).strict();
+
 export const zNetwork = z.object({
     network_id: zIdentifier,
     name: zResourceName,
@@ -969,6 +1035,43 @@ export const zRoute = z.object({
 
 export const zRoutes = z.object({
     routes: z.array(zRoute)
+}).strict();
+
+export const zServiceAccessToken = z.object({
+    token_id: zIdentifier,
+    principal_id: zIdentifier,
+    label: z.string().refine((value) => trimmedBytes(value, 64), 'label must be 1..64 trimmed UTF-8 bytes without NUL'),
+    state: zServiceAccessTokenState,
+    created_at_unix_seconds: zUnixSeconds,
+    expires_at_unix_seconds: zUnixSeconds,
+    revoked_at_unix_seconds: zUnixSeconds.optional(),
+    revocation_reason: z.string().optional().refine((value) => value === undefined || trimmedBytes(value, 256), 'reason must be 1..256 trimmed UTF-8 bytes without NUL')
+}).strict().refine((value) => value.state === 'revoked'
+    ? value.revoked_at_unix_seconds !== undefined && value.revocation_reason !== undefined
+    : value.revoked_at_unix_seconds === undefined && value.revocation_reason === undefined, 'revocation metadata must match token state');
+
+export const zIssuedServiceAccessToken = z.object({
+    access_token: z.string().regex(/^lnw_spat_v1\.(?!0{32}\.)[0-9a-f]{32}\.[A-Za-z0-9_-]{43}$/).readonly(),
+    token: zServiceAccessToken
+}).strict();
+
+export const zServiceAccessTokens = z.object({
+    tokens: z.array(zServiceAccessToken)
+}).strict();
+
+export const zServicePrincipal = z.object({
+    principal_id: zIdentifier,
+    name: zServicePrincipalName,
+    enabled: z.boolean(),
+    all_networks: z.boolean(),
+    network_ids: z.array(zIdentifier),
+    permissions: z.array(zAutomationPermission).min(1),
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict().refine(validServicePrincipalScope, 'service principal scope and permissions must be unique and consistent');
+
+export const zServicePrincipals = z.object({
+    service_principals: z.array(zServicePrincipal)
 }).strict();
 
 /**
@@ -1068,6 +1171,13 @@ export const zCreateAdministratorRequest = z.object({
  * Static root service-principal credential for local file-based automation only. The controller rejects this credential when Origin or Sec-Fetch-* headers indicate a browser context. It is never a console credential.
  */
 /**
+ * Automation-only bearer bound to one durable service principal, explicit operation grants, network scope, expiry, and revocation state. Origin or Sec-Fetch-* browser-context headers are rejected.
+ */
+export const zIssuedServiceAccessTokenWritable = z.object({
+    token: zServiceAccessToken
+}).strict();
+
+/**
  * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
  */
 export const zAuditCursor = z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/);
@@ -1098,6 +1208,8 @@ export const zRouteId = zIdentifier;
 export const zRuleId = zIdentifier;
 
 export const zSessionId = zIdentifier;
+
+export const zTokenId = zIdentifier;
 
 /**
  * Current administrator authentication entry state.
@@ -1225,6 +1337,66 @@ export const zRevokeAdministratorSessionPath = z.object({
  * Session operation completed with no response body.
  */
 export const zRevokeAdministratorSessionResponse = z.void();
+
+export const zListServicePrincipalsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Bounded automation service-principal snapshot.
+ */
+export const zListServicePrincipalsResponse = zServicePrincipals;
+
+export const zCreateServicePrincipalBody = zCreateServicePrincipalRequest;
+
+/**
+ * Newly created automation service principal.
+ */
+export const zCreateServicePrincipalResponse = zServicePrincipal;
+
+export const zDisableServicePrincipalPath = z.object({
+    principal_id: zIdentifier
+}).strict();
+
+/**
+ * Session operation completed with no response body.
+ */
+export const zDisableServicePrincipalResponse = z.void();
+
+export const zListServiceAccessTokensPath = z.object({
+    principal_id: zIdentifier
+}).strict();
+
+export const zListServiceAccessTokensQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Bounded safe service access-token metadata snapshot.
+ */
+export const zListServiceAccessTokensResponse = zServiceAccessTokens;
+
+export const zIssueServiceAccessTokenBody = zIssueServiceAccessTokenRequest;
+
+export const zIssueServiceAccessTokenPath = z.object({
+    principal_id: zIdentifier
+}).strict();
+
+/**
+ * One-time service access-token disclosure and safe metadata.
+ */
+export const zIssueServiceAccessTokenResponse = zIssuedServiceAccessToken;
+
+export const zRevokeServiceAccessTokenBody = zServiceAccessTokenRevocationRequest;
+
+export const zRevokeServiceAccessTokenPath = z.object({
+    token_id: zIdentifier
+}).strict();
+
+/**
+ * Session operation completed with no response body.
+ */
+export const zRevokeServiceAccessTokenResponse = z.void();
 
 export const zListGlobalAuditEventsQuery = z.object({
     limit: z.int().gte(1).lte(1000).optional().default(100)

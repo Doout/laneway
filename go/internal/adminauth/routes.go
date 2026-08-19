@@ -32,6 +32,12 @@ var managementRoutes = []RoutePolicy{
 	{http.MethodPost, "/v1/admin/administrators/{principal_id}/recovery-grants", OperationRecoveryManage, ScopeObject, true},
 	{http.MethodGet, "/v1/admin/administrators/{principal_id}/sessions", OperationSessionManage, ScopeObject, false},
 	{http.MethodPost, "/v1/admin/sessions/{session_id}/revoke", OperationSessionManage, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/service-principals", OperationServicePrincipalManage, ScopeGlobal, true},
+	{http.MethodGet, "/v1/admin/service-principals", OperationServicePrincipalManage, ScopeGlobal, false},
+	{http.MethodPost, "/v1/admin/service-principals/{principal_id}/disable", OperationServicePrincipalManage, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/service-principals/{principal_id}/tokens", OperationServicePrincipalManage, ScopeObject, true},
+	{http.MethodGet, "/v1/admin/service-principals/{principal_id}/tokens", OperationServicePrincipalManage, ScopeObject, false},
+	{http.MethodPost, "/v1/admin/service-access-tokens/{token_id}/revoke", OperationServicePrincipalManage, ScopeObject, true},
 	{http.MethodGet, "/v1/admin/audit", OperationAuditReadGlobal, ScopeGlobal, false},
 	{http.MethodGet, "/v1/admin/audit/page", OperationAuditReadGlobal, ScopeGlobal, false},
 	{http.MethodPost, "/v1/admin/enrollment-tokens", OperationEnrollmentIssue, ScopeBody, true},
@@ -102,7 +108,8 @@ func (p RoutePolicy) Valid() bool {
 		return p.Operation.NetworkScoped()
 	case ScopeObject:
 		return p.Operation.NetworkScoped() || p.Operation == OperationPrincipalManage ||
-			p.Operation == OperationSessionManage || p.Operation == OperationRecoveryManage ||
+			p.Operation == OperationSessionManage || p.Operation == OperationServicePrincipalManage ||
+			p.Operation == OperationRecoveryManage ||
 			p.Operation == OperationRootTokenRotate
 	default:
 		return false

@@ -49,7 +49,28 @@ func TestSubjectConstructionAndDefensiveValues(t *testing.T) {
 		t.Fatal("administrator actor aliases subject state")
 	}
 
-	if !SubjectRootServicePrincipal.Valid() || !SubjectAdministratorSession.Valid() || SubjectKind("unknown").Valid() {
+	tokenPrincipalID, tokenID, tokenProof := identity.ID{4}, identity.ID{5}, [32]byte{6}
+	token := ServicePrincipalTokenSubject(tokenPrincipalID, tokenID, tokenProof)
+	tokenPrincipalID[0], tokenID[0], tokenProof[0] = 7, 8, 9
+	gotTokenID, hasTokenID := token.TokenID()
+	gotTokenProof, hasTokenProof := token.TokenHash()
+	if !token.Valid() || token.Kind() != SubjectServicePrincipalToken || token.ActorID() != (identity.ID{4}) ||
+		!hasTokenID || gotTokenID != (identity.ID{5}) || !hasTokenProof || gotTokenProof != ([32]byte{6}) {
+		t.Fatalf("invalid service access-token subject: %+v", token)
+	}
+	if _, ok := token.SessionID(); ok {
+		t.Fatal("service access-token subject exposed a session ID")
+	}
+	gotTokenID[0], gotTokenProof[0] = 1, 1
+	if stableID, _ := token.TokenID(); stableID != (identity.ID{5}) {
+		t.Fatal("service access-token ID accessor aliases subject state")
+	}
+	if stableProof, _ := token.TokenHash(); stableProof != ([32]byte{6}) {
+		t.Fatal("service access-token proof accessor aliases subject state")
+	}
+
+	if !SubjectRootServicePrincipal.Valid() || !SubjectServicePrincipalToken.Valid() ||
+		!SubjectAdministratorSession.Valid() || SubjectKind("unknown").Valid() {
 		t.Fatal("subject kinds were not classified exhaustively")
 	}
 	invalid := []Subject{
@@ -57,6 +78,9 @@ func TestSubjectConstructionAndDefensiveValues(t *testing.T) {
 		RootSubject(identity.ID{}),
 		SessionSubject(identity.ID{}, identity.ID{3}),
 		SessionSubject(identity.ID{2}, identity.ID{}),
+		ServicePrincipalTokenSubject(identity.ID{}, identity.ID{3}, [32]byte{4}),
+		ServicePrincipalTokenSubject(identity.ID{2}, identity.ID{}, [32]byte{4}),
+		ServicePrincipalTokenSubject(identity.ID{2}, identity.ID{3}, [32]byte{}),
 		{kind: SubjectRootServicePrincipal, actorID: identity.ID{1}, sessionID: identity.ID{3}},
 		{kind: SubjectKind("unknown"), actorID: identity.ID{1}},
 	}
@@ -154,8 +178,8 @@ func TestDecisionBindsEveryRouteToItsExactTargetKind(t *testing.T) {
 		ObjectTarget(objectID),
 	}
 	routes := ManagementRoutes()
-	if len(routes) != 52 {
-		t.Fatalf("management routes=%d want 52", len(routes))
+	if len(routes) != 58 {
+		t.Fatalf("management routes=%d want 58", len(routes))
 	}
 	for _, policy := range routes {
 		policy := policy
@@ -256,7 +280,8 @@ func TestDecisionBindsGlobalObjectManagementPolicies(t *testing.T) {
 	owner := Principal{ID: identity.ID{1}, Username: "owner", Role: RoleOwner, Enabled: true, AllNetworks: true}
 	operator := Principal{ID: identity.ID{1}, Username: "operator", Role: RoleOperator, Enabled: true}
 	for _, operation := range []Operation{
-		OperationPrincipalManage, OperationSessionManage, OperationRecoveryManage, OperationRootTokenRotate,
+		OperationPrincipalManage, OperationSessionManage, OperationServicePrincipalManage,
+		OperationRecoveryManage, OperationRootTokenRotate,
 	} {
 		policy := RoutePolicy{
 			Method: "DELETE", Pattern: "/v1/auth/objects/{object_id}", Operation: operation,
@@ -492,7 +517,7 @@ func expectedRoleAllows(role Role, operation Operation) bool {
 		OperationRelayManage, OperationCertificateManage:
 		return role == RoleOwner || role == RoleOperator
 	case OperationNetworkCreate, OperationBootstrapCreate, OperationAuditReadGlobal,
-		OperationPrincipalManage, OperationSessionManage:
+		OperationPrincipalManage, OperationSessionManage, OperationServicePrincipalManage:
 		return role == RoleOwner
 	case OperationRecoveryManage, OperationRootTokenRotate:
 		return false

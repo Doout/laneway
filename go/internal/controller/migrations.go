@@ -831,6 +831,134 @@ CREATE TRIGGER access_resource_grants_immutable
 BEGIN
     SELECT RAISE(ABORT, 'access resource grant is immutable');
 END;
+`, `
+CREATE TABLE automation_service_principals (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    name TEXT NOT NULL UNIQUE CHECK(
+        length(name) BETWEEN 3 AND 64 AND
+        name = trim(name) AND
+        name GLOB '[a-z0-9]*' AND
+        substr(name, -1, 1) GLOB '[a-z0-9]' AND
+        name NOT GLOB '*[^a-z0-9._-]*'
+    ),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    all_networks INTEGER NOT NULL DEFAULT 0 CHECK(all_networks IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    disabled_at INTEGER,
+    CHECK(
+        (enabled = 1 AND disabled_at IS NULL) OR
+        (enabled = 0 AND disabled_at IS NOT NULL AND disabled_at >= created_at)
+    )
+) STRICT;
+
+CREATE TABLE automation_service_principal_networks (
+    principal_id BLOB NOT NULL REFERENCES automation_service_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id,network_id)
+) STRICT;
+CREATE INDEX automation_service_principal_networks_network
+    ON automation_service_principal_networks(network_id,principal_id);
+
+CREATE TABLE automation_service_principal_permissions (
+    principal_id BLOB NOT NULL REFERENCES automation_service_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    operation TEXT NOT NULL CHECK(operation IN (
+        'network.list','network.read','network.create','enrollment.issue',
+        'bootstrap_bundle.create','node.read','node.manage','route.read','route.manage',
+        'acl.read','acl.manage','relay.read','relay.manage','certificate.read',
+        'certificate.revoke','audit.read','audit.read_global'
+    )),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id,operation)
+) STRICT;
+
+CREATE TABLE automation_service_access_tokens (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    principal_id BLOB NOT NULL REFERENCES automation_service_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    label TEXT NOT NULL CHECK(
+        length(CAST(label AS BLOB)) BETWEEN 1 AND 64 AND
+        label = trim(label) AND
+        instr(label,char(0)) = 0
+    ),
+    token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(
+        length(CAST(revocation_reason AS BLOB)) <= 256 AND
+        (revocation_reason = '' OR revocation_reason = trim(revocation_reason)) AND
+        instr(revocation_reason,char(0)) = 0
+    ),
+    CHECK(
+        (revoked_at IS NULL AND revocation_reason = '') OR
+        (revoked_at IS NOT NULL AND revoked_at >= created_at AND length(revocation_reason) > 0)
+    )
+) STRICT;
+CREATE INDEX automation_service_access_tokens_principal
+    ON automation_service_access_tokens(principal_id,created_at,id);
+CREATE INDEX automation_service_access_tokens_active_expiry
+    ON automation_service_access_tokens(expires_at,id) WHERE revoked_at IS NULL;
+
+CREATE TRIGGER automation_service_principals_identity_immutable
+    BEFORE UPDATE OF id,name,all_networks,created_at ON automation_service_principals
+BEGIN
+    SELECT RAISE(ABORT, 'automation service principal identity is immutable');
+END;
+CREATE TRIGGER automation_service_principals_enabled_limit
+    BEFORE INSERT ON automation_service_principals
+    WHEN NEW.enabled=1 AND (SELECT count(*) FROM automation_service_principals WHERE enabled=1) >= 100
+BEGIN
+    SELECT RAISE(ABORT, 'enabled automation service principal limit reached');
+END;
+CREATE TRIGGER automation_service_principal_disable_immutable
+    BEFORE UPDATE OF enabled,disabled_at ON automation_service_principals
+    WHEN OLD.enabled=0
+BEGIN
+    SELECT RAISE(ABORT, 'disabled automation service principal is immutable');
+END;
+CREATE TRIGGER automation_service_principal_scope_requires_scoped
+    BEFORE INSERT ON automation_service_principal_networks
+BEGIN
+    SELECT CASE WHEN COALESCE((SELECT all_networks FROM automation_service_principals
+        WHERE id=NEW.principal_id),1) <> 0
+        THEN RAISE(ABORT, 'all-network service principal cannot retain network scopes') END;
+END;
+CREATE TRIGGER automation_service_principal_scope_immutable
+    BEFORE UPDATE ON automation_service_principal_networks
+BEGIN
+    SELECT RAISE(ABORT, 'automation service principal scope is immutable');
+END;
+CREATE TRIGGER automation_service_principal_permission_immutable
+    BEFORE UPDATE ON automation_service_principal_permissions
+BEGIN
+    SELECT RAISE(ABORT, 'automation service principal permission is immutable');
+END;
+CREATE TRIGGER automation_service_access_token_immutable
+    BEFORE UPDATE OF id,principal_id,label,token_hash,created_at,expires_at
+    ON automation_service_access_tokens
+BEGIN
+    SELECT RAISE(ABORT, 'automation service access token identity is immutable');
+END;
+CREATE TRIGGER automation_service_access_token_unrevoked_limit
+    BEFORE INSERT ON automation_service_access_tokens
+    WHEN NEW.revoked_at IS NULL AND (
+        SELECT count(*) FROM automation_service_access_tokens
+        WHERE principal_id=NEW.principal_id AND revoked_at IS NULL
+    ) >= 100
+BEGIN
+    SELECT RAISE(ABORT, 'unrevoked automation service access token limit reached');
+END;
+CREATE TRIGGER automation_service_access_token_revocation_immutable
+    BEFORE UPDATE OF revoked_at,revocation_reason ON automation_service_access_tokens
+    WHEN OLD.revoked_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'automation service access token revocation is immutable');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

@@ -23,6 +23,7 @@ import {
   zCreateAdministratorRequest,
   zCreateAccessResourceRequest,
   zCreateAccessServiceRequest,
+  zCreateServicePrincipalRequest,
   zEnrollmentTokenRequest,
   zEndpointRuntimeReport,
   zEndpointStatus,
@@ -39,6 +40,9 @@ import {
   zRequestId,
   zResourceName,
   zRevocationRequest,
+  zIssueServiceAccessTokenRequest,
+  zServiceAccessToken,
+  zServiceAccessTokenRevocationRequest,
   zSessionRevocationRequest,
   zTrafficSelector,
   zTrafficSelectorInput,
@@ -235,6 +239,32 @@ describe('UTF-8 byte limits', () => {
     accepted(zSessionRevocationRequest, { reason: 'é'.repeat(128) })
     rejected(zSessionRevocationRequest, { reason: 'é'.repeat(129) })
     rejected(zSessionRevocationRequest, { reason: '' })
+
+    accepted(zServiceAccessTokenRevocationRequest, { reason: 'é'.repeat(128) })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: 'é'.repeat(129) })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: '' })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: ' padded' })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: 'nul\0reason' })
+  })
+
+  it('enforces service access-token label byte limits', () => {
+    const expires_at_unix_seconds = 2_000_000_000
+    accepted(zIssueServiceAccessTokenRequest, {
+      label: 'é'.repeat(32),
+      expires_at_unix_seconds,
+    })
+    rejected(zIssueServiceAccessTokenRequest, {
+      label: 'é'.repeat(33),
+      expires_at_unix_seconds,
+    })
+    rejected(zIssueServiceAccessTokenRequest, {
+      label: ' padded',
+      expires_at_unix_seconds,
+    })
+    rejected(zIssueServiceAccessTokenRequest, {
+      label: 'nul\0label',
+      expires_at_unix_seconds,
+    })
   })
 
   it('enforces bootstrap payload and ACL-description byte limits', () => {
@@ -273,6 +303,76 @@ describe('UTF-8 byte limits', () => {
         description: 'bad\0description',
       })
     }
+  })
+})
+
+describe('service-principal automation invariants', () => {
+  const globalPrincipal = {
+    name: 'release-bot',
+    all_networks: false,
+    network_ids: [],
+    permissions: ['network.create'] as const,
+  }
+  const scopedPrincipal = {
+    name: 'inventory-bot',
+    all_networks: false,
+    network_ids: [networkId],
+    permissions: ['network.list', 'network.read'] as const,
+  }
+
+  it('requires explicit unique permissions and matching network scope', () => {
+    accepted(zCreateServicePrincipalRequest, globalPrincipal)
+    accepted(zCreateServicePrincipalRequest, scopedPrincipal)
+    accepted(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      all_networks: true,
+      network_ids: [],
+    })
+
+    rejected(zCreateServicePrincipalRequest, {
+      ...globalPrincipal,
+      network_ids: [networkId],
+    })
+    rejected(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      network_ids: [],
+    })
+    rejected(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      network_ids: [networkId, networkId],
+    })
+    rejected(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      permissions: ['network.read', 'network.read'],
+    })
+  })
+
+  it('binds revocation metadata to revoked token state', () => {
+    const base = {
+      token_id: '5'.repeat(32),
+      principal_id: principalId,
+      label: 'deployment',
+      created_at_unix_seconds: 1,
+      expires_at_unix_seconds: 2,
+    }
+    accepted(zServiceAccessToken, { ...base, state: 'active' })
+    accepted(zServiceAccessToken, {
+      ...base,
+      state: 'revoked',
+      revoked_at_unix_seconds: 2,
+      revocation_reason: 'rotated',
+    })
+    rejected(zServiceAccessToken, {
+      ...base,
+      state: 'active',
+      revoked_at_unix_seconds: 2,
+      revocation_reason: 'rotated',
+    })
+    rejected(zServiceAccessToken, {
+      ...base,
+      state: 'revoked',
+      revoked_at_unix_seconds: 2,
+    })
   })
 })
 
