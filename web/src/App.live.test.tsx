@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { App } from './App.live'
@@ -49,7 +49,7 @@ describe('shipped live application authorization', () => {
         { node_id: '4'.repeat(32), network_id: networkId, name: 'healthy-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' },
         { node_id: '5'.repeat(32), network_id: networkId, name: 'expired-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'ephemeral', lease_expires_at_unix_seconds: 1 },
       ],
-      visible: 'healthy-node', hidden: 'expired-node', filter: 'Active only',
+      visible: 'healthy-node', hidden: 'expired-node', filter: 'Current only',
     },
     {
       page: 'users', path: '/users', permission: 'acl.read', inventoryPath: '/access-subjects', responseKey: 'users',
@@ -237,5 +237,102 @@ describe('shipped live application authorization', () => {
 
     expect(await screen.findByRole('heading', { name: heading })).toBeVisible()
     expect(screen.getByText(command)).toBeVisible()
+  })
+
+  it('reports configured inventory without presenting relay enablement as runtime health', async () => {
+    vi.stubEnv('MODE', 'live')
+    const nodeId = '4'.repeat(32)
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list', 'node.read', 'route.read', 'acl.read', 'relay.read', 'certificate.read'])))
+      if (path.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [{ network_id: networkId, name: 'Scoped network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 }] }))
+      if (path.includes('/nodes?')) return Promise.resolve(managementResponse({ nodes: [{ node_id: nodeId, network_id: networkId, name: 'configured-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' }] }))
+      if (path.includes('/routes?')) return Promise.resolve(managementResponse({ routes: [{ route_id: '5'.repeat(32), network_id: networkId, node_id: nodeId, prefix: '10.20.0.0/16', kind: 'subnet', mode: 'nat', metric: 100, state: 'approved', created_at_unix_seconds: 1_700_000_000 }] }))
+      if (path.includes('/access-subjects')) return Promise.resolve(managementResponse({ users: [], teams: [], memberships: [], grants: [] }))
+      if (path.includes('/acl-rules?')) return Promise.resolve(managementResponse({ acl_rules: [{ rule_id: '6'.repeat(32), network_id: networkId, priority: 100, action: 'accept', selector: {}, description: 'Configured rule', enabled: true, configuration_epoch: 1 }] }))
+      if (path.includes('/relays?')) return Promise.resolve(managementResponse({ relays: [{ relay_id: '7'.repeat(32), network_id: networkId, service_id: '8'.repeat(32), name: 'enabled-relay', endpoint: 'relay.example.test:443', enabled: true, created_at_unix_seconds: 1_700_000_000, configuration_epoch: 1 }] }))
+      if (path.includes('/certificates?')) return Promise.resolve(managementResponse({ certificates: [] }))
+      throw new Error(`Unexpected request ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPath('/overview')
+    expect(await screen.findByText('Controller inventory')).toBeVisible()
+    expect(screen.getByText('current nodes and enabled relays')).toBeVisible()
+    expect(screen.getByText('current routes and enabled rules')).toBeVisible()
+    expect(screen.getByText('Current nodes')).toBeVisible()
+    expect(screen.getByText('Current routes')).toBeVisible()
+    expect(screen.queryByText('Online')).not.toBeInTheDocument()
+    expect(screen.queryByText('active nodes and relays')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('link', { name: /^Infrastructure$/ }))
+    expect(await screen.findByRole('heading', { name: 'Infrastructure' })).toBeVisible()
+    expect(screen.getByText('Enabled relays')).toBeVisible()
+    expect(screen.getByText('Runtime status')).toBeVisible()
+    expect(screen.getByText('Not reported')).toBeVisible()
+    expect(screen.getByText('No relay health telemetry')).toBeVisible()
+    expect(screen.getByText('Configured')).toBeVisible()
+    expect(screen.queryByText('Relays online')).not.toBeInTheDocument()
+    expect(screen.queryByText('Coverage')).not.toBeInTheDocument()
+  })
+
+  it('marks permission-limited inventory counts as unavailable instead of zero', async () => {
+    vi.stubEnv('MODE', 'live')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list'])))
+      if (path.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [{ network_id: networkId, name: 'Scoped network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 }] }))
+      throw new Error(`Unexpected request ${path}`)
+    }))
+
+    renderPath('/overview')
+    const overviewSummary = await screen.findByLabelText('Network inventory summary')
+    expect(within(overviewSummary).getAllByText('—')).toHaveLength(3)
+    expect(within(overviewSummary).getAllByText('Not authorized')).toHaveLength(3)
+
+    fireEvent.click(screen.getByRole('link', { name: /^Infrastructure$/ }))
+    expect(await screen.findByText('Relay inventory unavailable')).toBeVisible()
+    expect(screen.getByText('This administrator cannot read relay records.')).toBeVisible()
+    const infrastructureSummary = screen.getByLabelText('Infrastructure summary')
+    expect(within(infrastructureSummary).getByText('Not authorized')).toBeVisible()
+  })
+
+  it('keeps node moves and network connections visible but unavailable when the API has no contract', async () => {
+    vi.stubEnv('MODE', 'live')
+    const secondNetworkId = '5'.repeat(32)
+    const nodeId = '4'.repeat(32)
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list', 'node.read', 'route.read'], { network_ids: [networkId, secondNetworkId] })))
+      if (path.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [
+        { network_id: networkId, name: 'First network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 },
+        { network_id: secondNetworkId, name: 'Second network', ipv4_pool: '100.65.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 },
+      ] }))
+      if (path.includes(`/networks/${networkId}/nodes?`)) return Promise.resolve(managementResponse({ nodes: [{ node_id: nodeId, network_id: networkId, name: 'movable-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' }] }))
+      if (path.includes(`/networks/${secondNetworkId}/nodes?`)) return Promise.resolve(managementResponse({ nodes: [] }))
+      if (path.includes('/routes?')) return Promise.resolve(managementResponse({ routes: [] }))
+      throw new Error(`Unexpected request ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPath('/networks?view=nodes')
+    expect(await screen.findByText('movable-node')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
+    expect(screen.getByText('Node reassignment is not available in this controller API.')).toBeVisible()
+    expect(screen.getByLabelText('Destination network')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Unavailable' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('link', { name: 'Connectivity' }))
+    expect(await screen.findByText('Connection data unavailable')).toBeVisible()
+    expect(screen.getByText('No connection state reported')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect network' }))
+    expect(screen.getByText('Network connection management is not available in this controller API.')).toBeVisible()
+    expect(screen.getByLabelText('Destination network')).toBeDisabled()
+    expect(screen.getByLabelText('Traffic direction')).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Unavailable' })).toBeDisabled()
+
+    const paths = fetchMock.mock.calls.map(([input]) => String(input))
+    expect(paths.some((path) => path.includes('/network-connections'))).toBe(false)
+    expect(paths.some((path) => path.includes(`/nodes/${nodeId}/move`))).toBe(false)
   })
 })

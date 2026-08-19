@@ -26,7 +26,7 @@ export function RoutesPage() {
   const purposeOptions = [
     { id: 'all' as const, label: 'All paths', detail: `${records.filter((route) => routeState(route).actionable).length} current`, icon: <Waypoints size={18} /> },
     { id: 'private' as const, label: 'Private destinations', detail: `${privateRoutes} configured`, icon: <Network size={18} /> },
-    { id: 'exit' as const, label: 'Internet exits', detail: `${exits} available`, icon: <Globe2 size={18} /> },
+    { id: 'exit' as const, label: 'Internet exits', detail: `${exits} configured`, icon: <Globe2 size={18} /> },
     { id: 'review' as const, label: 'Needs review', detail: needsReview ? `${needsReview} waiting` : 'Nothing waiting', icon: <Clock3 size={18} /> },
   ]
   return <>

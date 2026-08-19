@@ -185,7 +185,7 @@ test('compiled live artifact uses same-origin cookie transport and real permissi
   await expect(page.getByText('controller-node-canary', { exact: true }).first()).toBeVisible()
   await expect(page.getByText('Network exit', { exact: true })).toBeVisible()
   await networkViews.getByRole('link', { name: 'Connectivity' }).click()
-  await expect(page.getByText('No connections', { exact: true })).toBeVisible()
+  await expect(page.getByText('Connection data unavailable', { exact: true })).toBeVisible()
   await networkViews.getByRole('link', { name: 'Networks', exact: true }).click()
   await page.getByRole('button', { name: 'Add Network' }).click()
   await expect(page.getByRole('heading', { name: 'Create Network' })).toBeVisible()

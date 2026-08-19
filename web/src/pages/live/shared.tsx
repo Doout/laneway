@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Link2, MonitorDot, Network, TriangleAlert } from 'lucide-react'
 import { Button, Callout, EmptyState, FilterSelect, Toolbar } from '../../components/ui'
-import type { ControllerACLRule, ControllerAccessTeam, ControllerAccessUser, ControllerAuditEvent, ControllerCertificate, ControllerNode, ControllerRoute } from '../../lib/control-plane'
+import type { ControllerACLRule, ControllerAuditEvent, ControllerCertificate, ControllerNode, ControllerRoute } from '../../lib/control-plane'
 
 export function time(seconds?: number) {
   return seconds ? new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(seconds * 1000)) : 'Not recorded'
@@ -176,31 +176,6 @@ export const subnetRouterCapability = 1 << 3
 export const exitNodeCapability = 1 << 4
 export const emptyNodes: ControllerNode[] = []
 
-export type NetworkConnection = {
-  connection_id: string
-  source_network_id: string
-  destination_network_id: string
-  direction: 'one_way' | 'two_way'
-  state: 'draft' | 'active' | 'disabled'
-  default_action: 'deny'
-  created_at_unix_seconds: number
-}
-
-export type NetworkConnectionRule = {
-  rule_id: string
-  connection_id: string
-  source_kind: 'team' | 'user' | 'node'
-  source_id: string
-  target_kind: 'network' | 'node'
-  target_id?: string
-  protocol: 'any' | 'tcp' | 'udp' | 'icmp'
-  destination_ports?: string
-}
-
-export function networkConnectionSourceId(kind: NetworkConnectionRule['source_kind'], choice: ControllerAccessTeam | ControllerAccessUser | ControllerNode) {
-  return kind === 'team' ? (choice as ControllerAccessTeam).team_id : kind === 'user' ? (choice as ControllerAccessUser).user_id : (choice as ControllerNode).node_id
-}
-
 export function VisibilityToolbar({ value, onChange, currentLabel, visible, total, children }: {
   value: RecordVisibility
   onChange: (value: RecordVisibility) => void
@@ -226,11 +201,11 @@ export function DashboardEmpty({ icon, title, description }: { icon: ReactNode; 
   return <div className="dashboard-empty"><span aria-hidden="true">{icon}</span><div><strong>{title}</strong>{description ? <p>{description}</p> : null}</div></div>
 }
 
-export function NetworkWorkspaceTabs({ view, networks, nodes, connections }: { view: NetworkWorkspaceView; networks: number; nodes: number; connections: number }) {
-  const items: Array<{ id: NetworkWorkspaceView; label: string; count: number; icon: ReactNode }> = [
+export function NetworkWorkspaceTabs({ view, networks, nodes, connections }: { view: NetworkWorkspaceView; networks: number; nodes: number; connections?: number }) {
+  const items: Array<{ id: NetworkWorkspaceView; label: string; count: ReactNode; icon: ReactNode }> = [
     { id: 'networks', label: 'Networks', count: networks, icon: <Network size={15} /> },
     { id: 'nodes', label: 'Nodes', count: nodes, icon: <MonitorDot size={15} /> },
-    { id: 'connectivity', label: 'Connectivity', count: connections, icon: <Link2 size={15} /> },
+    { id: 'connectivity', label: 'Connectivity', count: connections ?? '—', icon: <Link2 size={15} /> },
   ]
   return <nav className="network-workspace-tabs" aria-label="Network workspace views">{items.map((item) => <Link key={item.id} to={item.id === 'networks' ? '/networks' : `/networks?view=${item.id}`} aria-current={view === item.id ? 'page' : undefined}><span aria-hidden="true">{item.icon}</span><span>{item.label}</span><em aria-hidden="true">{item.count}</em></Link>)}</nav>
 }
