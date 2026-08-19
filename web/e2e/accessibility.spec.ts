@@ -99,6 +99,24 @@ test.describe('mobile layout', () => {
   }
 })
 
+test('long node names remain contained on the node detail page', async ({ page }) => {
+  const longName = 'ibmcloud-shared-exit-v0261-expired-exit-c4ae1eae8905a7d8707680cb27cc03ad'
+  await page.goto('/nodes/new')
+  await page.getByLabel('Node name').fill(longName)
+  await page.getByRole('button', { name: 'Issue enrollment token' }).click()
+  await page.getByRole('link', { name: 'View node', exact: true }).click()
+  await expect(page.getByRole('heading', { name: longName, level: 2 })).toBeVisible()
+
+  for (const width of [1280, 768, 375]) {
+    await page.setViewportSize({ width, height: 900 })
+    const overflow = await page.locator('.identity-block > h2, .metadata dd, .nodes-path, .nodes-path > span:not([aria-hidden]), .nodes-path .status').evaluateAll((elements) => elements.flatMap((element) => element.scrollWidth > element.clientWidth + 1
+      ? [{ element: element.tagName.toLowerCase(), clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }]
+      : []))
+    expect(overflow, `overflow at ${width}px`).toEqual([])
+    await expectNoHorizontalPageOverflow(page)
+  }
+})
+
 test('interactive topology groups preserve descendant link semantics', async ({ page }) => {
   await page.goto('/infrastructure')
   const topology = page.getByRole('group', { name: 'Network and relay topology' })

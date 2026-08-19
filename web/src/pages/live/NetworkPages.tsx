@@ -149,7 +149,7 @@ export function NodeDetailPage() {
   const subnetRoutes = (inventory?.routes ?? []).filter((route) => route.node_id === node.node_id && route.kind === 'subnet' && routeState(route).actionable)
   const routingRole = exitRoute ? 'Network exit' : node.enabled_capabilities & exitNodeCapability ? 'Eligible for network exit' : subnetRoutes.length || node.enabled_capabilities & subnetRouterCapability ? 'Subnet router' : 'Standard node'
   return <>
-    <PageHeader title={node.name || 'Node'} action={<Button to="/networks" variant="quiet">Back to network</Button>} />
+    <PageHeader title="Node detail" action={<Button to="/networks" variant="quiet">Back to network</Button>} />
     <DetailLayout identity={<IdentityBlock icon={<MonitorDot size={30} />} title={node.name || node.node_id} state={<Status tone={state.tone}>{state.label}</Status>} actions={canManage ? <><Button to={`/nodes/${node.node_id}/capabilities`}>Capabilities</Button><Button to={`/nodes/${node.node_id}/revoke`} variant="danger">Revoke</Button></> : undefined} metadata={[["Node ID", <code>{node.node_id}</code>], ["Network ID", <code>{node.network_id}</code>], ["Created", time(node.created_at_unix_seconds)]]} />}>
       <Section title="Overlay addresses"><RecordList rows={[["IPv4", <code>{node.ipv4_address ?? 'Not assigned'}</code>], ["IPv6", <code>{node.ipv6_address ?? 'Not assigned'}</code>]]} /></Section>
       <Section title="Network membership"><RecordList rows={[["Network", inventory?.network?.name ?? node.network_id], ["Routing role", routingRole], ["Network exit route", exitRoute ? <code>{exitRoute.prefix}</code> : 'Not assigned'], ["Subnet routes", subnetRoutes.length]]} /></Section>
