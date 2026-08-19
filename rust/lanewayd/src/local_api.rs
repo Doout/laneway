@@ -250,8 +250,7 @@ async fn prepare_socket(path: &Path) -> Result<()> {
     };
     ensure!(
         metadata.file_type().is_socket(),
-        "refusing to replace non-socket local API path {:?}",
-        path
+        "refusing to replace non-socket local API path {path:?}"
     );
     if timeout(Duration::from_millis(100), UnixStream::connect(path))
         .await
