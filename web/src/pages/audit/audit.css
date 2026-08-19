@@ -1,24 +1,28 @@
+.audit-page { display: flex; flex-direction: column; height: calc(100dvh - 134px - clamp(34px, 4vw, 54px)); min-height: 560px; }
+.audit-page > .page-header, .audit-page > .toolbar, .audit-page > .audit-message { flex: 0 0 auto; }
 .audit-message { margin: 14px 0 0; padding: 11px 14px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 7px; }
 .audit-message.is-error, .audit-copy-error { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
-.audit-workspace { display: grid; grid-template-columns: minmax(430px, 1.12fr) minmax(350px, .88fr); min-height: 610px; overflow: hidden; margin-top: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 0 0 8px 8px; border-top: 0; }
+.audit-workspace { display: grid; grid-template-columns: minmax(430px, 1.12fr) minmax(350px, .88fr); flex: 1 1 auto; min-height: 0; overflow: hidden; margin-top: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 0 0 8px 8px; border-top: 0; }
 .audit-workspace.is-closed { grid-template-columns: 1fr; }
-.audit-stream { min-width: 0; border-inline-end: 1px solid var(--border); }
-.audit-stream-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 15px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: .68rem; }
-.audit-stream > button { display: grid; grid-template-columns: 108px 34px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; min-height: 67px; padding: 11px 15px; color: var(--muted); text-align: start; background: transparent; border: 0; border-bottom: 1px solid var(--border); }
-.audit-stream > button:hover { background: var(--surface-hover); }
-.audit-stream > button.is-selected { background: var(--surface-raised); box-shadow: inset 2px 0 var(--focus); }
-.audit-stream time { color: var(--faint); font-size: .69rem; font-variant-numeric: tabular-nums; }
-.audit-stream strong, .audit-stream small { display: block; }
-.audit-stream strong { color: var(--text); font-size: .8rem; font-weight: 600; }
-.audit-stream small { margin-top: 3px; color: var(--muted); font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audit-stream code { color: var(--faint); font-size: .65rem; }
+.audit-stream { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border-inline-end: 1px solid var(--border); }
+.audit-stream-head { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; gap: 14px; padding: 11px 15px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: .68rem; }
+.audit-stream-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.audit-day > h2 { margin: 0; padding: 8px 15px; color: var(--faint); background: var(--surface-raised); border-bottom: 1px solid var(--border); font-size: .64rem; font-weight: 700; letter-spacing: .055em; text-transform: uppercase; }
+.audit-day > button { display: grid; grid-template-columns: 72px 34px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; min-height: 67px; padding: 11px 15px; color: var(--muted); text-align: start; background: transparent; border: 0; border-bottom: 1px solid var(--border); }
+.audit-day > button:hover { background: var(--surface-hover); }
+.audit-day > button.is-selected { background: var(--surface-raised); box-shadow: inset 2px 0 var(--focus); }
+.audit-day time { color: var(--faint); font-size: .69rem; font-variant-numeric: tabular-nums; }
+.audit-day strong, .audit-day small { display: block; }
+.audit-day strong { color: var(--text); font-size: .8rem; font-weight: 600; }
+.audit-day small { margin-top: 3px; color: var(--muted); font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-day em { padding: 4px 7px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; font-size: .62rem; font-style: normal; white-space: nowrap; }
 .audit-event-icon, .audit-inspector-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent); border-radius: 6px; }
 .audit-event-icon { width: 32px; height: 32px; }
 .audit-event-icon.is-warning { color: var(--warning); background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 30%, transparent); }
 .audit-event-icon.is-danger { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
 .audit-empty { padding: 72px 20px; text-align: center; }
 .audit-empty p { margin-inline: auto; }
-.audit-inspector { min-width: 0; padding-bottom: 18px; }
+.audit-inspector { min-width: 0; min-height: 0; padding-bottom: 18px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
 .audit-inspector-head { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 15px 17px; border-bottom: 1px solid var(--border); }
 .audit-inspector-head h2 { margin-bottom: 2px; font-size: 1rem; }
 .audit-inspector-head p { margin: 0; font-size: .7rem; }
@@ -35,14 +39,18 @@
 .audit-inspector > .button-row { padding-inline: 17px; }
 
 @media (max-width: 1100px) {
-  .audit-workspace { grid-template-columns: 1fr; }
+  .audit-workspace { grid-template-columns: 1fr; grid-template-rows: minmax(240px, .85fr) minmax(280px, 1.15fr); }
   .audit-stream { border-inline-end: 0; border-bottom: 1px solid var(--border); }
 }
 
 @media (max-width: 680px) {
-  .audit-stream > button { grid-template-columns: 34px minmax(0, 1fr) auto; }
-  .audit-stream time { grid-column: 2; grid-row: 2; }
-  .audit-stream > button > code { grid-column: 3; grid-row: 1 / span 2; }
+  .audit-page { height: auto; min-height: 0; }
+  .audit-workspace { display: block; }
+  .audit-stream { max-height: 480px; }
+  .audit-inspector { overflow: visible; }
+  .audit-day > button { grid-template-columns: 34px minmax(0, 1fr) auto; }
+  .audit-day time { grid-column: 2; grid-row: 2; }
+  .audit-day > button > em { grid-column: 3; grid-row: 1 / span 2; }
   .audit-event-icon { grid-row: 1 / span 2; }
   .audit-inspector-head { grid-template-columns: 40px minmax(0, 1fr) auto; }
   .audit-inspector-head .status { grid-column: 2; }

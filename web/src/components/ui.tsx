@@ -111,7 +111,7 @@ type FieldControlProps = {
   'aria-invalid'?: boolean | 'true' | 'false' | 'grammar' | 'spelling'
 }
 
-export function Field({ label, hint, error, children }: { label: string; hint?: ReactNode; error?: ReactNode; children: ReactNode }) {
+export function Field({ label, hint, error, children }: { label: ReactNode; hint?: ReactNode; error?: ReactNode; children: ReactNode }) {
   const generatedId = useId()
   const control = isValidElement<FieldControlProps>(children) ? children as ReactElement<FieldControlProps> : null
   const controlId = control?.props.id ?? `${generatedId}-control`
@@ -155,6 +155,6 @@ export function ConfirmPanel({ icon, title, description, children }: { icon: Rea
   return <div className="confirm-panel"><span className="confirm-panel__icon" aria-hidden="true">{icon}</span><h2>{title}</h2><p>{description}</p>{children}</div>
 }
 
-export function EmptyState({ icon, title, description, action }: { icon: ReactNode; title: string; description: string; action?: ReactNode }) {
-  return <div className="empty-state"><span className="empty-state__icon" aria-hidden="true">{icon}</span><h2>{title}</h2><p>{description}</p>{action}</div>
+export function EmptyState({ icon, title, description, action }: { icon: ReactNode; title: string; description?: string; action?: ReactNode }) {
+  return <div className="empty-state"><span className="empty-state__icon" aria-hidden="true">{icon}</span><h2>{title}</h2>{description ? <p>{description}</p> : null}{action}</div>
 }

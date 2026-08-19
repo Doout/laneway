@@ -382,6 +382,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
   const sessionRef = useRef<AdministratorSession | null>(null)
   const csrfRef = useRef('')
   const restoreAbortRef = useRef<AbortController | null>(null)
+  const revalidationAbortRef = useRef<AbortController | null>(null)
   const sessionChannelRef = useRef<BroadcastChannel | null>(null)
   const inventoryRequestRef = useRef(0)
   const selectedNetworkIdRef = useRef<string | null>(null)
@@ -471,6 +472,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
   const retryAuthentication = useCallback(async () => {
     if (!live) return
     purgeLegacyAuthStorage()
+    revalidationAbortRef.current?.abort()
     restoreAbortRef.current?.abort()
     const controller = new AbortController()
     restoreAbortRef.current = controller
@@ -516,6 +518,60 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
     }
   }, [clearSessionSecrets, installSession, live, resetInventory])
 
+  const revalidateCurrentSession = useCallback(async () => {
+    if (!live) return
+    const current = sessionRef.current
+    if (!current) return
+    const generation = authGenerationRef.current
+    revalidationAbortRef.current?.abort()
+    const controller = new AbortController()
+    revalidationAbortRef.current = controller
+    try {
+      const response = await authFetch('/v1/admin/auth/session', {
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || authGenerationRef.current !== generation || sessionRef.current?.sessionId !== current.sessionId) return
+      if (response.status === 401) {
+        if (invalidateSession(generation, 'Your session expired. Sign in again.')) notifyOtherTabs('logout', current.sessionId)
+        return
+      }
+      if (!response.ok) return
+      const envelope = parseAdministratorSession(await response.json())
+      if (controller.signal.aborted || authGenerationRef.current !== generation || sessionRef.current?.sessionId !== current.sessionId) return
+      const expiresAt = Math.min(envelope.session.idleExpiresAtUnixSeconds, envelope.session.absoluteExpiresAtUnixSeconds) * 1000
+      if (expiresAt <= Date.now()) {
+        if (invalidateSession(generation, 'Your session expired. Sign in again.')) notifyOtherTabs('logout', current.sessionId)
+        return
+      }
+      const sameAuthorization = envelope.session.sessionId === current.sessionId &&
+        envelope.session.principalId === current.principalId &&
+        envelope.session.username === current.username &&
+        envelope.session.role === current.role &&
+        envelope.session.allNetworks === current.allNetworks &&
+        envelope.session.permissions.length === current.permissions.length &&
+        envelope.session.permissions.every((permission, index) => permission === current.permissions[index]) &&
+        envelope.session.networkIds.length === current.networkIds.length &&
+        envelope.session.networkIds.every((networkId, index) => networkId === current.networkIds[index])
+      if (!sameAuthorization) {
+        clearSessionSecrets()
+        const nextGeneration = ++authGenerationRef.current
+        installSession(envelope, nextGeneration)
+        return
+      }
+      sessionRef.current = envelope.session
+      csrfRef.current = envelope.csrfToken
+      setSession(envelope.session)
+      setAuthState('authenticated')
+      setAuthError('')
+    } catch {
+      // A background connectivity failure is not evidence that the current
+      // authenticated page should be torn down. Requests still fail closed.
+    } finally {
+      if (revalidationAbortRef.current === controller) revalidationAbortRef.current = null
+    }
+  }, [clearSessionSecrets, installSession, invalidateSession, live, notifyOtherTabs])
+
   const reconcileCredentialCookieMutation = useCallback(async () => {
     // Set-Cookie is applied before fetch resolves, so a response that lost a
     // local generation race can still have changed credentials for every tab.
@@ -556,7 +612,10 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     if (!live) return
     void retryAuthentication()
-    return () => restoreAbortRef.current?.abort()
+    return () => {
+      restoreAbortRef.current?.abort()
+      revalidationAbortRef.current?.abort()
+    }
   }, [live, retryAuthentication])
 
   useEffect(() => {
@@ -564,7 +623,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
     const generation = authGenerationRef.current
     const expiresAt = Math.min(session.idleExpiresAtUnixSeconds, session.absoluteExpiresAtUnixSeconds) * 1000
     const expire = () => {
-      if (Date.now() >= expiresAt && authGenerationRef.current === generation) void retryAuthentication()
+      if (Date.now() >= expiresAt && authGenerationRef.current === generation) void revalidateCurrentSession()
     }
     const delay = Math.max(0, Math.min(expiresAt - Date.now(), 2_147_483_647))
     const timer = window.setTimeout(expire, delay)
@@ -576,12 +635,12 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
       window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', visibility)
     }
-  }, [authState, live, retryAuthentication, session])
+  }, [authState, live, revalidateCurrentSession, session])
 
   useEffect(() => {
     if (!live) return
     const revalidate = () => {
-      if (sessionRef.current) void retryAuthentication()
+      if (sessionRef.current) void revalidateCurrentSession()
     }
     const visibility = () => {
       if (document.visibilityState === 'visible') revalidate()
@@ -592,7 +651,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
       document.removeEventListener('visibilitychange', visibility)
       window.removeEventListener('pageshow', revalidate)
     }
-  }, [live, retryAuthentication])
+  }, [live, revalidateCurrentSession])
 
   const hasPermission = useCallback((permission: AdministratorPermission, networkId?: string) => {
     if (!live) return true
@@ -924,7 +983,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
         selectedNetworkIdRef.current = null
         setSelectedNetworkId(null)
       }
-      if (!network && networkResult.networks.length === 1) {
+      if (!network && networkResult.networks.length >= 1) {
         network = networkResult.networks[0]
         networkGenerationRef.current += 1
         selectedNetworkIdRef.current = network.network_id

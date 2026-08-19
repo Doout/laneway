@@ -140,7 +140,10 @@ describe('Laneway browser sessions', () => {
     expect(login?.init?.credentials).toBe('same-origin')
     expect(new Headers(login?.init?.headers).has('Authorization')).toBe(false)
     expect(JSON.parse(String(login?.init?.body))).toEqual({ username: 'console-owner', password: 'a sufficiently long password' })
-    expect(window.localStorage.length).toBe(0)
+    expect(window.localStorage.length).toBe(1)
+    expect(window.localStorage.getItem('laneway-console-theme')).toMatch(/^(light|dark)$/)
+    expect(window.localStorage.getItem('laneway-console-admin-token')).toBeNull()
+    expect(window.localStorage.getItem('laneway-console-operator')).toBeNull()
     expect(window.sessionStorage.length).toBe(0)
   })
 

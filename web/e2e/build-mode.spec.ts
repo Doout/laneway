@@ -66,7 +66,7 @@ function browserSessionSetCookie(value: string) {
   return `${browserSessionCookieName}=${value}; Path=/; Secure; HttpOnly; SameSite=Strict`
 }
 
-async function mockManagementApi(page: Page, networks: Network[]) {
+async function mockManagementApi(page: Page, networks: Network[], auditEvents: unknown[] = []) {
   const requests: Array<{ authorization?: string; csrf?: string; method: string; origin: string; path: string }> = []
   await page.route('**/v1/admin/**', async (route) => {
     const request = route.request()
@@ -83,12 +83,12 @@ async function mockManagementApi(page: Page, networks: Network[]) {
         : route.fulfill({ status: 401, json: { error: 'unauthorized' } })
     }
     if (url.pathname === '/v1/admin/networks') return route.fulfill({ headers: sessionHeaders(), json: { networks } })
-    if (url.pathname === '/v1/admin/audit') return route.fulfill({ headers: sessionHeaders(), json: { events: [] } })
+    if (url.pathname === '/v1/admin/audit') return route.fulfill({ headers: sessionHeaders(), json: { events: auditEvents } })
 
     const prefix = `/v1/admin/networks/${networkId}`
     const responses: Record<string, unknown> = {
-      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, user_id: accessUserId, name: 'controller-node-canary', enabled_capabilities: 8, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable' }] },
-      [`${prefix}/routes`]: { routes: [] },
+      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, user_id: accessUserId, name: 'controller-node-canary', enabled_capabilities: 16, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable' }] },
+      [`${prefix}/routes`]: { routes: [{ route_id: '5'.repeat(32), network_id: networkId, node_id: '4'.repeat(32), prefix: '0.0.0.0/0', kind: 'exit', mode: 'nat', metric: 100, state: 'approved', created_at_unix_seconds: 1_700_000_100 }] },
       [`${prefix}/acl-rules`]: { acl_rules: [] },
       [`${prefix}/access-subjects`]: {
         users: [{ user_id: accessUserId, network_id: networkId, name: 'Private operator', enabled: true, created_at_unix_seconds: 1_700_000_100, updated_at_unix_seconds: 1_700_000_100 }],
@@ -123,6 +123,10 @@ test('compiled artifact preserves its declared authentication boundary', async (
     window.sessionStorage.setItem('laneway-console-operator', 'Legacy Name')
   })
   await page.goto('/sign-in')
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/laneway-mark.svg')
+  await expect(page.locator('link[rel="apple-touch-icon"]')).toHaveAttribute('href', '/apple-touch-icon.png')
+  await expect(page.locator('link[rel="manifest"]')).toHaveAttribute('href', '/site.webmanifest')
+  await expect(page.locator('.brand-mark')).toHaveAttribute('src', '/laneway-mark.svg')
   expect(await page.evaluate(() => [window.localStorage.getItem('laneway-console-admin-token'), window.sessionStorage.getItem('laneway-console-operator')])).toEqual([null, null])
 
   if (expectedMode === 'live') {
@@ -172,15 +176,29 @@ test('compiled live artifact uses same-origin cookie transport and real permissi
   await page.getByLabel('Password').fill(password)
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page).toHaveURL(/\/overview$/)
-  await expect(page.getByText(controllerNetwork.name, { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('1 Network', { exact: true })).toBeVisible()
   await expect(page.getByLabel('Signed in administrator')).toContainText('console-owner')
-  await page.getByRole('link', { name: 'Nodes' }).click()
-  await expect(page.getByRole('heading', { name: 'Nodes' })).toBeVisible()
+  await page.getByRole('link', { name: 'Networks', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Networks', exact: true, level: 1 })).toBeVisible()
+  const networkViews = page.getByRole('navigation', { name: 'Network workspace views' })
+  await networkViews.getByRole('link', { name: 'Nodes' }).click()
   await expect(page.getByText('controller-node-canary', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText('Exit node', { exact: true })).toBeVisible()
-  await page.getByRole('link', { name: 'Users' }).click()
+  await expect(page.getByText('Network exit', { exact: true })).toBeVisible()
+  await networkViews.getByRole('link', { name: 'Connectivity' }).click()
+  await expect(page.getByText('Connection data unavailable', { exact: true })).toBeVisible()
+  await networkViews.getByRole('link', { name: 'Networks', exact: true }).click()
+  await page.getByRole('button', { name: 'Add Network' }).click()
+  await expect(page.getByRole('heading', { name: 'Create Network' })).toBeVisible()
+  await expect(page.getByLabel('IPv4 address pool')).toBeVisible()
+  await page.getByRole('button', { name: 'Cancel' }).click()
+  await page.getByRole('link', { name: 'People' }).click()
+  await expect(page.getByRole('heading', { name: 'People' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Users' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByText('Private operator', { exact: true })).toBeVisible()
   await page.getByRole('link', { name: 'Teams' }).click()
+  await expect(page.getByRole('heading', { name: 'People' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'People' })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('link', { name: 'Teams' })).toHaveAttribute('aria-current', 'page')
   await expect(page.getByText('Operations Team', { exact: true })).toBeVisible()
 
   expect(requests.length).toBeGreaterThan(0)
@@ -189,19 +207,86 @@ test('compiled live artifact uses same-origin cookie transport and real permissi
   expect(requests.filter((request) => request.method === 'GET').every((request) => request.csrf === undefined)).toBe(true)
 })
 
-test('compiled live artifact requires an explicit selection for multi-network inventory', async ({ page }) => {
+test('compiled live artifact keeps multiple Networks in one workspace', async ({ page }) => {
   test.skip(expectedMode !== 'live', 'Live artifact contract')
   const requests = await mockManagementApi(page, [controllerNetwork, { ...controllerNetwork, network_id: '5'.repeat(32), name: 'Second controller canary' }])
 
   await signIn(page)
-  await expect(page.getByLabel('Selected network')).toBeVisible()
-  await expect(page.getByText('Select a network.')).toBeVisible()
-  await page.getByLabel('Selected network').selectOption(networkId)
-  await page.getByRole('link', { name: 'Nodes' }).click()
+  await expect(page.getByLabel('Selected network')).toHaveCount(0)
+  await page.getByRole('link', { name: 'Networks', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '2 Networks' })).toBeVisible()
+  const networkViews = page.getByRole('navigation', { name: 'Network workspace views' })
+  await networkViews.getByRole('link', { name: 'Nodes' }).click()
   await expect(page.getByText('controller-node-canary', { exact: true }).first()).toBeVisible()
+  await networkViews.getByRole('link', { name: 'Connectivity' }).click()
+  await page.getByRole('button', { name: 'Connect Network' }).click()
+  await expect(page.getByLabel('Destination Network')).toHaveValue('5'.repeat(32))
+  await expect(page.getByLabel('Initial access')).toHaveValue('Not available')
+  await expect(page.getByLabel('Routes')).toHaveValue('Not available')
+  await expect(page.getByText('Network connection management is not available in this controller API.')).toBeVisible()
   expect(requests.some((request) => request.path === '/v1/admin/audit?limit=250')).toBe(true)
   expect(requests.some((request) => request.path.includes(`/networks/${networkId}/audit`))).toBe(false)
   await expect(page.getByRole('note', { name: 'Demo data notice' })).toHaveCount(0)
+})
+
+test('compiled live audit keeps the event detail visible while the event stream scrolls', async ({ page }) => {
+  test.skip(expectedMode !== 'live', 'Live artifact contract')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const now = Math.floor(Date.now() / 1000)
+  const events = Array.from({ length: 40 }, (_, index) => ({
+    event_id: (index + 10).toString(16).padStart(32, '0'),
+    network_id: networkId,
+    actor_kind: 'system',
+    action: 'node.update',
+    target_type: 'node',
+    target_id: '4'.repeat(32),
+    details: { sequence: index + 1 },
+    created_at_unix_seconds: now - index * 60,
+  }))
+  await mockManagementApi(page, [controllerNetwork], events)
+
+  await signIn(page)
+  await page.getByRole('link', { name: 'Audit', exact: true }).click()
+  await expect(page.locator('.audit-day > button')).toHaveCount(events.length)
+  const stream = page.locator('.audit-stream-scroll')
+  const inspector = page.getByLabel('Selected audit event detail')
+  await expect(stream).toBeVisible()
+  await expect(inspector).toBeVisible()
+
+  await stream.evaluate((element) => { element.scrollTop = element.scrollHeight })
+  expect(await stream.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  expect(await page.evaluate(() => window.scrollY)).toBe(0)
+  const inspectorBox = await inspector.boundingBox()
+  expect(inspectorBox).not.toBeNull()
+  expect((inspectorBox?.y ?? 0) + (inspectorBox?.height ?? 0)).toBeLessThanOrEqual(900)
+
+  await page.locator('.audit-day > button').last().click()
+  await expect(inspector.getByText(events.at(-1)?.event_id ?? '', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => window.scrollY)).toBe(0)
+})
+
+test('compiled live artifact keeps the workspace usable on a compact viewport and across themes', async ({ page }) => {
+  test.skip(expectedMode !== 'live', 'Live artifact contract')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockManagementApi(page, [controllerNetwork])
+
+  await signIn(page)
+  await expect(page).toHaveURL(/\/overview$/)
+  await expect(page.getByRole('heading', { name: 'Overview' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Use dark theme' })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+
+  await page.getByRole('button', { name: 'Use dark theme' }).click()
+  await expect(page.getByRole('button', { name: 'Use light theme' })).toBeVisible()
+  expect(await page.evaluate(() => ({ theme: document.documentElement.dataset.theme, stored: window.localStorage.getItem('laneway-console-theme') }))).toEqual({ theme: 'dark', stored: 'dark' })
+
+  await page.getByRole('link', { name: 'Networks', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Networks', exact: true })).toBeVisible()
+  await page.getByRole('navigation', { name: 'Network workspace views' }).getByRole('link', { name: 'Nodes' }).click()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+  await page.getByRole('link', { name: 'People' }).click()
+  await expect(page.getByRole('heading', { name: 'People' })).toBeVisible()
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
 })
 
 test('a two-tab logout wins over a racing session rotation', async ({ context }) => {

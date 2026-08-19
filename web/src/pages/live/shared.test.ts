@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import type { ControllerACLRule, ControllerCertificate, ControllerNode, ControllerRoute } from '../../lib/control-plane'
-import { liveACLRuleLabel, liveCertificateState, liveNodeState, liveRouteMode, liveRouteState } from './LivePages'
+import { accessRulePresentation, aclRuleLabel, certificateState, nodeState, routeMode, routeState } from './shared'
 
 afterEach(() => vi.useRealTimers())
 
@@ -17,7 +17,7 @@ test('expired ephemeral enrollment wins over revocation and remains separate fro
     lease_expires_at_unix_seconds: Math.floor(Date.now() / 1000) - 1,
     revoked_at_unix_seconds: Math.floor(Date.now() / 1000),
   }
-  expect(liveNodeState(node)).toEqual({ label: 'Lease expired', tone: 'muted', inactive: true })
+  expect(nodeState(node)).toEqual({ label: 'Lease expired', tone: 'muted', inactive: true })
   expect(node.enrollment_class).toBe('ephemeral')
   expect(node.enabled_capabilities).toBe(16)
 })
@@ -37,8 +37,8 @@ test('expired advertisements are non-actionable and every route mode has a truth
     valid_until_unix_seconds: Math.floor(Date.now() / 1000) - 1,
     created_at_unix_seconds: 1,
   }
-  expect(liveRouteState(route)).toEqual({ label: 'Expired', tone: 'muted', actionable: false })
-  expect((['none', 'nat', 'routed'] as const).map(liveRouteMode)).toEqual(['None', 'NAT', 'Routed'])
+  expect(routeState(route)).toEqual({ label: 'Expired', tone: 'muted', actionable: false })
+  expect((['none', 'nat', 'routed'] as const).map(routeMode)).toEqual(['None', 'NAT', 'Routed'])
 })
 
 test('ACL fallback labels never overwrite a blank controller description', () => {
@@ -52,8 +52,27 @@ test('ACL fallback labels never overwrite a blank controller description', () =>
     enabled: true,
     configuration_epoch: 1,
   }
-  expect(liveACLRuleLabel(rule)).toBe('Allow rule 9')
+  expect(aclRuleLabel(rule)).toBe('Allow rule 9')
   expect(rule.description).toBe('')
+})
+
+test('managed access rules hide internal connector names from the primary UI', () => {
+  const rule: ControllerACLRule = {
+    rule_id: '4'.repeat(32),
+    network_id: '2'.repeat(32),
+    priority: 100,
+    action: 'accept',
+    selector: { ip_protocol: 'IP_PROTOCOL_ANY' },
+    description: 'managed route 10.240.64.6/32 via laneway-connector-ibmcloud for laptop',
+    enabled: true,
+    configuration_epoch: 1,
+  }
+
+  expect(accessRulePresentation(rule)).toEqual({
+    title: '10.240.64.6/32 through IBM Cloud',
+    detail: 'For laptop · Any service',
+  })
+  expect(rule.description).toContain('laneway-connector-ibmcloud')
 })
 
 test('certificate state uses authoritative validity boundaries and revocation', () => {
@@ -68,8 +87,8 @@ test('certificate state uses authoritative validity boundaries and revocation', 
     created_at_unix_seconds: now - 60,
   }
 
-  expect(liveCertificateState({ ...certificate, revoked_at_unix_seconds: now - 1 }, now)).toEqual({ label: 'Revoked', tone: 'danger' })
-  expect(liveCertificateState({ ...certificate, not_before_unix_seconds: now + 1 }, now)).toEqual({ label: 'Not yet valid', tone: 'warning' })
-  expect(liveCertificateState({ ...certificate, not_after_unix_seconds: now }, now)).toEqual({ label: 'Expired', tone: 'muted' })
-  expect(liveCertificateState(certificate, now)).toEqual({ label: 'Valid', tone: 'positive' })
+  expect(certificateState({ ...certificate, revoked_at_unix_seconds: now - 1 }, now)).toEqual({ label: 'Revoked', tone: 'danger' })
+  expect(certificateState({ ...certificate, not_before_unix_seconds: now + 1 }, now)).toEqual({ label: 'Not yet valid', tone: 'warning' })
+  expect(certificateState({ ...certificate, not_after_unix_seconds: now }, now)).toEqual({ label: 'Expired', tone: 'muted' })
+  expect(certificateState(certificate, now)).toEqual({ label: 'Valid', tone: 'positive' })
 })

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Laneway">
+  <rect width="64" height="64" rx="15" fill="#0877e5"/>
+  <path d="M13 32.5 22 28v20.5L13 53V32.5Z" fill="#fff"/>
+  <path d="m27.5 20 9-4.5v26l-9 4.5V20Z" fill="#fff"/>
+  <path d="m42 27 9-4.5v18L42 45V27Z" fill="#fff"/>
+</svg>

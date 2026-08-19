@@ -13,6 +13,8 @@ import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-do
 import clsx from 'clsx'
 import { isNetworkScopedAdministratorPermission, useControlPlane, type AdministratorPermission } from '../lib/control-plane'
 import { isPendingControllerRoute } from '../lib/live-records'
+import { ThemeToggle } from './Theme'
+import { BrandMark } from './BrandMark'
 
 const navigation = [
   {
@@ -59,10 +61,6 @@ const detailLabels: Record<string, string> = {
   edit: 'Edit',
   networks: 'Networks',
   relays: 'Relays',
-}
-
-function BrandMark() {
-  return <span className="brand-mark" aria-hidden="true"><span /><span /><span /></span>
 }
 
 function Breadcrumbs({ pathname }: { pathname: string }) {
@@ -136,6 +134,7 @@ export function AppShell() {
         <Breadcrumbs pathname={location.pathname} />
         <div className="command-bar__tools">
           {live ? <button className="refresh-button" type="button" onClick={() => void refresh()} disabled={inventoryPending} aria-label="Refresh controller inventory"><RefreshCw aria-hidden="true" size={15} /></button> : null}
+          <ThemeToggle />
           {live && session ? <div className="administrator-identity" aria-label="Signed in administrator"><strong>{session.username}</strong><span>{session.role}</span></div> : null}
           {live ? <button className="sign-out-button" type="button" onClick={() => void handleSignOut()} disabled={authPending}>{authPending ? 'Signing out…' : 'Sign out'}</button> : null}
         </div>
