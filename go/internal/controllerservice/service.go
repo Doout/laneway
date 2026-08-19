@@ -220,12 +220,14 @@ func New(opts Options) (*Service, error) {
 	mux.HandleFunc("POST /v1/enroll", s.enroll)
 	mux.HandleFunc("POST /v1/renew", s.renew)
 	mux.HandleFunc("POST /v1/configuration", s.configuration)
+	mux.HandleFunc("PUT /v1/status", s.recordEndpointStatus)
 	mux.HandleFunc("POST /v1/relay/configuration", s.relayConfiguration)
 	mux.HandleFunc("GET /v1/revocations/{serial}", s.revocation)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks", s.createNetwork)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks", s.readNetworks)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}", s.readNetwork)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/nodes", s.readNodes)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/endpoint-statuses", s.readEndpointStatuses)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/relays", s.readRelays)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/acl-rules", s.readACLRules)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/certificates", s.readCertificates)
@@ -809,6 +811,11 @@ func (s *Service) authenticatedNode(r *http.Request) (identity.NodeIdentity, err
 	if err != nil || node.NetworkID != nodeIdentity.NetworkID || node.RevokedAt != nil {
 		return identity.NodeIdentity{}, ErrPermissionDenied
 	}
+	now := s.now().UTC()
+	if node.EnrollmentClass == controller.EnrollmentClassEphemeral &&
+		(node.LeaseExpiresAt == nil || !now.Before(*node.LeaseExpiresAt)) {
+		return identity.NodeIdentity{}, ErrPermissionDenied
+	}
 	// The default mTLS path additionally checks the exact presented certificate
 	// against durable revocation state. Custom authorizers own equivalent
 	// credential revocation semantics.
@@ -817,7 +824,7 @@ func (s *Service) authenticatedNode(r *http.Request) (identity.NodeIdentity, err
 		if cert == nil {
 			return identity.NodeIdentity{}, ErrUnauthenticated
 		}
-		if !s.certificateCurrentlyValid(cert) {
+		if now.Before(cert.NotBefore) || !now.Before(cert.NotAfter) {
 			return identity.NodeIdentity{}, ErrPermissionDenied
 		}
 		record, err := s.store.CertificateBySerial(r.Context(), cert.SerialNumber.Bytes())

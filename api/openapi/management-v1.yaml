@@ -510,6 +510,26 @@ paths:
           $ref: './components.yaml#/components/responses/Nodes'
         default:
           $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/endpoint-statuses:
+    get:
+      operationId: listNetworkEndpointStatuses
+      tags: [Nodes]
+      summary: Read bounded latest endpoint status with explicit TTL freshness.
+      description: >-
+        Returns one row per bounded Node inventory entry. Runtime report fields
+        are present only while their controller-owned TTL is current; expired,
+        never-reported, and inactive Nodes do not retain stale health fields.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/EndpointStatuses'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
   /v1/admin/networks/{network_id}/relays:
     get:
       operationId: listNetworkRelays

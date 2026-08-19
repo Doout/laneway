@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	currentSchemaVersion = 12
-	busyTimeoutMS        = 5_000
+	currentSchemaVersion        = 13
+	endpointStatusSchemaVersion = 13
+	busyTimeoutMS               = 5_000
 )
 
 type Store struct {

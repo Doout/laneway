@@ -481,6 +481,7 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 	resourcePolicies := []adminauth.RoutePolicy{
 		administratorEnrollmentIssuePolicy, administratorNetworkCreatePolicy, administratorNetworkListPolicy,
 		administratorNetworkReadPolicy, administratorNodeListPolicy, administratorRelayListPolicy,
+		administratorEndpointStatusListPolicy,
 		administratorACLListPolicy, administratorCertificateListPolicy, administratorRouteListPolicy,
 		administratorAuditListPolicy, administratorAuditPageListPolicy,
 		administratorGlobalAuditListPolicy, administratorGlobalAuditPageListPolicy,
@@ -492,8 +493,8 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 		administratorAccessUserUpdatePolicy, administratorAccessTeamCreatePolicy, administratorAccessMemberAddPolicy,
 		administratorAccessMemberDeletePolicy, administratorAccessGrantCreatePolicy, administratorAccessGrantDeletePolicy,
 	}
-	if len(resourcePolicies) != 33 {
-		t.Fatalf("resource policies=%d want 33 non-bootstrap routes", len(resourcePolicies))
+	if len(resourcePolicies) != 34 {
+		t.Fatalf("resource policies=%d want 34 non-bootstrap routes", len(resourcePolicies))
 	}
 	identityPolicies := []adminauth.RoutePolicy{
 		administratorCreatePolicy, administratorListPolicy, administratorReadPolicy,
@@ -796,6 +797,11 @@ func TestAdministratorInventoryReturnsEpochWithoutLegacyNetworkRead(t *testing.T
 			_, err := store.AdministratorNetworkNodes(ctx, decision, missingNetwork, 10)
 			return err
 		},
+		"endpoint statuses": func() error {
+			decision := administratorRootDecision(t, store, administratorEndpointStatusListPolicy, adminauth.NetworkTarget(missingNetwork))
+			_, err := store.AdministratorNetworkEndpointStatuses(ctx, decision, missingNetwork, 10, store.now())
+			return err
+		},
 		"relays": func() error {
 			decision := administratorRootDecision(t, store, administratorRelayListPolicy, adminauth.NetworkTarget(missingNetwork))
 			_, _, err := store.AdministratorNetworkRelays(ctx, decision, missingNetwork, 10)
@@ -848,6 +854,10 @@ func TestAdministratorCollectionAuthenticationPrecedesParentLookup(t *testing.T)
 	}{
 		{"nodes", administratorNodeListPolicy, func(decision adminauth.Decision, networkID identity.NetworkID) error {
 			_, err := store.AdministratorNetworkNodes(ctx, decision, networkID, 10)
+			return err
+		}},
+		{"endpoint statuses", administratorEndpointStatusListPolicy, func(decision adminauth.Decision, networkID identity.NetworkID) error {
+			_, err := store.AdministratorNetworkEndpointStatuses(ctx, decision, networkID, 10, store.now())
 			return err
 		}},
 		{"relays", administratorRelayListPolicy, func(decision adminauth.Decision, networkID identity.NetworkID) error {

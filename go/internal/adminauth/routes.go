@@ -40,6 +40,7 @@ var managementRoutes = []RoutePolicy{
 	{http.MethodGet, "/v1/admin/networks", OperationNetworkList, ScopeFiltered, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}", OperationNetworkRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/nodes", OperationNodeRead, ScopePath, false},
+	{http.MethodGet, "/v1/admin/networks/{network_id}/endpoint-statuses", OperationNodeRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/relays", OperationRelayRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/acl-rules", OperationACLRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/access-subjects", OperationACLRead, ScopePath, false},

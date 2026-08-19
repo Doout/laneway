@@ -19,6 +19,8 @@ import {
   zCreateAclRuleRequest,
   zCreateAdministratorRequest,
   zEnrollmentTokenRequest,
+  zEndpointRuntimeReport,
+  zEndpointStatus,
   zErrorEnvelope,
   zListAdministratorsQuery,
   zNetwork,
@@ -110,6 +112,78 @@ describe('generated strict DTOs and scalar boundaries', () => {
     rejected(zUnixSeconds, Number.MIN_SAFE_INTEGER - 1)
     rejected(zUnixSeconds, Number.MAX_SAFE_INTEGER + 1)
     rejected(zUnixSeconds, 1n)
+  })
+
+  it('keeps endpoint status bounded and removes stale health fields', () => {
+    const report = {
+      valid_for_seconds: 60,
+      product_version: '1.2.3',
+      platform: 'linux',
+      certificate_state: 'healthy',
+      configuration_state: 'current',
+      carrier_state: 'relay_quic',
+      route_state: 'ready',
+      selected_exit_state: 'not_selected',
+      cleanup_failure_count: 0,
+      configuration_epoch: 7,
+    }
+    accepted(zEndpointRuntimeReport, report)
+    rejected(zEndpointRuntimeReport, { ...report, valid_for_seconds: 301 })
+    rejected(zEndpointRuntimeReport, { ...report, private_endpoint: '10.0.0.1:443' })
+
+    const base = {
+      node_id: nodeId,
+      network_id: networkId,
+      node_name: 'node-one',
+      authoritative_configuration_epoch: 7,
+    }
+    accepted(zEndpointStatus, {
+      ...base,
+      freshness: 'current',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+      report,
+    })
+    accepted(zEndpointStatus, {
+      ...base,
+      freshness: 'expired',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+    })
+    accepted(zEndpointStatus, { ...base, freshness: 'never_reported' })
+    accepted(zEndpointStatus, { ...base, freshness: 'node_inactive' })
+    accepted(zEndpointStatus, {
+      ...base,
+      freshness: 'node_inactive',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+    })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'expired',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+      report,
+    })
+    rejected(zEndpointStatus, { ...base, freshness: 'current', report })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'current',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 159,
+      report,
+    })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'node_inactive',
+      last_reported_at_unix_seconds: 100,
+    })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'expired',
+      last_reported_at_unix_seconds: 160,
+      expires_at_unix_seconds: 160,
+    })
   })
 })
 

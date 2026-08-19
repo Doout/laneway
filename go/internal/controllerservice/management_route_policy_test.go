@@ -147,7 +147,8 @@ func TestManagementHandlersDoNotCallLegacyAdministratorStoreMethods(t *testing.T
 	if len(managementHandlers) != len(ManagementRoutePolicies())+2 {
 		t.Fatalf("management handlers=%d policies=%d", len(managementHandlers)-2, len(ManagementRoutePolicies()))
 	}
-	for _, name := range []string{"service.go", "management.go", "access_management.go", "bootstrap_bundles.go", "administrator_management_http.go"} {
+	inspectedHandlers := make(map[string]struct{}, len(managementHandlers))
+	for _, name := range []string{"service.go", "management.go", "endpoint_status.go", "access_management.go", "bootstrap_bundles.go", "administrator_management_http.go"} {
 		parsed, err := parser.ParseFile(token.NewFileSet(), filepath.Join(directory, name), nil, 0)
 		if err != nil {
 			t.Fatal(err)
@@ -160,6 +161,7 @@ func TestManagementHandlersDoNotCallLegacyAdministratorStoreMethods(t *testing.T
 			if _, ok := managementHandlers[function.Name.Name]; !ok {
 				continue
 			}
+			inspectedHandlers[function.Name.Name] = struct{}{}
 			ast.Inspect(function.Body, func(node ast.Node) bool {
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
@@ -179,6 +181,13 @@ func TestManagementHandlersDoNotCallLegacyAdministratorStoreMethods(t *testing.T
 				t.Errorf("%s.%s calls legacy Store method %s", name, function.Name.Name, method)
 				return true
 			})
+		}
+	}
+	if len(inspectedHandlers) != len(managementHandlers) {
+		for name := range managementHandlers {
+			if _, ok := inspectedHandlers[name]; !ok {
+				t.Errorf("management handler %s was not inspected", name)
+			}
 		}
 	}
 }

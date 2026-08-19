@@ -97,6 +97,166 @@ type Node struct {
 	UserID              *identity.ID
 }
 
+// EndpointStatusReport is one bounded endpoint-produced runtime observation.
+// It deliberately excludes endpoints, peers, credentials, packet data, and
+// free-form diagnostic text. The controller retains only the latest report.
+type EndpointStatusReport struct {
+	ValidForSeconds    uint32
+	ProductVersion     string
+	Platform           EndpointPlatform
+	CertificateState   CertificateStatusState
+	ConfigurationState ConfigurationStatusState
+	CarrierState       CarrierStatusState
+	RouteState         RouteStatusState
+	SelectedExitState  SelectedExitStatusState
+	CleanupFailures    uint32
+	ConfigurationEpoch uint64
+}
+
+type EndpointPlatform string
+
+const (
+	EndpointPlatformLinux   EndpointPlatform = "linux"
+	EndpointPlatformDarwin  EndpointPlatform = "darwin"
+	EndpointPlatformWindows EndpointPlatform = "windows"
+	EndpointPlatformOther   EndpointPlatform = "other"
+	EndpointPlatformUnknown EndpointPlatform = "unknown"
+)
+
+func (value EndpointPlatform) Valid() bool {
+	switch value {
+	case EndpointPlatformLinux, EndpointPlatformDarwin, EndpointPlatformWindows,
+		EndpointPlatformOther, EndpointPlatformUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+type CertificateStatusState string
+
+const (
+	CertificateStatusHealthy    CertificateStatusState = "healthy"
+	CertificateStatusRenewalDue CertificateStatusState = "renewal_due"
+	CertificateStatusExpired    CertificateStatusState = "expired"
+	CertificateStatusRevoked    CertificateStatusState = "revoked"
+	CertificateStatusUnknown    CertificateStatusState = "unknown"
+)
+
+func (value CertificateStatusState) Valid() bool {
+	switch value {
+	case CertificateStatusHealthy, CertificateStatusRenewalDue, CertificateStatusExpired,
+		CertificateStatusRevoked, CertificateStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+type ConfigurationStatusState string
+
+const (
+	ConfigurationStatusCurrent ConfigurationStatusState = "current"
+	ConfigurationStatusStale   ConfigurationStatusState = "stale"
+	ConfigurationStatusExpired ConfigurationStatusState = "expired"
+	ConfigurationStatusUnknown ConfigurationStatusState = "unknown"
+)
+
+func (value ConfigurationStatusState) Valid() bool {
+	switch value {
+	case ConfigurationStatusCurrent, ConfigurationStatusStale, ConfigurationStatusExpired,
+		ConfigurationStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+type CarrierStatusState string
+
+const (
+	CarrierStatusDirect       CarrierStatusState = "direct"
+	CarrierStatusRelayQUIC    CarrierStatusState = "relay_quic"
+	CarrierStatusRelayTCP     CarrierStatusState = "relay_tcp"
+	CarrierStatusNegotiating  CarrierStatusState = "negotiating"
+	CarrierStatusDegraded     CarrierStatusState = "degraded"
+	CarrierStatusDisconnected CarrierStatusState = "disconnected"
+	CarrierStatusUnknown      CarrierStatusState = "unknown"
+)
+
+func (value CarrierStatusState) Valid() bool {
+	switch value {
+	case CarrierStatusDirect, CarrierStatusRelayQUIC, CarrierStatusRelayTCP,
+		CarrierStatusNegotiating, CarrierStatusDegraded, CarrierStatusDisconnected,
+		CarrierStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+type RouteStatusState string
+
+const (
+	RouteStatusReady       RouteStatusState = "ready"
+	RouteStatusDegraded    RouteStatusState = "degraded"
+	RouteStatusUnavailable RouteStatusState = "unavailable"
+	RouteStatusUnknown     RouteStatusState = "unknown"
+)
+
+func (value RouteStatusState) Valid() bool {
+	switch value {
+	case RouteStatusReady, RouteStatusDegraded, RouteStatusUnavailable, RouteStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+type SelectedExitStatusState string
+
+const (
+	SelectedExitStatusNotSelected SelectedExitStatusState = "not_selected"
+	SelectedExitStatusReady       SelectedExitStatusState = "ready"
+	SelectedExitStatusDegraded    SelectedExitStatusState = "degraded"
+	SelectedExitStatusUnavailable SelectedExitStatusState = "unavailable"
+	SelectedExitStatusUnknown     SelectedExitStatusState = "unknown"
+)
+
+func (value SelectedExitStatusState) Valid() bool {
+	switch value {
+	case SelectedExitStatusNotSelected, SelectedExitStatusReady, SelectedExitStatusDegraded,
+		SelectedExitStatusUnavailable, SelectedExitStatusUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+type EndpointStatusFreshness string
+
+const (
+	EndpointStatusCurrent       EndpointStatusFreshness = "current"
+	EndpointStatusExpired       EndpointStatusFreshness = "expired"
+	EndpointStatusNeverReported EndpointStatusFreshness = "never_reported"
+	EndpointStatusNodeInactive  EndpointStatusFreshness = "node_inactive"
+)
+
+// EndpointStatus is the administrator-facing latest-state projection. Report
+// is nil unless Freshness is current, preventing stale health from surviving
+// its TTL. LastReportedAt remains available as evidence without implying
+// current reachability.
+type EndpointStatus struct {
+	NodeID                          identity.NodeID
+	NetworkID                       identity.NetworkID
+	NodeName                        string
+	AuthoritativeConfigurationEpoch uint64
+	Freshness                       EndpointStatusFreshness
+	LastReportedAt                  *time.Time
+	ExpiresAt                       *time.Time
+	Report                          *EndpointStatusReport
+}
+
 // EnrollmentToken contains the immutable token record and, only when returned
 // by IssueEnrollmentToken, its bearer Secret. The secret is never persisted.
 type EnrollmentToken struct {

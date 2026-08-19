@@ -266,6 +266,21 @@ const validRelayEndpoint = (value: string): boolean => {
 };
 const validAdministratorAccess = (value: { role: string; all_networks: boolean; network_ids: ReadonlyArray<string> }): boolean =>
     uniqueStrings(value.network_ids) && (value.role !== 'owner' || value.all_networks) && (!value.all_networks || value.network_ids.length === 0);
+const validEndpointStatus = (value: {
+    freshness: string;
+    last_reported_at_unix_seconds?: number;
+    expires_at_unix_seconds?: number;
+    report?: { valid_for_seconds: number };
+}): boolean => {
+    const hasLast = value.last_reported_at_unix_seconds !== undefined;
+    const hasExpiry = value.expires_at_unix_seconds !== undefined;
+    if (hasLast !== hasExpiry || hasLast && value.last_reported_at_unix_seconds! >= value.expires_at_unix_seconds!) return false;
+    if (value.freshness === 'current') return hasLast && value.report !== undefined &&
+        value.expires_at_unix_seconds! - value.last_reported_at_unix_seconds! === value.report.valid_for_seconds;
+    if (value.freshness === 'expired') return hasLast && value.report === undefined;
+    if (value.freshness === 'never_reported') return !hasLast && value.report === undefined;
+    return value.freshness === 'node_inactive' && value.report === undefined;
+};
 const validRoute = (value: { prefix: string; kind: string; mode: string }): boolean => {
     const parsed = parseCidr(value.prefix);
     if (!parsed || isIpv4Mapped(parsed.address) || parsed.canonical !== value.prefix) return false;
@@ -332,6 +347,7 @@ const zodReplacements = [
   ["    ]).optional()\n}).strict();\n\nexport const zEnrollmentTokenRequest", "    ]).optional()\n}).strict().refine((value) => value.enrollment_class === 'ephemeral'\n    ? value.session_lifetime_seconds !== undefined\n    : value.session_lifetime_seconds === undefined, 'session lifetime must match enrollment class');\n\nexport const zEnrollmentTokenRequest"],
   ["export const zNetwork = z.object({\n    network_id: zIdentifier,\n    name: zResourceName,\n    ipv4_pool: z.string(),\n    ipv6_pool: z.string().optional(),", "export const zNetwork = z.object({\n    network_id: zIdentifier,\n    name: zResourceName,\n    ipv4_pool: z.string().refine((value) => routableCidr(value, 4, 8, 30, true), 'IPv4 pool must be a canonical routable /8../30'),\n    ipv6_pool: z.string().optional().refine((value) => value === undefined || routableCidr(value, 6, 64, 120, true), 'IPv6 pool must be a canonical routable /64../120'),"],
   ["    password_updated_at_unix_seconds: zUnixSeconds\n}).strict();\n\nexport const zAdministratorBootstrapRequest", "    password_updated_at_unix_seconds: zUnixSeconds\n}).strict().refine((value) => validAdministratorAccess(value), 'administrator scope is inconsistent with role or contains duplicate networks');\n\nexport const zAdministratorBootstrapRequest"],
+  ["    report: zEndpointRuntimeReport.optional()\n}).strict();\n\nexport const zEndpointStatuses", "    report: zEndpointRuntimeReport.optional()\n}).strict().refine(validEndpointStatus, 'endpoint status freshness, evidence timestamps, and report must be consistent');\n\nexport const zEndpointStatuses"],
   ["    csrf_token: zSecret\n}).strict();\n\nexport const zAdministrators", "    csrf_token: zSecret\n}).strict().refine((value) => validAdministratorAccess(value), 'administrator scope is inconsistent with role or contains duplicate networks');\n\nexport const zAdministrators"],
 ];
 for (const [before, after] of zodReplacements) zod = replaceRequired(zod, before, after, before.slice(0, 80));

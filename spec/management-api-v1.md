@@ -38,7 +38,7 @@ and cannot be combined with `limit`.
 
 ## Current route inventory
 
-The contract contains exactly 53 operations:
+The contract contains exactly 54 operations:
 
 | Method | Path | Access class |
 | --- | --- | --- |
@@ -69,10 +69,19 @@ The contract contains exactly 53 operations:
 | `POST` | `/v1/admin/networks` | Protected mutation |
 | `GET` | `/v1/admin/networks/{network_id}` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/nodes` | Safe protected read |
+| `GET` | `/v1/admin/networks/{network_id}/endpoint-statuses` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/relays` | Safe protected read |
 | `POST` | `/v1/admin/networks/{network_id}/relays` | Protected mutation |
 | `GET` | `/v1/admin/networks/{network_id}/acl-rules` | Safe protected read |
 | `POST` | `/v1/admin/networks/{network_id}/acl-rules` | Protected mutation |
+| `GET` | `/v1/admin/networks/{network_id}/access-subjects` | Safe protected read |
+| `POST` | `/v1/admin/networks/{network_id}/users` | Protected mutation |
+| `PATCH` | `/v1/admin/users/{user_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/teams` | Protected mutation |
+| `PUT` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
+| `DELETE` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/access-grants` | Protected mutation |
+| `DELETE` | `/v1/admin/access-grants/{grant_id}` | Protected mutation |
 | `GET` | `/v1/admin/networks/{network_id}/certificates` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/routes` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/audit` | Safe protected read |
@@ -107,6 +116,7 @@ pagination metadata:
 | Administrator sessions | `{ "sessions": [...] }` |
 | Networks | `{ "networks": [...] }` |
 | Nodes | `{ "nodes": [...] }` |
+| Endpoint status | `{ "endpoint_statuses": [...] }` |
 | Relays | `{ "relays": [...] }` |
 | ACL rules | `{ "acl_rules": [...] }` |
 | Certificates | `{ "certificates": [...] }` |
@@ -221,7 +231,7 @@ corepack pnpm api:check
 ```
 
 `api:lint` applies strict OpenAPI linting. `api:routes` rejects duplicate YAML
-mapping keys and verifies parity with all 43 registered management operations.
+mapping keys and verifies parity with all 52 registered management operations.
 Generation is deterministic: CI regenerates the SDK and fails on a diff. The
 repository-level equivalent is `make management-api-check`; CI installs the
 pinned lockfile and runs the same gate.

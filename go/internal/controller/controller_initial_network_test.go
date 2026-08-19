@@ -262,7 +262,7 @@ func TestV12MigrationPreservesV11AccessSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if version, err := store.SchemaVersion(ctx); err != nil || version != 12 {
+	if version, err := store.SchemaVersion(ctx); err != nil || version != currentSchemaVersion {
 		t.Fatalf("schema version=%d error=%v", version, err)
 	}
 	for _, object := range []string{"access_users", "access_teams", "access_team_members", "access_grants", "controller_identity_state"} {

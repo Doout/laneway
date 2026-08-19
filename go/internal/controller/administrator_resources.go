@@ -18,6 +18,7 @@ var (
 	administratorNetworkListPolicy         = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/networks")
 	administratorNetworkReadPolicy         = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/networks/{network_id}")
 	administratorNodeListPolicy            = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/networks/{network_id}/nodes")
+	administratorEndpointStatusListPolicy  = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/networks/{network_id}/endpoint-statuses")
 	administratorRelayListPolicy           = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/networks/{network_id}/relays")
 	administratorACLListPolicy             = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/networks/{network_id}/acl-rules")
 	administratorAccessInventoryPolicy     = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/networks/{network_id}/access-subjects")

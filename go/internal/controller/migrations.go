@@ -664,6 +664,37 @@ CREATE TRIGGER controller_identity_state_undeletable
 BEGIN
     SELECT RAISE(ABORT, 'controller identity binding cannot be deleted');
 END;
+`, `
+CREATE TABLE endpoint_status_latest (
+    node_id BLOB PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE
+        CHECK(length(node_id) = 16 AND node_id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    observed_at INTEGER NOT NULL,
+    valid_for_seconds INTEGER NOT NULL CHECK(valid_for_seconds BETWEEN 10 AND 300),
+    expires_at INTEGER NOT NULL CHECK(expires_at = observed_at + valid_for_seconds),
+    product_version TEXT NOT NULL CHECK(length(product_version) BETWEEN 1 AND 64),
+    platform TEXT NOT NULL CHECK(platform IN ('linux','darwin','windows','other','unknown')),
+    certificate_state TEXT NOT NULL CHECK(certificate_state IN ('healthy','renewal_due','expired','revoked','unknown')),
+    configuration_state TEXT NOT NULL CHECK(configuration_state IN ('current','stale','expired','unknown')),
+    carrier_state TEXT NOT NULL CHECK(carrier_state IN ('direct','relay_quic','relay_tcp','negotiating','degraded','disconnected','unknown')),
+    route_state TEXT NOT NULL CHECK(route_state IN ('ready','degraded','unavailable','unknown')),
+    selected_exit_state TEXT NOT NULL CHECK(selected_exit_state IN ('not_selected','ready','degraded','unavailable','unknown')),
+    cleanup_failure_count INTEGER NOT NULL CHECK(cleanup_failure_count BETWEEN 0 AND 1000000000),
+    configuration_epoch INTEGER NOT NULL CHECK(configuration_epoch BETWEEN 0 AND 9223372036854775807),
+    FOREIGN KEY(network_id,node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX endpoint_status_latest_network
+    ON endpoint_status_latest(network_id,node_id);
+CREATE INDEX endpoint_status_latest_expiry
+    ON endpoint_status_latest(expires_at,node_id);
+CREATE INDEX certificates_endpoint_status_validity
+    ON certificates(network_id,node_id,revoked_at,not_before,not_after);
+CREATE TRIGGER endpoint_status_latest_identity_immutable
+    BEFORE UPDATE OF node_id,network_id ON endpoint_status_latest
+BEGIN
+    SELECT RAISE(ABORT, 'endpoint status identity is immutable');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

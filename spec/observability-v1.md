@@ -55,7 +55,64 @@ empty bounded lists are encoded as empty arrays. Status MUST NOT include tokens,
 keys, rendezvous material, or packet data. A foreground User reports successful
 network-state restoration when it exits cleanly.
 
-## 5. Diagnostics listeners
+## 5. Controller latest endpoint status
+
+Endpoint status reporting is optional and runs outside the packet path. A node
+submits a strict JSON object to `PUT /v1/status` over its existing authenticated
+management connection. The controller applies the same mTLS identity,
+certificate, durable node-revocation, and identity-lease checks used by
+configuration requests before parsing or accepting the report.
+
+The request contains exactly these fields:
+
+```json
+{
+  "valid_for_seconds": 60,
+  "product_version": "1.2.3",
+  "platform": "linux",
+  "certificate_state": "healthy",
+  "configuration_state": "current",
+  "carrier_state": "relay_quic",
+  "route_state": "ready",
+  "selected_exit_state": "not_selected",
+  "cleanup_failure_count": 0,
+  "configuration_epoch": 42
+}
+```
+
+`valid_for_seconds` MUST be 10 through 300. Product version is 1 through 64
+printable ASCII bytes. Platform is `linux`, `darwin`, `windows`, `other`, or
+`unknown`. Certificate state is `healthy`, `renewal_due`, `expired`, `revoked`,
+or `unknown`. Configuration state is `current`, `stale`, `expired`, or
+`unknown`. Carrier state is `direct`, `relay_quic`, `relay_tcp`, `negotiating`,
+`degraded`, `disconnected`, or `unknown`. Route state is `ready`, `degraded`,
+`unavailable`, or `unknown`. Selected Exit state adds `not_selected` to the
+route-state vocabulary. Cleanup failures are a bounded aggregate counter.
+
+The controller owns `observed_at` and `expires_at`; endpoint clocks do not.
+`expires_at` is exactly `observed_at + valid_for_seconds`.
+Only one row per NodeID is retained, and a report older than the retained
+observation is rejected. A report whose configuration epoch is ahead of the
+controller is rejected. A lower epoch is exposed as `stale`, even if the
+endpoint claimed `current`; staleness is re-evaluated when administrators read
+the report so a later controller change cannot leave old status marked current.
+
+The protected administrator read is
+`GET /v1/admin/networks/{network_id}/endpoint-statuses`. It returns one bounded
+inventory row per node with freshness `current`, `expired`, `never_reported`,
+or `node_inactive`. Runtime report fields are returned only for `current`.
+Expired and inactive rows may retain last-report and expiry timestamps as
+evidence but MUST NOT return stale health fields. Revocation, identity-lease
+expiry, or absence of a controller-valid certificate produces `node_inactive`;
+administrative enablement or the absence of revocation never produces current
+health.
+
+Reports MUST NOT contain tokens, keys, packet contents, private endpoints,
+free-form local data, per-peer state, or unbounded collections. Reporting does
+not create per-heartbeat audit history. Loss or rejection of telemetry MUST NOT
+change authorization or interrupt otherwise healthy forwarding.
+
+## 6. Diagnostics listeners
 
 | Implementation | Opt-in setting | Routes | Binding requirements |
 | --- | --- | --- | --- |
@@ -68,7 +125,7 @@ authenticated administrative tunnel for remote access and MUST NOT expose them
 through an unauthenticated proxy. Rust listeners do not provide profiling
 routes.
 
-## 6. Component metrics
+## 7. Component metrics
 
 | Component | Required coverage |
 | --- | --- |
@@ -87,7 +144,7 @@ Metrics are process-global and label-free. The Go Exit Node names are
 means accepted between the encrypted carrier and Exit TUN; it does not prove
 that an Internet destination replied.
 
-## 7. Alerts and backpressure
+## 8. Alerts and backpressure
 
 Operators SHOULD alert on approaching certificate, identity, or configuration
 lease deadlines; sustained limiter or queue saturation; path-failure rates

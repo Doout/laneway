@@ -187,6 +187,21 @@ const validRelayEndpoint = (value: string): boolean => {
 };
 const validAdministratorAccess = (value: { role: string; all_networks: boolean; network_ids: ReadonlyArray<string> }): boolean =>
     uniqueStrings(value.network_ids) && (value.role !== 'owner' || value.all_networks) && (!value.all_networks || value.network_ids.length === 0);
+const validEndpointStatus = (value: {
+    freshness: string;
+    last_reported_at_unix_seconds?: number;
+    expires_at_unix_seconds?: number;
+    report?: { valid_for_seconds: number };
+}): boolean => {
+    const hasLast = value.last_reported_at_unix_seconds !== undefined;
+    const hasExpiry = value.expires_at_unix_seconds !== undefined;
+    if (hasLast !== hasExpiry || hasLast && value.last_reported_at_unix_seconds! >= value.expires_at_unix_seconds!) return false;
+    if (value.freshness === 'current') return hasLast && value.report !== undefined &&
+        value.expires_at_unix_seconds! - value.last_reported_at_unix_seconds! === value.report.valid_for_seconds;
+    if (value.freshness === 'expired') return hasLast && value.report === undefined;
+    if (value.freshness === 'never_reported') return !hasLast && value.report === undefined;
+    return value.freshness === 'node_inactive' && value.report === undefined;
+};
 const validRoute = (value: { prefix: string; kind: string; mode: string }): boolean => {
     const parsed = parseCidr(value.prefix);
     if (!parsed || isIpv4Mapped(parsed.address) || parsed.canonical !== value.prefix) return false;
@@ -228,6 +243,49 @@ export const zAdministratorSessionState = z.enum([
 export const zAuthState = z.object({
     state: z.enum(['bootstrap_required', 'sign_in'])
 }).strict();
+
+export const zCarrierStatusState = z.enum([
+    'direct',
+    'relay_quic',
+    'relay_tcp',
+    'negotiating',
+    'degraded',
+    'disconnected',
+    'unknown'
+]);
+
+export const zCertificateStatusState = z.enum([
+    'healthy',
+    'renewal_due',
+    'expired',
+    'revoked',
+    'unknown'
+]);
+
+export const zConfigurationStatusState = z.enum([
+    'current',
+    'stale',
+    'expired',
+    'unknown'
+]);
+
+export const zEndpointPlatform = z.enum([
+    'linux',
+    'darwin',
+    'windows',
+    'other',
+    'unknown'
+]);
+
+/**
+ * Only current includes a report. Expired preserves observation times as evidence, never_reported has no observation, and node_inactive means revocation, lease expiry, or absence of a currently valid certificate prevents the retained report from representing live status.
+ */
+export const zEndpointStatusFreshness = z.enum([
+    'current',
+    'expired',
+    'never_reported',
+    'node_inactive'
+]);
 
 export const zEnrollmentClass = z.enum([
     'durable',
@@ -477,6 +535,13 @@ export const zRouteState = z.enum([
     'rejected'
 ]);
 
+export const zRouteStatusState = z.enum([
+    'ready',
+    'degraded',
+    'unavailable',
+    'unknown'
+]);
+
 /**
  * Opaque 32-byte secret encoded as unpadded base64url.
  */
@@ -486,6 +551,14 @@ export const zAdministratorRecoveryRequest = z.object({
     grant: zSecret,
     password: zPassword
 }).strict();
+
+export const zSelectedExitStatusState = z.enum([
+    'not_selected',
+    'ready',
+    'degraded',
+    'unavailable',
+    'unknown'
+]);
 
 export const zSessionRevocationRequest = z.object({
     reason: z.string().refine((value) => byteLengthBetween(value, 1, 256), 'reason must occupy 1..256 UTF-8 bytes')
@@ -542,6 +615,19 @@ export const zAclRule = z.object({
 
 export const zAclRules = z.object({
     acl_rules: z.array(zAclRule)
+}).strict();
+
+export const zEndpointRuntimeReport = z.object({
+    valid_for_seconds: z.int().gte(10).lte(300),
+    product_version: z.string().regex(/^[\x21-\x7e]{1,64}$/),
+    platform: zEndpointPlatform,
+    certificate_state: zCertificateStatusState,
+    configuration_state: zConfigurationStatusState,
+    carrier_state: zCarrierStatusState,
+    route_state: zRouteStatusState,
+    selected_exit_state: zSelectedExitStatusState,
+    cleanup_failure_count: z.int().gte(0).lte(1000000000),
+    configuration_epoch: zUint64
 }).strict();
 
 export const zEpoch = z.object({
@@ -663,6 +749,21 @@ export const zCertificate = z.object({
 
 export const zCertificates = z.object({
     certificates: z.array(zCertificate)
+}).strict();
+
+export const zEndpointStatus = z.object({
+    node_id: zIdentifier,
+    network_id: zIdentifier,
+    node_name: zResourceName,
+    authoritative_configuration_epoch: zUint64,
+    freshness: zEndpointStatusFreshness,
+    last_reported_at_unix_seconds: zUnixSeconds.optional(),
+    expires_at_unix_seconds: zUnixSeconds.optional(),
+    report: zEndpointRuntimeReport.optional()
+}).strict().refine(validEndpointStatus, 'endpoint status freshness, evidence timestamps, and report must be consistent');
+
+export const zEndpointStatuses = z.object({
+    endpoint_statuses: z.array(zEndpointStatus)
 }).strict();
 
 export const zEnrollmentToken = z.object({
@@ -1090,6 +1191,19 @@ export const zListNetworkNodesQuery = z.object({
  * Bounded node snapshot.
  */
 export const zListNetworkNodesResponse = zNodes;
+
+export const zListNetworkEndpointStatusesPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+export const zListNetworkEndpointStatusesQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Bounded latest endpoint-status snapshot.
+ */
+export const zListNetworkEndpointStatusesResponse = zEndpointStatuses;
 
 export const zListNetworkRelaysPath = z.object({
     network_id: zIdentifier

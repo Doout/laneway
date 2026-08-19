@@ -32,6 +32,18 @@ func TestBackupAndFreshRestore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	token, err := store.IssueEnrollmentToken(ctx, network.ID, "backup status", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := store.EnrollNode(ctx, token.Secret, "reported-node", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEndpointStatus(ctx, identity.NodeIdentity{NetworkID: network.ID, NodeID: node.ID},
+		testEndpointStatusReport(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
 
 	backupPath := filepath.Join(directory, "backups", "controller.db")
 	if err := os.Mkdir(filepath.Dir(backupPath), 0o700); err != nil {
@@ -79,6 +91,20 @@ func TestBackupAndFreshRestore(t *testing.T) {
 	}
 	if afterCount != 0 {
 		t.Fatalf("post-backup record count = %d, want 0", afterCount)
+	}
+	var restoredVersion string
+	if err := restored.db.QueryRowContext(ctx, `SELECT product_version FROM endpoint_status_latest WHERE node_id=?`,
+		idBytes(node.ID)).Scan(&restoredVersion); err != nil || restoredVersion != "1.2.3" {
+		t.Fatalf("restored endpoint status version=%q err=%v", restoredVersion, err)
+	}
+}
+
+func testEndpointStatusReport() EndpointStatusReport {
+	return EndpointStatusReport{
+		ValidForSeconds: 60, ProductVersion: "1.2.3", Platform: EndpointPlatformLinux,
+		CertificateState: CertificateStatusHealthy, ConfigurationState: ConfigurationStatusCurrent,
+		CarrierState: CarrierStatusDirect, RouteState: RouteStatusReady,
+		SelectedExitState: SelectedExitStatusNotSelected, ConfigurationEpoch: 1,
 	}
 }
 
@@ -393,6 +419,77 @@ func TestRestoreRejectsIncompleteSchema(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsCurrentBackupWithoutEndpointStatusTable(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, _ := openTestStore(t)
+	source := filepath.Join(directory, "missing-status.db")
+	if err := store.Backup(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE endpoint_status_latest`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "restored.db")
+	if err := RestoreDatabase(ctx, source, destination); err == nil ||
+		!strings.Contains(err.Error(), "required table endpoint_status_latest is missing") {
+		t.Fatalf("restore missing endpoint status table error=%v", err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("incomplete restore published destination: %v", err)
+	}
+}
+
+func TestRestoreRejectsEndpointStatusTTLViolation(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, _ := openTestStore(t)
+	network := resourceTestNetwork(t, store, "tampered-backup-status", "10.118.0.0/24")
+	node := resourceTestNode(t, store, network.ID, "tampered-backup-node", 0)
+	current, err := store.Network(ctx, network.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := testEndpointStatusReport()
+	report.ConfigurationEpoch = current.ConfigurationEpoch
+	if err := store.RecordEndpointStatus(ctx, identity.NodeIdentity{NetworkID: network.ID, NodeID: node.ID},
+		report, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(directory, "tampered-status-ttl.db")
+	if err := store.Backup(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA ignore_check_constraints=ON;
+		UPDATE endpoint_status_latest SET expires_at=observed_at+10000;
+		PRAGMA ignore_check_constraints=OFF`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "restored.db")
+	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "endpoint status TTL is corrupt") {
+		t.Fatalf("tampered endpoint TTL restore error=%v", err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tampered endpoint TTL restore published destination: %v", err)
+	}
+}
+
 func TestBackupDatabaseDoesNotMigrateSource(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
@@ -704,18 +801,29 @@ func TestRestoreRejectsMalformedCurrentAdministratorScopeTable(t *testing.T) {
 
 func TestRestoreRejectsWeakenedCurrentAdministratorDDL(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		old, newer string
+		name                   string
+		objectType, objectName string
+		old, newer             string
 	}{
 		{
-			name:  "partial password uniqueness predicate",
-			old:   `WHERE credential_type = 'password' AND revoked_at IS NULL`,
-			newer: `WHERE credential_type = 'password'`,
+			name: "partial password uniqueness predicate", objectType: "index",
+			objectName: "one_active_administrator_password",
+			old:        `WHERE credential_type = 'password' AND revoked_at IS NULL`,
+			newer:      `WHERE credential_type = 'password'`,
 		},
 		{
-			name:  "administrator role constraint",
-			old:   `role TEXT NOT NULL CHECK(role IN ('owner','operator','auditor'))`,
-			newer: `role TEXT NOT NULL`,
+			name: "administrator role constraint", objectType: "table", objectName: "administrator_principals",
+			old: `role TEXT NOT NULL CHECK(role IN ('owner','operator','auditor'))`, newer: `role TEXT NOT NULL`,
+		},
+		{
+			name: "endpoint status TTL constraint", objectType: "table", objectName: "endpoint_status_latest",
+			old:   `valid_for_seconds INTEGER NOT NULL CHECK(valid_for_seconds BETWEEN 10 AND 300)`,
+			newer: `valid_for_seconds INTEGER NOT NULL`,
+		},
+		{
+			name: "endpoint status expiry relation", objectType: "table", objectName: "endpoint_status_latest",
+			old:   `expires_at INTEGER NOT NULL CHECK(expires_at = observed_at + valid_for_seconds)`,
+			newer: `expires_at INTEGER NOT NULL`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -731,11 +839,7 @@ func TestRestoreRejectsWeakenedCurrentAdministratorDDL(t *testing.T) {
 				t.Fatal(err)
 			}
 			var definition string
-			objectType, objectName := "table", "administrator_principals"
-			if strings.Contains(test.name, "predicate") {
-				objectType, objectName = "index", "one_active_administrator_password"
-			}
-			if err := db.QueryRow(`SELECT sql FROM sqlite_schema WHERE type=? AND name=?`, objectType, objectName).Scan(&definition); err != nil {
+			if err := db.QueryRow(`SELECT sql FROM sqlite_schema WHERE type=? AND name=?`, test.objectType, test.objectName).Scan(&definition); err != nil {
 				db.Close()
 				t.Fatal(err)
 			}
@@ -745,7 +849,7 @@ func TestRestoreRejectsWeakenedCurrentAdministratorDDL(t *testing.T) {
 				t.Fatalf("fixture did not find canonical fragment %q", test.old)
 			}
 			if _, err := db.Exec(`PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=? WHERE type=? AND name=?; PRAGMA writable_schema=OFF`,
-				weakened, objectType, objectName); err != nil {
+				weakened, test.objectType, test.objectName); err != nil {
 				db.Close()
 				t.Fatal(err)
 			}

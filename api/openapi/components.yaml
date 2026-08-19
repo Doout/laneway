@@ -402,6 +402,21 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Nodes'
+    EndpointStatuses:
+      description: Bounded latest endpoint-status snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EndpointStatuses'
     AccessInventory:
       description: Users, Teams, memberships, and effective grant definitions for one Network.
       headers:
@@ -1185,6 +1200,109 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Node'
+    EndpointStatusFreshness:
+      type: string
+      enum: [current, expired, never_reported, node_inactive]
+      description: >-
+        Only current includes a report. Expired preserves observation times as
+        evidence, never_reported has no observation, and node_inactive means
+        revocation, lease expiry, or absence of a currently valid certificate
+        prevents the retained report from representing live status.
+    EndpointPlatform:
+      type: string
+      enum: [linux, darwin, windows, other, unknown]
+    CertificateStatusState:
+      type: string
+      enum: [healthy, renewal_due, expired, revoked, unknown]
+    ConfigurationStatusState:
+      type: string
+      enum: [current, stale, expired, unknown]
+    CarrierStatusState:
+      type: string
+      enum: [direct, relay_quic, relay_tcp, negotiating, degraded, disconnected, unknown]
+    RouteStatusState:
+      type: string
+      enum: [ready, degraded, unavailable, unknown]
+    SelectedExitStatusState:
+      type: string
+      enum: [not_selected, ready, degraded, unavailable, unknown]
+    EndpointRuntimeReport:
+      type: object
+      additionalProperties: false
+      required:
+        - valid_for_seconds
+        - product_version
+        - platform
+        - certificate_state
+        - configuration_state
+        - carrier_state
+        - route_state
+        - selected_exit_state
+        - cleanup_failure_count
+        - configuration_epoch
+      properties:
+        valid_for_seconds:
+          type: integer
+          minimum: 10
+          maximum: 300
+        product_version:
+          type: string
+          pattern: '^[\x21-\x7e]{1,64}$'
+        platform:
+          $ref: '#/components/schemas/EndpointPlatform'
+        certificate_state:
+          $ref: '#/components/schemas/CertificateStatusState'
+        configuration_state:
+          $ref: '#/components/schemas/ConfigurationStatusState'
+        carrier_state:
+          $ref: '#/components/schemas/CarrierStatusState'
+        route_state:
+          $ref: '#/components/schemas/RouteStatusState'
+        selected_exit_state:
+          $ref: '#/components/schemas/SelectedExitStatusState'
+        cleanup_failure_count:
+          type: integer
+          minimum: 0
+          maximum: 1000000000
+        configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+    EndpointStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - node_id
+        - network_id
+        - node_name
+        - authoritative_configuration_epoch
+        - freshness
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        node_name:
+          $ref: '#/components/schemas/ResourceName'
+        authoritative_configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+        freshness:
+          $ref: '#/components/schemas/EndpointStatusFreshness'
+        last_reported_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        report:
+          allOf:
+            - $ref: '#/components/schemas/EndpointRuntimeReport'
+          description: Present only when freshness is current.
+    EndpointStatuses:
+      type: object
+      additionalProperties: false
+      required: [endpoint_statuses]
+      properties:
+        endpoint_statuses:
+          type: array
+          items:
+            $ref: '#/components/schemas/EndpointStatus'
     AccessUser:
       type: object
       additionalProperties: false

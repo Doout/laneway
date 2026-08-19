@@ -280,6 +280,9 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	if version >= 12 {
 		requiredTables = append(requiredTables, "controller_identity_state")
 	}
+	if version >= endpointStatusSchemaVersion {
+		requiredTables = append(requiredTables, "endpoint_status_latest")
+	}
 	if version >= 8 {
 		requiredTables = append(requiredTables, "administrator_principals", "administrator_principal_networks",
 			"administrator_credentials", "administrator_sessions", "administrator_recovery_grants", "administrator_auth_state")
@@ -297,6 +300,17 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 		}
 		if count != 1 {
 			return fmt.Errorf("backup schema is incomplete: required table %s is missing", table)
+		}
+	}
+	if version >= endpointStatusSchemaVersion {
+		var invalidTTLRows int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM endpoint_status_latest
+			WHERE valid_for_seconds NOT BETWEEN 10 AND 300
+			OR expires_at != observed_at + valid_for_seconds`).Scan(&invalidTTLRows); err != nil {
+			return fmt.Errorf("validate endpoint status TTL: %w", err)
+		}
+		if invalidTTLRows != 0 {
+			return errors.New("backup endpoint status TTL is corrupt")
 		}
 	}
 	if version >= 8 {
@@ -406,14 +420,15 @@ var administratorSchemaTables = map[string]struct{}{
 	"administrator_root_token_rotations": {},
 	"ephemeral_exit_sessions":            {},
 	"controller_identity_state":          {},
+	"endpoint_status_latest":             {},
 	"audit_events":                       {},
 }
 
 // administratorSchemaFingerprint covers the exact sqlite_schema text and
-// complete object set for every security-critical administrator table. This includes
-// implicit/explicit indexes and triggers, so altered CHECK/FK clauses,
-// partial-index predicates, STRICT declarations, or unexpected triggers all
-// change the fingerprint.
+// complete object set for every security-critical administrator or runtime
+// truth table. This includes implicit/explicit indexes and triggers, so altered
+// CHECK/FK clauses, partial-index predicates, STRICT declarations, or
+// unexpected triggers all change the fingerprint.
 func administratorSchemaFingerprint(ctx context.Context, db *sql.DB) ([sha256.Size]byte, int, error) {
 	rows, err := db.QueryContext(ctx, `SELECT type,name,tbl_name,sql
 		FROM sqlite_schema WHERE type IN ('table','index','trigger')

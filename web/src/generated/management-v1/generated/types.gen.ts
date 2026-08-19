@@ -242,6 +242,18 @@ export type BootstrapBundleRequest = {
     expires_at_unix_seconds: UnixSeconds;
 };
 
+export const CarrierStatusState = {
+    DIRECT: 'direct',
+    RELAY_QUIC: 'relay_quic',
+    RELAY_TCP: 'relay_tcp',
+    NEGOTIATING: 'negotiating',
+    DEGRADED: 'degraded',
+    DISCONNECTED: 'disconnected',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type CarrierStatusState = typeof CarrierStatusState[keyof typeof CarrierStatusState];
+
 export type Certificate = {
     certificate_id: Identifier;
     network_id: Identifier;
@@ -257,9 +269,28 @@ export type Certificate = {
     revocation_reason?: string;
 };
 
+export const CertificateStatusState = {
+    HEALTHY: 'healthy',
+    RENEWAL_DUE: 'renewal_due',
+    EXPIRED: 'expired',
+    REVOKED: 'revoked',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type CertificateStatusState = typeof CertificateStatusState[keyof typeof CertificateStatusState];
+
 export type Certificates = {
     certificates: Array<Certificate>;
 };
+
+export const ConfigurationStatusState = {
+    CURRENT: 'current',
+    STALE: 'stale',
+    EXPIRED: 'expired',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type ConfigurationStatusState = typeof ConfigurationStatusState[keyof typeof ConfigurationStatusState];
 
 export type CreateAclRuleRequest = {
     /**
@@ -302,6 +333,62 @@ export type CreateAdministratorRequest = unknown & {
      * Omission or null is normalized to an empty array.
      */
     network_ids?: Array<Identifier> | null;
+};
+
+export const EndpointPlatform = {
+    LINUX: 'linux',
+    DARWIN: 'darwin',
+    WINDOWS: 'windows',
+    OTHER: 'other',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type EndpointPlatform = typeof EndpointPlatform[keyof typeof EndpointPlatform];
+
+export type EndpointRuntimeReport = {
+    valid_for_seconds: number;
+    product_version: string;
+    platform: EndpointPlatform;
+    certificate_state: CertificateStatusState;
+    configuration_state: ConfigurationStatusState;
+    carrier_state: CarrierStatusState;
+    route_state: RouteStatusState;
+    selected_exit_state: SelectedExitStatusState;
+    cleanup_failure_count: number;
+    configuration_epoch: Uint64;
+};
+
+export type EndpointStatus = {
+    node_id: Identifier;
+    network_id: Identifier;
+    node_name: ResourceName;
+    authoritative_configuration_epoch: Uint64;
+    freshness: EndpointStatusFreshness;
+    last_reported_at_unix_seconds?: UnixSeconds;
+    expires_at_unix_seconds?: UnixSeconds;
+    /**
+     * Present only when freshness is current.
+     */
+    report?: EndpointRuntimeReport;
+};
+
+/**
+ * Only current includes a report. Expired preserves observation times as evidence, never_reported has no observation, and node_inactive means revocation, lease expiry, or absence of a currently valid certificate prevents the retained report from representing live status.
+ */
+export const EndpointStatusFreshness = {
+    CURRENT: 'current',
+    EXPIRED: 'expired',
+    NEVER_REPORTED: 'never_reported',
+    NODE_INACTIVE: 'node_inactive'
+} as const;
+
+/**
+ * Only current includes a report. Expired preserves observation times as evidence, never_reported has no observation, and node_inactive means revocation, lease expiry, or absence of a currently valid certificate prevents the retained report from representing live status.
+ */
+export type EndpointStatusFreshness = typeof EndpointStatusFreshness[keyof typeof EndpointStatusFreshness];
+
+export type EndpointStatuses = {
+    endpoint_statuses: Array<EndpointStatus>;
 };
 
 export const EnrollmentClass = {
@@ -640,6 +727,15 @@ export const RouteState = {
 
 export type RouteState = typeof RouteState[keyof typeof RouteState];
 
+export const RouteStatusState = {
+    READY: 'ready',
+    DEGRADED: 'degraded',
+    UNAVAILABLE: 'unavailable',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type RouteStatusState = typeof RouteStatusState[keyof typeof RouteStatusState];
+
 export type Routes = {
     routes: Array<Route>;
 };
@@ -648,6 +744,16 @@ export type Routes = {
  * Opaque 32-byte secret encoded as unpadded base64url.
  */
 export type Secret = string;
+
+export const SelectedExitStatusState = {
+    NOT_SELECTED: 'not_selected',
+    READY: 'ready',
+    DEGRADED: 'degraded',
+    UNAVAILABLE: 'unavailable',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type SelectedExitStatusState = typeof SelectedExitStatusState[keyof typeof SelectedExitStatusState];
 
 export type SessionRevocationRequest = {
     /**
@@ -1371,6 +1477,38 @@ export type ListNetworkNodesResponses = {
 };
 
 export type ListNetworkNodesResponse = ListNetworkNodesResponses[keyof ListNetworkNodesResponses];
+
+export type ListNetworkEndpointStatusesData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/networks/{network_id}/endpoint-statuses';
+};
+
+export type ListNetworkEndpointStatusesErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListNetworkEndpointStatusesError = ListNetworkEndpointStatusesErrors[keyof ListNetworkEndpointStatusesErrors];
+
+export type ListNetworkEndpointStatusesResponses = {
+    /**
+     * Bounded latest endpoint-status snapshot.
+     */
+    200: EndpointStatuses;
+};
+
+export type ListNetworkEndpointStatusesResponse = ListNetworkEndpointStatusesResponses[keyof ListNetworkEndpointStatusesResponses];
 
 export type ListNetworkRelaysData = {
     body?: never;
