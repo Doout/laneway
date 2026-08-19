@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Doout/laneway/go/internal/adminauth"
+	"github.com/Doout/laneway/go/internal/identity"
 	sqlite "modernc.org/sqlite"
 )
 
@@ -343,6 +344,11 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 			return err
 		}
 	}
+	if version >= automationServicePrincipalSchemaVersion {
+		if err := validateAutomationServicePrincipalData(ctx, db); err != nil {
+			return err
+		}
+	}
 	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
 		return fmt.Errorf("run SQLite foreign-key check: %w", err)
@@ -353,6 +359,65 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("read SQLite foreign-key check: %w", err)
+	}
+	return nil
+}
+
+func validateAutomationServicePrincipalData(ctx context.Context, db *sql.DB) error {
+	var enabledPrincipals int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM automation_service_principals
+		WHERE enabled=1`).Scan(&enabledPrincipals); err != nil {
+		return fmt.Errorf("validate enabled automation service principal count: %w", err)
+	}
+	if enabledPrincipals > MaxEnabledServicePrincipals {
+		return errors.New("backup automation data is invalid: enabled service principal limit exceeded")
+	}
+
+	var overLimitPrincipal []byte
+	var unrevokedTokens int
+	err := db.QueryRowContext(ctx, `SELECT principal_id,count(*)
+		FROM automation_service_access_tokens WHERE revoked_at IS NULL
+		GROUP BY principal_id HAVING count(*)>? ORDER BY principal_id LIMIT 1`,
+		MaxUnrevokedServiceAccessTokensPerPrincipal).Scan(&overLimitPrincipal, &unrevokedTokens)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("validate unrevoked automation service access token count: %w", err)
+	}
+	if err == nil {
+		if _, scanErr := scanID(overLimitPrincipal); scanErr != nil {
+			return errors.New("backup automation data is invalid: corrupt service access token owner")
+		}
+		return fmt.Errorf("backup automation data is invalid: unrevoked service access token limit exceeded (%d)", unrevokedTokens)
+	}
+
+	rows, err := db.QueryContext(ctx, `SELECT id FROM automation_service_principals ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("read backup automation service principals: %w", err)
+	}
+	var principalIDs []identity.ID
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan backup automation service principal: %w", err)
+		}
+		principalID, err := scanID(raw)
+		if err != nil {
+			rows.Close()
+			return errors.New("backup automation data is invalid: corrupt service principal ID")
+		}
+		principalIDs = append(principalIDs, principalID)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close backup automation service principals: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate backup automation service principals: %w", err)
+	}
+	for _, principalID := range principalIDs {
+		principal, err := servicePrincipalRecord(ctx, db, principalID)
+		if err != nil || !principal.Principal.Valid() {
+			return errors.New("backup automation data is invalid: service principal is invalid")
+		}
 	}
 	return nil
 }

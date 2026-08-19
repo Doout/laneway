@@ -694,6 +694,196 @@ func TestRestoreRejectsNamedAccessPolicyDataTamperingWithRestoredGuards(t *testi
 	}
 }
 
+func TestBackupAndRestoreRejectAutomationLimitTamperingWithRestoredGuards(t *testing.T) {
+	tests := []struct {
+		name, trigger, want string
+		mutate              func(context.Context, *sql.Tx, identity.NetworkID) error
+	}{
+		{
+			name:    "enabled service principals",
+			trigger: "automation_service_principals_enabled_limit",
+			want:    "enabled service principal limit exceeded",
+			mutate: func(ctx context.Context, tx *sql.Tx, _ identity.NetworkID) error {
+				if _, err := tx.ExecContext(ctx, `WITH RECURSIVE sequence(value) AS (
+					VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<101
+				) INSERT INTO automation_service_principals
+					(id,name,enabled,all_networks,created_at,updated_at)
+					SELECT randomblob(16),printf('backup-bot-%03d',value),1,0,1,1 FROM sequence`); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx, `INSERT INTO automation_service_principal_permissions
+					(principal_id,operation,created_at)
+					SELECT id,'network.create',1 FROM automation_service_principals
+					WHERE name LIKE 'backup-bot-%'`)
+				return err
+			},
+		},
+		{
+			name:    "unrevoked service access tokens",
+			trigger: "automation_service_access_token_unrevoked_limit",
+			want:    "unrevoked service access token limit exceeded",
+			mutate: func(ctx context.Context, tx *sql.Tx, _ identity.NetworkID) error {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO automation_service_principals
+					(id,name,enabled,all_networks,created_at,updated_at)
+					VALUES(x'01000000000000000000000000000001','token-cap-bot',1,0,1,1);
+					INSERT INTO automation_service_principal_permissions(principal_id,operation,created_at)
+					VALUES(x'01000000000000000000000000000001','network.create',1)`); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx, `WITH RECURSIVE sequence(value) AS (
+					VALUES(1) UNION ALL SELECT value+1 FROM sequence WHERE value<101
+				) INSERT INTO automation_service_access_tokens
+					(id,principal_id,label,token_hash,created_at,expires_at)
+					SELECT randomblob(16),x'01000000000000000000000000000001',
+					printf('token-%03d',value),randomblob(32),1,3601 FROM sequence`)
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertAutomationBackupAndRestoreRejectTamper(t, test.trigger, test.want, test.mutate)
+		})
+	}
+}
+
+func TestBackupAndRestoreRejectInvalidServicePrincipalShape(t *testing.T) {
+	tests := []struct {
+		name, trigger string
+		mutate        func(context.Context, *sql.Tx, identity.NetworkID) error
+	}{
+		{
+			name: "zero permissions",
+			mutate: func(ctx context.Context, tx *sql.Tx, _ identity.NetworkID) error {
+				_, err := tx.ExecContext(ctx, `INSERT INTO automation_service_principals
+					(id,name,enabled,all_networks,created_at,updated_at)
+					VALUES(x'02000000000000000000000000000001','empty-permissions',1,0,1,1)`)
+				return err
+			},
+		},
+		{
+			name: "network permission without scope",
+			mutate: func(ctx context.Context, tx *sql.Tx, _ identity.NetworkID) error {
+				_, err := tx.ExecContext(ctx, `INSERT INTO automation_service_principals
+					(id,name,enabled,all_networks,created_at,updated_at)
+					VALUES(x'02000000000000000000000000000002','unscoped-reader',1,0,1,1);
+					INSERT INTO automation_service_principal_permissions(principal_id,operation,created_at)
+					VALUES(x'02000000000000000000000000000002','network.read',1)`)
+				return err
+			},
+		},
+		{
+			name:    "all networks with explicit scope",
+			trigger: "automation_service_principal_scope_requires_scoped",
+			mutate: func(ctx context.Context, tx *sql.Tx, networkID identity.NetworkID) error {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO automation_service_principals
+					(id,name,enabled,all_networks,created_at,updated_at)
+					VALUES(x'02000000000000000000000000000003','ambiguous-reader',1,1,1,1);
+					INSERT INTO automation_service_principal_permissions(principal_id,operation,created_at)
+					VALUES(x'02000000000000000000000000000003','network.read',1)`); err != nil {
+					return err
+				}
+				_, err := tx.ExecContext(ctx, `INSERT INTO automation_service_principal_networks
+					(principal_id,network_id,created_at)
+					VALUES(x'02000000000000000000000000000003',?,1)`, idBytes(networkID))
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertAutomationBackupAndRestoreRejectTamper(t, test.trigger,
+				"service principal is invalid", test.mutate)
+		})
+	}
+}
+
+func assertAutomationBackupAndRestoreRejectTamper(t *testing.T, trigger, want string,
+	mutate func(context.Context, *sql.Tx, identity.NetworkID) error,
+) {
+	t.Helper()
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, _ := openTestStore(t)
+	network, err := store.CreateNetwork(ctx, "automation-backup", netip.MustParsePrefix("10.119.0.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreSource := filepath.Join(directory, "restore-source.db")
+	if err := store.Backup(ctx, restoreSource); err != nil {
+		t.Fatal(err)
+	}
+	applyAutomationBackupTamper(t, ctx, store.db, network.ID, trigger, mutate)
+	restoreDB, err := sql.Open("sqlite", restoreSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyAutomationBackupTamper(t, ctx, restoreDB, network.ID, trigger, mutate)
+	if err := restoreDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	backupDestination := filepath.Join(directory, "rejected-backup.db")
+	if err := store.Backup(ctx, backupDestination); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("tampered backup error=%v want %q", err, want)
+	}
+	if _, err := os.Stat(backupDestination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tampered backup published destination: %v", err)
+	}
+	restoreDestination := filepath.Join(directory, "rejected-restore.db")
+	if err := RestoreDatabase(ctx, restoreSource, restoreDestination); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("tampered restore error=%v want %q", err, want)
+	}
+	if _, err := os.Stat(restoreDestination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("tampered restore published destination: %v", err)
+	}
+	assertNoTemporaryDatabaseFiles(t, directory)
+}
+
+func applyAutomationBackupTamper(t *testing.T, ctx context.Context, db *sql.DB,
+	networkID identity.NetworkID, trigger string,
+	mutate func(context.Context, *sql.Tx, identity.NetworkID) error,
+) {
+	t.Helper()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var definition string
+	if trigger != "" {
+		if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema
+			WHERE type='trigger' AND name=?`, trigger).Scan(&definition); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `DROP TRIGGER `+trigger); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := mutate(ctx, tx, networkID); err != nil {
+		t.Fatal(err)
+	}
+	if definition != "" {
+		if _, err := tx.ExecContext(ctx, definition); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	wantFingerprint, wantObjects, err := expectedAdministratorSchemaFingerprint(ctx, currentSchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotFingerprint, gotObjects, err := administratorSchemaFingerprint(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotObjects != wantObjects || gotFingerprint != wantFingerprint {
+		t.Fatal("automation data tamper did not restore the canonical schema exactly")
+	}
+}
+
 func TestBackupDatabaseDoesNotMigrateSource(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
