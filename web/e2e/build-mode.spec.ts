@@ -66,7 +66,7 @@ function browserSessionSetCookie(value: string) {
   return `${browserSessionCookieName}=${value}; Path=/; Secure; HttpOnly; SameSite=Strict`
 }
 
-async function mockManagementApi(page: Page, networks: Network[], auditEvents: unknown[] = []) {
+async function mockManagementApi(page: Page, networks: Network[], auditEvents: unknown[] = [], nodeOverrides: Record<string, unknown> = {}) {
   const requests: Array<{ authorization?: string; csrf?: string; method: string; origin: string; path: string }> = []
   await page.route('**/v1/admin/**', async (route) => {
     const request = route.request()
@@ -87,7 +87,7 @@ async function mockManagementApi(page: Page, networks: Network[], auditEvents: u
 
     const prefix = `/v1/admin/networks/${networkId}`
     const responses: Record<string, unknown> = {
-      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, user_id: accessUserId, name: 'controller-node-canary', enabled_capabilities: 16, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable' }] },
+      [`${prefix}/nodes`]: { nodes: [{ node_id: '4'.repeat(32), network_id: networkId, user_id: accessUserId, name: 'controller-node-canary', enabled_capabilities: 16, ipv4_address: '100.90.0.9', created_at_unix_seconds: 1_700_000_100, enrollment_class: 'durable', ...nodeOverrides }] },
       [`${prefix}/routes`]: { routes: [{ route_id: '5'.repeat(32), network_id: networkId, node_id: '4'.repeat(32), prefix: '0.0.0.0/0', kind: 'exit', mode: 'nat', metric: 100, state: 'approved', created_at_unix_seconds: 1_700_000_100 }] },
       [`${prefix}/acl-rules`]: { acl_rules: [] },
       [`${prefix}/access-subjects`]: {
@@ -263,6 +263,49 @@ test('compiled live audit keeps the event detail visible while the event stream 
   await page.locator('.audit-day > button').last().click()
   await expect(inspector.getByText(events.at(-1)?.event_id ?? '', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => window.scrollY)).toBe(0)
+})
+
+test('compiled live detail pages contain long names and identifiers at every layout width', async ({ page }) => {
+  test.skip(expectedMode !== 'live', 'Live artifact contract')
+  const nodeId = '4'.repeat(32)
+  const longName = `ibmcloud-shared-exit-v0261~expired-exit~${nodeId}`
+  await mockManagementApi(page, [controllerNetwork], [], {
+    name: longName,
+    enrollment_class: 'ephemeral',
+    lease_expires_at_unix_seconds: 1,
+  })
+
+  await signIn(page)
+  await page.getByRole('link', { name: 'Networks', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Network workspace views' }).getByRole('link', { name: 'Nodes' }).click()
+  await page.getByLabel('Record visibility').selectOption('all')
+
+  const compactName = page.locator('.node-history__row .entity-title strong')
+  await expect(compactName).toHaveText(longName)
+  await expect(compactName).toHaveAttribute('title', longName)
+  expect(await compactName.evaluate((element) => ({
+    overflow: getComputedStyle(element).overflow,
+    textOverflow: getComputedStyle(element).textOverflow,
+    whiteSpace: getComputedStyle(element).whiteSpace,
+  }))).toEqual({ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' })
+
+  await page.getByRole('link', { name: 'View', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Node detail', level: 1 })).toBeVisible()
+  await expect(page.getByRole('heading', { name: longName, level: 2 })).toBeVisible()
+
+  for (const width of [1280, 768, 390]) {
+    await page.setViewportSize({ width, height: 900 })
+    const overflow = await page.locator('.page-header__copy, .page-header__copy h1, .detail-layout > aside, .identity-block, .identity-block > h2, .metadata dd').evaluateAll((elements) => elements.flatMap((element) => {
+      const rect = element.getBoundingClientRect()
+      const parentRect = element.parentElement?.getBoundingClientRect()
+      const escapesParent = parentRect ? rect.left < parentRect.left - 1 || rect.right > parentRect.right + 1 : false
+      return element.scrollWidth > element.clientWidth + 1 || escapesParent
+        ? [{ selector: element.tagName.toLowerCase(), clientWidth: element.clientWidth, scrollWidth: element.scrollWidth, left: rect.left, right: rect.right }]
+        : []
+    }))
+    expect(overflow, `overflow at ${width}px`).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+  }
 })
 
 test('compiled live artifact keeps the workspace usable on a compact viewport and across themes', async ({ page }) => {

@@ -42,7 +42,9 @@ export function Status({ children, tone = 'positive' }: { children: ReactNode; t
 }
 
 export function EntityTitle({ icon, children, subtitle }: { icon: ReactNode; children: ReactNode; subtitle?: ReactNode }) {
-  return <span className="entity-title"><span className="entity-title__icon" aria-hidden="true">{icon}</span><span><strong>{children}</strong>{subtitle ? <small>{subtitle}</small> : null}</span></span>
+  const title = typeof children === 'string' ? children : undefined
+  const subtitleTitle = typeof subtitle === 'string' ? subtitle : undefined
+  return <span className="entity-title"><span className="entity-title__icon" aria-hidden="true">{icon}</span><span><strong title={title}>{children}</strong>{subtitle ? <small title={subtitleTitle}>{subtitle}</small> : null}</span></span>
 }
 
 export function Toolbar({ children, filters }: { children?: ReactNode; filters?: ReactNode }) {

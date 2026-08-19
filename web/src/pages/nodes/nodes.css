@@ -40,7 +40,8 @@
 .nodes-facts dt, .nodes-path small { color: var(--muted); }
 .nodes-facts dd { margin: 0; overflow-wrap: anywhere; }
 .nodes-path { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 18px; padding: 20px; background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--radius); }
-.nodes-path > span:not([aria-hidden]) { display: grid; gap: 7px; }
+.nodes-path > span:not([aria-hidden]) { display: grid; gap: 7px; min-width: 0; }
+.nodes-path .status { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .nodes-path > span[aria-hidden] { color: var(--accent); font-size: 1.5rem; }
 .nodes-capabilities { display: flex; flex-wrap: wrap; gap: 8px; }
 .nodes-capabilities span { display: inline-flex; align-items: center; gap: 7px; padding: 8px 10px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 7px; font-size: .75rem; }
