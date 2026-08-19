@@ -14,10 +14,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -168,17 +171,131 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	if err != nil {
 		return err
 	}
-	tlsConfig, err := controllerTLSConfig(cfg.TLS, caPEM)
+	validationNow := time.Now()
+	if err := verifyControllerIssuer(ca, issuerChain, caPEM, validationNow); err != nil {
+		return err
+	}
+	tlsConfig, controllerIdentity, err := controllerTLSConfigAt(cfg.TLS, caPEM, validationNow)
 	if err != nil {
 		return err
 	}
+	initialNetwork, err := configuredControllerInitialNetwork(cfg.Controller.InitialNetwork)
+	if err != nil {
+		return err
+	}
+	if !initialNetwork.NetworkID.IsZero() && initialNetwork.NetworkID != controllerIdentity.NetworkID {
+		return errors.New("controller initial network does not match the verified controller certificate network identity")
+	}
+	var bootstrapNetworkID identity.NetworkID
+	if cfg.Bootstrap.NetworkID != "" {
+		bootstrapNetworkID, err = identity.ParseNetworkID(cfg.Bootstrap.NetworkID)
+		if err != nil {
+			return fmt.Errorf("parse bootstrap network ID: %w", err)
+		}
+		if bootstrapNetworkID != controllerIdentity.NetworkID {
+			return errors.New("bootstrap network does not match the verified controller certificate network identity")
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := controller.PreflightControllerInitialNetwork(ctx, cfg.Controller.DatabaseFile, initialNetwork, controllerIdentity, bootstrapNetworkID); err != nil {
+		return fmt.Errorf("preflight controller initial network: %w", err)
+	}
+
+	// Everything below this point and above controller.Open is read-only or a
+	// reversible listener reservation. Deterministic local startup failures must
+	// be discovered here so migration and identity binding remain the commit
+	// boundary rather than an early side effect.
+	bootstrapRelays := &deferredRelaySource{}
+	var bootstrapServer *http.Server
+	var bootstrapListener net.Listener
+	var bootstrapHandler http.Handler
+	if !bootstrapNetworkID.IsZero() {
+		artifacts := make([]bootstrap.Artifact, 0, len(cfg.Bootstrap.Artifacts))
+		for _, artifact := range cfg.Bootstrap.Artifacts {
+			artifacts = append(artifacts, bootstrap.Artifact{
+				OS: artifact.OS, Arch: artifact.Arch, URL: artifact.URL,
+				SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes,
+			})
+		}
+		bootstrapMetadata, bootstrapErr := bootstrap.NewServer(bootstrap.ServerOptions{
+			Relays: bootstrapRelays, NetworkID: bootstrapNetworkID,
+			ControllerEndpoint:   cfg.Bootstrap.ControllerEndpoint,
+			ControllerQUIC:       cfg.Bootstrap.ControllerQUICEndpoint,
+			ControllerServerName: cfg.Bootstrap.ControllerServerName,
+			ControllerServiceID:  controllerIdentity.SubjectID,
+			CAPEM:                string(caPEM), Artifacts: artifacts,
+		})
+		if bootstrapErr != nil {
+			return bootstrapErr
+		}
+		bootstrapHandler = bootstrapMetadata.Handler()
+		if cfg.Bootstrap.Listen != "" {
+			endpoint, parseErr := url.Parse(cfg.Bootstrap.ControllerEndpoint)
+			if parseErr != nil || endpoint.Hostname() == "" {
+				return errors.New("bootstrap controller endpoint has no certificate hostname")
+			}
+			publicCertificate, certificateErr := loadBrowserCertificateAt(
+				cfg.Bootstrap.CertificateFile, cfg.Bootstrap.PrivateKeyFile, endpoint.Hostname(), "bootstrap", validationNow)
+			if certificateErr != nil {
+				return certificateErr
+			}
+			bootstrapServer = &http.Server{
+				Addr: cfg.Bootstrap.Listen, Handler: bootstrapHandler,
+				TLSConfig:         &tls.Config{Certificates: []tls.Certificate{publicCertificate}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
+				ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+				WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
+			}
+			bootstrapListener, err = net.Listen("tcp", cfg.Bootstrap.Listen)
+			if err != nil {
+				return fmt.Errorf("listen for public bootstrap metadata: %w", err)
+			}
+			defer bootstrapListener.Close()
+		}
+	}
+
+	httpTLSConfig := tlsConfig.Clone()
+	if consoleCertificate != "" {
+		if err := addConsoleCertificateAt(httpTLSConfig, consoleCertificate, consolePrivateKey, consoleServerName, validationNow); err != nil {
+			return err
+		}
+	}
+	consoleAPI := &deferredHTTPHandler{}
+	var consoleHandler http.Handler
+	if consoleDir != "" {
+		consoleHandler, err = controllerservice.ConsoleHandler(consoleAPI, consoleDir)
+		if err != nil {
+			return err
+		}
+	}
+	listener, err := net.Listen("tcp", cfg.Controller.Listen)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+	defer listener.Close()
+	quicPacketConn, err := net.ListenPacket("udp", cfg.Controller.QUICListen)
+	if err != nil {
+		return fmt.Errorf("controller QUIC: listen: %w", err)
+	}
+	defer quicPacketConn.Close()
+	diagnosticsConfig := observability.Config{Listen: diagnostics}
+	diagnosticsListener, err := observability.Listen(diagnosticsConfig)
+	if err != nil {
+		return err
+	}
+	if diagnosticsListener != nil {
+		defer diagnosticsListener.Close()
+	}
+
 	store, err := controller.Open(ctx, cfg.Controller.DatabaseFile)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	ensuredInitialNetwork, _, err := store.EnsureControllerInitialNetwork(ctx, initialNetwork, controllerIdentity)
+	if err != nil {
+		return fmt.Errorf("ensure controller initial network: %w", err)
+	}
 	authState, err := store.AdministratorAuthState(ctx)
 	if err != nil {
 		return fmt.Errorf("read administrator authentication state: %w", err)
@@ -194,75 +311,19 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	if err != nil {
 		return err
 	}
-	var bootstrapServer *http.Server
-	var bootstrapListener net.Listener
 	var bootstrapServeErr <-chan error
-	var bootstrapHandler http.Handler
-	if cfg.Bootstrap.NetworkID != "" {
-		networkID, parseErr := identity.ParseNetworkID(cfg.Bootstrap.NetworkID)
-		if parseErr != nil {
-			return parseErr
-		}
-		if _, lookupErr := store.Network(ctx, networkID); lookupErr != nil {
+	if !bootstrapNetworkID.IsZero() {
+		networkID := bootstrapNetworkID
+		if !ensuredInitialNetwork.ID.IsZero() {
+			if ensuredInitialNetwork.ID != networkID {
+				return errors.New("bootstrap network does not match the durable controller network identity")
+			}
+		} else if _, lookupErr := store.Network(ctx, networkID); lookupErr != nil {
 			return fmt.Errorf("bootstrap network: %w", lookupErr)
 		}
-		controllerIdentity, identityErr := identity.AuthenticatedIdentityFromCertificate(tlsConfig.Certificates[0].Leaf)
-		if identityErr != nil {
-			return identityErr
-		}
-		if controllerIdentity.NetworkID != networkID {
-			return errors.New("bootstrap network does not match the controller certificate network identity")
-		}
-		artifacts := make([]bootstrap.Artifact, 0, len(cfg.Bootstrap.Artifacts))
-		for _, artifact := range cfg.Bootstrap.Artifacts {
-			artifacts = append(artifacts, bootstrap.Artifact{
-				OS: artifact.OS, Arch: artifact.Arch, URL: artifact.URL,
-				SHA256: artifact.SHA256, SizeBytes: artifact.SizeBytes,
-			})
-		}
-		bootstrapMetadata, bootstrapErr := bootstrap.NewServer(bootstrap.ServerOptions{
-			Relays: store, NetworkID: networkID,
-			ControllerEndpoint:   cfg.Bootstrap.ControllerEndpoint,
-			ControllerQUIC:       cfg.Bootstrap.ControllerQUICEndpoint,
-			ControllerServerName: cfg.Bootstrap.ControllerServerName,
-			ControllerServiceID:  controllerIdentity.SubjectID,
-			CAPEM:                string(caPEM), Artifacts: artifacts,
-		})
-		if bootstrapErr != nil {
-			return bootstrapErr
-		}
-		// Keep the optional direct public listener metadata-only. One-time
-		// Connector bundles are exposed through the relay's public HTTPS
-		// listener, which rate-limits the request before fetching the bundle
-		// over the authenticated controller connection.
-		bootstrapHandler = bootstrapMetadata.Handler()
-		if cfg.Bootstrap.Listen != "" {
-			publicCertificate, certificateErr := tls.LoadX509KeyPair(cfg.Bootstrap.CertificateFile, cfg.Bootstrap.PrivateKeyFile)
-			if certificateErr != nil {
-				return fmt.Errorf("load bootstrap Web PKI certificate and key: %w", certificateErr)
-			}
-			bootstrapServer = &http.Server{
-				Addr: cfg.Bootstrap.Listen, Handler: bootstrapHandler,
-				TLSConfig:         &tls.Config{Certificates: []tls.Certificate{publicCertificate}, MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
-				ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
-				WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
-			}
-			bootstrapListener, err = net.Listen("tcp", cfg.Bootstrap.Listen)
-			if err != nil {
-				return fmt.Errorf("listen for public bootstrap metadata: %w", err)
-			}
-			defer bootstrapListener.Close()
-			bootstrapErrors := make(chan error, 1)
-			bootstrapServeErr = bootstrapErrors
-			go func() { bootstrapErrors <- bootstrapServer.ServeTLS(bootstrapListener, "", "") }()
-		}
+		bootstrapRelays.Set(store)
 	}
-	server := service.NewHTTPServer(cfg.Controller.Listen, tlsConfig)
-	if consoleCertificate != "" {
-		if err := addConsoleCertificate(server.TLSConfig, consoleCertificate, consolePrivateKey, consoleServerName); err != nil {
-			return err
-		}
-	}
+	server := service.NewHTTPServer(cfg.Controller.Listen, httpTLSConfig)
 	if bootstrapHandler != nil {
 		privateHandler := server.Handler
 		server.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -273,23 +334,20 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 			privateHandler.ServeHTTP(writer, request)
 		})
 	}
-	if consoleDir != "" {
-		consoleHandler, consoleErr := controllerservice.ConsoleHandler(server.Handler, consoleDir)
-		if consoleErr != nil {
-			return consoleErr
-		}
+	if consoleHandler != nil {
+		consoleAPI.Set(server.Handler)
 		server.Handler = consoleHandler
 	}
-	quicServer, err := service.ListenQUIC(cfg.Controller.QUICListen, tlsConfig)
+	quicServer, err := service.ListenQUICPacketConn(quicPacketConn, tlsConfig)
 	if err != nil {
 		return err
 	}
 	defer quicServer.Close()
-	listener, err := net.Listen("tcp", cfg.Controller.Listen)
-	if err != nil {
-		return fmt.Errorf("listen: %w", err)
+	if bootstrapServer != nil {
+		bootstrapErrors := make(chan error, 1)
+		bootstrapServeErr = bootstrapErrors
+		go func() { bootstrapErrors <- bootstrapServer.ServeTLS(bootstrapListener, "", "") }()
 	}
-	defer listener.Close()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ServeTLS(listener, "", "") }()
 	quicServeErr := make(chan error, 1)
@@ -311,7 +369,7 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 			}
 		}
 	}()
-	diagnosticsDone, err := observability.Start(ctx, observability.Config{Listen: diagnostics, Snapshot: func() map[string]uint64 {
+	diagnosticsConfig.Snapshot = func() map[string]uint64 {
 		metrics := service.Metrics()
 		return map[string]uint64{
 			"controller_up":                1,
@@ -321,7 +379,8 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 			"authorization_failures_total": metrics.AuthorizationFailures,
 			"internal_failures_total":      metrics.InternalFailures,
 		}
-	}})
+	}
+	diagnosticsDone, err := observability.StartListener(ctx, diagnosticsListener, diagnosticsConfig)
 	if err != nil {
 		_ = server.Close()
 		_ = quicServer.Close()
@@ -412,7 +471,54 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	}
 }
 
+type deferredRelaySource struct {
+	mu     sync.RWMutex
+	source bootstrap.RelaySource
+}
+
+func (source *deferredRelaySource) Set(value bootstrap.RelaySource) {
+	source.mu.Lock()
+	source.source = value
+	source.mu.Unlock()
+}
+
+func (source *deferredRelaySource) ActiveRelays(ctx context.Context, networkID identity.NetworkID) ([]controller.Relay, error) {
+	source.mu.RLock()
+	value := source.source
+	source.mu.RUnlock()
+	if value == nil {
+		return nil, errors.New("bootstrap relay source is not ready")
+	}
+	return value.ActiveRelays(ctx, networkID)
+}
+
+type deferredHTTPHandler struct {
+	mu      sync.RWMutex
+	handler http.Handler
+}
+
+func (handler *deferredHTTPHandler) Set(value http.Handler) {
+	handler.mu.Lock()
+	handler.handler = value
+	handler.mu.Unlock()
+}
+
+func (handler *deferredHTTPHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	handler.mu.RLock()
+	value := handler.handler
+	handler.mu.RUnlock()
+	if value == nil {
+		http.Error(writer, "management API unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	value.ServeHTTP(writer, request)
+}
+
 func addConsoleCertificate(config *tls.Config, certificateFile, privateKeyFile, serverName string) error {
+	return addConsoleCertificateAt(config, certificateFile, privateKeyFile, serverName, time.Now())
+}
+
+func addConsoleCertificateAt(config *tls.Config, certificateFile, privateKeyFile, serverName string, now time.Time) error {
 	if config == nil || len(config.Certificates) == 0 {
 		return errors.New("configure console certificate: controller HTTPS certificate is missing")
 	}
@@ -423,7 +529,6 @@ func addConsoleCertificate(config *tls.Config, certificateFile, privateKeyFile, 
 	if len(certificate.Certificate) == 0 {
 		return errors.New("console certificate chain is empty")
 	}
-	now := time.Now()
 	chain := make([]*x509.Certificate, 0, len(certificate.Certificate))
 	for index, certificateDER := range certificate.Certificate {
 		parsed, parseErr := x509.ParseCertificate(certificateDER)
@@ -490,6 +595,14 @@ func addConsoleCertificate(config *tls.Config, certificateFile, privateKeyFile, 
 	return nil
 }
 
+func loadBrowserCertificateAt(certificateFile, privateKeyFile, serverName, purpose string, now time.Time) (tls.Certificate, error) {
+	probe := &tls.Config{Certificates: []tls.Certificate{{}}}
+	if err := addConsoleCertificateAt(probe, certificateFile, privateKeyFile, serverName, now); err != nil {
+		return tls.Certificate{}, fmt.Errorf("%s Web PKI certificate: %w", purpose, err)
+	}
+	return probe.Certificates[1], nil
+}
+
 func browserCompatibleSignatureAlgorithm(algorithm x509.SignatureAlgorithm) bool {
 	switch algorithm {
 	case x509.SHA256WithRSA, x509.SHA384WithRSA, x509.SHA512WithRSA,
@@ -513,33 +626,107 @@ func allowsServerAuthentication(usages []x509.ExtKeyUsage) bool {
 	return false
 }
 
-func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, error) {
+func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, identity.AuthenticatedIdentity, error) {
+	return controllerTLSConfigAt(cfg, caPEM, time.Now())
+}
+
+func controllerTLSConfigAt(cfg config.TLS, caPEM []byte, now time.Time) (*tls.Config, identity.AuthenticatedIdentity, error) {
 	certificate, err := tls.LoadX509KeyPair(cfg.CertificateFile, cfg.PrivateKeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("load controller certificate and key: %w", err)
+		return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("load controller certificate and key: %w", err)
 	}
 	if len(certificate.Certificate) == 0 {
-		return nil, errors.New("controller certificate chain is empty")
+		return nil, identity.AuthenticatedIdentity{}, errors.New("controller certificate chain is empty")
 	}
 	certificate.Leaf, err = x509.ParseCertificate(certificate.Certificate[0])
 	if err != nil {
-		return nil, fmt.Errorf("parse controller certificate: %w", err)
+		return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("parse controller certificate: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, identity.AuthenticatedIdentity{}, errors.New("CA file contains no valid certificates")
+	}
+	intermediates := x509.NewCertPool()
+	for index, raw := range certificate.Certificate[1:] {
+		parsed, parseErr := x509.ParseCertificate(raw)
+		if parseErr != nil {
+			return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("parse controller certificate chain entry %d: %w", index+1, parseErr)
+		}
+		intermediates.AddCert(parsed)
+	}
+	if _, err := certificate.Leaf.Verify(x509.VerifyOptions{
+		Roots: roots, Intermediates: intermediates, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("verify controller certificate chain: %w", err)
 	}
 	authenticated, err := identity.AuthenticatedIdentityFromCertificate(certificate.Leaf)
 	if err != nil {
-		return nil, err
+		return nil, identity.AuthenticatedIdentity{}, err
 	}
 	if err := authenticated.RequireRole(identity.IdentityRoleController); err != nil {
-		return nil, err
-	}
-	clientCAs := x509.NewCertPool()
-	if !clientCAs.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("CA file contains no valid certificates")
+		return nil, identity.AuthenticatedIdentity{}, err
 	}
 	return &tls.Config{
-		Certificates: []tls.Certificate{certificate}, ClientCAs: clientCAs,
+		Certificates: []tls.Certificate{certificate}, ClientCAs: roots,
 		MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
+	}, authenticated, nil
+}
+
+func configuredControllerInitialNetwork(value config.ControllerInitialNetwork) (controller.ControllerInitialNetwork, error) {
+	if value.NetworkID == "" && value.Name == "" && value.IPv4Pool == "" && value.IPv6Pool == "" {
+		return controller.ControllerInitialNetwork{}, nil
+	}
+	networkID, err := identity.ParseNetworkID(value.NetworkID)
+	if err != nil {
+		return controller.ControllerInitialNetwork{}, fmt.Errorf("parse controller initial network ID: %w", err)
+	}
+	ipv4Pool, err := netip.ParsePrefix(value.IPv4Pool)
+	if err != nil {
+		return controller.ControllerInitialNetwork{}, fmt.Errorf("parse controller initial IPv4 pool: %w", err)
+	}
+	var ipv6Pool netip.Prefix
+	if value.IPv6Pool != "" {
+		ipv6Pool, err = netip.ParsePrefix(value.IPv6Pool)
+		if err != nil {
+			return controller.ControllerInitialNetwork{}, fmt.Errorf("parse controller initial IPv6 pool: %w", err)
+		}
+	}
+	return controller.ControllerInitialNetwork{
+		NetworkID: networkID, Name: value.Name, IPv4Pool: ipv4Pool, IPv6Pool: ipv6Pool,
 	}, nil
+}
+
+func verifyControllerIssuer(issuer *x509.Certificate, chain []*x509.Certificate, rootPEM []byte, now time.Time) error {
+	roots, err := pki.ParseCertificatesPEM(rootPEM)
+	if err != nil || len(roots) != 1 {
+		return errors.New("controller CA file must contain exactly one certificate")
+	}
+	root := roots[0]
+	if !root.IsCA || root.CheckSignatureFrom(root) != nil {
+		return errors.New("controller CA certificate is not a self-signed root")
+	}
+	if issuer == nil || len(chain) == 0 {
+		return errors.New("controller issuer chain is empty")
+	}
+	if (len(chain) == 1 && !issuer.Equal(root)) || (len(chain) > 1 && !chain[len(chain)-1].Equal(root)) {
+		return errors.New("controller issuer chain is not anchored by tls.ca")
+	}
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(root)
+	intermediates := x509.NewCertPool()
+	for _, certificate := range chain[1:] {
+		if !certificate.Equal(root) {
+			intermediates.AddCert(certificate)
+		}
+	}
+	if _, err := issuer.Verify(x509.VerifyOptions{
+		Roots: rootPool, Intermediates: intermediates, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		return fmt.Errorf("verify controller issuing authority: %w", err)
+	}
+	return nil
 }
 
 type adminBearerCredential struct {

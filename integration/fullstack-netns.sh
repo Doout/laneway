@@ -1295,6 +1295,32 @@ run_controller_connect_flow() {
     -network-id "${network_id}" -service-id "${controller_service}" \
     -dns lane.example.test -ip 10.252.0.1 \
     -out-cert "${case_dir}/controller.crt" -out-key "${case_dir}/controller.key"
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "ERROR: controller-connect fixture requires openssl" >&2
+    return 1
+  fi
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+    -out "${case_dir}/bootstrap-ca.key" >/dev/null 2>&1
+  openssl req -x509 -new -sha256 -key "${case_dir}/bootstrap-ca.key" \
+    -subj "/CN=Laneway full-stack bootstrap fixture CA" -days 1 \
+    -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -out "${case_dir}/bootstrap-ca.crt" >/dev/null 2>&1
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+    -out "${case_dir}/bootstrap.key" >/dev/null 2>&1
+  openssl req -new -sha256 -key "${case_dir}/bootstrap.key" \
+    -subj "/CN=lane.example.test" -out "${case_dir}/bootstrap.csr" >/dev/null 2>&1
+  cat >"${case_dir}/bootstrap.ext" <<EOF
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:lane.example.test,IP:10.252.0.1
+EOF
+  openssl x509 -req -sha256 -in "${case_dir}/bootstrap.csr" \
+    -CA "${case_dir}/bootstrap-ca.crt" -CAkey "${case_dir}/bootstrap-ca.key" -CAcreateserial \
+    -days 1 -extfile "${case_dir}/bootstrap.ext" \
+    -out "${case_dir}/bootstrap.crt" >/dev/null 2>&1
+  chmod 600 "${case_dir}/bootstrap-ca.key" "${case_dir}/bootstrap.key"
   "${work_dir}/laneway" pki relay -ca-cert "${case_dir}/ca.crt" -ca-key "${case_dir}/ca.key" \
     -network-id "${network_id}" -service-id "${relay_service}" -ip 10.252.0.2 \
     -out-cert "${case_dir}/relay.crt" -out-key "${case_dir}/relay.key"
@@ -1351,8 +1377,8 @@ EOF
   cat >>"${case_dir}/controller.toml" <<EOF
 [bootstrap]
 listen = "10.252.0.1:9443"
-certificate = "${case_dir}/controller.crt"
-private_key = "${case_dir}/controller.key"
+certificate = "${case_dir}/bootstrap.crt"
+private_key = "${case_dir}/bootstrap.key"
 network_id = "${network_id}"
 controller_endpoint = "${controller_endpoint}"
 controller_quic_endpoint = "${controller_quic_endpoint}"
@@ -1556,7 +1582,7 @@ EOF
       --config "${case_dir}/controller.toml" --name temporary-user \
       --ephemeral --session-lifetime 5m >"${invite_file}" 2>"${case_dir}/invite.log"
   )
-  start_process "${user}" "${connect_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+  start_process "${user}" "${connect_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
     "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${invite_file}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${connect_log}" "path=relay-quic"
@@ -1603,7 +1629,7 @@ EOF
       --config "${case_dir}/controller.toml" --name temporary-user-crash \
       --ephemeral --session-lifetime 5m >"${crash_token}" 2>"${case_dir}/invite-crash.log"
   )
-  start_process "${user}" "${crash_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+  start_process "${user}" "${crash_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
     "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${crash_token}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${crash_log}" "path=relay-quic"
@@ -1619,7 +1645,7 @@ EOF
       --config "${case_dir}/controller.toml" --name temporary-user-recovery \
       --ephemeral --session-lifetime 5m >"${recovery_token}" 2>"${case_dir}/invite-recovery.log"
   )
-  start_process "${user}" "${recovery_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+  start_process "${user}" "${recovery_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
     "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${recovery_token}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${recovery_log}" "path=relay-quic"
@@ -1654,7 +1680,7 @@ EOF
       --config "${case_dir}/controller.toml" --name temporary-user-exit \
       --ephemeral --session-lifetime 5m >"${exit_token}" 2>"${case_dir}/invite-exit.log"
   )
-  start_process "${user}" "${exit_log}" env SSL_CERT_FILE="${case_dir}/ca.crt" \
+  start_process "${user}" "${exit_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
     PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${resolver_state_dir}" \
     LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
     "${case_dir}/connect-resolver-wrapper" "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${exit_token}" \

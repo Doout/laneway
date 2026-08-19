@@ -73,6 +73,15 @@ type Network struct {
 	CreatedAt          time.Time
 }
 
+// ControllerInitialNetwork is the exact immutable network topology a
+// controller may establish before it begins serving requests.
+type ControllerInitialNetwork struct {
+	NetworkID identity.NetworkID
+	Name      string
+	IPv4Pool  netip.Prefix
+	IPv6Pool  netip.Prefix
+}
+
 type Node struct {
 	ID                  identity.NodeID
 	NetworkID           identity.NetworkID

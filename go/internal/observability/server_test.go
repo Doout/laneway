@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -70,5 +71,33 @@ func TestServeStopsWithContext(t *testing.T) {
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		t.Fatalf("completion error = %v", err)
+	}
+}
+
+func TestStartListenerUsesOnlyPreboundLoopbackSocket(t *testing.T) {
+	t.Parallel()
+	config := Config{Listen: "127.0.0.1:0"}
+	listener, err := Listen(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done, err := StartListener(ctx, listener, config)
+	if err != nil {
+		listener.Close()
+		t.Fatal(err)
+	}
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("completion error = %v", err)
+	}
+
+	wildcard, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wildcard.Close()
+	if _, err := StartListener(context.Background(), wildcard, config); !errors.Is(err, ErrNonLoopbackAddress) {
+		t.Fatalf("wildcard pre-bound listener error = %v", err)
 	}
 }

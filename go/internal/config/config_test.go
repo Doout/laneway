@@ -223,6 +223,11 @@ database = "/var/lib/laneway-controller/controller.db"
 ca_private_key = "/etc/laneway/ca.key"
 admin_token_file = "/etc/laneway/admin.token"
 leaf_validity = "720h"
+[controller.initial_network]
+network_id = "000102030405060708090a0b0c0d0e0f"
+name = "production"
+ipv4_pool = "100.96.0.0/16"
+ipv6_pool = "fd00:96::/64"
 [bootstrap]
 listen = ":443"
 certificate = "/etc/letsencrypt/live/lane/fullchain.pem"
@@ -248,7 +253,8 @@ size_bytes = 124
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Bootstrap.Listen != ":443" || len(cfg.Bootstrap.Artifacts) != 2 {
+	if cfg.Bootstrap.Listen != ":443" || len(cfg.Bootstrap.Artifacts) != 2 ||
+		cfg.Controller.InitialNetwork.Name != "production" || cfg.Controller.InitialNetwork.IPv6Pool != "fd00:96::/64" {
 		t.Fatalf("bootstrap config = %+v", cfg.Bootstrap)
 	}
 	if _, err := Decode(strings.NewReader(strings.Replace(source, "arch = \"arm64\"", "arch = \"amd64\"", 1))); err == nil {
@@ -256,6 +262,72 @@ size_bytes = 124
 	}
 	if _, err := Decode(strings.NewReader(strings.Replace(source, "https://downloads.example.test/laneway-amd64.tar.gz", "http://downloads.example.test/laneway-amd64.tar.gz", 1))); err == nil {
 		t.Fatal("insecure artifact URL accepted")
+	}
+	if _, err := Decode(strings.NewReader(strings.Replace(source,
+		`network_id = "000102030405060708090a0b0c0d0e0f"`,
+		`network_id = "101112131415161718191a1b1c1d1e1f"`, 1))); err == nil {
+		t.Fatal("bootstrap network differing from initial network accepted")
+	}
+	legacy := strings.Replace(source, `[controller.initial_network]
+network_id = "000102030405060708090a0b0c0d0e0f"
+name = "production"
+ipv4_pool = "100.96.0.0/16"
+ipv6_pool = "fd00:96::/64"
+`, "", 1)
+	if _, err := Decode(strings.NewReader(legacy)); err != nil {
+		t.Fatalf("legacy bootstrap config without initial network rejected: %v", err)
+	}
+}
+
+func TestControllerInitialNetworkValidation(t *testing.T) {
+	valid := Defaults()
+	valid.Mode = ModeController
+	valid.StateDir, valid.SocketPath = "/state", "/socket"
+	valid.TLS = TLS{CertificateFile: "cert", PrivateKeyFile: "key", CAFile: "ca"}
+	valid.Controller.QUICListen = ":8443"
+	valid.Controller.DatabaseFile = "/state/controller.db"
+	valid.Controller.CAPrivateKeyFile = "ca.key"
+	valid.Controller.AdminTokenFile = "admin.token"
+	valid.Controller.InitialNetwork = ControllerInitialNetwork{
+		NetworkID: "000102030405060708090a0b0c0d0e0f", Name: "production", IPv4Pool: "100.96.0.0/16",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid initial network rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*Config){
+		"partial":        func(c *Config) { c.Controller.InitialNetwork.Name = "" },
+		"zero ID":        func(c *Config) { c.Controller.InitialNetwork.NetworkID = strings.Repeat("0", 32) },
+		"untrimmed name": func(c *Config) { c.Controller.InitialNetwork.Name = " production" },
+		"noncanonical v4": func(c *Config) {
+			c.Controller.InitialNetwork.IPv4Pool = "100.96.1.0/16"
+		},
+		"narrow v4":     func(c *Config) { c.Controller.InitialNetwork.IPv4Pool = "100.96.0.0/31" },
+		"link-local v6": func(c *Config) { c.Controller.InitialNetwork.IPv6Pool = "fe80::/64" },
+		"wide v6":       func(c *Config) { c.Controller.InitialNetwork.IPv6Pool = "fd00::/48" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			if err := candidate.Validate(); err == nil {
+				t.Fatal("invalid initial network accepted")
+			}
+		})
+	}
+	empty := valid
+	empty.Controller.InitialNetwork = ControllerInitialNetwork{}
+	if err := empty.Validate(); err != nil {
+		t.Fatalf("fully absent initial network rejected: %v", err)
+	}
+}
+
+func TestControllerInitialNetworkRejectedOutsideControllerMode(t *testing.T) {
+	for _, mode := range []Mode{ModeNode, ModeRelay} {
+		cfg := Config{Mode: mode, Controller: Controller{InitialNetwork: ControllerInitialNetwork{
+			NetworkID: "000102030405060708090a0b0c0d0e0f", Name: "production", IPv4Pool: "100.96.0.0/16",
+		}}}
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "valid only in controller mode") {
+			t.Fatalf("mode %q initial network error=%v", mode, err)
+		}
 	}
 }
 

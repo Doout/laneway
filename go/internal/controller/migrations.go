@@ -645,6 +645,25 @@ CREATE TRIGGER access_grants_immutable
 BEGIN
     SELECT RAISE(ABORT, 'access grant is immutable');
 END;
+`, `
+CREATE TABLE controller_identity_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    network_id BLOB NOT NULL UNIQUE REFERENCES networks(id) ON DELETE RESTRICT
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    controller_service_id BLOB NOT NULL UNIQUE
+        CHECK(length(controller_service_id) = 16 AND controller_service_id <> zeroblob(16)),
+    created_at INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER controller_identity_state_immutable
+    BEFORE UPDATE ON controller_identity_state
+BEGIN
+    SELECT RAISE(ABORT, 'controller identity binding is immutable');
+END;
+CREATE TRIGGER controller_identity_state_undeletable
+    BEFORE DELETE ON controller_identity_state
+BEGIN
+    SELECT RAISE(ABORT, 'controller identity binding cannot be deleted');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

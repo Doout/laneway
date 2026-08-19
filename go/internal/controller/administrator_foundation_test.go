@@ -225,7 +225,7 @@ func TestV9UpgradeFromExactV8InvalidatesAmbiguousSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if version, err := store.SchemaVersion(ctx); err != nil || version != 11 {
+	if version, err := store.SchemaVersion(ctx); err != nil || version != currentSchemaVersion {
 		t.Fatalf("version=%d err=%v", version, err)
 	}
 	var active, wrongMaximum int

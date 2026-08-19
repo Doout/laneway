@@ -81,6 +81,7 @@ func addPlatformCommands(root *cobra.Command) {
 		pkiCommand(),
 		group("config", "Inspect and validate configuration", runConfig,
 			forwarded("validate", "Validate a laneway.toml file", "validate", runConfig),
+			forwarded("inspect-controller-initial-network", "Inspect immutable controller network configuration", "inspect-controller-initial-network", runConfig),
 		),
 	} {
 		hidden.Hidden = true
