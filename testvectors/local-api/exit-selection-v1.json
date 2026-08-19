@@ -1,0 +1,28 @@
+{
+  "valid": [
+    {"name": "empty", "json": "{}", "enabled": false, "selected_node_id": ""},
+    {"name": "disabled", "json": "{\"enabled\":false}", "enabled": false, "selected_node_id": ""},
+    {"name": "disabled_empty_node", "json": "{\"enabled\":false,\"selected_node_id\":\"\"}", "enabled": false, "selected_node_id": ""},
+    {"name": "selected", "json": "{\"enabled\":true,\"selected_node_id\":\"202122232425262728292a2b2c2d2e2f\"}", "enabled": true, "selected_node_id": "202122232425262728292a2b2c2d2e2f"}
+  ],
+  "invalid": [
+    {"name": "null_document", "json": "null"},
+    {"name": "null_enabled", "json": "{\"enabled\":null}"},
+    {"name": "null_selected_node", "json": "{\"selected_node_id\":null}"},
+    {"name": "enabled_without_node", "json": "{\"enabled\":true}"},
+    {"name": "enabled_empty_node", "json": "{\"enabled\":true,\"selected_node_id\":\"\"}"},
+    {"name": "enabled_zero_node", "json": "{\"enabled\":true,\"selected_node_id\":\"00000000000000000000000000000000\"}"},
+    {"name": "enabled_short_node", "json": "{\"enabled\":true,\"selected_node_id\":\"abcd\"}"},
+    {"name": "enabled_uppercase_node", "json": "{\"enabled\":true,\"selected_node_id\":\"202122232425262728292A2B2C2D2E2F\"}"},
+    {"name": "disabled_with_node", "json": "{\"enabled\":false,\"selected_node_id\":\"202122232425262728292a2b2c2d2e2f\"}"},
+    {"name": "wrong_enabled_type", "json": "{\"enabled\":1}"},
+    {"name": "wrong_selected_node_type", "json": "{\"selected_node_id\":false}"},
+    {"name": "case_variant_enabled", "json": "{\"Enabled\":true}"},
+    {"name": "case_variant_selected_node", "json": "{\"Selected_Node_Id\":\"node\"}"},
+    {"name": "duplicate_enabled", "json": "{\"enabled\":true,\"enabled\":false}"},
+    {"name": "duplicate_selected_node", "json": "{\"selected_node_id\":\"one\",\"selected_node_id\":\"two\"}"},
+    {"name": "unknown_member", "json": "{\"enabled\":false,\"future\":true}"},
+    {"name": "trailing_document", "json": "{\"enabled\":false} {}"},
+    {"name": "array_document", "json": "[]"}
+  ]
+}

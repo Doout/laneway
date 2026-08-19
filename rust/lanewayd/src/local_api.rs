@@ -4,7 +4,10 @@ use std::{
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -20,7 +23,18 @@ use tokio::{
 const MAX_HEADER_BYTES: usize = 8 << 10;
 const MAX_REQUEST_BYTES: usize = 4 << 10;
 const MAX_RESPONSE_BYTES: usize = 1 << 20;
+const MAX_ERROR_DETAIL_BYTES: usize = 2 << 10;
 const MAX_CONNECTIONS: usize = 32;
+const API_REVISION: u32 = 1;
+const REQUEST_ID_HEADER: &str = "X-Laneway-Request-ID";
+
+const ERROR_INVALID_REQUEST: &str = "invalid_request";
+const ERROR_NOT_FOUND: &str = "not_found";
+const ERROR_METHOD_NOT_ALLOWED: &str = "method_not_allowed";
+const ERROR_CONFLICT: &str = "conflict";
+const ERROR_UNSUPPORTED_OPERATION: &str = "unsupported_operation";
+const ERROR_BUSY: &str = "busy";
+const ERROR_INTERNAL: &str = "internal";
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct ApiMetrics {
@@ -49,6 +63,8 @@ pub(crate) struct ExitStatus {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct Status {
+    pub(crate) daemon_instance_id: String,
+    pub(crate) api_revision: u32,
     pub(crate) running: bool,
     pub(crate) actor: String,
     pub(crate) product_version: String,
@@ -123,6 +139,28 @@ pub(crate) struct Server {
     set_exit: Option<Arc<ExitFn>>,
 }
 
+struct RequestIds {
+    prefix: String,
+    next: AtomicU64,
+}
+
+impl RequestIds {
+    fn new(instance_id: &str) -> Self {
+        Self {
+            prefix: instance_id[..16].to_owned(),
+            next: AtomicU64::new(0),
+        }
+    }
+
+    fn next(&self) -> String {
+        format!(
+            "{}{:016x}",
+            self.prefix,
+            self.next.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+        )
+    }
+}
+
 impl Server {
     pub(crate) fn new(
         path: PathBuf,
@@ -140,35 +178,49 @@ impl Server {
         prepare_socket(&self.path).await?;
         let listener = UnixListener::bind(&self.path)
             .with_context(|| format!("listen on local API socket {}", self.path.display()))?;
+        let mut owned = OwnedSocket {
+            path: self.path.clone(),
+            identity: None,
+        };
+        let metadata = std::fs::symlink_metadata(&self.path)
+            .context("inspect local API socket path after bind")?;
+        owned.identity = Some((metadata.dev(), metadata.ino()));
+        let _owned = owned;
         std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
             .context("secure local API socket")?;
-        let metadata = std::fs::symlink_metadata(&self.path)?;
-        let _owned = OwnedSocket {
-            path: self.path.clone(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
-        };
+        let instance_id = daemon_instance_id()?;
+        let request_ids = Arc::new(RequestIds::new(&instance_id));
         let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
         let mut tasks = JoinSet::new();
         loop {
             let (mut stream, _) = listener.accept().await.context("accept local API client")?;
             let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
+                let request_id = request_ids.next();
+                let response =
+                    error_response(503, &request_id, ERROR_BUSY, "local API is busy", true);
                 let _ = write_response(
                     &mut stream,
-                    503,
-                    "text/plain; charset=utf-8",
-                    b"local API is busy\n",
+                    response.status,
+                    response.content_type,
+                    &response.body,
+                    &request_id,
+                    false,
                 )
                 .await;
                 continue;
             };
             let snapshot = Arc::clone(&self.snapshot);
             let set_exit = self.set_exit.clone();
+            let request_id = request_ids.next();
+            let instance_id = instance_id.clone();
             tasks.spawn(async move {
                 let _permit = permit;
-                if timeout(Duration::from_secs(5), handle(stream, snapshot, set_exit))
-                    .await
-                    .is_err()
+                if timeout(
+                    Duration::from_secs(5),
+                    handle(stream, snapshot, set_exit, instance_id, request_id),
+                )
+                .await
+                .is_err()
                 {
                     // Dropping the stream is the bounded timeout response.
                 }
@@ -176,6 +228,16 @@ impl Server {
             while tasks.len() >= MAX_CONNECTIONS {
                 let _ = tasks.join_next().await;
             }
+        }
+    }
+}
+
+fn daemon_instance_id() -> Result<String> {
+    loop {
+        let mut value = [0_u8; 16];
+        getrandom::fill(&mut value).context("generate local API daemon instance ID")?;
+        if value.iter().any(|byte| *byte != 0) {
+            return Ok(hex::encode(value));
         }
     }
 }
@@ -203,72 +265,133 @@ async fn prepare_socket(path: &Path) -> Result<()> {
 
 struct OwnedSocket {
     path: PathBuf,
-    device: u64,
-    inode: u64,
+    identity: Option<(u64, u64)>,
 }
 
 impl Drop for OwnedSocket {
     fn drop(&mut self) {
         if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
             && metadata.file_type().is_socket()
-            && metadata.dev() == self.device
-            && metadata.ino() == self.inode
+            && self
+                .identity
+                .is_none_or(|(device, inode)| metadata.dev() == device && metadata.ino() == inode)
         {
             let _ = std::fs::remove_file(&self.path);
         }
     }
 }
 
-async fn handle(mut stream: UnixStream, snapshot: Arc<SnapshotFn>, set_exit: Option<Arc<ExitFn>>) {
-    let response = read_request(&mut stream).await.and_then(|request| {
-        match (request.method, request.path.as_str()) {
-            ("GET", "/v1/status") => json_response(&(snapshot)().status),
-            ("GET", "/v1/peers") => json_response(&(snapshot)().peers),
-            ("GET", "/v1/routes") => json_response(&(snapshot)().routes),
+async fn handle(
+    mut stream: UnixStream,
+    snapshot: Arc<SnapshotFn>,
+    set_exit: Option<Arc<ExitFn>>,
+    instance_id: String,
+    request_id: String,
+) {
+    let mut suppress_body = false;
+    let response = match read_request(&mut stream, &mut suppress_body).await {
+        Ok(request) => match (request.method, request.path.as_str()) {
+            ("GET", "/v1/status") => {
+                let mut status = (snapshot)().status;
+                status.daemon_instance_id = instance_id;
+                status.api_revision = API_REVISION;
+                json_response(&status).unwrap_or_else(|_| {
+                    error_response(
+                        500,
+                        &request_id,
+                        ERROR_INTERNAL,
+                        "encode local API response",
+                        true,
+                    )
+                })
+            }
+            ("GET", "/v1/peers") => json_response(&(snapshot)().peers).unwrap_or_else(|_| {
+                error_response(
+                    500,
+                    &request_id,
+                    ERROR_INTERNAL,
+                    "encode local API response",
+                    true,
+                )
+            }),
+            ("GET", "/v1/routes") => json_response(&(snapshot)().routes).unwrap_or_else(|_| {
+                error_response(
+                    500,
+                    &request_id,
+                    ERROR_INTERNAL,
+                    "encode local API response",
+                    true,
+                )
+            }),
             ("POST", "/v1/exit") => {
                 if set_exit.is_none() {
-                    return Ok(Response::Ready(
+                    error_response(
                         501,
-                        "text/plain; charset=utf-8",
-                        b"exit selection is not configured\n".to_vec(),
-                    ));
+                        &request_id,
+                        ERROR_UNSUPPORTED_OPERATION,
+                        "exit selection is not configured",
+                        false,
+                    )
+                } else {
+                    match decode_selection(&request.body) {
+                        Ok(selection) => {
+                            match (set_exit.as_ref().expect("exit callback checked"))(selection)
+                                .await
+                            {
+                                Ok(()) => {
+                                    ReadyResponse::new(204, "text/plain; charset=utf-8", Vec::new())
+                                }
+                                Err(error) => error_response(
+                                    409,
+                                    &request_id,
+                                    ERROR_CONFLICT,
+                                    &error.to_string(),
+                                    false,
+                                ),
+                            }
+                        }
+                        Err(_) => error_response(
+                            400,
+                            &request_id,
+                            ERROR_INVALID_REQUEST,
+                            "invalid exit selection",
+                            false,
+                        ),
+                    }
                 }
-                let selection = decode_selection(&request.body)?;
-                Ok(Response::Exit(selection))
             }
-            (_, "/v1/status" | "/v1/peers" | "/v1/routes" | "/v1/exit") => Ok(Response::Ready(
+            (_, "/v1/status" | "/v1/peers" | "/v1/routes" | "/v1/exit") => error_response(
                 405,
-                "text/plain; charset=utf-8",
-                b"method not allowed\n".to_vec(),
-            )),
-            _ => Ok(Response::Ready(
+                &request_id,
+                ERROR_METHOD_NOT_ALLOWED,
+                "method not allowed",
+                false,
+            ),
+            _ => error_response(
                 404,
-                "text/plain; charset=utf-8",
-                b"404 page not found\n".to_vec(),
-            )),
-        }
-    });
-    let response = match response {
-        Ok(Response::Exit(selection)) => {
-            match (set_exit.expect("exit callback checked"))(selection).await {
-                Ok(()) => Response::Ready(204, "text/plain; charset=utf-8", Vec::new()),
-                Err(error) => Response::Ready(
-                    409,
-                    "text/plain; charset=utf-8",
-                    format!("{error}\n").into_bytes(),
-                ),
-            }
-        }
-        Ok(response) => response,
-        Err(error) => Response::Ready(
+                &request_id,
+                ERROR_NOT_FOUND,
+                "local API route not found",
+                false,
+            ),
+        },
+        Err(_) => error_response(
             400,
-            "text/plain; charset=utf-8",
-            format!("{error}\n").into_bytes(),
+            &request_id,
+            ERROR_INVALID_REQUEST,
+            "invalid local API request",
+            false,
         ),
     };
-    if let Response::Ready(status, content_type, body) = response {
-        let _ = write_response(&mut stream, status, content_type, &body).await;
-    }
+    let _ = write_response(
+        &mut stream,
+        response.status,
+        response.content_type,
+        &response.body,
+        &request_id,
+        suppress_body,
+    )
+    .await;
 }
 
 struct Request {
@@ -277,12 +400,23 @@ struct Request {
     body: Vec<u8>,
 }
 
-enum Response {
-    Ready(u16, &'static str, Vec<u8>),
-    Exit(ExitSelection),
+struct ReadyResponse {
+    status: u16,
+    content_type: &'static str,
+    body: Vec<u8>,
 }
 
-async fn read_request(stream: &mut UnixStream) -> Result<Request> {
+impl ReadyResponse {
+    fn new(status: u16, content_type: &'static str, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            content_type,
+            body,
+        }
+    }
+}
+
+async fn read_request(stream: &mut UnixStream, suppress_body: &mut bool) -> Result<Request> {
     let mut buffer = Vec::with_capacity(1024);
     let header_end = loop {
         if let Some(position) = buffer.windows(4).position(|value| value == b"\r\n\r\n") {
@@ -312,9 +446,11 @@ async fn read_request(stream: &mut UnixStream) -> Result<Request> {
     let method = match request_line.next() {
         Some("GET") => "GET",
         Some("POST") => "POST",
+        Some("HEAD") => "HEAD",
         Some(_) => "OTHER",
         None => bail!("request method is missing"),
     };
+    *suppress_body = method == "HEAD";
     let path = request_line
         .next()
         .context("request path is missing")?
@@ -361,7 +497,7 @@ async fn read_request(stream: &mut UnixStream) -> Result<Request> {
         bail!("request body is too large");
     }
     ensure!(
-        method == "POST" || content_length == 0,
+        method != "GET" || content_length == 0,
         "GET request body is not allowed"
     );
     let total = header_end + content_length;
@@ -383,17 +519,85 @@ async fn read_request(stream: &mut UnixStream) -> Result<Request> {
 
 fn decode_selection(body: &[u8]) -> Result<ExitSelection> {
     ensure!(!body.is_empty(), "invalid exit selection");
+    ensure!(
+        body.iter()
+            .copied()
+            .find(|byte| !byte.is_ascii_whitespace())
+            == Some(b'{'),
+        "exit selection must be a JSON object"
+    );
     let mut decoder = serde_json::Deserializer::from_slice(body);
     let selection = ExitSelection::deserialize(&mut decoder).context("invalid exit selection")?;
     decoder.end().context("invalid exit selection")?;
+    ensure!(
+        !selection.enabled || canonical_node_id(&selection.selected_node_id),
+        "enabled exit selection requires a canonical nonzero node ID"
+    );
+    ensure!(
+        selection.enabled || selection.selected_node_id.is_empty(),
+        "disabled exit selection must not select a node"
+    );
     Ok(selection)
 }
 
-fn json_response(value: &impl Serialize) -> Result<Response> {
+fn canonical_node_id(value: &str) -> bool {
+    value.len() == 32
+        && value.bytes().any(|byte| byte != b'0')
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn json_response(value: &impl Serialize) -> Result<ReadyResponse> {
     let mut body = serde_json::to_vec(value).context("encode response")?;
     body.push(b'\n');
     ensure!(body.len() <= MAX_RESPONSE_BYTES, "response is too large");
-    Ok(Response::Ready(200, "application/json", body))
+    Ok(ReadyResponse::new(200, "application/json", body))
+}
+
+#[derive(Serialize)]
+struct ErrorEnvelope<'a> {
+    request_id: &'a str,
+    code: &'a str,
+    detail: &'a str,
+    retryable: bool,
+}
+
+fn error_response(
+    status: u16,
+    request_id: &str,
+    code: &str,
+    detail: &str,
+    retryable: bool,
+) -> ReadyResponse {
+    let detail = if detail.is_empty() {
+        "local API request failed"
+    } else {
+        bounded_detail(detail)
+    };
+    let mut body = serde_json::to_vec(&ErrorEnvelope {
+        request_id,
+        code,
+        detail,
+        retryable,
+    })
+    .unwrap_or_else(|_| {
+        br#"{"request_id":"","code":"internal","detail":"encode local API error","retryable":true}"#
+            .to_vec()
+    });
+    body.push(b'\n');
+    ReadyResponse::new(status, "application/json", body)
+}
+
+fn bounded_detail(detail: &str) -> &str {
+    if detail.len() <= MAX_ERROR_DETAIL_BYTES {
+        return detail;
+    }
+    let mut end = MAX_ERROR_DETAIL_BYTES;
+    while !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    &detail[..end]
 }
 
 async fn write_response(
@@ -401,6 +605,8 @@ async fn write_response(
     status: u16,
     content_type: &str,
     body: &[u8],
+    request_id: &str,
+    suppress_body: bool,
 ) -> Result<()> {
     let reason = match status {
         200 => "OK",
@@ -413,17 +619,14 @@ async fn write_response(
         503 => "Service Unavailable",
         _ => "Internal Server Error",
     };
-    let cache = if content_type == "application/json" {
-        "Cache-Control: no-store\r\n"
-    } else {
-        ""
-    };
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{cache}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{REQUEST_ID_HEADER}: {request_id}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body).await?;
+    if !suppress_body {
+        stream.write_all(body).await?;
+    }
     stream.shutdown().await?;
     Ok(())
 }
@@ -439,6 +642,8 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             status: Status {
+                daemon_instance_id: "0123456789abcdef0123456789abcdef".into(),
+                api_revision: API_REVISION,
                 running: true,
                 actor: "node".into(),
                 product_version: "1.0.0".into(),
@@ -476,6 +681,73 @@ mod tests {
         response
     }
 
+    fn request_id(response: &str) -> &str {
+        response
+            .lines()
+            .find_map(|line| line.strip_prefix("X-Laneway-Request-ID: "))
+            .expect("request ID header")
+    }
+
+    fn response_json(response: &str) -> serde_json::Value {
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    #[test]
+    fn matches_shared_v1_golden_documents() {
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../testvectors/local-api/status-v1.json"
+        ))
+        .unwrap();
+        let actual = serde_json::to_value(snapshot().status).unwrap();
+        assert_eq!(actual, expected);
+
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("../../../testvectors/local-api/error-v1.json"))
+                .unwrap();
+        let response = error_response(
+            400,
+            "0123456789abcdef0000000000000001",
+            ERROR_INVALID_REQUEST,
+            "invalid exit selection",
+            false,
+        );
+        let actual: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(actual, expected);
+
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../testvectors/local-api/exit-selection-v1.json"
+        ))
+        .unwrap();
+        for case in cases["valid"].as_array().unwrap() {
+            let selection = decode_selection(case["json"].as_str().unwrap().as_bytes())
+                .unwrap_or_else(|error| panic!("{}: {error}", case["name"]));
+            assert_eq!(selection.enabled, case["enabled"].as_bool().unwrap());
+            assert_eq!(
+                selection.selected_node_id,
+                case["selected_node_id"].as_str().unwrap()
+            );
+        }
+        for case in cases["invalid"].as_array().unwrap() {
+            assert!(
+                decode_selection(case["json"].as_str().unwrap().as_bytes()).is_err(),
+                "{}",
+                case["name"]
+            );
+        }
+        assert!(decode_selection(b"{\"selected_node_id\":\"\xff\"}").is_err());
+        let empty_detail = error_response(
+            409,
+            "0123456789abcdef0000000000000001",
+            ERROR_CONFLICT,
+            "",
+            false,
+        );
+        assert_ne!(
+            serde_json::from_slice::<serde_json::Value>(&empty_detail.body).unwrap()["detail"],
+            ""
+        );
+    }
+
     #[tokio::test]
     async fn serves_go_compatible_bounded_api_and_cleans_up() {
         let directory = tempdir().unwrap();
@@ -506,6 +778,21 @@ mod tests {
         );
         let response = request(&path, "GET /v1/status HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert_eq!(request_id(&response).len(), 32);
+        assert!(
+            request_id(&response)
+                .chars()
+                .all(|value| value.is_ascii_hexdigit())
+        );
+        let status = response_json(&response);
+        assert_eq!(status["api_revision"], API_REVISION);
+        assert_eq!(status["daemon_instance_id"].as_str().unwrap().len(), 32);
+        let instance_id = status["daemon_instance_id"].as_str().unwrap().to_owned();
+        let first_request_id = request_id(&response).to_owned();
+        let response = request(&path, "GET /v1/status HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
+        let status = response_json(&response);
+        assert_eq!(status["daemon_instance_id"], instance_id);
+        assert_ne!(request_id(&response), first_request_id);
         assert!(response.contains("\"packet_version\":1"));
         assert!(response.contains("\"actor\":\"node\""));
         assert!(response.contains("\"overlay_addresses\":[\"100.96.0.1/32\"]"));
@@ -553,6 +840,12 @@ mod tests {
         )
         .await;
         assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert!(response.contains("Content-Type: application/json\r\n"));
+        let error = response_json(&response);
+        assert_eq!(error["code"], ERROR_INVALID_REQUEST);
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["request_id"], request_id(&response));
+        assert_eq!(selected.lock().unwrap().as_deref(), Some(""));
         let oversized = "x".repeat(MAX_REQUEST_BYTES + 1);
         let response = request(
             &path,
@@ -563,6 +856,98 @@ mod tests {
         )
         .await;
         assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_INVALID_REQUEST);
+
+        let response = request(&path, "GET /missing HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_NOT_FOUND);
+
+        let response = request(&path, "POST /v1/status HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_METHOD_NOT_ALLOWED);
+
+        let response = request(&path, "HEAD /v1/status HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(body.is_empty());
+        assert!(!head.contains("Content-Length: 0\r\n"));
+
+        let response = request(
+            &path,
+            "HEAD /v1/status HTTP/1.1\r\nHost: lanewayd\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(body.is_empty());
+        assert!(!head.contains("Content-Length: 0\r\n"));
+
+        let response = request(
+            &path,
+            "HEAD /v1/status?fresh=1 HTTP/1.1\r\nHost: lanewayd\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(body.is_empty());
+        assert!(!head.contains("Content-Length: 0\r\n"));
+
+        let response = request(
+            &path,
+            "HEAD /v1/status HTTP/1.1\r\nHost: lanewayd\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(body.is_empty());
+        assert!(!head.contains("Content-Length: 0\r\n"));
+
+        let response = request(
+            &path,
+            "PUT /v1/status HTTP/1.1\r\nHost: lanewayd\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_METHOD_NOT_ALLOWED);
+
+        let oversized = "x".repeat(MAX_REQUEST_BYTES + 1);
+        let response = request(
+            &path,
+            &format!(
+                "PUT /v1/status HTTP/1.1\r\nHost: lanewayd\r\nContent-Length: {}\r\n\r\n{oversized}",
+                oversized.len()
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_INVALID_REQUEST);
+
+        let response = request(&path, "GET /v1//status HTTP/1.1\r\nHost: lanewayd\r\n\r\n").await;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_NOT_FOUND);
+
+        let response = request(
+            &path,
+            "GET /v1/status?fresh=1 HTTP/1.1\r\nHost: lanewayd\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_INVALID_REQUEST);
+
+        let response = request(
+            &path,
+            "GET /v1/status HTTP/1.1\r\nHost: lanewayd\r\nContent-Length: 2\r\n\r\n{}",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_INVALID_REQUEST);
+        let response = request(
+            &path,
+            "POST /v1/exit HTTP/1.1\r\nHost: lanewayd\r\nTransfer-Encoding: chunked\r\n\r\n11\r\n{\"enabled\":false}\r\n0\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_INVALID_REQUEST);
         let second = Server::new(
             path.clone(),
             Arc::new(snapshot),
@@ -594,6 +979,21 @@ mod tests {
         )
         .await;
         assert!(response.starts_with("HTTP/1.1 501 Not Implemented\r\n"));
+        assert_eq!(
+            response_json(&response)["code"],
+            ERROR_UNSUPPORTED_OPERATION
+        );
+        let oversized = "x".repeat(MAX_REQUEST_BYTES + 1);
+        let response = request(
+            &path,
+            &format!(
+                "POST /v1/exit HTTP/1.1\r\nHost: lanewayd\r\nContent-Length: {}\r\n\r\n{oversized}",
+                oversized.len()
+            ),
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+        assert_eq!(response_json(&response)["code"], ERROR_INVALID_REQUEST);
         task.abort();
         let _ = task.await;
     }
@@ -624,5 +1024,19 @@ mod tests {
         assert!(path.exists());
         prepare_socket(&path).await.unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn bound_socket_guard_cleans_up_before_identity_capture() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("api.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let guard = OwnedSocket {
+            path: path.clone(),
+            identity: None,
+        };
+        drop(guard);
+        assert!(!path.exists());
+        drop(listener);
     }
 }

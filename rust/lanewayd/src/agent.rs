@@ -686,6 +686,9 @@ impl RuntimeControl {
         overlay_addresses.sort();
         let serving_exit = effective.forwarding.exit_gateway;
         let status = local_api::Status {
+            // The local API server overwrites both fields for every response.
+            daemon_instance_id: String::new(),
+            api_revision: 0,
             running: true,
             actor: if serving_exit { "exit-node" } else { "node" }.to_owned(),
             product_version: "1.0.0".to_owned(),

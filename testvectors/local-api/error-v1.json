@@ -1,0 +1,6 @@
+{
+  "request_id": "0123456789abcdef0000000000000001",
+  "code": "invalid_request",
+  "detail": "invalid exit selection",
+  "retryable": false
+}

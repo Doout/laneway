@@ -267,6 +267,30 @@
       "stored_byte_length": 193,
       "sha256": "acf27ab1e311f929f64fd54437bff82b7b124980e42a2e2ae9312e7b731f9ce0",
       "expected": "matches_tcp_packet_record"
+    },
+    {
+      "path": "local-api/status-v1.json",
+      "kind": "local-daemon-api-v1:status",
+      "encoding": "json-utf8",
+      "stored_byte_length": 1333,
+      "sha256": "603e4818cc96a66dbf12bcf490997a48fdfc91e66714d126b641c52d1aeb90c5",
+      "expected": "matches_go_and_rust_status"
+    },
+    {
+      "path": "local-api/error-v1.json",
+      "kind": "local-daemon-api-v1:error-envelope",
+      "encoding": "json-utf8",
+      "stored_byte_length": 144,
+      "sha256": "ee85d6a3b9e5964133d01122f8875f0708ed300741046e3fba3662f486640cb7",
+      "expected": "matches_go_and_rust_error"
+    },
+    {
+      "path": "local-api/exit-selection-v1.json",
+      "kind": "table:local-daemon-api-v1-exit-selection",
+      "encoding": "json-utf8",
+      "stored_byte_length": 2043,
+      "sha256": "0edad9eea138f9693beaf53271a07260c2e345dce01a48bc3ad84640c1b50775",
+      "expected": "per_case_go_and_rust"
     }
   ]
 }
