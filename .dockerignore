@@ -11,6 +11,10 @@ web/.playwright-browsers
 web/test-results
 web/dist
 web/.env*
+desktop/node_modules
+desktop/dist
+desktop/src-tauri/gen
+desktop/src-tauri/target
 deploy/compose/.env
 deploy/compose/generated
 **/*.tsbuildinfo

@@ -36,7 +36,7 @@ const ERROR_UNSUPPORTED_OPERATION: &str = "unsupported_operation";
 const ERROR_BUSY: &str = "busy";
 const ERROR_INTERNAL: &str = "internal";
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct ApiMetrics {
     pub(crate) connections: u64,
     pub(crate) reconnects: u64,
@@ -48,10 +48,10 @@ pub(crate) struct ApiMetrics {
     pub(crate) tcp_failures: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct ExitStatus {
     pub(crate) enabled: bool,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) selected_node_id: String,
     pub(crate) authorized: bool,
     pub(crate) serving: bool,
@@ -61,7 +61,7 @@ pub(crate) struct ExitStatus {
     pub(crate) namespace_cleanup_failures: u64,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Status {
     pub(crate) daemon_instance_id: String,
     pub(crate) api_revision: u32,
@@ -85,7 +85,7 @@ pub(crate) struct Status {
     pub(crate) controller: ControllerStatus,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct ControllerStatus {
     pub(crate) candidate_exchange_enabled: bool,
     pub(crate) certificate_presented_serial: String,
@@ -97,16 +97,16 @@ pub(crate) struct ControllerStatus {
     pub(crate) configuration_lease_expired: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Peer {
     pub(crate) node_id: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) name: String,
     pub(crate) prefixes: Vec<String>,
     pub(crate) path: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Route {
     pub(crate) prefix: String,
     pub(crate) via_node: String,
@@ -638,6 +638,35 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DesktopFixture {
+        contract_version: u8,
+        platform: String,
+        ownership: String,
+        capabilities: std::collections::BTreeMap<String, bool>,
+        status: Status,
+        peers: Vec<Peer>,
+        routes: Vec<Route>,
+    }
+
+    #[test]
+    fn shares_the_desktop_status_contract() {
+        let fixture: DesktopFixture = serde_json::from_str(include_str!(
+            "../../../testvectors/local-api/desktop-snapshot-v1.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.contract_version, 1);
+        assert_eq!(fixture.platform, "linux");
+        assert_eq!(fixture.ownership, "same-user-daemon");
+        assert_eq!(fixture.capabilities.get("connection_control"), Some(&false));
+        assert_eq!(fixture.capabilities.get("exit_selection"), Some(&false));
+        assert_eq!(fixture.capabilities.get("snapshot_coherence"), Some(&false));
+        assert_eq!(fixture.status.name, "workstation");
+        assert_eq!(fixture.peers[0].name, "office-exit");
+        assert_eq!(fixture.routes[0].prefix, "10.20.0.0/16");
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot {

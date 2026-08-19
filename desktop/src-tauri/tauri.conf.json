@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Laneway",
+  "version": "0.1.0",
+  "identifier": "com.github.doout.laneway.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://127.0.0.1:4176",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; font-src 'self'; connect-src ipc: http://ipc.localhost; script-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'"
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "Laneway",
+        "width": 1080,
+        "height": 760,
+        "minWidth": 640,
+        "minHeight": 560,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
