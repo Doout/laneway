@@ -22,5 +22,5 @@ export const approvedScreens = [
   ['/infrastructure/networks/production', 'Production'],
   ['/infrastructure/relays/new', 'Register relay'],
   ['/security', 'Security'],
-  ['/audit', 'Audit events'],
+  ['/audit', 'Audit log'],
 ] as const
