@@ -99,10 +99,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - name: Install Tauri Linux build dependencies
-        run: >-
-          sudo apt-get update && sudo apt-get install --yes
-          build-essential pkg-config libwebkit2gtk-4.1-dev libxdo-dev libssl-dev
-          libayatana-appindicator3-dev librsvg2-dev
+        run: |
+          sudo sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install --yes \
+            build-essential pkg-config libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
       - name: Build the endpoint UI
         working-directory: desktop
         run: |
