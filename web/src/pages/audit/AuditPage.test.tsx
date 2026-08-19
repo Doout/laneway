@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import { ControlPlaneProvider } from '../../lib/control-plane'
-import { AuditPage, formatControllerAuditActor } from './AuditPage'
+import { AuditPage, formatControllerAuditAction, formatControllerAuditActor } from './AuditPage'
 
 describe('audit split inspector', () => {
   it('moves event identity into the inspector and supports empty search recovery', async () => {
@@ -25,5 +25,14 @@ describe('audit split inspector', () => {
     [{ actor_kind: 'legacy_unknown' as const }, 'Legacy actor'],
   ])('renders controller actor provenance without inventing a browser label', (event, expected) => {
     expect(formatControllerAuditActor(event)).toBe(expected)
+  })
+
+  it.each([
+    ['administrator.login', 'Administrator signed in'],
+    ['administrator.session.expire', 'Administrator session expired'],
+    ['ephemeral_exit.session.start', 'Exit session started'],
+    ['route.approve', 'Approved route'],
+  ])('turns %s into readable activity text', (action, expected) => {
+    expect(formatControllerAuditAction(action)).toBe(expected)
   })
 })

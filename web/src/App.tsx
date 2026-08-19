@@ -1,5 +1,6 @@
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
+import { ThemeProvider } from './components/Theme'
 import { Button, PageHeader } from './components/ui'
 import { AccessRuleDetailPage, AccessRuleFormPage, AccessRulesPage } from './pages/access'
 import { AuditPage } from './pages/audit/AuditPage'
@@ -69,7 +70,7 @@ function NotFoundPage() {
 }
 
 export function App() {
-  return <Routes>
+  return <ThemeProvider><Routes>
     <Route index element={<LandingPage />} />
     <Route path="/sign-in" element={<SignInPage />} />
     <Route path="/setup" element={<SetupRequiredPage />} />
@@ -135,5 +136,5 @@ export function App() {
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Route>
-  </Routes>
+  </Routes></ThemeProvider>
 }

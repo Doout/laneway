@@ -1,37 +1,38 @@
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
-import { LiveAppShell } from './components/LiveAppShell'
+import { ControllerAppShell } from './components/ControllerAppShell'
+import { ThemeProvider } from './components/Theme'
 import { Button, PageHeader } from './components/ui'
 import { isNetworkScopedAdministratorPermission, useControlPlane, type AdministratorPermission } from './lib/control-plane'
 import { AuthenticationUnavailablePage, SetupRequiredPage, SignInPage } from './pages/auth/SignInPage'
 import {
-  LiveAccessDetailPage,
-  LiveAccessPage,
-  LiveAddNodePage,
-  LiveApproveRoutePage,
-  LiveAuditPage,
-  LiveCreateAccessPage,
-  LiveCreateGrantPage,
-  LiveCreateRoutePage,
-  LiveCreateTeamPage,
-  LiveCreateUserPage,
-  LiveInfrastructurePage,
-  LiveNetworkPage,
-  LiveNodeCapabilitiesPage,
-  LiveNodeDetailPage,
-  LiveNodeRevokePage,
-  LiveNodesPage,
-  LiveOverviewPage,
-  LiveRelayPage,
-  LiveRouteDetailPage,
-  LiveRoutesPage,
-  LiveSecurityPage,
-  LiveTokenPage,
-  LiveTeamDetailPage,
-  LiveTeamsPage,
-  LiveUserDetailPage,
-  LiveUserEnrollmentPage,
-  LiveUsersPage,
-} from './pages/live/LivePages'
+  AccessDetailPage,
+  AccessPage,
+  AddNodePage,
+  ApproveRoutePage,
+  AuditPage,
+  CreateAccessPage,
+  CreateGrantPage,
+  CreateRoutePage,
+  CreateTeamPage,
+  CreateUserPage,
+  InfrastructurePage,
+  NetworkPage,
+  NodeCapabilitiesPage,
+  NodeDetailPage,
+  NodeRevokePage,
+  NetworksPage,
+  OverviewPage,
+  RelayPage,
+  RouteDetailPage,
+  RoutesPage,
+  SecurityPage,
+  TokenPage,
+  TeamDetailPage,
+  TeamsPage,
+  UserDetailPage,
+  UserEnrollmentPage,
+  UsersPage,
+} from './pages/live'
 
 function Loading({ children = 'Checking administrator session…' }: { children?: string }) {
   return <main className="auth-page"><p role="status">{children}</p></main>
@@ -80,26 +81,26 @@ function RequireAuditPermission() {
 }
 
 export function App() {
-  return <Routes>
+  return <ThemeProvider><Routes>
     <Route index element={<Landing />} />
     <Route path="/sign-in" element={<SignInPage />} />
     <Route path="/setup" element={<SetupRequiredPage />} />
-    <Route element={<RequireSession />}><Route element={<LiveAppShell />}>
-      <Route element={<RequirePermission permission="network.list" />}><Route path="/overview" element={<LiveOverviewPage />} /><Route path="/infrastructure" element={<LiveInfrastructurePage />} /></Route>
-      <Route element={<RequirePermission permission="node.read" />}><Route path="/networks" element={<LiveNodesPage />} /><Route path="/nodes" element={<Navigate to="/networks" replace />} /><Route path="/nodes/:nodeId" element={<LiveNodeDetailPage />} /></Route>
-      <Route element={<RequirePermission permission="acl.read" />}><Route path="/users" element={<LiveUsersPage />} /><Route path="/users/:userId" element={<LiveUserDetailPage />} /><Route path="/teams" element={<LiveTeamsPage />} /><Route path="/teams/:teamId" element={<LiveTeamDetailPage />} /></Route>
-      <Route element={<RequirePermission permission="enrollment.issue" />}><Route path="/nodes/new" element={<LiveAddNodePage />} /><Route path="/nodes/new/token" element={<LiveTokenPage />} /><Route path="/users/:userId/enroll" element={<LiveUserEnrollmentPage />} /><Route path="/users/:userId/enroll/token" element={<LiveTokenPage user />} /></Route>
-      <Route element={<RequirePermission permission="node.manage" />}><Route path="/nodes/:nodeId/capabilities" element={<LiveNodeCapabilitiesPage />} /><Route path="/nodes/:nodeId/revoke" element={<LiveNodeRevokePage />} /></Route>
-      <Route element={<RequirePermission permission="route.read" />}><Route path="/routes" element={<LiveRoutesPage />} /><Route path="/routes/:routeId" element={<LiveRouteDetailPage />} /></Route>
-      <Route element={<RequirePermission permission="route.manage" />}><Route path="/routes/new" element={<LiveCreateRoutePage />} /><Route path="/routes/:routeId/approve" element={<LiveApproveRoutePage />} /></Route>
-      <Route element={<RequirePermission permission="acl.read" />}><Route path="/access" element={<LiveAccessPage />} /><Route path="/access/:ruleId" element={<LiveAccessDetailPage />} /></Route>
-      <Route element={<RequirePermission permission="acl.manage" />}><Route path="/access/new" element={<LiveCreateAccessPage />} /><Route path="/users/new" element={<LiveCreateUserPage />} /><Route path="/teams/new" element={<LiveCreateTeamPage />} /><Route path="/users/:userId/grants/new" element={<LiveCreateGrantPage subjectKind="user" />} /><Route path="/teams/:teamId/grants/new" element={<LiveCreateGrantPage subjectKind="team" />} /></Route>
-      <Route element={<RequirePermission permission="network.read" />}><Route path="/infrastructure/networks/:networkId" element={<LiveNetworkPage />} /></Route>
-      <Route element={<RequirePermission permission="relay.read" />}><Route path="/infrastructure/relays/:relayId" element={<LiveRelayPage />} /></Route>
-      <Route element={<RequirePermission permission="relay.manage" />}><Route path="/infrastructure/relays/new" element={<LiveRelayPage />} /></Route>
-      <Route element={<RequirePermission permission="certificate.read" />}><Route path="/security" element={<LiveSecurityPage />} /></Route>
-      <Route element={<RequireAuditPermission />}><Route path="/audit" element={<LiveAuditPage />} /></Route>
+    <Route element={<RequireSession />}><Route element={<ControllerAppShell />}>
+      <Route element={<RequirePermission permission="network.list" />}><Route path="/overview" element={<OverviewPage />} /><Route path="/infrastructure" element={<InfrastructurePage />} /></Route>
+      <Route element={<RequirePermission permission="node.read" />}><Route path="/networks" element={<NetworksPage />} /><Route path="/nodes" element={<Navigate to="/networks" replace />} /><Route path="/nodes/:nodeId" element={<NodeDetailPage />} /></Route>
+      <Route element={<RequirePermission permission="acl.read" />}><Route path="/users" element={<UsersPage />} /><Route path="/users/:userId" element={<UserDetailPage />} /><Route path="/teams" element={<TeamsPage />} /><Route path="/teams/:teamId" element={<TeamDetailPage />} /></Route>
+      <Route element={<RequirePermission permission="enrollment.issue" />}><Route path="/nodes/new" element={<AddNodePage />} /><Route path="/nodes/new/token" element={<TokenPage />} /><Route path="/users/:userId/enroll" element={<UserEnrollmentPage />} /><Route path="/users/:userId/enroll/token" element={<TokenPage user />} /></Route>
+      <Route element={<RequirePermission permission="node.manage" />}><Route path="/nodes/:nodeId/capabilities" element={<NodeCapabilitiesPage />} /><Route path="/nodes/:nodeId/revoke" element={<NodeRevokePage />} /></Route>
+      <Route element={<RequirePermission permission="route.read" />}><Route path="/routes" element={<RoutesPage />} /><Route path="/routes/:routeId" element={<RouteDetailPage />} /></Route>
+      <Route element={<RequirePermission permission="route.manage" />}><Route path="/routes/new" element={<CreateRoutePage />} /><Route path="/routes/:routeId/approve" element={<ApproveRoutePage />} /></Route>
+      <Route element={<RequirePermission permission="acl.read" />}><Route path="/access" element={<AccessPage />} /><Route path="/access/:ruleId" element={<AccessDetailPage />} /></Route>
+      <Route element={<RequirePermission permission="acl.manage" />}><Route path="/access/new" element={<CreateAccessPage />} /><Route path="/users/new" element={<CreateUserPage />} /><Route path="/teams/new" element={<CreateTeamPage />} /><Route path="/users/:userId/grants/new" element={<CreateGrantPage subjectKind="user" />} /><Route path="/teams/:teamId/grants/new" element={<CreateGrantPage subjectKind="team" />} /></Route>
+      <Route element={<RequirePermission permission="network.read" />}><Route path="/infrastructure/networks/:networkId" element={<NetworkPage />} /></Route>
+      <Route element={<RequirePermission permission="relay.read" />}><Route path="/infrastructure/relays/:relayId" element={<RelayPage />} /></Route>
+      <Route element={<RequirePermission permission="relay.manage" />}><Route path="/infrastructure/relays/new" element={<RelayPage />} /></Route>
+      <Route element={<RequirePermission permission="certificate.read" />}><Route path="/security" element={<SecurityPage />} /></Route>
+      <Route element={<RequireAuditPermission />}><Route path="/audit" element={<AuditPage />} /></Route>
       <Route path="*" element={<PageHeader title="Page not found" action={<Button to="/overview">Overview</Button>} />} />
     </Route></Route>
-  </Routes>
+  </Routes></ThemeProvider>
 }

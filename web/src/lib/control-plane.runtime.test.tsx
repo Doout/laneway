@@ -325,7 +325,7 @@ describe('cookie session runtime races', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Rotate' }))
     expect(await screen.findByLabelText('session ID')).toHaveTextContent(newSessionId)
     FakeBroadcastChannel.instances[0].emit({ type: 'logout', sessionId: oldSessionId })
-    expect(await screen.findByLabelText('auth state')).toHaveTextContent('anonymous')
+    await waitFor(() => expect(screen.getByLabelText('auth state')).toHaveTextContent('anonymous'))
     expect(screen.getByLabelText('session ID')).toHaveTextContent('none')
     expect(sessionReads).toBe(2)
   })
@@ -582,5 +582,44 @@ describe('cookie session runtime races', () => {
     document.dispatchEvent(new Event('visibilitychange'))
     await waitFor(() => expect(screen.getByLabelText('session ID')).toHaveTextContent(visibleSessionId))
     expect(reads).toBe(3)
+  })
+
+  it('keeps the authenticated page and inventory mounted while a visible tab revalidates', async () => {
+    vi.stubGlobal('BroadcastChannel', undefined)
+    let resolveRevalidation!: (response: Response) => void
+    const pendingRevalidation = new Promise<Response>((resolve) => { resolveRevalidation = resolve })
+    let sessionReads = 0
+    let inventoryReads = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) {
+        sessionReads += 1
+        if (sessionReads === 1) return Promise.resolve(jsonResponse(sessionView(oldSessionId, {
+          permissions: ['network.list'],
+        })))
+        return pendingRevalidation
+      }
+      if (path.includes('/v1/admin/networks?limit=100')) {
+        inventoryReads += 1
+        return Promise.resolve(managementResponse({ networks: [
+          { network_id: networkId, name: 'Production', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1 },
+        ] }))
+      }
+      throw new Error(`Unexpected request ${path}`)
+    }))
+    vi.stubEnv('MODE', 'live')
+    render(<ControlPlaneProvider><Harness /></ControlPlaneProvider>)
+    expect(await screen.findByLabelText('session ID')).toHaveTextContent(oldSessionId)
+    await waitFor(() => expect(screen.getByLabelText('network count')).toHaveTextContent('1'))
+
+    await act(async () => { window.dispatchEvent(new PageTransitionEvent('pageshow')) })
+
+    expect(sessionReads).toBe(2)
+    expect(screen.getByLabelText('auth state')).toHaveTextContent('authenticated')
+    expect(screen.getByLabelText('session ID')).toHaveTextContent(oldSessionId)
+    expect(screen.getByLabelText('network count')).toHaveTextContent('1')
+    resolveRevalidation(jsonResponse(sessionView(oldSessionId, { permissions: ['network.list'] })))
+    await waitFor(() => expect(screen.getByLabelText('auth state')).toHaveTextContent('authenticated'))
+    expect(inventoryReads).toBe(1)
   })
 })

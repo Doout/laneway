@@ -2,6 +2,8 @@ import { useState, type FormEvent, type ReactNode } from 'react'
 import { LockKeyhole, RefreshCw } from 'lucide-react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { Button, Callout, Field } from '../../components/ui'
+import { ThemeToggle } from '../../components/Theme'
+import { BrandMark } from '../../components/BrandMark'
 import { useControlPlane } from '../../lib/control-plane'
 import { safeReturnPath } from '../../lib/safe-navigation'
 import './auth.css'
@@ -9,8 +11,9 @@ import './auth.css'
 function AuthFrame({ title, children }: { title: string; children: ReactNode }) {
   return <main className="auth-page">
     <section className="auth-stage" aria-labelledby="auth-title">
+      <ThemeToggle className="auth-theme-toggle" />
       <div className="auth-brand" aria-label="Laneway">
-        <span className="auth-brand__mark" aria-hidden="true"><i /><i /><i /></span>
+        <BrandMark className="auth-brand__mark" />
         <span>Laneway</span>
       </div>
       <div className="auth-layout">

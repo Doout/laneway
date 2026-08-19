@@ -1,8 +1,10 @@
-import { LayoutDashboard, Network, RadioTower, RefreshCw, Route, ScrollText, ShieldCheck, Users } from 'lucide-react'
+import { LayoutDashboard, LogOut, Network, RadioTower, RefreshCw, RotateCw, Route, ScrollText, ShieldCheck, Users } from 'lucide-react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { isNetworkScopedAdministratorPermission, useControlPlane, type AdministratorPermission } from '../lib/control-plane'
+import { ThemeToggle } from './Theme'
+import { BrandMark } from './BrandMark'
 
 const navigation: Array<{ group: 'Workspace' | 'Network' | 'Operations'; label: string; to: string; activePrefixes?: string[]; icon: typeof LayoutDashboard; permission: AdministratorPermission }> = [
   { group: 'Workspace', label: 'Overview', to: '/overview', icon: LayoutDashboard, permission: 'network.list' },
@@ -26,11 +28,7 @@ function breadcrumbLabel(pathname: string) {
   return segment.length > 18 ? `${segment.slice(0, 8)}…${segment.slice(-4)}` : segment
 }
 
-function BrandMark() {
-  return <span className="brand-mark" aria-hidden="true"><span /><span /><span /></span>
-}
-
-export function LiveAppShell() {
+export function ControllerAppShell() {
   const location = useLocation()
   const navigate = useNavigate()
   const [rotationPending, setRotationPending] = useState(false)
@@ -42,6 +40,11 @@ export function LiveAppShell() {
     if (!isNetworkScopedAdministratorPermission(item.permission)) return hasPermission(item.permission)
     return Boolean(networkId && hasPermission(item.permission, networkId))
   })
+
+  useEffect(() => {
+    document.documentElement.scrollTop = 0
+    document.body.scrollTop = 0
+  }, [location.pathname])
 
   async function handleSignOut() {
     setSignOutPending(true)
@@ -88,9 +91,10 @@ export function LiveAppShell() {
         <div className="command-bar__tools">
           <div className={clsx('inventory-health', inventoryError && 'is-error')} role="status"><span aria-hidden="true" />{inventoryError || (inventoryPending ? 'Refreshing' : inventory ? 'Connected' : 'Connecting')}</div>
           <button className="refresh-button" type="button" onClick={() => void refresh()} disabled={inventoryPending} aria-label="Refresh controller inventory"><RefreshCw aria-hidden="true" size={15} /></button>
+          <ThemeToggle />
           {session ? <div className="administrator-identity" aria-label="Signed in administrator"><strong>{session.username}</strong><span>{session.role}</span></div> : null}
-          <button className="session-refresh-button" type="button" onClick={() => void handleRotation()} disabled={authPending}>{rotationPending ? 'Refreshing…' : 'Refresh session'}</button>
-          <button className="sign-out-button" type="button" onClick={() => void handleSignOut()} disabled={authPending}>{signOutPending ? 'Signing out…' : 'Sign out'}</button>
+          <button className="session-refresh-button command-icon-button" type="button" onClick={() => void handleRotation()} disabled={authPending} aria-label="Refresh session" title="Refresh session"><RotateCw aria-hidden="true" size={15} className={rotationPending ? 'is-spinning' : undefined} /></button>
+          <button className="sign-out-button command-icon-button" type="button" onClick={() => void handleSignOut()} disabled={authPending} aria-label="Sign out" title={signOutPending ? 'Signing out…' : 'Sign out'}><LogOut aria-hidden="true" size={15} /></button>
         </div>
       </header>
       {authError ? <div className="session-error" role="alert">{authError}</div> : null}

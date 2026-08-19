@@ -44,7 +44,7 @@ describe('shipped live application authorization', () => {
 
   it.each([
     {
-      page: 'nodes', path: '/networks', permission: 'node.read', inventoryPath: '/nodes?', responseKey: 'nodes',
+      page: 'nodes', path: '/networks?view=nodes', permission: 'node.read', inventoryPath: '/nodes?', responseKey: 'nodes',
       records: [
         { node_id: '4'.repeat(32), network_id: networkId, name: 'healthy-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' },
         { node_id: '5'.repeat(32), network_id: networkId, name: 'expired-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'ephemeral', lease_expires_at_unix_seconds: 1 },
@@ -91,7 +91,7 @@ describe('shipped live application authorization', () => {
       ],
       visible: 'valid-serial', hidden: 'expired-serial', filter: 'Valid only',
     },
-  ])('shows current $page by default and reveals inactive records on request', async ({ path: initialPath, permission, inventoryPath, responseKey, records, visible, hidden, filter }) => {
+  ])('shows current $page by default and reveals inactive records on request', async ({ page: pageName, path: initialPath, permission, inventoryPath, responseKey, records, visible, hidden, filter }) => {
     vi.stubEnv('MODE', 'live')
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
       const path = String(input)
@@ -108,9 +108,22 @@ describe('shipped live application authorization', () => {
     expect(screen.queryByText(hidden)).not.toBeInTheDocument()
     expect(screen.getByLabelText('Record visibility')).toHaveValue('current')
     expect(screen.getByRole('option', { name: filter })).toBeInTheDocument()
+    if (pageName === 'nodes') {
+      expect(screen.getByText('1 of 1 shown')).toBeVisible()
+      expect(screen.getByRole('link', { name: 'Nodes' })).toHaveTextContent('1')
+    }
 
     fireEvent.change(screen.getByLabelText('Record visibility'), { target: { value: 'all' } })
     expect(await screen.findByText(hidden)).toBeVisible()
+    if (pageName === 'nodes') {
+      expect(screen.getByText('2 of 2 shown')).toBeVisible()
+      expect(screen.getByText('Lease expired')).toBeVisible()
+      expect(screen.getByRole('heading', { name: 'History' })).toBeVisible()
+      expect(screen.getByText('1 inactive')).toBeVisible()
+      expect(screen.getByRole('link', { name: 'View' })).toHaveAttribute('href', `/nodes/${'5'.repeat(32)}`)
+      expect(screen.queryByText('Ephemeral enrollment')).not.toBeInTheDocument()
+      expect(screen.getByRole('link', { name: 'Nodes' })).toHaveTextContent('1')
+    }
   })
 
   it('shows an administrator-assigned route as approved without sending it through approval', async () => {
@@ -144,6 +157,40 @@ describe('shipped live application authorization', () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith(`/routes/${routeId}/approve`))).toBe(false)
   })
 
+  it('creates a traffic rule from guided fields without exposing selector JSON', async () => {
+    vi.stubEnv('MODE', 'live')
+    const ruleId = '6'.repeat(32)
+    let created = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list', 'acl.read', 'acl.manage'])))
+      if (path.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [{ network_id: networkId, name: 'Scoped network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 }] }))
+      if (path.includes('/acl-rules?')) return Promise.resolve(managementResponse({ acl_rules: created ? [{ rule_id: ruleId, network_id: networkId, priority: 100, action: 'accept', selector: { destination_prefixes: [{ address: 'ChgAAA==', prefix_length: 16 }], ip_protocol: 'IP_PROTOCOL_TCP', destination_ports: [{ first: 443, last: 443 }] }, description: 'Allow production HTTPS', enabled: true, configuration_epoch: 2 }] : [] }))
+      if (path.includes('/access-subjects')) return Promise.resolve(managementResponse({ users: [], teams: [], memberships: [], grants: [] }))
+      if (path.endsWith(`/networks/${networkId}/acl-rules`)) {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+        expect(body).toMatchObject({ description: 'Allow production HTTPS', action: 'accept', priority: 100, selector: { destination_prefixes: [{ address: 'ChgAAA==', prefix_length: 16 }], ip_protocol: 'IP_PROTOCOL_TCP', destination_ports: [{ first: 80, last: 80 }, { first: 443, last: 443 }, { first: 8443, last: 8450 }] } })
+        created = true
+        return Promise.resolve(managementResponse({ rule_id: ruleId }))
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPath('/access/new')
+    expect(await screen.findByRole('heading', { name: 'Add traffic rule' })).toBeVisible()
+    expect(screen.queryByLabelText('Selector JSON')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Rule name'), { target: { value: 'Allow production HTTPS' } })
+    fireEvent.change(screen.getByLabelText('IPv4 prefix'), { target: { value: '10.24.0.0/16' } })
+    expect(screen.getByLabelText('Port format help')).toBeVisible()
+    fireEvent.change(screen.getByLabelText('Destination ports'), { target: { value: '80, 443, 8443-8450' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: /Confirm allowed traffic/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create rule' }))
+
+    expect(await screen.findByRole('heading', { name: 'Allow production HTTPS' })).toBeVisible()
+    expect(screen.getByText('TCP · 443')).toBeVisible()
+  })
+
   it('loads the owner global audit stream once and renders recovery actors without selecting a network', async () => {
     vi.stubEnv('MODE', 'live')
     const secondNetworkId = '5'.repeat(32)
@@ -160,7 +207,8 @@ describe('shipped live application authorization', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     renderPath('/audit')
-    expect(await screen.findByText(`Recovery grant ${recoveryId}`)).toBeVisible()
+    expect(await screen.findByText(`Recovery grant · ${recoveryId.slice(0, 8)}…${recoveryId.slice(-4)}`)).toBeVisible()
+    expect(screen.getByText(recoveryId)).toBeVisible()
     expect(screen.getByText('Global')).toBeVisible()
     expect(screen.queryByLabelText('Selected network')).not.toBeInTheDocument()
     const paths = fetchMock.mock.calls.map(([input]) => String(input))
