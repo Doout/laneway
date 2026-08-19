@@ -64,6 +64,8 @@ type NoBeginRotation = AssertFalse<'beginRootAdministratorTokenRotation' extends
 type NoCompleteRotation = AssertFalse<'completeRootAdministratorTokenRotation' extends keyof typeof api ? true : false>;
 // @ts-expect-error Root automation credentials are absent from browser types.
 type NoRootBearerType = import('./index').RootBearer;
+// @ts-expect-error Service access-token credentials are absent from browser types.
+type NoServiceAccessTokenCredentialType = import('./index').ServiceAccessToken2;
 // @ts-expect-error Configurable origins are absent from browser types.
 type NoClientOptionsType = import('./index').ClientOptions;
 // @ts-expect-error The generic transport is internal and absent from the browser entry.
@@ -77,5 +79,6 @@ export type BrowserSurfaceAssertions =
   | NoBeginRotation
   | NoCompleteRotation
   | NoRootBearerType
+  | NoServiceAccessTokenCredentialType
   | NoClientOptionsType
   | NoInternalTransportType;

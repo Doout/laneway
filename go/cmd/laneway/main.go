@@ -713,12 +713,23 @@ func printJSON(value any) error {
 }
 
 func runConfig(args []string) error {
-	if len(args) == 0 || args[0] != "validate" {
-		return errors.New("usage: laneway config validate [-config path]")
+	if len(args) == 0 {
+		return errors.New("usage: laneway config <validate|inspect-controller-initial-network> [-config path]")
 	}
+	switch args[0] {
+	case "validate":
+		return runConfigValidate(args[1:])
+	case "inspect-controller-initial-network":
+		return runConfigInspectControllerInitialNetwork(args[1:])
+	default:
+		return errors.New("usage: laneway config <validate|inspect-controller-initial-network> [-config path]")
+	}
+}
+
+func runConfigValidate(args []string) error {
 	fs := flag.NewFlagSet("config validate", flag.ContinueOnError)
 	path := fs.String("config", "/etc/laneway/laneway.toml", "configuration file")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if _, err := config.Load(*path); err != nil {
@@ -726,6 +737,45 @@ func runConfig(args []string) error {
 	}
 	fmt.Println("configuration is valid")
 	return nil
+}
+
+type controllerInitialNetworkInspection struct {
+	Configured         bool   `json:"configured"`
+	NetworkID          string `json:"network_id,omitempty"`
+	Name               string `json:"name,omitempty"`
+	IPv4Pool           string `json:"ipv4_pool,omitempty"`
+	IPv6Pool           string `json:"ipv6_pool,omitempty"`
+	BootstrapNetworkID string `json:"bootstrap_network_id,omitempty"`
+}
+
+func runConfigInspectControllerInitialNetwork(args []string) error {
+	fs := flag.NewFlagSet("config inspect-controller-initial-network", flag.ContinueOnError)
+	path := fs.String("config", "/etc/laneway/controller.toml", "controller configuration file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: laneway config inspect-controller-initial-network [-config path]")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if cfg.Mode != config.ModeController {
+		return fmt.Errorf("configuration mode is %q, want %q", cfg.Mode, config.ModeController)
+	}
+	initial := cfg.Controller.InitialNetwork
+	inspection := controllerInitialNetworkInspection{
+		Configured:         initial.NetworkID != "",
+		BootstrapNetworkID: cfg.Bootstrap.NetworkID,
+	}
+	if inspection.Configured {
+		inspection.NetworkID = initial.NetworkID
+		inspection.Name = initial.Name
+		inspection.IPv4Pool = initial.IPv4Pool
+		inspection.IPv6Pool = initial.IPv6Pool
+	}
+	return printJSON(inspection)
 }
 
 func runPKI(args []string) error {

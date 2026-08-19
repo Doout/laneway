@@ -73,7 +73,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
         } else if argument == "--check-config" {
             check = true;
         } else {
-            bail!("unknown argument {:?}", argument);
+            bail!("unknown argument {argument:?}");
         }
     }
     Ok(Arguments { config, check })

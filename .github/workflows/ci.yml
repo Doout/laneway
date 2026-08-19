@@ -59,6 +59,66 @@ jobs:
           corepack pnpm build:live
           LANEWAY_EXPECTED_BUILD_MODE=live corepack pnpm exec playwright test e2e/build-mode.spec.ts
 
+  desktop:
+    name: Desktop foundation (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Enable pinned pnpm
+        run: corepack enable
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: corepack pnpm install --frozen-lockfile
+      - name: Validate endpoint UI
+        working-directory: desktop
+        run: corepack pnpm check
+      - name: Validate native local-daemon boundary
+        run: |
+          cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
+          cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+      - name: Compile the unsigned macOS application
+        working-directory: desktop
+        run: corepack pnpm tauri build --no-bundle
+
+  desktop-linux-boundary:
+    name: Desktop local-daemon boundary (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Tauri Linux build dependencies
+        run: |
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+          fi
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true -o Acquire::https::Timeout=30 install --yes \
+            build-essential pkg-config libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+      - name: Build the endpoint UI
+        working-directory: desktop
+        run: |
+          corepack enable
+          corepack pnpm install --frozen-lockfile
+          corepack pnpm build
+      - name: Test Linux-only daemon commands and trust checks
+        run: |
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
+          cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+
   go:
     name: Go ${{ matrix.go }}
     runs-on: ubuntu-latest

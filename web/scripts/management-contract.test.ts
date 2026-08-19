@@ -11,12 +11,22 @@ import {
 import {
   zAdministratorAccessPatch,
   zAdministratorUpdateRequest,
+  zAccessResource,
+  zAccessService,
+  zAccessServicePortRange,
   zAssignRouteRequest,
   zAuditEvent,
+  zAuditEventPage,
+  zAuditEvents,
   zBootstrapBundleRequest,
   zCreateAclRuleRequest,
   zCreateAdministratorRequest,
+  zCreateAccessResourceRequest,
+  zCreateAccessServiceRequest,
+  zCreateServicePrincipalRequest,
   zEnrollmentTokenRequest,
+  zEndpointRuntimeReport,
+  zEndpointStatus,
   zErrorEnvelope,
   zListAdministratorsQuery,
   zNetwork,
@@ -30,6 +40,9 @@ import {
   zRequestId,
   zResourceName,
   zRevocationRequest,
+  zIssueServiceAccessTokenRequest,
+  zServiceAccessToken,
+  zServiceAccessTokenRevocationRequest,
   zSessionRevocationRequest,
   zTrafficSelector,
   zTrafficSelectorInput,
@@ -109,6 +122,78 @@ describe('generated strict DTOs and scalar boundaries', () => {
     rejected(zUnixSeconds, Number.MAX_SAFE_INTEGER + 1)
     rejected(zUnixSeconds, 1n)
   })
+
+  it('keeps endpoint status bounded and removes stale health fields', () => {
+    const report = {
+      valid_for_seconds: 60,
+      product_version: '1.2.3',
+      platform: 'linux',
+      certificate_state: 'healthy',
+      configuration_state: 'current',
+      carrier_state: 'relay_quic',
+      route_state: 'ready',
+      selected_exit_state: 'not_selected',
+      cleanup_failure_count: 0,
+      configuration_epoch: 7,
+    }
+    accepted(zEndpointRuntimeReport, report)
+    rejected(zEndpointRuntimeReport, { ...report, valid_for_seconds: 301 })
+    rejected(zEndpointRuntimeReport, { ...report, private_endpoint: '10.0.0.1:443' })
+
+    const base = {
+      node_id: nodeId,
+      network_id: networkId,
+      node_name: 'node-one',
+      authoritative_configuration_epoch: 7,
+    }
+    accepted(zEndpointStatus, {
+      ...base,
+      freshness: 'current',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+      report,
+    })
+    accepted(zEndpointStatus, {
+      ...base,
+      freshness: 'expired',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+    })
+    accepted(zEndpointStatus, { ...base, freshness: 'never_reported' })
+    accepted(zEndpointStatus, { ...base, freshness: 'node_inactive' })
+    accepted(zEndpointStatus, {
+      ...base,
+      freshness: 'node_inactive',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+    })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'expired',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 160,
+      report,
+    })
+    rejected(zEndpointStatus, { ...base, freshness: 'current', report })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'current',
+      last_reported_at_unix_seconds: 100,
+      expires_at_unix_seconds: 159,
+      report,
+    })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'node_inactive',
+      last_reported_at_unix_seconds: 100,
+    })
+    rejected(zEndpointStatus, {
+      ...base,
+      freshness: 'expired',
+      last_reported_at_unix_seconds: 160,
+      expires_at_unix_seconds: 160,
+    })
+  })
 })
 
 describe('UTF-8 byte limits', () => {
@@ -154,6 +239,32 @@ describe('UTF-8 byte limits', () => {
     accepted(zSessionRevocationRequest, { reason: 'é'.repeat(128) })
     rejected(zSessionRevocationRequest, { reason: 'é'.repeat(129) })
     rejected(zSessionRevocationRequest, { reason: '' })
+
+    accepted(zServiceAccessTokenRevocationRequest, { reason: 'é'.repeat(128) })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: 'é'.repeat(129) })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: '' })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: ' padded' })
+    rejected(zServiceAccessTokenRevocationRequest, { reason: 'nul\0reason' })
+  })
+
+  it('enforces service access-token label byte limits', () => {
+    const expires_at_unix_seconds = 2_000_000_000
+    accepted(zIssueServiceAccessTokenRequest, {
+      label: 'é'.repeat(32),
+      expires_at_unix_seconds,
+    })
+    rejected(zIssueServiceAccessTokenRequest, {
+      label: 'é'.repeat(33),
+      expires_at_unix_seconds,
+    })
+    rejected(zIssueServiceAccessTokenRequest, {
+      label: ' padded',
+      expires_at_unix_seconds,
+    })
+    rejected(zIssueServiceAccessTokenRequest, {
+      label: 'nul\0label',
+      expires_at_unix_seconds,
+    })
   })
 
   it('enforces bootstrap payload and ACL-description byte limits', () => {
@@ -192,6 +303,76 @@ describe('UTF-8 byte limits', () => {
         description: 'bad\0description',
       })
     }
+  })
+})
+
+describe('service-principal automation invariants', () => {
+  const globalPrincipal = {
+    name: 'release-bot',
+    all_networks: false,
+    network_ids: [],
+    permissions: ['network.create'] as const,
+  }
+  const scopedPrincipal = {
+    name: 'inventory-bot',
+    all_networks: false,
+    network_ids: [networkId],
+    permissions: ['network.list', 'network.read'] as const,
+  }
+
+  it('requires explicit unique permissions and matching network scope', () => {
+    accepted(zCreateServicePrincipalRequest, globalPrincipal)
+    accepted(zCreateServicePrincipalRequest, scopedPrincipal)
+    accepted(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      all_networks: true,
+      network_ids: [],
+    })
+
+    rejected(zCreateServicePrincipalRequest, {
+      ...globalPrincipal,
+      network_ids: [networkId],
+    })
+    rejected(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      network_ids: [],
+    })
+    rejected(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      network_ids: [networkId, networkId],
+    })
+    rejected(zCreateServicePrincipalRequest, {
+      ...scopedPrincipal,
+      permissions: ['network.read', 'network.read'],
+    })
+  })
+
+  it('binds revocation metadata to revoked token state', () => {
+    const base = {
+      token_id: '5'.repeat(32),
+      principal_id: principalId,
+      label: 'deployment',
+      created_at_unix_seconds: 1,
+      expires_at_unix_seconds: 2,
+    }
+    accepted(zServiceAccessToken, { ...base, state: 'active' })
+    accepted(zServiceAccessToken, {
+      ...base,
+      state: 'revoked',
+      revoked_at_unix_seconds: 2,
+      revocation_reason: 'rotated',
+    })
+    rejected(zServiceAccessToken, {
+      ...base,
+      state: 'active',
+      revoked_at_unix_seconds: 2,
+      revocation_reason: 'rotated',
+    })
+    rejected(zServiceAccessToken, {
+      ...base,
+      state: 'revoked',
+      revoked_at_unix_seconds: 2,
+    })
   })
 })
 
@@ -238,6 +419,91 @@ describe('network and protobuf-shaped refinements', () => {
     rejected(zTrafficSelector, {
       ip_protocol: 'IP_PROTOCOL_ICMP',
       destination_ports: [{ first: 8, last: 8 }],
+    })
+  })
+
+  it('keeps named Resource and Service selectors exact and fail-closed', () => {
+    accepted(zCreateAccessResourceRequest, {
+      name: 'Build server',
+      target_kind: 'node',
+      node_id: nodeId,
+    })
+    accepted(zCreateAccessResourceRequest, {
+      name: 'Database',
+      target_kind: 'prefix',
+      route_id: eventId,
+      prefix: '10.24.0.6/32',
+    })
+    rejected(zCreateAccessResourceRequest, {
+      name: 'Ambiguous',
+      target_kind: 'node',
+      node_id: nodeId,
+      route_id: eventId,
+    })
+    rejected(zCreateAccessResourceRequest, {
+      name: 'Unmasked',
+      target_kind: 'prefix',
+      route_id: eventId,
+      prefix: '10.24.0.6/24',
+    })
+
+    accepted(zAccessServicePortRange, { first: 443, last: 445 })
+    rejected(zAccessServicePortRange, { first: 445, last: 443 })
+    accepted(zCreateAccessServiceRequest, {
+      name: 'HTTPS',
+      protocol: 'tcp',
+      ports: [{ first: 443, last: 445 }],
+    })
+    rejected(zCreateAccessServiceRequest, { name: 'Missing HTTPS ports', protocol: 'tcp' })
+    rejected(zCreateAccessServiceRequest, { name: 'Empty HTTPS ports', protocol: 'tcp', ports: [] })
+    rejected(zCreateAccessServiceRequest, { name: 'Null HTTPS ports', protocol: 'tcp', ports: null })
+    accepted(zCreateAccessServiceRequest, { name: 'Ping', protocol: 'icmp' })
+    rejected(zCreateAccessServiceRequest, {
+      name: 'Invalid ping ports',
+      protocol: 'icmp',
+      ports: [],
+    })
+
+    accepted(zAccessResource, {
+      resource_id: principalId,
+      network_id: networkId,
+      name: 'Database',
+      target_kind: 'prefix',
+      route_id: eventId,
+      prefix: '10.24.0.6/32',
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
+    })
+    accepted(zAccessService, {
+      service_id: principalId,
+      network_id: networkId,
+      name: 'HTTPS',
+      protocol: 'tcp',
+      ports: [{ first: 443, last: 445 }],
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
+    })
+    rejected(zAccessService, {
+      service_id: principalId,
+      network_id: networkId,
+      name: 'Ping',
+      protocol: 'icmp',
+      ports: [{ first: 8, last: 8 }],
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
+    })
+    rejected(zAccessService, {
+      service_id: principalId,
+      network_id: networkId,
+      name: 'Missing HTTPS ports',
+      protocol: 'tcp',
+      ports: [],
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
     })
   })
 
@@ -524,6 +790,15 @@ describe('administrator, enrollment, and audit invariants', () => {
       accepted(zAuditEvent, { ...base, actor_kind })
       rejected(zAuditEvent, { ...base, actor_kind, actor_id: principalId })
     }
+  })
+
+  it('keeps legacy audit snapshots strict while pagination is opt-in', () => {
+    accepted(zAuditEvents, { events: [] })
+    rejected(zAuditEvents, { events: [], next_cursor: 'A'.repeat(56) })
+
+    accepted(zAuditEventPage, { events: [] })
+    accepted(zAuditEventPage, { events: [], next_cursor: 'A'.repeat(56) })
+    rejected(zAuditEventPage, { events: [], next_cursor: 'not a cursor' })
   })
 })
 

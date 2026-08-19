@@ -11,30 +11,77 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Doout/laneway/go/internal/identity"
 	"golang.org/x/crypto/argon2"
 )
 
 const (
-	MinPasswordBytes = 15
-	MaxPasswordBytes = 1024
-	secretBytes      = 32
-	passwordSaltSize = 16
-	argonMemoryKiB   = 64 * 1024
-	argonIterations  = 3
-	argonParallelism = 1
-	argonKeyBytes    = 32
+	MinPasswordBytes         = 15
+	MaxPasswordBytes         = 1024
+	secretBytes              = 32
+	passwordSaltSize         = 16
+	argonMemoryKiB           = 64 * 1024
+	argonIterations          = 3
+	argonParallelism         = 1
+	argonKeyBytes            = 32
+	ServiceAccessTokenPrefix = "lnw_spat_v1"
 )
 
 type SecretPurpose string
 
 const (
-	SecretSession  SecretPurpose = "session"
-	SecretCSRF     SecretPurpose = "csrf"
-	SecretRecovery SecretPurpose = "recovery"
+	SecretSession            SecretPurpose = "session"
+	SecretCSRF               SecretPurpose = "csrf"
+	SecretRecovery           SecretPurpose = "recovery"
+	SecretServiceAccessToken SecretPurpose = "service_access_token"
 )
 
 func (p SecretPurpose) Valid() bool {
-	return p == SecretSession || p == SecretCSRF || p == SecretRecovery
+	return p == SecretSession || p == SecretCSRF || p == SecretRecovery ||
+		p == SecretServiceAccessToken
+}
+
+// NewServiceAccessToken creates a self-identifying opaque bearer. The ID is
+// public routing metadata; only a purpose-separated digest of the random
+// secret is persisted.
+func NewServiceAccessToken(tokenID identity.ID, random io.Reader) (string, [sha256.Size]byte, error) {
+	if tokenID.IsZero() {
+		return "", [sha256.Size]byte{}, errors.New("invalid service access token ID")
+	}
+	secret, _, err := NewSecret(SecretServiceAccessToken, random)
+	if err != nil {
+		return "", [sha256.Size]byte{}, err
+	}
+	bearer := ServiceAccessTokenPrefix + "." + tokenID.String() + "." + secret
+	digest := digestServiceAccessToken(tokenID, secret)
+	return bearer, digest, nil
+}
+
+func ParseServiceAccessToken(bearer string) (identity.ID, [sha256.Size]byte, error) {
+	var zero [sha256.Size]byte
+	parts := strings.Split(bearer, ".")
+	if len(parts) != 3 || parts[0] != ServiceAccessTokenPrefix {
+		return identity.ID{}, zero, errors.New("invalid service access token")
+	}
+	tokenID, err := identity.ParseID(parts[1])
+	if err != nil || tokenID.IsZero() {
+		return identity.ID{}, zero, errors.New("invalid service access token")
+	}
+	if _, err := HashSecret(SecretServiceAccessToken, parts[2]); err != nil {
+		return identity.ID{}, zero, errors.New("invalid service access token")
+	}
+	return tokenID, digestServiceAccessToken(tokenID, parts[2]), nil
+}
+
+func digestServiceAccessToken(tokenID identity.ID, secret string) [sha256.Size]byte {
+	prefix := "laneway-service-access-token-v1\x00"
+	material := make([]byte, 0, len(prefix)+len(tokenID)+len(secret))
+	material = append(material, prefix...)
+	material = append(material, tokenID[:]...)
+	material = append(material, secret...)
+	digest := sha256.Sum256(material)
+	clear(material)
+	return digest
 }
 
 func ValidatePassword(password []byte) error {

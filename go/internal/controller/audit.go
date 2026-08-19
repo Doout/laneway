@@ -4,12 +4,29 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/Doout/laneway/go/internal/adminauth"
 	"github.com/Doout/laneway/go/internal/identity"
 )
 
 type administratorMutationContextKey struct{}
+
+// AuditPageCursor is the durable sort key of the final event returned by an
+// audit page. API layers encode it as an opaque token; Store callers must not
+// construct cursors from anything other than a previously returned page.
+type AuditPageCursor struct {
+	CreatedAt time.Time
+	ID        identity.ID
+}
+
+// AuditPage contains one deterministic slice of the audit stream. NextCursor
+// is nil only when the query proved there are no older records.
+type AuditPage struct {
+	Events     []AuditEvent
+	NextCursor *AuditPageCursor
+}
 
 type administratorMutationAuthorization struct {
 	actor     adminauth.Actor
@@ -97,91 +114,167 @@ func (s *Store) AdministratorAuditMutation(ctx context.Context, decision adminau
 }
 
 func (s *Store) AuditEvents(ctx context.Context, networkID identity.NetworkID, limit int) ([]AuditEvent, error) {
-	if limit < 1 || limit > 1000 {
-		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
+	page, err := s.AuditEventsPage(ctx, networkID, limit, nil)
+	return page.Events, err
+}
+
+// AuditEventsPage returns a complete, resumable network audit page ordered
+// newest first. Rows inserted after the first request do not duplicate or skip
+// records while a caller continues from the returned cursor.
+func (s *Store) AuditEventsPage(ctx context.Context, networkID identity.NetworkID, limit int, cursor *AuditPageCursor) (AuditPage, error) {
+	if networkID.IsZero() {
+		return AuditPage{}, fmt.Errorf("%w: network ID", ErrInvalid)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
-		FROM audit_events WHERE network_id=? ORDER BY created_at DESC,id DESC LIMIT ?`, idBytes(networkID), limit)
-	if err != nil {
-		return nil, fmt.Errorf("query audit events: %w", err)
-	}
-	return scanAuditEvents(rows)
+	return queryAuditEventsPage(ctx, s.db, &networkID, limit, cursor)
 }
 
 func (s *Store) AdministratorAuditEvents(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, limit int) ([]AuditEvent, error) {
-	if limit < 1 || limit > 1000 {
-		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
+	page, err := s.administratorAuditEventsPage(ctx, decision, networkID, limit, nil, administratorAuditListPolicy)
+	return page.Events, err
+}
+
+// AdministratorAuditEventsPage is the authorized network-scoped audit cursor
+// read. Authorization and page selection share one database transaction.
+func (s *Store) AdministratorAuditEventsPage(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, limit int, cursor *AuditPageCursor) (AuditPage, error) {
+	return s.administratorAuditEventsPage(ctx, decision, networkID, limit, cursor, administratorAuditPageListPolicy)
+}
+
+func (s *Store) administratorAuditEventsPage(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID,
+	limit int, cursor *AuditPageCursor, policy adminauth.RoutePolicy) (AuditPage, error) {
+	if err := validateAuditPage(limit, cursor); err != nil {
+		return AuditPage{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return AuditPage{}, err
 	}
 	defer tx.Rollback()
-	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorAuditListPolicy, networkID); err != nil {
-		return nil, err
+	if _, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, policy, networkID); err != nil {
+		return AuditPage{}, err
 	}
 	if err := administratorNetworkExistsTx(ctx, tx, networkID); err != nil {
-		return nil, err
+		return AuditPage{}, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
-		FROM audit_events WHERE network_id=? ORDER BY created_at DESC,id DESC LIMIT ?`, idBytes(networkID), limit)
+	page, err := queryAuditEventsPage(ctx, tx, &networkID, limit, cursor)
 	if err != nil {
-		return nil, fmt.Errorf("query authorized audit events: %w", err)
-	}
-	events, err := scanAuditEvents(rows)
-	if err != nil {
-		return nil, err
+		return AuditPage{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return AuditPage{}, err
 	}
-	return events, nil
+	return page, nil
 }
 
 // AdministratorGlobalAuditEvents returns the global lifecycle stream and all
 // network-scoped events after revalidating the exact owner/root decision in
 // the same read transaction. Ordering matches the existing audit APIs.
 func (s *Store) AdministratorGlobalAuditEvents(ctx context.Context, decision adminauth.Decision, limit int) ([]AuditEvent, error) {
-	if limit < 1 || limit > 1000 {
-		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
+	page, err := s.administratorGlobalAuditEventsPage(ctx, decision, limit, nil, administratorGlobalAuditListPolicy)
+	return page.Events, err
+}
+
+// AdministratorGlobalAuditEventsPage returns a resumable global audit stream
+// after revalidating the exact owner/root decision in the read transaction.
+func (s *Store) AdministratorGlobalAuditEventsPage(ctx context.Context, decision adminauth.Decision, limit int, cursor *AuditPageCursor) (AuditPage, error) {
+	return s.administratorGlobalAuditEventsPage(ctx, decision, limit, cursor, administratorGlobalAuditPageListPolicy)
+}
+
+func (s *Store) administratorGlobalAuditEventsPage(ctx context.Context, decision adminauth.Decision, limit int,
+	cursor *AuditPageCursor, policy adminauth.RoutePolicy) (AuditPage, error) {
+	if err := validateAuditPage(limit, cursor); err != nil {
+		return AuditPage{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return AuditPage{}, err
 	}
 	defer tx.Rollback()
 	if _, err := s.authorizeAdministratorGlobalResourceTx(ctx, tx, decision,
-		administratorGlobalAuditListPolicy, adminauth.GlobalTarget()); err != nil {
-		return nil, err
+		policy, adminauth.GlobalTarget()); err != nil {
+		return AuditPage{}, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
-		FROM audit_events ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
+	page, err := queryAuditEventsPage(ctx, tx, nil, limit, cursor)
 	if err != nil {
-		return nil, fmt.Errorf("query authorized global audit events: %w", err)
-	}
-	events, err := scanAuditEvents(rows)
-	if err != nil {
-		return nil, err
+		return AuditPage{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return AuditPage{}, err
 	}
-	return events, nil
+	return page, nil
 }
 
 // GlobalAuditEvents returns global authentication/recovery records alongside
 // network-scoped administrative and node events. NetworkScope is nil only for
 // a genuinely global event.
 func (s *Store) GlobalAuditEvents(ctx context.Context, limit int) ([]AuditEvent, error) {
+	page, err := s.GlobalAuditEventsPage(ctx, limit, nil)
+	return page.Events, err
+}
+
+// GlobalAuditEventsPage returns a resumable global audit page for internal
+// controller consumers that do not use the administrator authorization layer.
+func (s *Store) GlobalAuditEventsPage(ctx context.Context, limit int, cursor *AuditPageCursor) (AuditPage, error) {
+	return queryAuditEventsPage(ctx, s.db, nil, limit, cursor)
+}
+
+type auditPageQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func validateAuditPage(limit int, cursor *AuditPageCursor) error {
 	if limit < 1 || limit > 1000 {
-		return nil, fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
+		return fmt.Errorf("%w: audit limit must be 1..1000", ErrInvalid)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
-		FROM audit_events ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
+	if cursor == nil {
+		return nil
+	}
+	createdAt := cursor.CreatedAt.UTC()
+	if cursor.ID.IsZero() || createdAt.IsZero() || !createdAt.Equal(createdAt.Truncate(time.Second)) {
+		return fmt.Errorf("%w: invalid audit cursor", ErrInvalid)
+	}
+	return nil
+}
+
+func queryAuditEventsPage(ctx context.Context, queryer auditPageQueryer, networkID *identity.NetworkID,
+	limit int, cursor *AuditPageCursor) (AuditPage, error) {
+	if err := validateAuditPage(limit, cursor); err != nil {
+		return AuditPage{}, err
+	}
+	conditions := make([]string, 0, 2)
+	arguments := make([]any, 0, 5)
+	if networkID != nil {
+		if networkID.IsZero() {
+			return AuditPage{}, fmt.Errorf("%w: network ID", ErrInvalid)
+		}
+		conditions = append(conditions, "network_id=?")
+		arguments = append(arguments, idBytes(*networkID))
+	}
+	if cursor != nil {
+		conditions = append(conditions, "(created_at<? OR (created_at=? AND id<?))")
+		createdAt := unix(cursor.CreatedAt)
+		arguments = append(arguments, createdAt, createdAt, idBytes(cursor.ID))
+	}
+	query := `SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at FROM audit_events`
+	if len(conditions) != 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += " ORDER BY created_at DESC,id DESC LIMIT ?"
+	arguments = append(arguments, limit+1)
+	rows, err := queryer.QueryContext(ctx, query, arguments...)
 	if err != nil {
-		return nil, fmt.Errorf("query global audit events: %w", err)
+		return AuditPage{}, fmt.Errorf("query audit event page: %w", err)
 	}
-	return scanAuditEvents(rows)
+	events, err := scanAuditEvents(rows)
+	if err != nil {
+		return AuditPage{}, err
+	}
+	page := AuditPage{Events: events}
+	if len(events) > limit {
+		page.Events = events[:limit]
+		last := page.Events[len(page.Events)-1]
+		page.NextCursor = &AuditPageCursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+	return page, nil
 }
 
 func scanAuditEvents(rows *sql.Rows) ([]AuditEvent, error) {

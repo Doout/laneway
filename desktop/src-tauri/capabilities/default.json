@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-main",
+  "description": "The endpoint status window receives no Tauri core or plugin capabilities; it can invoke only the read-only snapshot command registered by the Rust backend.",
+  "windows": ["main"],
+  "permissions": []
+}

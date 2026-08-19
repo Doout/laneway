@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -27,6 +28,68 @@ func TestAuditEventsReturnsNewestFirstBeforeLimit(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Action != "enrollment_token.issue" {
 		t.Fatalf("newest audit event = %+v", events)
+	}
+}
+
+func TestAuditEventsPageTraversesEqualTimestampsExactlyOnce(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	base := time.Date(2026, time.August, 19, 14, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return base }
+	network := createTestNetwork(t, store, "100.119.0.0/24")
+	for i := range 5 {
+		if _, err := store.IssueEnrollmentToken(ctx, network.ID, string(rune('a'+i)), base.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := store.AuditEvents(ctx, network.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(want) != 6 {
+		t.Fatalf("audit event count=%d want 6", len(want))
+	}
+
+	first, err := store.AuditEventsPage(ctx, network.ID, 2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Events) != 2 || first.NextCursor == nil {
+		t.Fatalf("first page=%+v", first)
+	}
+
+	// A newer event committed between requests must not displace or duplicate
+	// any record that was reachable from the first page's cursor.
+	store.now = func() time.Time { return base.Add(time.Minute) }
+	if _, err := store.IssueEnrollmentToken(ctx, network.ID, "new-after-page-one", base.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got := append([]AuditEvent(nil), first.Events...)
+	cursor := first.NextCursor
+	for cursor != nil {
+		page, err := store.AuditEventsPage(ctx, network.ID, 2, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, page.Events...)
+		cursor = page.NextCursor
+	}
+	if len(got) != len(want) {
+		t.Fatalf("traversed event count=%d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID {
+			t.Fatalf("event %d=%s want %s", i, got[i].ID, want[i].ID)
+		}
+	}
+}
+
+func TestAuditEventsPageRejectsInvalidCursor(t *testing.T) {
+	store, _ := openTestStore(t)
+	network := createTestNetwork(t, store, "100.118.0.0/24")
+	cursor := &AuditPageCursor{CreatedAt: time.Now().UTC().Truncate(time.Second).Add(time.Nanosecond)}
+	if _, err := store.AuditEventsPage(context.Background(), network.ID, 10, cursor); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("invalid audit cursor error=%v want ErrInvalid", err)
 	}
 }
 

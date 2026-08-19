@@ -8,14 +8,17 @@ info:
   summary: Versioned administrator management and browser-session contract.
   description: >-
     The current v1 administrator surface. It intentionally documents bounded
-    list snapshots and current mutation semantics without claiming cursors,
-    totals, entity tags, preconditions, or idempotency keys that are not yet
-    implemented. JSON request objects are strict and reject unknown fields.
+    list snapshots and cursor-paginated audit streams alongside current
+    mutation semantics without claiming totals, entity tags, preconditions, or
+    idempotency keys that are not yet implemented. JSON request objects are
+    strict and reject unknown fields.
 tags:
   - name: Authentication
     description: Browser administrator authentication and root automation probes.
   - name: Administrators
     description: Administrator principals, credentials, grants, and sessions.
+  - name: Automation
+    description: Scoped service principals and revocable access tokens.
   - name: Networks
     description: Network inventory and creation.
   - name: Enrollment
@@ -33,7 +36,7 @@ tags:
   - name: Certificates
     description: Certificate inventory and revocation.
   - name: Audit
-    description: Global and network-scoped audit snapshots.
+    description: Global and network-scoped audit snapshots and cursor pages.
 
 paths:
   /v1/admin/auth/state:
@@ -54,9 +57,9 @@ paths:
       tags: [Authentication]
       summary: Create an administrator browser session.
       description: >-
-        Requires an HTTPS same-origin Origin and no active administrator or root
-        credential. A stale or expired session cookie may be replaced. No CSRF
-        header is required before a session exists.
+        Requires an HTTPS same-origin Origin, rejects every supplied bearer, and
+        rejects an active administrator session. A stale or expired session
+        cookie may be replaced. No CSRF header is required before a session exists.
       security: []
       requestBody:
         required: true
@@ -368,6 +371,135 @@ paths:
           $ref: './components.yaml#/components/responses/SessionNoContent'
         default:
           $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/service-principals:
+    post:
+      operationId: createServicePrincipal
+      tags: [Automation]
+      summary: Create a scoped automation principal.
+      description: >-
+        Owner session or root automation. Permissions and network visibility are
+        explicit; no human owner role is inherited.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateServicePrincipalRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/ServicePrincipalCreated'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    get:
+      operationId: listServicePrincipals
+      tags: [Automation]
+      summary: Read a bounded service-principal snapshot.
+      description: >-
+        Enabled principals sort first and are capped at 100, so the default
+        100-record inventory always includes every enabled automation identity.
+        A larger limit may include disabled history.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/ServicePrincipals'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/service-principals/{principal_id}/disable:
+    post:
+      operationId: disableServicePrincipal
+      tags: [Automation]
+      summary: Disable an automation principal and revoke its tokens.
+      description: >-
+        Owner session or root automation. Disabling is irreversible in v1 and
+        atomically revokes every unrevoked token belonging to the principal.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/SessionNoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/service-principals/{principal_id}/tokens:
+    post:
+      operationId: issueServiceAccessToken
+      tags: [Automation]
+      summary: Issue a service access token.
+      description: The bearer is returned once and only its digest is persisted.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/IssueServiceAccessTokenRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/ServiceAccessTokenIssued'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    get:
+      operationId: listServiceAccessTokens
+      tags: [Automation]
+      summary: Read safe token metadata for one service principal.
+      description: >-
+        Live tokens sort first. At most 100 unrevoked tokens may belong to one
+        principal, so the default 100-record inventory always includes every
+        bearer that can still authorize a request. A larger limit may include
+        revoked history.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/PrincipalID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/ServiceAccessTokens'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/service-access-tokens/{token_id}/revoke:
+    post:
+      operationId: revokeServiceAccessToken
+      tags: [Automation]
+      summary: Revoke a service access token immediately.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/TokenID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/ServiceAccessTokenRevocationRequest'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/SessionNoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
   /v1/admin/audit:
     get:
       operationId: listGlobalAuditEvents
@@ -376,11 +508,29 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/Limit'
       responses:
         '200':
           $ref: './components.yaml#/components/responses/AuditEvents'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/audit/page:
+    get:
+      operationId: pageGlobalAuditEvents
+      tags: [Audit]
+      summary: Read one cursor page of the global audit stream.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/Limit'
+        - $ref: './components.yaml#/components/parameters/AuditCursor'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AuditEventPage'
         default:
           $ref: './components.yaml#/components/responses/Error'
 
@@ -394,6 +544,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       requestBody:
         required: true
         content:
@@ -415,6 +566,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       requestBody:
         required: true
         content:
@@ -437,6 +589,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       requestBody:
         required: true
         content:
@@ -455,6 +608,7 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/Limit'
       responses:
@@ -470,6 +624,7 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
       responses:
@@ -485,12 +640,34 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
         - $ref: './components.yaml#/components/parameters/Limit'
       responses:
         '200':
           $ref: './components.yaml#/components/responses/Nodes'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/endpoint-statuses:
+    get:
+      operationId: listNetworkEndpointStatuses
+      tags: [Nodes]
+      summary: Read bounded latest endpoint status with explicit TTL freshness.
+      description: >-
+        Returns one row per bounded Node inventory entry. Runtime report fields
+        are present only while their controller-owned TTL is current; expired,
+        never-reported, and inactive Nodes do not retain stale health fields.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/EndpointStatuses'
         default:
           $ref: './components.yaml#/components/responses/Error'
   /v1/admin/networks/{network_id}/relays:
@@ -501,6 +678,7 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
         - $ref: './components.yaml#/components/parameters/Limit'
@@ -518,6 +696,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
       requestBody:
@@ -539,6 +718,7 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
         - $ref: './components.yaml#/components/parameters/Limit'
@@ -556,6 +736,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
       requestBody:
@@ -577,6 +758,7 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
       responses:
@@ -594,6 +776,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
       requestBody:
@@ -617,6 +800,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - name: user_id
           in: path
@@ -644,6 +828,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
       requestBody:
@@ -678,6 +863,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       responses:
         '200':
           $ref: './components.yaml#/components/responses/Epoch'
@@ -692,6 +878,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       responses:
         '200':
           $ref: './components.yaml#/components/responses/Epoch'
@@ -710,6 +897,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
       requestBody:
@@ -733,6 +921,165 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/resources:
+    post:
+      operationId: createNetworkAccessResource
+      tags: [Access]
+      summary: Create a named Node or routed-prefix resource.
+      description: >-
+        Prefix resources are pinned to one approved subnet route. If that
+        route is no longer usable, every grant targeting the resource fails
+        closed until an administrator deliberately repairs the mapping.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessResourceRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessResource'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/resources/{resource_id}:
+    patch:
+      operationId: updateAccessResource
+      tags: [Access]
+      summary: Enable or disable a named resource and every grant that targets it.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - name: resource_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/UpdateAccessSelectorRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AccessResource'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/services:
+    post:
+      operationId: createNetworkAccessService
+      tags: [Access]
+      summary: Create a named protocol and destination-port selector.
+      description: >-
+        TCP and UDP require at least one explicit port range. Other protocols
+        forbid ranges. Overlapping and adjacent ranges are stored and returned
+        in canonical merged order.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessServiceRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessService'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/services/{service_id}:
+    patch:
+      operationId: updateAccessService
+      tags: [Access]
+      summary: Enable or disable a named service and every grant that uses it.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - name: service_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/UpdateAccessSelectorRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AccessService'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/resource-access-grants:
+    post:
+      operationId: createNetworkResourceAccessGrant
+      tags: [Access]
+      summary: Grant a network-scoped User or Team one named Resource and Service.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessResourceGrantRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessResourceGrant'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/resource-access-grants/{grant_id}:
+    delete:
+      operationId: deleteAccessResourceGrant
+      tags: [Access]
+      summary: Delete a named-resource access grant.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - name: grant_id
           in: path
@@ -752,6 +1099,7 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
         - $ref: './components.yaml#/components/parameters/Limit'
@@ -768,6 +1116,7 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
         - $ref: './components.yaml#/components/parameters/Limit'
@@ -784,12 +1133,31 @@ paths:
       security:
         - administratorSession: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
         - $ref: './components.yaml#/components/parameters/Limit'
       responses:
         '200':
           $ref: './components.yaml#/components/responses/AuditEvents'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/audit/page:
+    get:
+      operationId: pageNetworkAuditEvents
+      tags: [Audit]
+      summary: Read one cursor page of a network audit stream.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+        - $ref: './components.yaml#/components/parameters/AuditCursor'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AuditEventPage'
         default:
           $ref: './components.yaml#/components/responses/Error'
   /v1/admin/networks/{network_id}/certificates/{serial}/revoke:
@@ -802,6 +1170,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NetworkID'
         - $ref: './components.yaml#/components/parameters/CertificateSerial'
@@ -828,6 +1197,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       requestBody:
         required: true
         content:
@@ -851,6 +1221,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/RouteID'
       responses:
@@ -868,6 +1239,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/RouteID'
       responses:
@@ -885,6 +1257,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/RuleID'
       requestBody:
@@ -907,6 +1280,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/RuleID'
       responses:
@@ -924,6 +1298,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NodeID'
       requestBody:
@@ -947,6 +1322,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/NodeID'
       requestBody:
@@ -970,6 +1346,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/RelayID'
       responses:
@@ -987,6 +1364,7 @@ paths:
           administratorCsrfCookie: []
           administratorCsrfHeader: []
         - rootBearer: []
+        - serviceAccessToken: []
       parameters:
         - $ref: './components.yaml#/components/parameters/RelayID'
       requestBody:
@@ -1011,3 +1389,5 @@ components:
       $ref: './components.yaml#/components/securitySchemes/administratorCsrfHeader'
     rootBearer:
       $ref: './components.yaml#/components/securitySchemes/rootBearer'
+    serviceAccessToken:
+      $ref: './components.yaml#/components/securitySchemes/serviceAccessToken'

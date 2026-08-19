@@ -210,7 +210,8 @@ journalctl -u laneway-relay --since '30 minutes ago' --no-pager
 
 Node status reports addresses, routes, carrier, certificate and configuration
 lease health, and Exit selection. Peer status reports `direct`, `relay-quic`,
-`tcp-fallback`, or `disconnected`.
+`tcp-fallback`, or `disconnected`. Endpoint clients use the protected
+[local daemon API v1](local-daemon-api-v1.md) behind these commands.
 
 Alert on credentials approaching expiry, sustained relay throttling, loss of
 all paths, cleanup failures, or an Exit Node whose forwarding/NAT readiness is

@@ -1,0 +1,26 @@
+{
+  "name": "@laneway/desktop-client",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.14.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "dev": "vite",
+    "tauri": "tauri",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@tauri-apps/api": "2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "^24.10.0",
+    "typescript": "6.0.3",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  }
+}

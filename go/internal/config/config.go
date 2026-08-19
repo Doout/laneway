@@ -133,15 +133,16 @@ type WireGuard struct {
 }
 
 type Controller struct {
-	Listen           string `toml:"listen"`
-	QUICListen       string `toml:"quic_listen"`
-	Endpoint         string `toml:"endpoint"`
-	QUICEndpoint     string `toml:"quic_endpoint"`
-	ServerName       string `toml:"server_name"`
-	NetworkID        string `toml:"network_id"`
-	ServiceID        string `toml:"service_id"`
-	DatabaseFile     string `toml:"database"`
-	CAPrivateKeyFile string `toml:"ca_private_key"`
+	Listen           string                   `toml:"listen"`
+	QUICListen       string                   `toml:"quic_listen"`
+	Endpoint         string                   `toml:"endpoint"`
+	QUICEndpoint     string                   `toml:"quic_endpoint"`
+	ServerName       string                   `toml:"server_name"`
+	NetworkID        string                   `toml:"network_id"`
+	ServiceID        string                   `toml:"service_id"`
+	DatabaseFile     string                   `toml:"database"`
+	CAPrivateKeyFile string                   `toml:"ca_private_key"`
+	InitialNetwork   ControllerInitialNetwork `toml:"initial_network"`
 	// IssuerCertificateFile is an issuer-first PEM CA bundle. It may differ
 	// from tls.ca so the controller can hold an intermediate key while nodes
 	// trust only the offline root. Empty preserves direct-root deployments.
@@ -149,6 +150,16 @@ type Controller struct {
 	AdminTokenFile        string   `toml:"admin_token_file"`
 	LeafValidity          Duration `toml:"leaf_validity"`
 	PollInterval          Duration `toml:"poll_interval"`
+}
+
+// ControllerInitialNetwork is the immutable topology a controller may create
+// before serving. The controller certificate supplies the service identity;
+// duplicating it in configuration would create a second source of truth.
+type ControllerInitialNetwork struct {
+	NetworkID string `toml:"network_id"`
+	Name      string `toml:"name"`
+	IPv4Pool  string `toml:"ipv4_pool"`
+	IPv6Pool  string `toml:"ipv6_pool"`
 }
 
 // Bootstrap configures a dedicated public-Web-PKI HTTPS listener. It serves
@@ -295,6 +306,9 @@ func (c Config) Validate() error {
 	if c.Mode != ModeNode && c.Mode != ModeRelay && c.Mode != ModeController {
 		return fmt.Errorf("mode must be %q, %q, or %q", ModeNode, ModeRelay, ModeController)
 	}
+	if c.Mode != ModeController && controllerInitialNetworkConfigured(c.Controller.InitialNetwork) {
+		return errors.New("controller.initial_network is valid only in controller mode")
+	}
 	if c.StateDir == "" || c.SocketPath == "" {
 		return errors.New("state_dir and socket_path are required")
 	}
@@ -409,11 +423,18 @@ func (c Config) Validate() error {
 		if c.Controller.LeafValidity <= 0 {
 			return errors.New("controller.leaf_validity must be positive")
 		}
+		if err := validateControllerInitialNetwork(c.Controller.InitialNetwork); err != nil {
+			return err
+		}
 		if c.TCPFallback.Address != "" || c.TCPFallback.Listen != "" {
 			return errors.New("tcp_fallback endpoints are not valid in controller mode")
 		}
 		if err := validateBootstrap(c.Bootstrap); err != nil {
 			return err
+		}
+		if controllerInitialNetworkConfigured(c.Controller.InitialNetwork) && c.Bootstrap.NetworkID != "" &&
+			c.Bootstrap.NetworkID != c.Controller.InitialNetwork.NetworkID {
+			return errors.New("bootstrap.network_id must match controller.initial_network.network_id")
 		}
 	}
 	if c.Mode != ModeController && bootstrapConfigured(c.Bootstrap) {
@@ -509,6 +530,36 @@ func (c Config) Validate() error {
 func bootstrapConfigured(value Bootstrap) bool {
 	return value.Listen != "" || value.CertificateFile != "" || value.PrivateKeyFile != "" || value.NetworkID != "" ||
 		value.ControllerEndpoint != "" || value.ControllerQUICEndpoint != "" || value.ControllerServerName != "" || len(value.Artifacts) != 0
+}
+
+func controllerInitialNetworkConfigured(value ControllerInitialNetwork) bool {
+	return value.NetworkID != "" || value.Name != "" || value.IPv4Pool != "" || value.IPv6Pool != ""
+}
+
+func validateControllerInitialNetwork(value ControllerInitialNetwork) error {
+	if !controllerInitialNetworkConfigured(value) {
+		return nil
+	}
+	if value.NetworkID == "" || value.Name == "" || value.IPv4Pool == "" {
+		return errors.New("controller.initial_network requires network_id, name, and ipv4_pool")
+	}
+	if _, err := identity.ParseNetworkID(value.NetworkID); err != nil {
+		return fmt.Errorf("controller.initial_network.network_id: %w", err)
+	}
+	if value.Name != strings.TrimSpace(value.Name) || len(value.Name) > 253 || strings.IndexByte(value.Name, 0) >= 0 {
+		return errors.New("controller.initial_network.name must be 1..253 trimmed bytes")
+	}
+	pool, err := canonicalPrefix(value.IPv4Pool)
+	if err != nil || netvalidate.RoutablePrefix(pool, false) != nil || !pool.Addr().Is4() || pool.Bits() < 8 || pool.Bits() > 30 {
+		return errors.New("controller.initial_network.ipv4_pool must be a canonical routable IPv4 /8 through /30")
+	}
+	if value.IPv6Pool != "" {
+		pool, err := canonicalPrefix(value.IPv6Pool)
+		if err != nil || netvalidate.RoutablePrefix(pool, false) != nil || !pool.Addr().Is6() || pool.Bits() < 64 || pool.Bits() > 120 {
+			return errors.New("controller.initial_network.ipv6_pool must be a canonical routable IPv6 /64 through /120")
+		}
+	}
+	return nil
 }
 
 func validateBootstrap(value Bootstrap) error {

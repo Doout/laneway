@@ -645,6 +645,320 @@ CREATE TRIGGER access_grants_immutable
 BEGIN
     SELECT RAISE(ABORT, 'access grant is immutable');
 END;
+`, `
+CREATE TABLE controller_identity_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    network_id BLOB NOT NULL UNIQUE REFERENCES networks(id) ON DELETE RESTRICT
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    controller_service_id BLOB NOT NULL UNIQUE
+        CHECK(length(controller_service_id) = 16 AND controller_service_id <> zeroblob(16)),
+    created_at INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER controller_identity_state_immutable
+    BEFORE UPDATE ON controller_identity_state
+BEGIN
+    SELECT RAISE(ABORT, 'controller identity binding is immutable');
+END;
+CREATE TRIGGER controller_identity_state_undeletable
+    BEFORE DELETE ON controller_identity_state
+BEGIN
+    SELECT RAISE(ABORT, 'controller identity binding cannot be deleted');
+END;
+`, `
+CREATE TABLE endpoint_status_latest (
+    node_id BLOB PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE
+        CHECK(length(node_id) = 16 AND node_id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    observed_at INTEGER NOT NULL,
+    valid_for_seconds INTEGER NOT NULL CHECK(valid_for_seconds BETWEEN 10 AND 300),
+    expires_at INTEGER NOT NULL CHECK(expires_at = observed_at + valid_for_seconds),
+    product_version TEXT NOT NULL CHECK(length(product_version) BETWEEN 1 AND 64),
+    platform TEXT NOT NULL CHECK(platform IN ('linux','darwin','windows','other','unknown')),
+    certificate_state TEXT NOT NULL CHECK(certificate_state IN ('healthy','renewal_due','expired','revoked','unknown')),
+    configuration_state TEXT NOT NULL CHECK(configuration_state IN ('current','stale','expired','unknown')),
+    carrier_state TEXT NOT NULL CHECK(carrier_state IN ('direct','relay_quic','relay_tcp','negotiating','degraded','disconnected','unknown')),
+    route_state TEXT NOT NULL CHECK(route_state IN ('ready','degraded','unavailable','unknown')),
+    selected_exit_state TEXT NOT NULL CHECK(selected_exit_state IN ('not_selected','ready','degraded','unavailable','unknown')),
+    cleanup_failure_count INTEGER NOT NULL CHECK(cleanup_failure_count BETWEEN 0 AND 1000000000),
+    configuration_epoch INTEGER NOT NULL CHECK(configuration_epoch BETWEEN 0 AND 9223372036854775807),
+    FOREIGN KEY(network_id,node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX endpoint_status_latest_network
+    ON endpoint_status_latest(network_id,node_id);
+CREATE INDEX endpoint_status_latest_expiry
+    ON endpoint_status_latest(expires_at,node_id);
+CREATE INDEX certificates_endpoint_status_validity
+    ON certificates(network_id,node_id,revoked_at,not_before,not_after);
+CREATE TRIGGER endpoint_status_latest_identity_immutable
+    BEFORE UPDATE OF node_id,network_id ON endpoint_status_latest
+BEGIN
+    SELECT RAISE(ABORT, 'endpoint status identity is immutable');
+END;
+`, `
+CREATE UNIQUE INDEX routes_network_identity ON routes(network_id,id);
+CREATE TRIGGER routes_identity_immutable
+    BEFORE UPDATE OF id,network_id,node_id,prefix_address,prefix_length,kind,mode,metric,valid_until,created_at ON routes
+BEGIN
+    SELECT RAISE(ABORT, 'route identity and target are immutable');
+END;
+
+CREATE TABLE access_resources (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253 AND name = trim(name)),
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('node','prefix')),
+    node_id BLOB CHECK(node_id IS NULL OR (length(node_id) = 16 AND node_id <> zeroblob(16))),
+    route_id BLOB CHECK(route_id IS NULL OR (length(route_id) = 16 AND route_id <> zeroblob(16))),
+    route_node_id BLOB CHECK(route_node_id IS NULL OR (length(route_node_id) = 16 AND route_node_id <> zeroblob(16))),
+    route_prefix_address BLOB CHECK(route_prefix_address IS NULL OR length(route_prefix_address) IN (4,16)),
+    route_prefix_length INTEGER CHECK(route_prefix_length IS NULL OR route_prefix_length BETWEEN 1 AND 128),
+    prefix_address BLOB CHECK(prefix_address IS NULL OR length(prefix_address) IN (4,16)),
+    prefix_length INTEGER CHECK(prefix_length IS NULL OR prefix_length BETWEEN 1 AND 128),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    UNIQUE(network_id,name),
+    UNIQUE(network_id,id),
+    CHECK(
+        (target_kind='node' AND node_id IS NOT NULL AND route_id IS NULL AND route_node_id IS NULL AND
+            route_prefix_address IS NULL AND route_prefix_length IS NULL AND prefix_address IS NULL AND prefix_length IS NULL) OR
+        (target_kind='prefix' AND node_id IS NULL AND route_id IS NOT NULL AND route_node_id IS NOT NULL AND
+            route_prefix_address IS NOT NULL AND route_prefix_length IS NOT NULL AND prefix_address IS NOT NULL AND
+            length(route_prefix_address)=length(prefix_address) AND
+            ((length(route_prefix_address)=4 AND route_prefix_length BETWEEN 1 AND 32) OR
+             (length(route_prefix_address)=16 AND route_prefix_length BETWEEN 1 AND 128)) AND
+            ((length(prefix_address)=4 AND prefix_length BETWEEN 1 AND 32) OR
+             (length(prefix_address)=16 AND prefix_length BETWEEN 1 AND 128)))
+    ),
+    FOREIGN KEY(network_id,node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,route_node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,route_id) REFERENCES routes(network_id,id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE access_services (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253 AND name = trim(name)),
+    protocol TEXT NOT NULL CHECK(protocol IN ('any','tcp','udp','icmp','icmpv6')),
+    ports_sealed INTEGER NOT NULL DEFAULT 0 CHECK(ports_sealed IN (0,1)),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    UNIQUE(network_id,name),
+    UNIQUE(network_id,id)
+) STRICT;
+CREATE TRIGGER access_services_staged_insert
+    BEFORE INSERT ON access_services WHEN NEW.ports_sealed<>0
+BEGIN
+    SELECT RAISE(ABORT, 'access service must begin with staged ports');
+END;
+
+CREATE TABLE access_service_ports (
+    service_id BLOB NOT NULL REFERENCES access_services(id) ON DELETE CASCADE
+        CHECK(length(service_id) = 16 AND service_id <> zeroblob(16)),
+    first_port INTEGER NOT NULL CHECK(first_port BETWEEN 1 AND 65535),
+    last_port INTEGER NOT NULL CHECK(last_port BETWEEN first_port AND 65535),
+    PRIMARY KEY(service_id,first_port,last_port)
+) STRICT;
+CREATE TRIGGER access_service_ports_staged_insert
+    BEFORE INSERT ON access_service_ports WHEN NOT EXISTS(
+        SELECT 1 FROM access_services WHERE id=NEW.service_id AND protocol IN ('tcp','udp') AND ports_sealed=0)
+BEGIN
+    SELECT RAISE(ABORT, 'ports may be inserted only while creating a TCP or UDP service');
+END;
+CREATE TRIGGER access_services_seal
+    BEFORE UPDATE OF ports_sealed ON access_services WHEN
+        OLD.ports_sealed<>0 OR NEW.ports_sealed<>1 OR
+        (NEW.protocol IN ('tcp','udp') AND NOT EXISTS(
+            SELECT 1 FROM access_service_ports WHERE service_id=NEW.id)) OR
+        (NEW.protocol NOT IN ('tcp','udp') AND EXISTS(
+            SELECT 1 FROM access_service_ports WHERE service_id=NEW.id))
+BEGIN
+    SELECT RAISE(ABORT, 'access service ports must be complete before sealing');
+END;
+CREATE TRIGGER access_service_ports_immutable_update
+    BEFORE UPDATE ON access_service_ports
+BEGIN
+    SELECT RAISE(ABORT, 'access service port ranges are immutable');
+END;
+CREATE TRIGGER access_service_ports_immutable_delete
+    BEFORE DELETE ON access_service_ports WHEN EXISTS(
+        SELECT 1 FROM access_services WHERE id=OLD.service_id AND ports_sealed=1)
+BEGIN
+    SELECT RAISE(ABORT, 'sealed access service port ranges cannot be deleted');
+END;
+
+CREATE TABLE access_resource_grants (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('user','team')),
+    user_id BLOB CHECK(user_id IS NULL OR (length(user_id) = 16 AND user_id <> zeroblob(16))),
+    team_id BLOB CHECK(team_id IS NULL OR (length(team_id) = 16 AND team_id <> zeroblob(16))),
+    resource_id BLOB NOT NULL CHECK(length(resource_id) = 16 AND resource_id <> zeroblob(16)),
+    service_id BLOB NOT NULL CHECK(length(service_id) = 16 AND service_id <> zeroblob(16)),
+    created_at INTEGER NOT NULL,
+    CHECK((subject_kind='user' AND user_id IS NOT NULL AND team_id IS NULL) OR
+          (subject_kind='team' AND team_id IS NOT NULL AND user_id IS NULL)),
+    FOREIGN KEY(network_id,user_id) REFERENCES access_users(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,team_id) REFERENCES access_teams(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,resource_id) REFERENCES access_resources(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,service_id) REFERENCES access_services(network_id,id) ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX access_resource_grants_user ON access_resource_grants(
+    network_id,user_id,resource_id,service_id) WHERE subject_kind='user';
+CREATE UNIQUE INDEX access_resource_grants_team ON access_resource_grants(
+    network_id,team_id,resource_id,service_id) WHERE subject_kind='team';
+CREATE INDEX access_resource_grants_resource ON access_resource_grants(network_id,resource_id);
+CREATE INDEX access_resource_grants_service ON access_resource_grants(network_id,service_id);
+
+CREATE TRIGGER access_resources_identity_immutable
+    BEFORE UPDATE OF id,network_id,name,target_kind,node_id,route_id,route_node_id,route_prefix_address,
+        route_prefix_length,prefix_address,prefix_length,created_at ON access_resources
+BEGIN
+    SELECT RAISE(ABORT, 'access resource identity is immutable');
+END;
+CREATE TRIGGER access_services_identity_immutable
+    BEFORE UPDATE OF id,network_id,name,protocol,created_at ON access_services
+BEGIN
+    SELECT RAISE(ABORT, 'access service identity is immutable');
+END;
+CREATE TRIGGER access_resource_grants_immutable
+    BEFORE UPDATE ON access_resource_grants
+BEGIN
+    SELECT RAISE(ABORT, 'access resource grant is immutable');
+END;
+`, `
+CREATE TABLE automation_service_principals (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    name TEXT NOT NULL UNIQUE CHECK(
+        length(name) BETWEEN 3 AND 64 AND
+        name = trim(name) AND
+        name GLOB '[a-z0-9]*' AND
+        substr(name, -1, 1) GLOB '[a-z0-9]' AND
+        name NOT GLOB '*[^a-z0-9._-]*'
+    ),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    all_networks INTEGER NOT NULL DEFAULT 0 CHECK(all_networks IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    disabled_at INTEGER,
+    CHECK(
+        (enabled = 1 AND disabled_at IS NULL) OR
+        (enabled = 0 AND disabled_at IS NOT NULL AND disabled_at >= created_at)
+    )
+) STRICT;
+
+CREATE TABLE automation_service_principal_networks (
+    principal_id BLOB NOT NULL REFERENCES automation_service_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id,network_id)
+) STRICT;
+CREATE INDEX automation_service_principal_networks_network
+    ON automation_service_principal_networks(network_id,principal_id);
+
+CREATE TABLE automation_service_principal_permissions (
+    principal_id BLOB NOT NULL REFERENCES automation_service_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    operation TEXT NOT NULL CHECK(operation IN (
+        'network.list','network.read','network.create','enrollment.issue',
+        'bootstrap_bundle.create','node.read','node.manage','route.read','route.manage',
+        'acl.read','acl.manage','relay.read','relay.manage','certificate.read',
+        'certificate.revoke','audit.read','audit.read_global'
+    )),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id,operation)
+) STRICT;
+
+CREATE TABLE automation_service_access_tokens (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    principal_id BLOB NOT NULL REFERENCES automation_service_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    label TEXT NOT NULL CHECK(
+        length(CAST(label AS BLOB)) BETWEEN 1 AND 64 AND
+        label = trim(label) AND
+        instr(label,char(0)) = 0
+    ),
+    token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(
+        length(CAST(revocation_reason AS BLOB)) <= 256 AND
+        (revocation_reason = '' OR revocation_reason = trim(revocation_reason)) AND
+        instr(revocation_reason,char(0)) = 0
+    ),
+    CHECK(
+        (revoked_at IS NULL AND revocation_reason = '') OR
+        (revoked_at IS NOT NULL AND revoked_at >= created_at AND length(revocation_reason) > 0)
+    )
+) STRICT;
+CREATE INDEX automation_service_access_tokens_principal
+    ON automation_service_access_tokens(principal_id,created_at,id);
+CREATE INDEX automation_service_access_tokens_active_expiry
+    ON automation_service_access_tokens(expires_at,id) WHERE revoked_at IS NULL;
+
+CREATE TRIGGER automation_service_principals_identity_immutable
+    BEFORE UPDATE OF id,name,all_networks,created_at ON automation_service_principals
+BEGIN
+    SELECT RAISE(ABORT, 'automation service principal identity is immutable');
+END;
+CREATE TRIGGER automation_service_principals_enabled_limit
+    BEFORE INSERT ON automation_service_principals
+    WHEN NEW.enabled=1 AND (SELECT count(*) FROM automation_service_principals WHERE enabled=1) >= 100
+BEGIN
+    SELECT RAISE(ABORT, 'enabled automation service principal limit reached');
+END;
+CREATE TRIGGER automation_service_principal_disable_immutable
+    BEFORE UPDATE OF enabled,disabled_at ON automation_service_principals
+    WHEN OLD.enabled=0
+BEGIN
+    SELECT RAISE(ABORT, 'disabled automation service principal is immutable');
+END;
+CREATE TRIGGER automation_service_principal_scope_requires_scoped
+    BEFORE INSERT ON automation_service_principal_networks
+BEGIN
+    SELECT CASE WHEN COALESCE((SELECT all_networks FROM automation_service_principals
+        WHERE id=NEW.principal_id),1) <> 0
+        THEN RAISE(ABORT, 'all-network service principal cannot retain network scopes') END;
+END;
+CREATE TRIGGER automation_service_principal_scope_immutable
+    BEFORE UPDATE ON automation_service_principal_networks
+BEGIN
+    SELECT RAISE(ABORT, 'automation service principal scope is immutable');
+END;
+CREATE TRIGGER automation_service_principal_permission_immutable
+    BEFORE UPDATE ON automation_service_principal_permissions
+BEGIN
+    SELECT RAISE(ABORT, 'automation service principal permission is immutable');
+END;
+CREATE TRIGGER automation_service_access_token_immutable
+    BEFORE UPDATE OF id,principal_id,label,token_hash,created_at,expires_at
+    ON automation_service_access_tokens
+BEGIN
+    SELECT RAISE(ABORT, 'automation service access token identity is immutable');
+END;
+CREATE TRIGGER automation_service_access_token_unrevoked_limit
+    BEFORE INSERT ON automation_service_access_tokens
+    WHEN NEW.revoked_at IS NULL AND (
+        SELECT count(*) FROM automation_service_access_tokens
+        WHERE principal_id=NEW.principal_id AND revoked_at IS NULL
+    ) >= 100
+BEGIN
+    SELECT RAISE(ABORT, 'unrevoked automation service access token limit reached');
+END;
+CREATE TRIGGER automation_service_access_token_revocation_immutable
+    BEFORE UPDATE OF revoked_at,revocation_reason ON automation_service_access_tokens
+    WHEN OLD.revoked_at IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT, 'automation service access token revocation is immutable');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

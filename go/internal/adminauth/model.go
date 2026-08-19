@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	MinUsernameLength = 3
-	MaxUsernameLength = 64
-	MaxSessionReason  = 256
+	MinUsernameLength             = 3
+	MaxUsernameLength             = 64
+	MinServicePrincipalNameLength = 3
+	MaxServicePrincipalNameLength = 64
+	MaxSessionReason              = 256
 )
 
 type Role string
@@ -45,6 +47,14 @@ func ValidateUsername(username string) bool {
 		return false
 	}
 	return true
+}
+
+// ValidateServicePrincipalName applies the same stable, URL-safe naming
+// contract as administrator usernames without making automation identities
+// human login principals.
+func ValidateServicePrincipalName(name string) bool {
+	return len(name) >= MinServicePrincipalNameLength && len(name) <= MaxServicePrincipalNameLength &&
+		ValidateUsername(name)
 }
 
 type ActorKind string
@@ -91,6 +101,48 @@ type Principal struct {
 	NetworkIDs  []identity.NetworkID
 }
 
+// ServicePrincipal is an automation-only identity. Permissions are explicit
+// operation grants rather than a human role, so creating one never implicitly
+// grants owner authority.
+type ServicePrincipal struct {
+	ID          identity.ID
+	Name        string
+	Enabled     bool
+	AllNetworks bool
+	NetworkIDs  []identity.NetworkID
+	Permissions []Operation
+}
+
+func (p ServicePrincipal) Valid() bool {
+	if p.ID.IsZero() || !ValidateServicePrincipalName(p.Name) ||
+		p.AllNetworks && len(p.NetworkIDs) != 0 || len(p.Permissions) == 0 {
+		return false
+	}
+	seenNetworks := make(map[identity.NetworkID]struct{}, len(p.NetworkIDs))
+	for _, networkID := range p.NetworkIDs {
+		if networkID.IsZero() {
+			return false
+		}
+		if _, exists := seenNetworks[networkID]; exists {
+			return false
+		}
+		seenNetworks[networkID] = struct{}{}
+	}
+	seenPermissions := make(map[Operation]struct{}, len(p.Permissions))
+	requiresNetworkScope := false
+	for _, operation := range p.Permissions {
+		if !AutomationGrantable(operation) {
+			return false
+		}
+		if _, exists := seenPermissions[operation]; exists {
+			return false
+		}
+		seenPermissions[operation] = struct{}{}
+		requiresNetworkScope = requiresNetworkScope || operation.NetworkScoped() || operation == OperationNetworkList
+	}
+	return requiresNetworkScope == (p.AllNetworks || len(p.NetworkIDs) != 0)
+}
+
 func (p Principal) Valid() bool {
 	if p.ID.IsZero() || !ValidateUsername(p.Username) || !p.Role.Valid() || p.Role == RoleOwner && !p.AllNetworks ||
 		p.AllNetworks && len(p.NetworkIDs) != 0 {
@@ -112,27 +164,28 @@ func (p Principal) Valid() bool {
 type Operation string
 
 const (
-	OperationNetworkList       Operation = "network.list"
-	OperationNetworkRead       Operation = "network.read"
-	OperationNetworkCreate     Operation = "network.create"
-	OperationEnrollmentIssue   Operation = "enrollment.issue"
-	OperationBootstrapCreate   Operation = "bootstrap_bundle.create"
-	OperationNodeRead          Operation = "node.read"
-	OperationNodeManage        Operation = "node.manage"
-	OperationRouteRead         Operation = "route.read"
-	OperationRouteManage       Operation = "route.manage"
-	OperationACLRead           Operation = "acl.read"
-	OperationACLManage         Operation = "acl.manage"
-	OperationRelayRead         Operation = "relay.read"
-	OperationRelayManage       Operation = "relay.manage"
-	OperationCertificateRead   Operation = "certificate.read"
-	OperationCertificateManage Operation = "certificate.revoke"
-	OperationAuditRead         Operation = "audit.read"
-	OperationAuditReadGlobal   Operation = "audit.read_global"
-	OperationPrincipalManage   Operation = "principal.manage"
-	OperationSessionManage     Operation = "session.manage_others"
-	OperationRecoveryManage    Operation = "recovery.manage"
-	OperationRootTokenRotate   Operation = "root_token.rotate"
+	OperationNetworkList            Operation = "network.list"
+	OperationNetworkRead            Operation = "network.read"
+	OperationNetworkCreate          Operation = "network.create"
+	OperationEnrollmentIssue        Operation = "enrollment.issue"
+	OperationBootstrapCreate        Operation = "bootstrap_bundle.create"
+	OperationNodeRead               Operation = "node.read"
+	OperationNodeManage             Operation = "node.manage"
+	OperationRouteRead              Operation = "route.read"
+	OperationRouteManage            Operation = "route.manage"
+	OperationACLRead                Operation = "acl.read"
+	OperationACLManage              Operation = "acl.manage"
+	OperationRelayRead              Operation = "relay.read"
+	OperationRelayManage            Operation = "relay.manage"
+	OperationCertificateRead        Operation = "certificate.read"
+	OperationCertificateManage      Operation = "certificate.revoke"
+	OperationAuditRead              Operation = "audit.read"
+	OperationAuditReadGlobal        Operation = "audit.read_global"
+	OperationPrincipalManage        Operation = "principal.manage"
+	OperationSessionManage          Operation = "session.manage_others"
+	OperationServicePrincipalManage Operation = "service_principal.manage"
+	OperationRecoveryManage         Operation = "recovery.manage"
+	OperationRootTokenRotate        Operation = "root_token.rotate"
 )
 
 type operationPolicy struct {
@@ -148,21 +201,22 @@ var operationPolicies = map[Operation]operationPolicy{
 	// Bootstrap bundles have no network identifier in their current wire
 	// contract. Keep issuance global and owner-only until the request and the
 	// resulting bundle are durably bound to a canonical network.
-	OperationBootstrapCreate:   {owner: true},
-	OperationNodeRead:          {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationNodeManage:        {owner: true, operator: true, networkScoped: true},
-	OperationRouteRead:         {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationRouteManage:       {owner: true, operator: true, networkScoped: true},
-	OperationACLRead:           {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationACLManage:         {owner: true, operator: true, networkScoped: true},
-	OperationRelayRead:         {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationRelayManage:       {owner: true, operator: true, networkScoped: true},
-	OperationCertificateRead:   {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationCertificateManage: {owner: true, operator: true, networkScoped: true},
-	OperationAuditRead:         {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationAuditReadGlobal:   {owner: true},
-	OperationPrincipalManage:   {owner: true},
-	OperationSessionManage:     {owner: true},
+	OperationBootstrapCreate:        {owner: true},
+	OperationNodeRead:               {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationNodeManage:             {owner: true, operator: true, networkScoped: true},
+	OperationRouteRead:              {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationRouteManage:            {owner: true, operator: true, networkScoped: true},
+	OperationACLRead:                {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationACLManage:              {owner: true, operator: true, networkScoped: true},
+	OperationRelayRead:              {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationRelayManage:            {owner: true, operator: true, networkScoped: true},
+	OperationCertificateRead:        {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationCertificateManage:      {owner: true, operator: true, networkScoped: true},
+	OperationAuditRead:              {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationAuditReadGlobal:        {owner: true},
+	OperationPrincipalManage:        {owner: true},
+	OperationSessionManage:          {owner: true},
+	OperationServicePrincipalManage: {owner: true},
 	// Recovery-grant issuance and root-token rotation are stable root service-
 	// principal capabilities, not human-role permissions. Root subjects bypass
 	// this role matrix and are revalidated against the durable singleton.
@@ -181,6 +235,7 @@ var permissionOrder = []Operation{
 	OperationRelayManage, OperationCertificateRead, OperationCertificateManage,
 	OperationAuditRead, OperationAuditReadGlobal, OperationPrincipalManage,
 	OperationSessionManage, OperationRecoveryManage, OperationRootTokenRotate,
+	OperationServicePrincipalManage,
 }
 
 // Permissions returns a deterministic, defensive list of every operation
@@ -225,6 +280,35 @@ func RoleAllows(role Role, operation Operation) bool {
 	}
 }
 
+// AutomationGrantable reports whether an operation may be assigned directly
+// to a non-human service principal. Identity, session, recovery, and root-token
+// administration stay human-owner/root boundaries and cannot be delegated.
+func AutomationGrantable(operation Operation) bool {
+	if !operation.Valid() {
+		return false
+	}
+	switch operation {
+	case OperationPrincipalManage, OperationSessionManage,
+		OperationServicePrincipalManage, OperationRecoveryManage, OperationRootTokenRotate:
+		return false
+	default:
+		return true
+	}
+}
+
+func AuthorizeServicePrincipal(principal ServicePrincipal, operation Operation, networkID *identity.NetworkID) bool {
+	if !principal.Enabled || !principal.Valid() || !slices.Contains(principal.Permissions, operation) {
+		return false
+	}
+	if operation.NetworkScoped() != (networkID != nil) {
+		return false
+	}
+	if networkID == nil {
+		return true
+	}
+	return principal.AllNetworks || slices.Contains(principal.NetworkIDs, *networkID)
+}
+
 func Authorize(principal Principal, operation Operation, networkID *identity.NetworkID) bool {
 	if !principal.Enabled || !principal.Valid() {
 		return false
@@ -255,6 +339,19 @@ func VisibleNetworkIDs(principal Principal, available []identity.NetworkID) []id
 			continue
 		}
 		if principal.Role == RoleOwner || principal.AllNetworks || slices.Contains(principal.NetworkIDs, networkID) {
+			visible = append(visible, networkID)
+		}
+	}
+	return visible
+}
+
+func VisibleServicePrincipalNetworkIDs(principal ServicePrincipal, available []identity.NetworkID) []identity.NetworkID {
+	if !principal.Enabled || !principal.Valid() || !slices.Contains(principal.Permissions, OperationNetworkList) {
+		return nil
+	}
+	visible := make([]identity.NetworkID, 0, len(available))
+	for _, networkID := range available {
+		if !networkID.IsZero() && (principal.AllNetworks || slices.Contains(principal.NetworkIDs, networkID)) {
 			visible = append(visible, networkID)
 		}
 	}

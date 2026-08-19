@@ -48,7 +48,7 @@ func (s *Store) AdministratorNetworks(ctx context.Context, decision adminauth.De
 		return nil, fmt.Errorf("begin authorized network list: %w", err)
 	}
 	defer tx.Rollback()
-	_, principal, err := s.administratorDecisionPrincipalTx(ctx, tx, decision)
+	_, principal, servicePrincipal, err := s.administratorDecisionPrincipalTx(ctx, tx, decision)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +64,14 @@ func (s *Store) AdministratorNetworks(ctx context.Context, decision adminauth.De
 			WHERE scope.principal_id=?
 			ORDER BY n.created_at,n.id LIMIT ?`
 		arguments = []any{idBytes(principal.ID), limit}
+	} else if servicePrincipal != nil && !servicePrincipal.AllNetworks {
+		query = `SELECT n.id,n.name,n.ipv4_address,n.ipv4_prefix_length,
+			n.ipv6_address,n.ipv6_prefix_length,n.configuration_epoch,n.created_at
+			FROM automation_service_principal_networks scope
+			JOIN networks n ON n.id=scope.network_id
+			WHERE scope.principal_id=?
+			ORDER BY n.created_at,n.id LIMIT ?`
+		arguments = []any{idBytes(servicePrincipal.ID), limit}
 	}
 	rows, err := tx.QueryContext(ctx, query, arguments...)
 	if err != nil {

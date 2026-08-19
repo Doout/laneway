@@ -481,23 +481,31 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 	resourcePolicies := []adminauth.RoutePolicy{
 		administratorEnrollmentIssuePolicy, administratorNetworkCreatePolicy, administratorNetworkListPolicy,
 		administratorNetworkReadPolicy, administratorNodeListPolicy, administratorRelayListPolicy,
+		administratorEndpointStatusListPolicy,
 		administratorACLListPolicy, administratorCertificateListPolicy, administratorRouteListPolicy,
-		administratorAuditListPolicy, administratorGlobalAuditListPolicy, administratorRouteAssignPolicy, administratorRouteApprovePolicy,
+		administratorAuditListPolicy, administratorAuditPageListPolicy,
+		administratorGlobalAuditListPolicy, administratorGlobalAuditPageListPolicy,
+		administratorRouteAssignPolicy, administratorRouteApprovePolicy,
 		administratorRouteWithdrawPolicy, administratorACLCreatePolicy, administratorACLUpdatePolicy,
 		administratorACLDeletePolicy, administratorNodeRevokePolicy, administratorNodeCapabilitiesPolicy,
 		administratorCertificateRevokePolicy, administratorRelayCreatePolicy, administratorRelayDisablePolicy,
 		administratorRelayUpdatePolicy, administratorAccessInventoryPolicy, administratorAccessUserCreatePolicy,
 		administratorAccessUserUpdatePolicy, administratorAccessTeamCreatePolicy, administratorAccessMemberAddPolicy,
 		administratorAccessMemberDeletePolicy, administratorAccessGrantCreatePolicy, administratorAccessGrantDeletePolicy,
+		administratorAccessResourceCreatePolicy, administratorAccessResourceUpdatePolicy,
+		administratorAccessServiceCreatePolicy, administratorAccessServiceUpdatePolicy,
+		administratorAccessResourceGrantCreatePolicy, administratorAccessResourceGrantDeletePolicy,
 	}
-	if len(resourcePolicies) != 31 {
-		t.Fatalf("resource policies=%d want 31 non-bootstrap routes", len(resourcePolicies))
+	if len(resourcePolicies) != 40 {
+		t.Fatalf("resource policies=%d want 40 non-bootstrap routes", len(resourcePolicies))
 	}
 	identityPolicies := []adminauth.RoutePolicy{
 		administratorCreatePolicy, administratorListPolicy, administratorReadPolicy,
 		administratorAccessUpdatePolicy, administratorPasswordReplacePolicy,
 		administratorSessionListPolicy, administratorSessionRevokePolicy,
 		administratorBootstrapGrantPolicy, administratorOwnerRecoveryGrantPolicy,
+		servicePrincipalCreatePolicy, servicePrincipalListPolicy, servicePrincipalDisablePolicy, serviceTokenIssuePolicy,
+		serviceTokenListPolicy, serviceTokenRevokePolicy,
 	}
 	seen := make(map[string]string, len(resourcePolicies)+len(identityPolicies)+1)
 	for _, policy := range resourcePolicies {
@@ -794,6 +802,11 @@ func TestAdministratorInventoryReturnsEpochWithoutLegacyNetworkRead(t *testing.T
 			_, err := store.AdministratorNetworkNodes(ctx, decision, missingNetwork, 10)
 			return err
 		},
+		"endpoint statuses": func() error {
+			decision := administratorRootDecision(t, store, administratorEndpointStatusListPolicy, adminauth.NetworkTarget(missingNetwork))
+			_, err := store.AdministratorNetworkEndpointStatuses(ctx, decision, missingNetwork, 10, store.now())
+			return err
+		},
 		"relays": func() error {
 			decision := administratorRootDecision(t, store, administratorRelayListPolicy, adminauth.NetworkTarget(missingNetwork))
 			_, _, err := store.AdministratorNetworkRelays(ctx, decision, missingNetwork, 10)
@@ -846,6 +859,10 @@ func TestAdministratorCollectionAuthenticationPrecedesParentLookup(t *testing.T)
 	}{
 		{"nodes", administratorNodeListPolicy, func(decision adminauth.Decision, networkID identity.NetworkID) error {
 			_, err := store.AdministratorNetworkNodes(ctx, decision, networkID, 10)
+			return err
+		}},
+		{"endpoint statuses", administratorEndpointStatusListPolicy, func(decision adminauth.Decision, networkID identity.NetworkID) error {
+			_, err := store.AdministratorNetworkEndpointStatuses(ctx, decision, networkID, 10, store.now())
 			return err
 		}},
 		{"relays", administratorRelayListPolicy, func(decision adminauth.Decision, networkID identity.NetworkID) error {

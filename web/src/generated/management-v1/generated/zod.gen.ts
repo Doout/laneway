@@ -12,6 +12,21 @@ const goTrimSpace = (value: string): string => value.replace(goSpace, '');
 const trimmedBytes = (value: string, maximum: number, allowEmpty = false): boolean =>
     (allowEmpty || value.length > 0) && value === goTrimSpace(value) && utf8ByteLength(value) <= maximum && !value.includes('\0');
 const uniqueStrings = (values: ReadonlyArray<string>): boolean => new Set(values).size === values.length;
+const globalAutomationPermissions = new Set([
+    'network.create',
+    'bootstrap_bundle.create',
+    'audit.read_global',
+]);
+const validServicePrincipalScope = (value: {
+    all_networks: boolean;
+    network_ids: ReadonlyArray<string>;
+    permissions: ReadonlyArray<string>;
+}): boolean => {
+    if (!uniqueStrings(value.network_ids) || !uniqueStrings(value.permissions)) return false;
+    if (value.all_networks && value.network_ids.length > 0) return false;
+    const requiresNetworkScope = value.permissions.some((permission) => !globalAutomationPermissions.has(permission));
+    return requiresNetworkScope === (value.all_networks || value.network_ids.length > 0);
+};
 
 const decodeBase64 = (value: string): Uint8Array | undefined => {
     try {
@@ -187,6 +202,21 @@ const validRelayEndpoint = (value: string): boolean => {
 };
 const validAdministratorAccess = (value: { role: string; all_networks: boolean; network_ids: ReadonlyArray<string> }): boolean =>
     uniqueStrings(value.network_ids) && (value.role !== 'owner' || value.all_networks) && (!value.all_networks || value.network_ids.length === 0);
+const validEndpointStatus = (value: {
+    freshness: string;
+    last_reported_at_unix_seconds?: number;
+    expires_at_unix_seconds?: number;
+    report?: { valid_for_seconds: number };
+}): boolean => {
+    const hasLast = value.last_reported_at_unix_seconds !== undefined;
+    const hasExpiry = value.expires_at_unix_seconds !== undefined;
+    if (hasLast !== hasExpiry || hasLast && value.last_reported_at_unix_seconds! >= value.expires_at_unix_seconds!) return false;
+    if (value.freshness === 'current') return hasLast && value.report !== undefined &&
+        value.expires_at_unix_seconds! - value.last_reported_at_unix_seconds! === value.report.valid_for_seconds;
+    if (value.freshness === 'expired') return hasLast && value.report === undefined;
+    if (value.freshness === 'never_reported') return !hasLast && value.report === undefined;
+    return value.freshness === 'node_inactive' && value.report === undefined;
+};
 const validRoute = (value: { prefix: string; kind: string; mode: string }): boolean => {
     const parsed = parseCidr(value.prefix);
     if (!parsed || isIpv4Mapped(parsed.address) || parsed.canonical !== value.prefix) return false;
@@ -200,6 +230,22 @@ const validRoute = (value: { prefix: string; kind: string; mode: string }): bool
 };
 
 export const zAclAction = z.enum(['accept', 'deny']);
+
+/**
+ * first must be less than or equal to last.
+ */
+export const zAccessServicePortRange = z.object({
+    first: z.int().gte(1).lte(65535),
+    last: z.int().gte(1).lte(65535)
+}).strict().refine((value) => value.first <= value.last, 'first must not exceed last');
+
+export const zAccessServiceProtocol = z.enum([
+    'any',
+    'tcp',
+    'udp',
+    'icmp',
+    'icmpv6'
+]);
 
 export const zAccessSubjectKind = z.enum(['user', 'team']);
 
@@ -228,6 +274,69 @@ export const zAdministratorSessionState = z.enum([
 export const zAuthState = z.object({
     state: z.enum(['bootstrap_required', 'sign_in'])
 }).strict();
+
+export const zAutomationPermission = z.enum([
+    'network.list',
+    'network.read',
+    'network.create',
+    'enrollment.issue',
+    'bootstrap_bundle.create',
+    'node.read',
+    'node.manage',
+    'route.read',
+    'route.manage',
+    'acl.read',
+    'acl.manage',
+    'relay.read',
+    'relay.manage',
+    'certificate.read',
+    'certificate.revoke',
+    'audit.read',
+    'audit.read_global'
+]);
+
+export const zCarrierStatusState = z.enum([
+    'direct',
+    'relay_quic',
+    'relay_tcp',
+    'negotiating',
+    'degraded',
+    'disconnected',
+    'unknown'
+]);
+
+export const zCertificateStatusState = z.enum([
+    'healthy',
+    'renewal_due',
+    'expired',
+    'revoked',
+    'unknown'
+]);
+
+export const zConfigurationStatusState = z.enum([
+    'current',
+    'stale',
+    'expired',
+    'unknown'
+]);
+
+export const zEndpointPlatform = z.enum([
+    'linux',
+    'darwin',
+    'windows',
+    'other',
+    'unknown'
+]);
+
+/**
+ * Only current includes a report. Expired preserves observation times as evidence, never_reported has no observation, and node_inactive means revocation, lease expiry, or absence of a currently valid certificate prevents the retained report from representing live status.
+ */
+export const zEndpointStatusFreshness = z.enum([
+    'current',
+    'expired',
+    'never_reported',
+    'node_inactive'
+]);
 
 export const zEnrollmentClass = z.enum([
     'durable',
@@ -273,6 +382,13 @@ export const zCreateAccessGrantRequest = z.intersection(z.union([
     target_kind: zAccessTargetKind,
     node_id: zIdentifier.optional()
 }).strict());
+
+export const zCreateAccessResourceGrantRequest = z.object({
+    subject_kind: zAccessSubjectKind,
+    subject_id: zIdentifier,
+    resource_id: zIdentifier,
+    service_id: zIdentifier
+}).strict();
 
 export const zMutableRouteMode = z.enum(['nat', 'routed']);
 
@@ -328,6 +444,7 @@ export const zPermission = z.enum([
     'audit.read_global',
     'principal.manage',
     'session.manage_others',
+    'service_principal.manage',
     'recovery.manage',
     'root_token.rotate'
 ]);
@@ -419,6 +536,36 @@ export const zErrorEnvelope = z.object({
  */
 export const zResourceName = z.string().refine((value) => trimmedBytes(value, 253), 'name must be 1..253 trimmed UTF-8 bytes without NUL');
 
+export const zCreateAccessResourceRequest = z.union([
+    z.object({
+        name: zResourceName,
+        target_kind: z.literal('node'),
+        node_id: zIdentifier
+    }).strict(),
+    z.object({
+        name: zResourceName,
+        target_kind: z.literal('prefix'),
+        route_id: zIdentifier,
+        prefix: z.string().refine((value) => routableCidr(value, undefined, 1, 128, true), 'prefix must be a canonical masked non-default routable CIDR')
+    }).strict()
+]);
+
+export const zCreateAccessServiceRequest = z.union([
+    z.object({
+        name: zResourceName,
+        protocol: z.enum(['tcp', 'udp']),
+        ports: z.array(zAccessServicePortRange).min(1).max(256)
+    }).strict(),
+    z.object({
+        name: zResourceName,
+        protocol: z.enum([
+            'any',
+            'icmp',
+            'icmpv6'
+        ])
+    }).strict()
+]);
+
 export const zCreateAccessSubjectRequest = z.object({
     name: zResourceName
 }).strict();
@@ -477,6 +624,13 @@ export const zRouteState = z.enum([
     'rejected'
 ]);
 
+export const zRouteStatusState = z.enum([
+    'ready',
+    'degraded',
+    'unavailable',
+    'unknown'
+]);
+
 /**
  * Opaque 32-byte secret encoded as unpadded base64url.
  */
@@ -486,6 +640,36 @@ export const zAdministratorRecoveryRequest = z.object({
     grant: zSecret,
     password: zPassword
 }).strict();
+
+export const zSelectedExitStatusState = z.enum([
+    'not_selected',
+    'ready',
+    'degraded',
+    'unavailable',
+    'unknown'
+]);
+
+export const zServiceAccessTokenRevocationRequest = z.object({
+    reason: z.string().refine((value) => trimmedBytes(value, 256), 'reason must be 1..256 trimmed UTF-8 bytes without NUL')
+}).strict();
+
+export const zServiceAccessTokenState = z.enum([
+    'active',
+    'expired',
+    'revoked'
+]);
+
+export const zServicePrincipalName = z.string().min(3).max(64).regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/);
+
+/**
+ * Network-scoped permissions, including network.list, require either all_networks=true or at least one network_id. Global-only permission sets require all_networks=false and an empty network_ids array.
+ */
+export const zCreateServicePrincipalRequest = z.object({
+    name: zServicePrincipalName,
+    all_networks: z.boolean(),
+    network_ids: z.array(zIdentifier),
+    permissions: z.array(zAutomationPermission).min(1)
+}).strict().refine(validServicePrincipalScope, 'service principal scope and permissions must be unique and consistent');
 
 export const zSessionRevocationRequest = z.object({
     reason: z.string().refine((value) => byteLengthBetween(value, 1, 256), 'reason must occupy 1..256 UTF-8 bytes')
@@ -544,6 +728,19 @@ export const zAclRules = z.object({
     acl_rules: z.array(zAclRule)
 }).strict();
 
+export const zEndpointRuntimeReport = z.object({
+    valid_for_seconds: z.int().gte(10).lte(300),
+    product_version: z.string().regex(/^[\x21-\x7e]{1,64}$/),
+    platform: zEndpointPlatform,
+    certificate_state: zCertificateStatusState,
+    configuration_state: zConfigurationStatusState,
+    carrier_state: zCarrierStatusState,
+    route_state: zRouteStatusState,
+    selected_exit_state: zSelectedExitStatusState,
+    cleanup_failure_count: z.int().gte(0).lte(1000000000),
+    configuration_epoch: zUint64
+}).strict();
+
 export const zEpoch = z.object({
     configuration_epoch: zUint64
 }).strict();
@@ -562,6 +759,51 @@ export const zAccessGrant = z.object({
     node_id: zIdentifier.optional(),
     created_at_unix_seconds: zUnixSeconds
 }).strict();
+
+export const zAccessResource = z.union([
+    z.object({
+        resource_id: zIdentifier,
+        network_id: zIdentifier,
+        name: zResourceName,
+        target_kind: z.literal('node'),
+        node_id: zIdentifier,
+        enabled: z.boolean(),
+        created_at_unix_seconds: zUnixSeconds,
+        updated_at_unix_seconds: zUnixSeconds
+    }).strict(),
+    z.object({
+        resource_id: zIdentifier,
+        network_id: zIdentifier,
+        name: zResourceName,
+        target_kind: z.literal('prefix'),
+        route_id: zIdentifier,
+        prefix: z.string().refine((value) => routableCidr(value, undefined, 1, 128, true), 'prefix must be a canonical masked non-default routable CIDR'),
+        enabled: z.boolean(),
+        created_at_unix_seconds: zUnixSeconds,
+        updated_at_unix_seconds: zUnixSeconds
+    }).strict()
+]);
+
+export const zAccessResourceGrant = z.object({
+    grant_id: zIdentifier,
+    network_id: zIdentifier,
+    subject_kind: zAccessSubjectKind,
+    subject_id: zIdentifier,
+    resource_id: zIdentifier,
+    service_id: zIdentifier,
+    created_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zAccessService = z.object({
+    service_id: zIdentifier,
+    network_id: zIdentifier,
+    name: zResourceName,
+    protocol: zAccessServiceProtocol,
+    ports: z.array(zAccessServicePortRange),
+    enabled: z.boolean(),
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict().refine((value) => value.protocol === 'tcp' || value.protocol === 'udp' ? value.ports.length > 0 : value.ports.length === 0, 'TCP and UDP require ports; other protocols forbid them');
 
 export const zAccessTeam = z.object({
     team_id: zIdentifier,
@@ -591,7 +833,10 @@ export const zAccessInventory = z.object({
     users: z.array(zAccessUser),
     teams: z.array(zAccessTeam),
     memberships: z.array(zAccessTeamMember),
-    grants: z.array(zAccessGrant)
+    grants: z.array(zAccessGrant),
+    resources: z.array(zAccessResource),
+    services: z.array(zAccessService),
+    resource_grants: z.array(zAccessResourceGrant)
 }).strict();
 
 export const zAdministratorSession = z.object({
@@ -629,6 +874,11 @@ export const zAuditEvent = z.object({
     return identified ? value.actor_id !== undefined : value.actor_id === undefined;
 }, 'actor_id presence must match actor_kind');
 
+export const zAuditEventPage = z.object({
+    events: z.array(zAuditEvent),
+    next_cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional()
+}).strict();
+
 export const zAuditEvents = z.object({
     events: z.array(zAuditEvent)
 }).strict();
@@ -658,6 +908,21 @@ export const zCertificate = z.object({
 
 export const zCertificates = z.object({
     certificates: z.array(zCertificate)
+}).strict();
+
+export const zEndpointStatus = z.object({
+    node_id: zIdentifier,
+    network_id: zIdentifier,
+    node_name: zResourceName,
+    authoritative_configuration_epoch: zUint64,
+    freshness: zEndpointStatusFreshness,
+    last_reported_at_unix_seconds: zUnixSeconds.optional(),
+    expires_at_unix_seconds: zUnixSeconds.optional(),
+    report: zEndpointRuntimeReport.optional()
+}).strict().refine(validEndpointStatus, 'endpoint status freshness, evidence timestamps, and report must be consistent');
+
+export const zEndpointStatuses = z.object({
+    endpoint_statuses: z.array(zEndpointStatus)
 }).strict();
 
 export const zEnrollmentToken = z.object({
@@ -697,6 +962,14 @@ export const zEnrollmentTokenRequest = z.object({
         ? value.session_lifetime_seconds != null && value.session_lifetime_seconds >= 300 && value.session_lifetime_seconds <= 86400
         : value.session_lifetime_seconds == null || value.session_lifetime_seconds === 0;
 }, 'session lifetime must match enrollment class');
+
+/**
+ * Expiry must be in the future and no more than 365 days away.
+ */
+export const zIssueServiceAccessTokenRequest = z.object({
+    label: z.string().refine((value) => trimmedBytes(value, 64), 'label must be 1..64 trimmed UTF-8 bytes without NUL'),
+    expires_at_unix_seconds: zUnixSeconds
+}).strict();
 
 export const zNetwork = z.object({
     network_id: zIdentifier,
@@ -764,6 +1037,43 @@ export const zRoutes = z.object({
     routes: z.array(zRoute)
 }).strict();
 
+export const zServiceAccessToken = z.object({
+    token_id: zIdentifier,
+    principal_id: zIdentifier,
+    label: z.string().refine((value) => trimmedBytes(value, 64), 'label must be 1..64 trimmed UTF-8 bytes without NUL'),
+    state: zServiceAccessTokenState,
+    created_at_unix_seconds: zUnixSeconds,
+    expires_at_unix_seconds: zUnixSeconds,
+    revoked_at_unix_seconds: zUnixSeconds.optional(),
+    revocation_reason: z.string().optional().refine((value) => value === undefined || trimmedBytes(value, 256), 'reason must be 1..256 trimmed UTF-8 bytes without NUL')
+}).strict().refine((value) => value.state === 'revoked'
+    ? value.revoked_at_unix_seconds !== undefined && value.revocation_reason !== undefined
+    : value.revoked_at_unix_seconds === undefined && value.revocation_reason === undefined, 'revocation metadata must match token state');
+
+export const zIssuedServiceAccessToken = z.object({
+    access_token: z.string().regex(/^lnw_spat_v1\.(?!0{32}\.)[0-9a-f]{32}\.[A-Za-z0-9_-]{43}$/).readonly(),
+    token: zServiceAccessToken
+}).strict();
+
+export const zServiceAccessTokens = z.object({
+    tokens: z.array(zServiceAccessToken)
+}).strict();
+
+export const zServicePrincipal = z.object({
+    principal_id: zIdentifier,
+    name: zServicePrincipalName,
+    enabled: z.boolean(),
+    all_networks: z.boolean(),
+    network_ids: z.array(zIdentifier),
+    permissions: z.array(zAutomationPermission).min(1),
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict().refine(validServicePrincipalScope, 'service principal scope and permissions must be unique and consistent');
+
+export const zServicePrincipals = z.object({
+    service_principals: z.array(zServicePrincipal)
+}).strict();
+
 /**
  * Full replacement. Omitted priority, description, and enabled fields reset to 0, the empty string, and false respectively.
  */
@@ -773,6 +1083,10 @@ export const zUpdateAclRuleRequest = z.object({
     selector: zTrafficSelectorInput,
     description: z.string().nullish().default('').refine((value) => value == null || utf8ByteLength(value) <= 1024 && !value.includes('\0'), 'description must occupy at most 1024 UTF-8 bytes without NUL'),
     enabled: z.boolean().nullish().default(false)
+}).strict();
+
+export const zUpdateAccessSelectorRequest = z.object({
+    enabled: z.boolean()
 }).strict();
 
 export const zUpdateAccessUserRequest = z.object({
@@ -857,12 +1171,24 @@ export const zCreateAdministratorRequest = z.object({
  * Static root service-principal credential for local file-based automation only. The controller rejects this credential when Origin or Sec-Fetch-* headers indicate a browser context. It is never a console credential.
  */
 /**
+ * Automation-only bearer bound to one durable service principal, explicit operation grants, network scope, expiry, and revocation state. Origin or Sec-Fetch-* browser-context headers are rejected.
+ */
+export const zIssuedServiceAccessTokenWritable = z.object({
+    token: zServiceAccessToken
+}).strict();
+
+/**
+ * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+ */
+export const zAuditCursor = z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/);
+
+/**
  * Canonical lowercase, even-length hexadecimal without a leading zero byte.
  */
 export const zCertificateSerial = z.string().regex(/^(?!00)[0-9a-f]{2}(?:[0-9a-f]{2}){0,31}$/);
 
 /**
- * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+ * Maximum number of records in the response. Omission or an empty value uses 100.
  */
 export const zLimit = z.int().gte(1).lte(1000).default(100);
 
@@ -882,6 +1208,8 @@ export const zRouteId = zIdentifier;
 export const zRuleId = zIdentifier;
 
 export const zSessionId = zIdentifier;
+
+export const zTokenId = zIdentifier;
 
 /**
  * Current administrator authentication entry state.
@@ -1010,14 +1338,84 @@ export const zRevokeAdministratorSessionPath = z.object({
  */
 export const zRevokeAdministratorSessionResponse = z.void();
 
+export const zListServicePrincipalsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Bounded automation service-principal snapshot.
+ */
+export const zListServicePrincipalsResponse = zServicePrincipals;
+
+export const zCreateServicePrincipalBody = zCreateServicePrincipalRequest;
+
+/**
+ * Newly created automation service principal.
+ */
+export const zCreateServicePrincipalResponse = zServicePrincipal;
+
+export const zDisableServicePrincipalPath = z.object({
+    principal_id: zIdentifier
+}).strict();
+
+/**
+ * Session operation completed with no response body.
+ */
+export const zDisableServicePrincipalResponse = z.void();
+
+export const zListServiceAccessTokensPath = z.object({
+    principal_id: zIdentifier
+}).strict();
+
+export const zListServiceAccessTokensQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Bounded safe service access-token metadata snapshot.
+ */
+export const zListServiceAccessTokensResponse = zServiceAccessTokens;
+
+export const zIssueServiceAccessTokenBody = zIssueServiceAccessTokenRequest;
+
+export const zIssueServiceAccessTokenPath = z.object({
+    principal_id: zIdentifier
+}).strict();
+
+/**
+ * One-time service access-token disclosure and safe metadata.
+ */
+export const zIssueServiceAccessTokenResponse = zIssuedServiceAccessToken;
+
+export const zRevokeServiceAccessTokenBody = zServiceAccessTokenRevocationRequest;
+
+export const zRevokeServiceAccessTokenPath = z.object({
+    token_id: zIdentifier
+}).strict();
+
+/**
+ * Session operation completed with no response body.
+ */
+export const zRevokeServiceAccessTokenResponse = z.void();
+
 export const zListGlobalAuditEventsQuery = z.object({
     limit: z.int().gte(1).lte(1000).optional().default(100)
 }).strict();
 
 /**
- * Bounded audit-event snapshot.
+ * Backward-compatible bounded audit-event snapshot.
  */
 export const zListGlobalAuditEventsResponse = zAuditEvents;
+
+export const zPageGlobalAuditEventsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100),
+    cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional()
+}).strict();
+
+/**
+ * One deterministic cursor page of the audit stream.
+ */
+export const zPageGlobalAuditEventsResponse = zAuditEventPage;
 
 export const zIssueEnrollmentTokenBody = zEnrollmentTokenRequest;
 
@@ -1070,6 +1468,19 @@ export const zListNetworkNodesQuery = z.object({
  * Bounded node snapshot.
  */
 export const zListNetworkNodesResponse = zNodes;
+
+export const zListNetworkEndpointStatusesPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+export const zListNetworkEndpointStatusesQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Bounded latest endpoint-status snapshot.
+ */
+export const zListNetworkEndpointStatusesResponse = zEndpointStatuses;
 
 export const zListNetworkRelaysPath = z.object({
     network_id: zIdentifier
@@ -1201,6 +1612,70 @@ export const zDeleteAccessGrantPath = z.object({
  */
 export const zDeleteAccessGrantResponse = zEpoch;
 
+export const zCreateNetworkAccessResourceBody = zCreateAccessResourceRequest;
+
+export const zCreateNetworkAccessResourcePath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named Node or routed-prefix access target.
+ */
+export const zCreateNetworkAccessResourceResponse = zAccessResource;
+
+export const zUpdateAccessResourceBody = zUpdateAccessSelectorRequest;
+
+export const zUpdateAccessResourcePath = z.object({
+    resource_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named Node or routed-prefix access target.
+ */
+export const zUpdateAccessResourceResponse = zAccessResource;
+
+export const zCreateNetworkAccessServiceBody = zCreateAccessServiceRequest;
+
+export const zCreateNetworkAccessServicePath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named protocol and destination-port selector.
+ */
+export const zCreateNetworkAccessServiceResponse = zAccessService;
+
+export const zUpdateAccessServiceBody = zUpdateAccessSelectorRequest;
+
+export const zUpdateAccessServicePath = z.object({
+    service_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named protocol and destination-port selector.
+ */
+export const zUpdateAccessServiceResponse = zAccessService;
+
+export const zCreateNetworkResourceAccessGrantBody = zCreateAccessResourceGrantRequest;
+
+export const zCreateNetworkResourceAccessGrantPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * User or Team grant for one named Resource and Service.
+ */
+export const zCreateNetworkResourceAccessGrantResponse = zAccessResourceGrant;
+
+export const zDeleteAccessResourceGrantPath = z.object({
+    grant_id: zIdentifier
+}).strict();
+
+/**
+ * Updated network configuration epoch.
+ */
+export const zDeleteAccessResourceGrantResponse = zEpoch;
+
 export const zListNetworkCertificatesPath = z.object({
     network_id: zIdentifier
 }).strict();
@@ -1236,9 +1711,23 @@ export const zListNetworkAuditEventsQuery = z.object({
 }).strict();
 
 /**
- * Bounded audit-event snapshot.
+ * Backward-compatible bounded audit-event snapshot.
  */
 export const zListNetworkAuditEventsResponse = zAuditEvents;
+
+export const zPageNetworkAuditEventsPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+export const zPageNetworkAuditEventsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100),
+    cursor: z.string().min(1).max(512).regex(/^[A-Za-z0-9_-]+$/).optional()
+}).strict();
+
+/**
+ * One deterministic cursor page of the audit stream.
+ */
+export const zPageNetworkAuditEventsResponse = zAuditEventPage;
 
 export const zRevokeNetworkCertificateBody = zRevocationRequest;
 

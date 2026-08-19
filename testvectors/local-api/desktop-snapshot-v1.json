@@ -1,0 +1,79 @@
+{
+  "contract_version": 1,
+  "platform": "linux",
+  "ownership": "same-user-daemon",
+  "capabilities": {
+    "status": true,
+    "private_routes": true,
+    "snapshot_coherence": true,
+    "exit_selection": false,
+    "profile_management": false,
+    "connection_control": false,
+    "ephemeral_sessions": false,
+    "updates": false,
+    "diagnostics": false
+  },
+  "status": {
+    "daemon_instance_id": "0123456789abcdef0123456789abcdef",
+    "api_revision": 1,
+    "running": true,
+    "actor": "user",
+    "product_version": "1.2.3",
+    "control_version": "1.0",
+    "packet_version": 1,
+    "capabilities": "relay-v1,direct-v1",
+    "selected_path": "relay-quic",
+    "network_id": "000102030405060708090a0b0c0d0e0f",
+    "node_id": "101112131415161718191a1b1c1d1e1f",
+    "name": "workstation",
+    "overlay_addresses": ["100.96.0.2/32"],
+    "selected_routes": ["10.20.0.0/16"],
+    "interface": "lane0",
+    "relay": "relay.example.test:4433",
+    "mtu": 1280,
+    "metrics": {
+      "connections": 1,
+      "reconnects": 0,
+      "packets_sent": 10,
+      "packets_received": 9,
+      "packets_dropped": 0,
+      "tcp_connections": 0,
+      "quic_failures": 0,
+      "tcp_failures": 0
+    },
+    "exit": {
+      "enabled": false,
+      "authorized": false,
+      "serving": false,
+      "forwarding_ready": false,
+      "nat_ready": false,
+      "forwarded_packets": 0,
+      "namespace_cleanup_failures": 0
+    },
+    "controller": {
+      "candidate_exchange_enabled": true,
+      "certificate_presented_serial": "01ab",
+      "certificate_renewal_needed": false,
+      "certificate_renew_after_unix_seconds": 2000000000,
+      "certificate_not_after_unix_seconds": 2000100000,
+      "identity_lease_expires_at_unix_seconds": 2000000000,
+      "configuration_lease_valid_until_unix_seconds": 2000000100,
+      "configuration_lease_expired": false
+    }
+  },
+  "peers": [
+    {
+      "node_id": "202122232425262728292a2b2c2d2e2f",
+      "name": "office-exit",
+      "prefixes": ["100.96.0.3/32"],
+      "path": "direct"
+    }
+  ],
+  "routes": [
+    {
+      "prefix": "10.20.0.0/16",
+      "via_node": "202122232425262728292a2b2c2d2e2f",
+      "kind": "subnet"
+    }
+  ]
+}

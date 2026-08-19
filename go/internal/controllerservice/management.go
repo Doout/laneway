@@ -921,6 +921,33 @@ type auditResponse struct {
 	CreatedAtUnixSeconds int64           `json:"created_at_unix_seconds"`
 }
 
+func auditPageJSON(page controller.AuditPage, cursorScope *identity.NetworkID, includeNetwork bool) auditPageResponse {
+	response := auditPageResponse{Events: make([]auditResponse, 0, len(page.Events)), NextCursor: encodeAuditCursor(page.NextCursor, cursorScope)}
+	for _, event := range page.Events {
+		item := auditResponse{
+			EventID: event.ID.String(), ActorKind: string(event.Actor.Kind), Action: event.Action,
+			TargetType: event.TargetType, Details: json.RawMessage(event.Details), CreatedAtUnixSeconds: event.CreatedAt.Unix(),
+		}
+		if includeNetwork && event.NetworkScope != nil {
+			item.NetworkID = event.NetworkScope.String()
+		}
+		if event.Actor.ID != nil {
+			value := event.Actor.ID.String()
+			item.ActorID = &value
+		}
+		if event.ActorNodeID != nil {
+			value := event.ActorNodeID.String()
+			item.ActorNodeID = &value
+		}
+		if event.TargetID != nil {
+			value := event.TargetID.String()
+			item.TargetID = &value
+		}
+		response.Events = append(response.Events, item)
+	}
+	return response
+}
+
 func (s *Service) readAudit(w http.ResponseWriter, r *http.Request) {
 	networkID, err := parseNetworkPath(r)
 	if err != nil {
@@ -942,27 +969,42 @@ func (s *Service) readAudit(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
-	response := make([]auditResponse, 0, len(events))
-	for _, event := range events {
-		item := auditResponse{
-			EventID: event.ID.String(), NetworkID: networkID.String(), ActorKind: string(event.Actor.Kind), Action: event.Action,
-			TargetType: event.TargetType, Details: json.RawMessage(event.Details), CreatedAtUnixSeconds: event.CreatedAt.Unix(),
-		}
-		if event.Actor.ID != nil {
-			value := event.Actor.ID.String()
-			item.ActorID = &value
-		}
-		if event.ActorNodeID != nil {
-			value := event.ActorNodeID.String()
-			item.ActorNodeID = &value
-		}
-		if event.TargetID != nil {
-			value := event.TargetID.String()
-			item.TargetID = &value
-		}
-		response = append(response, item)
+	response := auditPageJSON(controller.AuditPage{Events: events}, &networkID, true)
+	for i := range response.Events {
+		response.Events[i].NetworkID = networkID.String()
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"events": response})
+	s.writeJSON(w, http.StatusOK, map[string]any{"events": response.Events})
+}
+
+func (s *Service) readAuditPage(w http.ResponseWriter, r *http.Request) {
+	networkID, err := parseNetworkPath(r)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	limit, cursor, err := parseAuditPageRequest(r, &networkID)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	decision, err := s.administratorDecision(r, adminauth.NetworkTarget(networkID))
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	page, err := s.store.AdministratorAuditEventsPage(r.Context(), decision, networkID, limit, cursor)
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	response := auditPageJSON(page, &networkID, true)
+	// Every event in a network-scoped page has the requested parent. Preserve
+	// the explicit network_id field even for legacy rows loaded before
+	// NetworkScope was added to the in-memory representation.
+	for i := range response.Events {
+		response.Events[i].NetworkID = networkID.String()
+	}
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 func parseNetworkPath(r *http.Request) (identity.NetworkID, error) {

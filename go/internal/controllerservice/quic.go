@@ -39,6 +39,8 @@ type QUICServer struct {
 	service              *Service
 	handler              http.Handler
 	listener             *quic.Listener
+	packetConn           net.PacketConn
+	ownsPacketConn       bool
 	local                identity.AuthenticatedIdentity
 	connections          chan struct{}
 	ephemeralExitMu      sync.Mutex
@@ -96,6 +98,33 @@ func (s *Service) ListenQUIC(address string, tlsConfig *tls.Config) (*QUICServer
 // HTTP-compatible instrumentation around the shared bounded service handler.
 // Authorization still occurs inside Service after QUIC mTLS authentication.
 func (s *Service) ListenQUICWithMiddleware(address string, tlsConfig *tls.Config, middleware func(http.Handler) http.Handler) (*QUICServer, error) {
+	packetConn, err := net.ListenPacket("udp", address)
+	if err != nil {
+		return nil, fmt.Errorf("controller QUIC: listen: %w", err)
+	}
+	server, err := s.ListenQUICPacketConnWithMiddleware(packetConn, tlsConfig, middleware)
+	if err != nil {
+		_ = packetConn.Close()
+		return nil, err
+	}
+	server.ownsPacketConn = true
+	return server, nil
+}
+
+// ListenQUICPacketConn serves QUIC on an already-bound UDP socket. The caller
+// retains ownership of packetConn and must close it after the QUIC server.
+// This lets startup reserve every required address before mutating durable
+// controller state.
+func (s *Service) ListenQUICPacketConn(packetConn net.PacketConn, tlsConfig *tls.Config) (*QUICServer, error) {
+	return s.ListenQUICPacketConnWithMiddleware(packetConn, tlsConfig, nil)
+}
+
+// ListenQUICPacketConnWithMiddleware is the pre-bound equivalent of
+// ListenQUICWithMiddleware.
+func (s *Service) ListenQUICPacketConnWithMiddleware(packetConn net.PacketConn, tlsConfig *tls.Config, middleware func(http.Handler) http.Handler) (*QUICServer, error) {
+	if packetConn == nil {
+		return nil, errors.New("controller QUIC: packet listener is required")
+	}
 	if s == nil || tlsConfig == nil || len(tlsConfig.Certificates) == 0 || tlsConfig.ClientCAs == nil {
 		return nil, errors.New("controller QUIC: service certificate and client CA pool are required")
 	}
@@ -119,7 +148,7 @@ func (s *Service) ListenQUICWithMiddleware(address string, tlsConfig *tls.Config
 	config.MaxVersion = tls.VersionTLS13
 	config.NextProtos = []string{ControllerALPN}
 	config.ClientAuth = tls.RequireAndVerifyClientCert
-	listener, err := quic.ListenAddr(address, config, &quic.Config{
+	listener, err := quic.Listen(packetConn, config, &quic.Config{
 		HandshakeIdleTimeout:  10 * time.Second,
 		MaxIdleTimeout:        60 * time.Second,
 		KeepAlivePeriod:       20 * time.Second,
@@ -135,12 +164,18 @@ func (s *Service) ListenQUICWithMiddleware(address string, tlsConfig *tls.Config
 	if middleware != nil {
 		handler = middleware(handler)
 	}
-	return &QUICServer{service: s, handler: handler, listener: listener, local: local,
+	return &QUICServer{service: s, handler: handler, listener: listener, packetConn: packetConn, local: local,
 		connections: make(chan struct{}, maxControllerConnections), activeEphemeralExits: make(map[identity.NodeID]ephemeralExitConnection)}, nil
 }
 
 func (s *QUICServer) Addr() net.Addr { return s.listener.Addr() }
-func (s *QUICServer) Close() error   { return s.listener.Close() }
+func (s *QUICServer) Close() error {
+	err := s.listener.Close()
+	if s.ownsPacketConn {
+		err = errors.Join(err, s.packetConn.Close())
+	}
+	return err
+}
 
 // Serve accepts a bounded number of connections. Requests on each connection
 // are deliberately processed one-at-a-time, preserving application ordering

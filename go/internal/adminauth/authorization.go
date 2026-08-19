@@ -1,7 +1,9 @@
 package adminauth
 
 import (
+	"crypto/sha256"
 	"errors"
+	"slices"
 
 	"github.com/Doout/laneway/go/internal/identity"
 )
@@ -12,12 +14,14 @@ import (
 type SubjectKind string
 
 const (
-	SubjectRootServicePrincipal SubjectKind = "root_service_principal"
-	SubjectAdministratorSession SubjectKind = "administrator_session"
+	SubjectRootServicePrincipal  SubjectKind = "root_service_principal"
+	SubjectServicePrincipalToken SubjectKind = "service_principal_token"
+	SubjectAdministratorSession  SubjectKind = "administrator_session"
 )
 
 func (k SubjectKind) Valid() bool {
-	return k == SubjectRootServicePrincipal || k == SubjectAdministratorSession
+	return k == SubjectRootServicePrincipal || k == SubjectServicePrincipalToken ||
+		k == SubjectAdministratorSession
 }
 
 // Subject is the immutable durable identity binding for an authenticated
@@ -27,6 +31,7 @@ type Subject struct {
 	kind      SubjectKind
 	actorID   identity.ID
 	sessionID identity.ID
+	tokenHash [sha256.Size]byte
 }
 
 func RootSubject(servicePrincipalID identity.ID) Subject {
@@ -37,15 +42,21 @@ func SessionSubject(principalID, sessionID identity.ID) Subject {
 	return Subject{kind: SubjectAdministratorSession, actorID: principalID, sessionID: sessionID}
 }
 
+func ServicePrincipalTokenSubject(principalID, tokenID identity.ID, tokenHash [sha256.Size]byte) Subject {
+	return Subject{kind: SubjectServicePrincipalToken, actorID: principalID, sessionID: tokenID, tokenHash: tokenHash}
+}
+
 func (s Subject) Valid() bool {
 	if s.actorID.IsZero() {
 		return false
 	}
 	switch s.kind {
 	case SubjectRootServicePrincipal:
-		return s.sessionID.IsZero()
+		return s.sessionID.IsZero() && s.tokenHash == [sha256.Size]byte{}
 	case SubjectAdministratorSession:
-		return !s.sessionID.IsZero()
+		return !s.sessionID.IsZero() && s.tokenHash == [sha256.Size]byte{}
+	case SubjectServicePrincipalToken:
+		return !s.sessionID.IsZero() && s.tokenHash != [sha256.Size]byte{}
 	default:
 		return false
 	}
@@ -60,7 +71,7 @@ func (s Subject) Actor() Actor {
 		return Actor{}
 	}
 	switch s.kind {
-	case SubjectRootServicePrincipal:
+	case SubjectRootServicePrincipal, SubjectServicePrincipalToken:
 		return IDActor(ActorServicePrincipal, s.actorID)
 	case SubjectAdministratorSession:
 		return IDActor(ActorAdministrator, s.actorID)
@@ -76,6 +87,20 @@ func (s Subject) SessionID() (identity.ID, bool) {
 		return identity.ID{}, false
 	}
 	return s.sessionID, true
+}
+
+func (s Subject) TokenID() (identity.ID, bool) {
+	if !s.Valid() || s.kind != SubjectServicePrincipalToken {
+		return identity.ID{}, false
+	}
+	return s.sessionID, true
+}
+
+func (s Subject) TokenHash() ([sha256.Size]byte, bool) {
+	if !s.Valid() || s.kind != SubjectServicePrincipalToken {
+		return [sha256.Size]byte{}, false
+	}
+	return s.tokenHash, true
 }
 
 // DecisionTargetKind distinguishes global authorization, a filtered global
@@ -224,6 +249,31 @@ func AuthorizeEarly(subject Subject, principal *Principal, policy RoutePolicy, t
 		default:
 			return false
 		}
+	default:
+		return false
+	}
+}
+
+// AuthorizeServicePrincipalEarly applies an authenticated automation
+// principal snapshot for routing only. Durable state is always reloaded inside
+// the Store transaction before a read or mutation is committed.
+func AuthorizeServicePrincipalEarly(subject Subject, principal *ServicePrincipal, policy RoutePolicy,
+	target DecisionTarget) bool {
+	if !subject.Valid() || subject.kind != SubjectServicePrincipalToken || principal == nil ||
+		!principal.Enabled || !principal.Valid() || principal.ID != subject.actorID ||
+		!policy.Valid() || !target.Valid() || !targetMatchesPolicy(target, policy) ||
+		!slices.Contains(principal.Permissions, policy.Operation) {
+		return false
+	}
+	switch target.kind {
+	case DecisionTargetGlobal, DecisionTargetFiltered:
+		return AuthorizeServicePrincipal(*principal, policy.Operation, nil)
+	case DecisionTargetNetwork:
+		networkID := target.networkID
+		return AuthorizeServicePrincipal(*principal, policy.Operation, &networkID)
+	case DecisionTargetObject:
+		// The Store resolves and rechecks the object's canonical network.
+		return true
 	default:
 		return false
 	}

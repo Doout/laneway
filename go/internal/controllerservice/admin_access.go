@@ -32,21 +32,25 @@ type CredentialKind string
 const (
 	CredentialNone                 CredentialKind = ""
 	CredentialRootBearer           CredentialKind = "root_bearer"
+	CredentialServiceAccessToken   CredentialKind = "service_access_token"
 	CredentialAdministratorSession CredentialKind = "administrator_session"
 )
 
 func (k CredentialKind) Valid() bool {
-	return k == CredentialRootBearer || k == CredentialAdministratorSession
+	return k == CredentialRootBearer || k == CredentialServiceAccessToken ||
+		k == CredentialAdministratorSession
 }
 
 // RequestActor is the authenticated, server-derived actor for one request.
 // Browser-provided labels and other presentation strings never enter this
-// value. Principal is populated only for administrator sessions; the root
-// bearer is represented as its durable service-principal actor.
+// value. Principal is populated only for administrator sessions,
+// ServicePrincipal only for scoped access tokens, and the root bearer is
+// represented directly as its durable service-principal subject.
 type RequestActor struct {
 	Credential        CredentialKind
 	Subject           adminauth.Subject
 	Principal         *adminauth.Principal
+	ServicePrincipal  *adminauth.ServicePrincipal
 	CSRFHash          [sha256.Size]byte
 	IdleLifetime      time.Duration
 	IdleExpiresAt     time.Time
@@ -59,10 +63,15 @@ func (a RequestActor) Valid() bool {
 	}
 	switch a.Credential {
 	case CredentialRootBearer:
-		return a.Subject.Kind() == adminauth.SubjectRootServicePrincipal && a.Principal == nil && zeroDigest(a.CSRFHash) &&
+		return a.Subject.Kind() == adminauth.SubjectRootServicePrincipal && a.Principal == nil && a.ServicePrincipal == nil && zeroDigest(a.CSRFHash) &&
+			a.IdleLifetime == 0 && a.IdleExpiresAt.IsZero() && a.AbsoluteExpiresAt.IsZero()
+	case CredentialServiceAccessToken:
+		return a.Subject.Kind() == adminauth.SubjectServicePrincipalToken && a.Principal == nil &&
+			a.ServicePrincipal != nil && a.ServicePrincipal.Enabled && a.ServicePrincipal.Valid() &&
+			a.Subject.ActorID() == a.ServicePrincipal.ID && zeroDigest(a.CSRFHash) &&
 			a.IdleLifetime == 0 && a.IdleExpiresAt.IsZero() && a.AbsoluteExpiresAt.IsZero()
 	case CredentialAdministratorSession:
-		if a.Subject.Kind() != adminauth.SubjectAdministratorSession || a.Principal == nil || zeroDigest(a.CSRFHash) {
+		if a.Subject.Kind() != adminauth.SubjectAdministratorSession || a.Principal == nil || a.ServicePrincipal != nil || zeroDigest(a.CSRFHash) {
 			return false
 		}
 		return a.Principal.Enabled && a.Principal.Valid() && a.Subject.ActorID() == a.Principal.ID &&
@@ -189,7 +198,8 @@ func ValidateMutationProtection(request *http.Request, actor RequestActor) error
 	if request == nil || !actor.Valid() {
 		return ErrUnauthenticated
 	}
-	if !BrowserMutationRequiresProtection(request.Method) || actor.Credential == CredentialRootBearer {
+	if !BrowserMutationRequiresProtection(request.Method) || actor.Credential == CredentialRootBearer ||
+		actor.Credential == CredentialServiceAccessToken {
 		return nil
 	}
 	return ValidateBrowserMutation(request, actor.CSRFHash)

@@ -49,24 +49,53 @@ func Serve(ctx context.Context, config Config) error {
 // Start binds the diagnostics listener synchronously and returns its completion
 // channel. A nil channel means diagnostics are disabled.
 func Start(ctx context.Context, config Config) (<-chan error, error) {
-	if config.Listen == "" {
-		return nil, nil
-	}
-	if err := ValidateListenAddress(config.Listen); err != nil {
+	listener, err := Listen(config)
+	if err != nil || listener == nil {
 		return nil, err
 	}
-	if config.ReadHeaderTimeout == 0 {
-		config.ReadHeaderTimeout = DefaultReadHeaderTimeout
+	done, err := StartListener(ctx, listener, config)
+	if err != nil {
+		_ = listener.Close()
+		return nil, err
 	}
-	if config.IdleTimeout == 0 {
-		config.IdleTimeout = DefaultIdleTimeout
+	return done, nil
+}
+
+// Listen validates the diagnostics configuration and reserves its TCP
+// address without starting the HTTP server. A nil listener means diagnostics
+// are disabled. Callers that use this startup preflight retain ownership of
+// the returned listener until StartListener takes over serving it.
+func Listen(config Config) (net.Listener, error) {
+	normalized, err := normalizeConfig(config)
+	if err != nil || normalized.Listen == "" {
+		return nil, err
 	}
-	if config.ReadHeaderTimeout <= 0 || config.IdleTimeout <= 0 {
-		return nil, errors.New("observability: HTTP timeouts must be positive")
-	}
-	listener, err := net.Listen("tcp", config.Listen)
+	listener, err := net.Listen("tcp", normalized.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("observability: listen: %w", err)
+	}
+	return listener, nil
+}
+
+// StartListener serves diagnostics on a listener already reserved by Listen.
+// Context cancellation shuts down the HTTP server and closes listener.
+func StartListener(ctx context.Context, listener net.Listener, config Config) (<-chan error, error) {
+	config, err := normalizeConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	if config.Listen == "" {
+		if listener != nil {
+			return nil, errors.New("observability: listener supplied while diagnostics are disabled")
+		}
+		return nil, nil
+	}
+	if listener == nil {
+		return nil, errors.New("observability: pre-bound listener is required")
+	}
+	tcpAddress, ok := listener.Addr().(*net.TCPAddr)
+	if !ok || tcpAddress.IP == nil || !tcpAddress.IP.IsLoopback() {
+		return nil, ErrNonLoopbackAddress
 	}
 	server := &http.Server{
 		Handler:           Handler(config.Snapshot),
@@ -101,6 +130,25 @@ func Start(ctx context.Context, config Config) (<-chan error, error) {
 		}
 	}()
 	return done, nil
+}
+
+func normalizeConfig(config Config) (Config, error) {
+	if config.Listen == "" {
+		return config, nil
+	}
+	if err := ValidateListenAddress(config.Listen); err != nil {
+		return Config{}, err
+	}
+	if config.ReadHeaderTimeout == 0 {
+		config.ReadHeaderTimeout = DefaultReadHeaderTimeout
+	}
+	if config.IdleTimeout == 0 {
+		config.IdleTimeout = DefaultIdleTimeout
+	}
+	if config.ReadHeaderTimeout <= 0 || config.IdleTimeout <= 0 {
+		return Config{}, errors.New("observability: HTTP timeouts must be positive")
+	}
+	return config, nil
 }
 
 // ValidateListenAddress rejects wildcard, unspecified, and non-loopback binds.

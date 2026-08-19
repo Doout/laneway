@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"os"
 	"time"
 
 	"github.com/Doout/laneway/go/internal/adminauth"
@@ -36,17 +37,8 @@ func (s *Store) CreateNetworkDualStack(ctx context.Context, name string, pool ne
 // cycle: operators can generate the network ID first, issue the controller
 // service certificate for it, then create the durable row with the same ID.
 func (s *Store) CreateNetworkDualStackWithID(ctx context.Context, id identity.NetworkID, name string, pool netip.Prefix, ipv6Pool netip.Prefix) (Network, error) {
-	if id.IsZero() {
-		return Network{}, fmt.Errorf("%w: network ID", ErrInvalid)
-	}
-	if err := validateName("network", name); err != nil {
+	if err := validateNetworkDefinition(id, name, pool, ipv6Pool); err != nil {
 		return Network{}, err
-	}
-	if netvalidate.RoutablePrefix(pool, false) != nil || !pool.Addr().Is4() || pool.Bits() < 8 || pool.Bits() > 30 {
-		return Network{}, fmt.Errorf("%w: IPv4 pool must be a canonical /8 through /30", ErrInvalid)
-	}
-	if ipv6Pool.IsValid() && (netvalidate.RoutablePrefix(ipv6Pool, false) != nil || ipv6Pool.Addr().Is4() || ipv6Pool.Bits() < 64 || ipv6Pool.Bits() > 120) {
-		return Network{}, fmt.Errorf("%w: IPv6 pool must be a canonical /64 through /120", ErrInvalid)
 	}
 	now := s.now()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -77,6 +69,342 @@ func (s *Store) CreateNetworkDualStackWithID(ctx context.Context, id identity.Ne
 		return Network{}, fmt.Errorf("commit create network: %w", err)
 	}
 	return Network{ID: id, Name: name, IPv4Pool: pool, IPv6Pool: ipv6Pool, ConfigurationEpoch: 1, CreatedAt: now}, nil
+}
+
+// EnsureControllerInitialNetwork establishes or revalidates the controller's
+// durable identity binding and optional initial network. authenticated must be
+// obtained from a cryptographically verified controller certificate before
+// this method is called.
+//
+// A zero configured value supports legacy deployments. If no binding exists,
+// the result is the zero Network and no state is changed. If a binding already
+// exists, it is always enforced even when configured is zero.
+func (s *Store) EnsureControllerInitialNetwork(ctx context.Context, configured ControllerInitialNetwork, authenticated identity.AuthenticatedIdentity) (Network, bool, error) {
+	if err := authenticated.Validate(); err != nil {
+		return Network{}, false, fmt.Errorf("%w: controller certificate identity", ErrInvalid)
+	}
+	if err := authenticated.RequireRole(identity.IdentityRoleController); err != nil {
+		return Network{}, false, fmt.Errorf("%w: controller certificate role", ErrInvalid)
+	}
+	configuredPresent := controllerInitialNetworkPresent(configured)
+	if configuredPresent {
+		if err := validateNetworkDefinition(configured.NetworkID, configured.Name, configured.IPv4Pool, configured.IPv6Pool); err != nil {
+			return Network{}, false, err
+		}
+		if configured.NetworkID != authenticated.NetworkID {
+			return Network{}, false, fmt.Errorf("%w: initial network differs from controller certificate identity", ErrConflict)
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Network{}, false, fmt.Errorf("begin ensure controller initial network: %w", err)
+	}
+	defer tx.Rollback()
+
+	var boundNetworkRaw, boundServiceRaw []byte
+	var boundCreated int64
+	err = tx.QueryRowContext(ctx, `SELECT network_id,controller_service_id,created_at
+		FROM controller_identity_state WHERE singleton=1`).Scan(&boundNetworkRaw, &boundServiceRaw, &boundCreated)
+	if err == nil {
+		boundNetworkValue, scanErr := scanID(boundNetworkRaw)
+		if scanErr != nil {
+			return Network{}, false, fmt.Errorf("corrupt controller network binding: %w", scanErr)
+		}
+		boundServiceID, scanErr := scanID(boundServiceRaw)
+		if scanErr != nil {
+			return Network{}, false, fmt.Errorf("corrupt controller service binding: %w", scanErr)
+		}
+		boundNetworkID := identity.NetworkID(boundNetworkValue)
+		if boundNetworkID != authenticated.NetworkID || boundServiceID != authenticated.SubjectID {
+			return Network{}, false, fmt.Errorf("%w: controller certificate identity differs from durable binding", ErrConflict)
+		}
+		network, readErr := networkByRow(tx.QueryRowContext(ctx, `SELECT name,ipv4_address,ipv4_prefix_length,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length
+			FROM networks WHERE id=?`, idBytes(boundNetworkID)), boundNetworkID)
+		if errors.Is(readErr, ErrNotFound) {
+			return Network{}, false, errors.New("corrupt controller identity binding references a missing network")
+		}
+		if readErr != nil {
+			return Network{}, false, readErr
+		}
+		if fromUnix(boundCreated).Before(network.CreatedAt) {
+			return Network{}, false, errors.New("corrupt controller identity binding timestamp")
+		}
+		var bindingAudits, totalBindingAudits int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+			WHERE network_id=? AND actor_kind='system' AND actor_id IS NULL
+			AND action='controller.identity.bind' AND target_type='controller_service'
+			AND target_id=? AND created_at=?`, idBytes(boundNetworkID), idBytes(boundServiceID), boundCreated).
+			Scan(&bindingAudits); err != nil {
+			return Network{}, false, fmt.Errorf("validate controller identity binding audit: %w", err)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+			WHERE action='controller.identity.bind'`).Scan(&totalBindingAudits); err != nil {
+			return Network{}, false, fmt.Errorf("count controller identity binding audits: %w", err)
+		}
+		if bindingAudits != 1 || totalBindingAudits != 1 {
+			return Network{}, false, errors.New("corrupt controller identity binding audit")
+		}
+		if configuredPresent && !initialNetworkMatches(network, configured) {
+			return Network{}, false, fmt.Errorf("%w: configured initial network differs from durable state", ErrConflict)
+		}
+		if err := tx.Commit(); err != nil {
+			return Network{}, false, fmt.Errorf("finish controller identity validation: %w", err)
+		}
+		return network, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Network{}, false, fmt.Errorf("read controller identity binding: %w", err)
+	}
+	var staleBindingAudits int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='controller.identity.bind'`).Scan(&staleBindingAudits); err != nil {
+		return Network{}, false, fmt.Errorf("count controller identity binding audits: %w", err)
+	}
+	if staleBindingAudits != 0 {
+		return Network{}, false, errors.New("corrupt controller identity binding audit without durable state")
+	}
+	if !configuredPresent {
+		if err := tx.Commit(); err != nil {
+			return Network{}, false, fmt.Errorf("finish legacy controller identity check: %w", err)
+		}
+		return Network{}, false, nil
+	}
+
+	now := s.now()
+	var latestAudit sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(created_at) FROM audit_events`).Scan(&latestAudit); err != nil {
+		return Network{}, false, fmt.Errorf("read controller audit clock: %w", err)
+	}
+	if latestAudit.Valid {
+		now = latestTime(now, fromUnix(latestAudit.Int64))
+	}
+	network, readErr := networkByRow(tx.QueryRowContext(ctx, `SELECT name,ipv4_address,ipv4_prefix_length,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length
+		FROM networks WHERE id=?`, idBytes(configured.NetworkID)), configured.NetworkID)
+	created := false
+	switch {
+	case readErr == nil:
+		if !initialNetworkMatches(network, configured) {
+			return Network{}, false, fmt.Errorf("%w: existing initial network differs from configuration", ErrConflict)
+		}
+		now = latestTime(now, network.CreatedAt)
+	case errors.Is(readErr, ErrNotFound):
+		var networkCount int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM networks`).Scan(&networkCount); err != nil {
+			return Network{}, false, fmt.Errorf("count existing networks: %w", err)
+		}
+		if networkCount != 0 {
+			return Network{}, false, fmt.Errorf("%w: configured initial network is absent from nonempty controller state", ErrConflict)
+		}
+		a4 := configured.IPv4Pool.Addr().As4()
+		var a6, bits6 any
+		if configured.IPv6Pool.IsValid() {
+			value := configured.IPv6Pool.Addr().As16()
+			a6, bits6 = value[:], configured.IPv6Pool.Bits()
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO networks
+			(id,name,ipv4_address,ipv4_prefix_length,next_ipv4,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length)
+			VALUES(?,?,?,?,1,1,?,?,?)`, idBytes(configured.NetworkID), configured.Name, a4[:], configured.IPv4Pool.Bits(), unix(now), a6, bits6); err != nil {
+			if isConstraint(err) {
+				return Network{}, false, fmt.Errorf("%w: initial network name or ID", ErrConflict)
+			}
+			return Network{}, false, fmt.Errorf("insert initial network: %w", err)
+		}
+		network = Network{ID: configured.NetworkID, Name: configured.Name, IPv4Pool: configured.IPv4Pool,
+			IPv6Pool: configured.IPv6Pool, ConfigurationEpoch: 1, CreatedAt: now}
+		target := identity.ID(configured.NetworkID)
+		if err := auditActorTx(ctx, tx, &configured.NetworkID, adminauth.SystemActor(),
+			"network.create", "network", &target, `{"source":"controller_initial_network"}`, now); err != nil {
+			return Network{}, false, err
+		}
+		created = true
+	default:
+		return Network{}, false, readErr
+	}
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO controller_identity_state
+		(singleton,network_id,controller_service_id,created_at) VALUES(1,?,?,?)`,
+		idBytes(configured.NetworkID), idBytes(authenticated.SubjectID), unix(now)); err != nil {
+		if isConstraint(err) {
+			return Network{}, false, fmt.Errorf("%w: controller identity binding", ErrConflict)
+		}
+		return Network{}, false, fmt.Errorf("bind controller identity: %w", err)
+	}
+	target := authenticated.SubjectID
+	if err := auditActorTx(ctx, tx, &configured.NetworkID, adminauth.SystemActor(),
+		"controller.identity.bind", "controller_service", &target, `{}`, now); err != nil {
+		return Network{}, false, err
+	}
+	var bindingAudits, totalBindingAudits int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+		WHERE network_id=? AND actor_kind='system' AND actor_id IS NULL
+		AND action='controller.identity.bind' AND target_type='controller_service'
+		AND target_id=? AND created_at=?`, idBytes(configured.NetworkID), idBytes(authenticated.SubjectID), unix(now)).Scan(&bindingAudits); err != nil {
+		return Network{}, false, fmt.Errorf("validate new controller identity binding audit: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='controller.identity.bind'`).Scan(&totalBindingAudits); err != nil {
+		return Network{}, false, fmt.Errorf("count new controller identity binding audits: %w", err)
+	}
+	if bindingAudits != 1 || totalBindingAudits != 1 {
+		return Network{}, false, errors.New("controller identity binding audit is ambiguous")
+	}
+	if err := tx.Commit(); err != nil {
+		return Network{}, false, fmt.Errorf("commit controller initial network: %w", err)
+	}
+	return network, created, nil
+}
+
+// PreflightControllerInitialNetwork validates the controller certificate,
+// configured initial Network, optional bootstrap Network, and any existing
+// database without creating the database or applying migrations. Callers use
+// it before opening listeners' services so deterministic startup failures
+// cannot leave a partially migrated or newly bound controller database.
+func PreflightControllerInitialNetwork(ctx context.Context, databasePath string, configured ControllerInitialNetwork, authenticated identity.AuthenticatedIdentity, requiredNetworkID identity.NetworkID) error {
+	if err := authenticated.Validate(); err != nil {
+		return fmt.Errorf("%w: controller certificate identity", ErrInvalid)
+	}
+	if err := authenticated.RequireRole(identity.IdentityRoleController); err != nil {
+		return fmt.Errorf("%w: controller certificate role", ErrInvalid)
+	}
+	configuredPresent := controllerInitialNetworkPresent(configured)
+	if configuredPresent {
+		if err := validateNetworkDefinition(configured.NetworkID, configured.Name, configured.IPv4Pool, configured.IPv6Pool); err != nil {
+			return err
+		}
+		if configured.NetworkID != authenticated.NetworkID {
+			return fmt.Errorf("%w: initial network differs from controller certificate identity", ErrConflict)
+		}
+	}
+	if !requiredNetworkID.IsZero() && requiredNetworkID != authenticated.NetworkID {
+		return fmt.Errorf("%w: required network differs from controller certificate identity", ErrConflict)
+	}
+
+	info, err := os.Lstat(databasePath)
+	if errors.Is(err, os.ErrNotExist) {
+		if !requiredNetworkID.IsZero() && !configuredPresent {
+			return fmt.Errorf("%w: required network is absent from fresh controller state", ErrConflict)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect controller database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("controller database is not a regular file: %s", databasePath)
+	}
+	if err := validateDatabase(ctx, databasePath, currentSchemaVersion); err != nil {
+		return fmt.Errorf("validate controller database before startup: %w", err)
+	}
+	db, err := openReadOnlyDatabase(databasePath)
+	if err != nil {
+		return fmt.Errorf("open controller database before startup: %w", err)
+	}
+	defer db.Close()
+
+	var version int
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0) FROM schema_versions`).Scan(&version); err != nil {
+		return fmt.Errorf("read controller schema before startup: %w", err)
+	}
+	if version >= 12 {
+		var boundNetworkRaw, boundServiceRaw []byte
+		var boundCreated int64
+		err = db.QueryRowContext(ctx, `SELECT network_id,controller_service_id,created_at
+			FROM controller_identity_state WHERE singleton=1`).Scan(&boundNetworkRaw, &boundServiceRaw, &boundCreated)
+		switch {
+		case err == nil:
+			boundNetworkValue, scanErr := scanID(boundNetworkRaw)
+			if scanErr != nil {
+				return fmt.Errorf("corrupt controller network binding: %w", scanErr)
+			}
+			boundServiceID, scanErr := scanID(boundServiceRaw)
+			if scanErr != nil {
+				return fmt.Errorf("corrupt controller service binding: %w", scanErr)
+			}
+			boundNetworkID := identity.NetworkID(boundNetworkValue)
+			if boundNetworkID != authenticated.NetworkID || boundServiceID != authenticated.SubjectID {
+				return fmt.Errorf("%w: controller certificate identity differs from durable binding", ErrConflict)
+			}
+			network, readErr := networkByRow(db.QueryRowContext(ctx, `SELECT name,ipv4_address,ipv4_prefix_length,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length
+				FROM networks WHERE id=?`, idBytes(boundNetworkID)), boundNetworkID)
+			if errors.Is(readErr, ErrNotFound) {
+				return errors.New("corrupt controller identity binding references a missing network")
+			}
+			if readErr != nil {
+				return readErr
+			}
+			if fromUnix(boundCreated).Before(network.CreatedAt) {
+				return errors.New("corrupt controller identity binding timestamp")
+			}
+			if configuredPresent && !initialNetworkMatches(network, configured) {
+				return fmt.Errorf("%w: configured initial network differs from durable state", ErrConflict)
+			}
+			if !requiredNetworkID.IsZero() && requiredNetworkID != boundNetworkID {
+				return fmt.Errorf("%w: required network differs from durable controller state", ErrConflict)
+			}
+			return nil
+		case errors.Is(err, sql.ErrNoRows):
+			// validateDatabase already proves there is no surviving binding audit.
+		default:
+			return fmt.Errorf("read controller identity binding before startup: %w", err)
+		}
+	}
+
+	if configuredPresent {
+		network, readErr := networkByRow(db.QueryRowContext(ctx, `SELECT name,ipv4_address,ipv4_prefix_length,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length
+			FROM networks WHERE id=?`, idBytes(configured.NetworkID)), configured.NetworkID)
+		switch {
+		case readErr == nil:
+			if !initialNetworkMatches(network, configured) {
+				return fmt.Errorf("%w: existing initial network differs from configuration", ErrConflict)
+			}
+		case errors.Is(readErr, ErrNotFound):
+			var networkCount int
+			if err := db.QueryRowContext(ctx, `SELECT count(*) FROM networks`).Scan(&networkCount); err != nil {
+				return fmt.Errorf("count existing networks before startup: %w", err)
+			}
+			if networkCount != 0 {
+				return fmt.Errorf("%w: configured initial network is absent from nonempty controller state", ErrConflict)
+			}
+		default:
+			return readErr
+		}
+	}
+	if !requiredNetworkID.IsZero() && !configuredPresent {
+		var count int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM networks WHERE id=?`, idBytes(requiredNetworkID)).Scan(&count); err != nil {
+			return fmt.Errorf("find required network before startup: %w", err)
+		}
+		if count != 1 {
+			return fmt.Errorf("%w: required network is absent from controller state", ErrConflict)
+		}
+	}
+	return nil
+}
+
+func controllerInitialNetworkPresent(value ControllerInitialNetwork) bool {
+	return !value.NetworkID.IsZero() || value.Name != "" || value.IPv4Pool.IsValid() || value.IPv6Pool.IsValid()
+}
+
+func validateNetworkDefinition(id identity.NetworkID, name string, pool netip.Prefix, ipv6Pool netip.Prefix) error {
+	if id.IsZero() {
+		return fmt.Errorf("%w: network ID", ErrInvalid)
+	}
+	if err := validateName("network", name); err != nil {
+		return err
+	}
+	if netvalidate.RoutablePrefix(pool, false) != nil || !pool.Addr().Is4() || pool.Bits() < 8 || pool.Bits() > 30 {
+		return fmt.Errorf("%w: IPv4 pool must be a canonical /8 through /30", ErrInvalid)
+	}
+	if ipv6Pool.IsValid() && (netvalidate.RoutablePrefix(ipv6Pool, false) != nil || !ipv6Pool.Addr().Is6() || ipv6Pool.Bits() < 64 || ipv6Pool.Bits() > 120) {
+		return fmt.Errorf("%w: IPv6 pool must be a canonical /64 through /120", ErrInvalid)
+	}
+	return nil
+}
+
+func initialNetworkMatches(network Network, configured ControllerInitialNetwork) bool {
+	return network.ID == configured.NetworkID && network.Name == configured.Name &&
+		network.IPv4Pool == configured.IPv4Pool && network.IPv6Pool == configured.IPv6Pool
 }
 
 // AdministratorCreateNetworkDualStack creates a network only after the

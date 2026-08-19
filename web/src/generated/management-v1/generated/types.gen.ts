@@ -37,7 +37,73 @@ export type AccessInventory = {
     teams: Array<AccessTeam>;
     memberships: Array<AccessTeamMember>;
     grants: Array<AccessGrant>;
+    resources: Array<AccessResource>;
+    services: Array<AccessService>;
+    resource_grants: Array<AccessResourceGrant>;
 };
+
+export type AccessResource = {
+    resource_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    target_kind: 'node';
+    node_id: Identifier;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+} | {
+    resource_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    target_kind: 'prefix';
+    route_id: Identifier;
+    /**
+     * Canonical non-default IPv4 or IPv6 prefix inside the pinned route.
+     */
+    prefix: string;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+export type AccessResourceGrant = {
+    grant_id: Identifier;
+    network_id: Identifier;
+    subject_kind: AccessSubjectKind;
+    subject_id: Identifier;
+    resource_id: Identifier;
+    service_id: Identifier;
+    created_at_unix_seconds: UnixSeconds;
+};
+
+export type AccessService = {
+    service_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    protocol: AccessServiceProtocol;
+    ports: Array<AccessServicePortRange>;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+/**
+ * first must be less than or equal to last.
+ */
+export type AccessServicePortRange = {
+    first: number;
+    last: number;
+};
+
+export const AccessServiceProtocol = {
+    ANY: 'any',
+    TCP: 'tcp',
+    UDP: 'udp',
+    ICMP: 'icmp',
+    ICMPV6: 'icmpv6'
+} as const;
+
+export type AccessServiceProtocol = typeof AccessServiceProtocol[keyof typeof AccessServiceProtocol];
 
 export const AccessSubjectKind = { USER: 'user', TEAM: 'team' } as const;
 
@@ -209,6 +275,14 @@ export type AuditEvent = unknown & {
     created_at_unix_seconds: UnixSeconds;
 };
 
+export type AuditEventPage = {
+    events: Array<AuditEvent>;
+    /**
+     * Opaque continuation token. Omitted only when the controller proved that no older audit events remain in this scope.
+     */
+    next_cursor?: string;
+};
+
 export type AuditEvents = {
     events: Array<AuditEvent>;
 };
@@ -216,6 +290,28 @@ export type AuditEvents = {
 export type AuthState = {
     state: 'bootstrap_required' | 'sign_in';
 };
+
+export const AutomationPermission = {
+    NETWORK_LIST: 'network.list',
+    NETWORK_READ: 'network.read',
+    NETWORK_CREATE: 'network.create',
+    ENROLLMENT_ISSUE: 'enrollment.issue',
+    BOOTSTRAP_BUNDLE_CREATE: 'bootstrap_bundle.create',
+    NODE_READ: 'node.read',
+    NODE_MANAGE: 'node.manage',
+    ROUTE_READ: 'route.read',
+    ROUTE_MANAGE: 'route.manage',
+    ACL_READ: 'acl.read',
+    ACL_MANAGE: 'acl.manage',
+    RELAY_READ: 'relay.read',
+    RELAY_MANAGE: 'relay.manage',
+    CERTIFICATE_READ: 'certificate.read',
+    CERTIFICATE_REVOKE: 'certificate.revoke',
+    AUDIT_READ: 'audit.read',
+    AUDIT_READ_GLOBAL: 'audit.read_global'
+} as const;
+
+export type AutomationPermission = typeof AutomationPermission[keyof typeof AutomationPermission];
 
 export type BootstrapBundle = {
     bundle_id: Secret;
@@ -234,6 +330,18 @@ export type BootstrapBundleRequest = {
     expires_at_unix_seconds: UnixSeconds;
 };
 
+export const CarrierStatusState = {
+    DIRECT: 'direct',
+    RELAY_QUIC: 'relay_quic',
+    RELAY_TCP: 'relay_tcp',
+    NEGOTIATING: 'negotiating',
+    DEGRADED: 'degraded',
+    DISCONNECTED: 'disconnected',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type CarrierStatusState = typeof CarrierStatusState[keyof typeof CarrierStatusState];
+
 export type Certificate = {
     certificate_id: Identifier;
     network_id: Identifier;
@@ -249,9 +357,28 @@ export type Certificate = {
     revocation_reason?: string;
 };
 
+export const CertificateStatusState = {
+    HEALTHY: 'healthy',
+    RENEWAL_DUE: 'renewal_due',
+    EXPIRED: 'expired',
+    REVOKED: 'revoked',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type CertificateStatusState = typeof CertificateStatusState[keyof typeof CertificateStatusState];
+
 export type Certificates = {
     certificates: Array<Certificate>;
 };
+
+export const ConfigurationStatusState = {
+    CURRENT: 'current',
+    STALE: 'stale',
+    EXPIRED: 'expired',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type ConfigurationStatusState = typeof ConfigurationStatusState[keyof typeof ConfigurationStatusState];
 
 export type CreateAclRuleRequest = {
     /**
@@ -278,6 +405,33 @@ export type CreateAccessGrantRequest = ({
     node_id?: Identifier;
 };
 
+export type CreateAccessResourceGrantRequest = {
+    subject_kind: AccessSubjectKind;
+    subject_id: Identifier;
+    resource_id: Identifier;
+    service_id: Identifier;
+};
+
+export type CreateAccessResourceRequest = {
+    name: ResourceName;
+    target_kind: 'node';
+    node_id: Identifier;
+} | {
+    name: ResourceName;
+    target_kind: 'prefix';
+    route_id: Identifier;
+    prefix: string;
+};
+
+export type CreateAccessServiceRequest = {
+    name: ResourceName;
+    protocol: 'tcp' | 'udp';
+    ports: Array<AccessServicePortRange>;
+} | {
+    name: ResourceName;
+    protocol: 'any' | 'icmp' | 'icmpv6';
+};
+
 export type CreateAccessSubjectRequest = {
     name: ResourceName;
 };
@@ -294,6 +448,72 @@ export type CreateAdministratorRequest = unknown & {
      * Omission or null is normalized to an empty array.
      */
     network_ids?: Array<Identifier> | null;
+};
+
+/**
+ * Network-scoped permissions, including network.list, require either all_networks=true or at least one network_id. Global-only permission sets require all_networks=false and an empty network_ids array.
+ */
+export type CreateServicePrincipalRequest = {
+    name: ServicePrincipalName;
+    all_networks: boolean;
+    network_ids: Array<Identifier>;
+    permissions: Array<AutomationPermission>;
+};
+
+export const EndpointPlatform = {
+    LINUX: 'linux',
+    DARWIN: 'darwin',
+    WINDOWS: 'windows',
+    OTHER: 'other',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type EndpointPlatform = typeof EndpointPlatform[keyof typeof EndpointPlatform];
+
+export type EndpointRuntimeReport = {
+    valid_for_seconds: number;
+    product_version: string;
+    platform: EndpointPlatform;
+    certificate_state: CertificateStatusState;
+    configuration_state: ConfigurationStatusState;
+    carrier_state: CarrierStatusState;
+    route_state: RouteStatusState;
+    selected_exit_state: SelectedExitStatusState;
+    cleanup_failure_count: number;
+    configuration_epoch: Uint64;
+};
+
+export type EndpointStatus = {
+    node_id: Identifier;
+    network_id: Identifier;
+    node_name: ResourceName;
+    authoritative_configuration_epoch: Uint64;
+    freshness: EndpointStatusFreshness;
+    last_reported_at_unix_seconds?: UnixSeconds;
+    expires_at_unix_seconds?: UnixSeconds;
+    /**
+     * Present only when freshness is current.
+     */
+    report?: EndpointRuntimeReport;
+};
+
+/**
+ * Only current includes a report. Expired preserves observation times as evidence, never_reported has no observation, and node_inactive means revocation, lease expiry, or absence of a currently valid certificate prevents the retained report from representing live status.
+ */
+export const EndpointStatusFreshness = {
+    CURRENT: 'current',
+    EXPIRED: 'expired',
+    NEVER_REPORTED: 'never_reported',
+    NODE_INACTIVE: 'node_inactive'
+} as const;
+
+/**
+ * Only current includes a report. Expired preserves observation times as evidence, never_reported has no observation, and node_inactive means revocation, lease expiry, or absence of a currently valid certificate prevents the retained report from representing live status.
+ */
+export type EndpointStatusFreshness = typeof EndpointStatusFreshness[keyof typeof EndpointStatusFreshness];
+
+export type EndpointStatuses = {
+    endpoint_statuses: Array<EndpointStatus>;
 };
 
 export const EnrollmentClass = {
@@ -389,6 +609,25 @@ export type IpProtocol = typeof IpProtocol[keyof typeof IpProtocol];
  */
 export type Identifier = string;
 
+/**
+ * Expiry must be in the future and no more than 365 days away.
+ */
+export type IssueServiceAccessTokenRequest = {
+    /**
+     * Trimmed human-readable token purpose; 1..64 UTF-8 bytes without NUL.
+     */
+    label: string;
+    expires_at_unix_seconds: UnixSeconds;
+};
+
+export type IssuedServiceAccessToken = {
+    /**
+     * Returned once. The controller never persists or returns it again.
+     */
+    readonly access_token: string;
+    token: ServiceAccessToken;
+};
+
 export const MutableRouteMode = { NAT: 'nat', ROUTED: 'routed' } as const;
 
 export type MutableRouteMode = typeof MutableRouteMode[keyof typeof MutableRouteMode];
@@ -479,6 +718,7 @@ export const Permission = {
     AUDIT_READ_GLOBAL: 'audit.read_global',
     PRINCIPAL_MANAGE: 'principal.manage',
     SESSION_MANAGE_OTHERS: 'session.manage_others',
+    SERVICE_PRINCIPAL_MANAGE: 'service_principal.manage',
     RECOVERY_MANAGE: 'recovery.manage',
     ROOT_TOKEN_ROTATE: 'root_token.rotate'
 } as const;
@@ -632,6 +872,15 @@ export const RouteState = {
 
 export type RouteState = typeof RouteState[keyof typeof RouteState];
 
+export const RouteStatusState = {
+    READY: 'ready',
+    DEGRADED: 'degraded',
+    UNAVAILABLE: 'unavailable',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type RouteStatusState = typeof RouteStatusState[keyof typeof RouteStatusState];
+
 export type Routes = {
     routes: Array<Route>;
 };
@@ -640,6 +889,69 @@ export type Routes = {
  * Opaque 32-byte secret encoded as unpadded base64url.
  */
 export type Secret = string;
+
+export const SelectedExitStatusState = {
+    NOT_SELECTED: 'not_selected',
+    READY: 'ready',
+    DEGRADED: 'degraded',
+    UNAVAILABLE: 'unavailable',
+    UNKNOWN: 'unknown'
+} as const;
+
+export type SelectedExitStatusState = typeof SelectedExitStatusState[keyof typeof SelectedExitStatusState];
+
+export type ServiceAccessToken = {
+    token_id: Identifier;
+    principal_id: Identifier;
+    /**
+     * Trimmed human-readable token purpose; 1..64 UTF-8 bytes without NUL.
+     */
+    label: string;
+    state: ServiceAccessTokenState;
+    created_at_unix_seconds: UnixSeconds;
+    expires_at_unix_seconds: UnixSeconds;
+    revoked_at_unix_seconds?: UnixSeconds;
+    /**
+     * Present only for revoked tokens; 1..256 trimmed UTF-8 bytes without NUL.
+     */
+    revocation_reason?: string;
+};
+
+export type ServiceAccessTokenRevocationRequest = {
+    /**
+     * 1..256 trimmed UTF-8 bytes without NUL.
+     */
+    reason: string;
+};
+
+export const ServiceAccessTokenState = {
+    ACTIVE: 'active',
+    EXPIRED: 'expired',
+    REVOKED: 'revoked'
+} as const;
+
+export type ServiceAccessTokenState = typeof ServiceAccessTokenState[keyof typeof ServiceAccessTokenState];
+
+export type ServiceAccessTokens = {
+    tokens: Array<ServiceAccessToken>;
+};
+
+export type ServicePrincipal = {
+    principal_id: Identifier;
+    name: ServicePrincipalName;
+    enabled: boolean;
+    all_networks: boolean;
+    network_ids: Array<Identifier>;
+    permissions: Array<AutomationPermission>;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+export type ServicePrincipalName = string;
+
+export type ServicePrincipals = {
+    service_principals: Array<ServicePrincipal>;
+};
 
 export type SessionRevocationRequest = {
     /**
@@ -704,6 +1016,10 @@ export type UpdateAclRuleRequest = {
     enabled?: boolean | null;
 };
 
+export type UpdateAccessSelectorRequest = {
+    enabled: boolean;
+};
+
 export type UpdateAccessUserRequest = {
     enabled: boolean;
 };
@@ -735,12 +1051,24 @@ export type Username = string;
  * Static root service-principal credential for local file-based automation only. The controller rejects this credential when Origin or Sec-Fetch-* headers indicate a browser context. It is never a console credential.
  */
 /**
+ * Automation-only bearer bound to one durable service principal, explicit operation grants, network scope, expiry, and revocation state. Origin or Sec-Fetch-* browser-context headers are rejected.
+ */
+export type IssuedServiceAccessTokenWritable = {
+    token: ServiceAccessToken;
+};
+
+/**
+ * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+ */
+export type AuditCursor = string;
+
+/**
  * Canonical lowercase, even-length hexadecimal without a leading zero byte.
  */
 export type CertificateSerial = string;
 
 /**
- * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+ * Maximum number of records in the response. Omission or an empty value uses 100.
  */
 export type Limit = number;
 
@@ -760,6 +1088,8 @@ export type RouteId = Identifier;
 export type RuleId = Identifier;
 
 export type SessionId = Identifier;
+
+export type TokenId = Identifier;
 
 export type GetAdministratorAuthStateData = {
     body?: never;
@@ -941,7 +1271,7 @@ export type ListAdministratorsData = {
     path?: never;
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1079,7 +1409,7 @@ export type ListAdministratorSessionsData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1131,12 +1461,180 @@ export type RevokeAdministratorSessionResponses = {
 
 export type RevokeAdministratorSessionResponse = RevokeAdministratorSessionResponses[keyof RevokeAdministratorSessionResponses];
 
+export type ListServicePrincipalsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/service-principals';
+};
+
+export type ListServicePrincipalsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListServicePrincipalsError = ListServicePrincipalsErrors[keyof ListServicePrincipalsErrors];
+
+export type ListServicePrincipalsResponses = {
+    /**
+     * Bounded automation service-principal snapshot.
+     */
+    200: ServicePrincipals;
+};
+
+export type ListServicePrincipalsResponse = ListServicePrincipalsResponses[keyof ListServicePrincipalsResponses];
+
+export type CreateServicePrincipalData = {
+    body: CreateServicePrincipalRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/admin/service-principals';
+};
+
+export type CreateServicePrincipalErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateServicePrincipalError = CreateServicePrincipalErrors[keyof CreateServicePrincipalErrors];
+
+export type CreateServicePrincipalResponses = {
+    /**
+     * Newly created automation service principal.
+     */
+    201: ServicePrincipal;
+};
+
+export type CreateServicePrincipalResponse = CreateServicePrincipalResponses[keyof CreateServicePrincipalResponses];
+
+export type DisableServicePrincipalData = {
+    body?: never;
+    path: {
+        principal_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/service-principals/{principal_id}/disable';
+};
+
+export type DisableServicePrincipalErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type DisableServicePrincipalError = DisableServicePrincipalErrors[keyof DisableServicePrincipalErrors];
+
+export type DisableServicePrincipalResponses = {
+    /**
+     * Session operation completed with no response body.
+     */
+    204: void;
+};
+
+export type DisableServicePrincipalResponse = DisableServicePrincipalResponses[keyof DisableServicePrincipalResponses];
+
+export type ListServiceAccessTokensData = {
+    body?: never;
+    path: {
+        principal_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/service-principals/{principal_id}/tokens';
+};
+
+export type ListServiceAccessTokensErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListServiceAccessTokensError = ListServiceAccessTokensErrors[keyof ListServiceAccessTokensErrors];
+
+export type ListServiceAccessTokensResponses = {
+    /**
+     * Bounded safe service access-token metadata snapshot.
+     */
+    200: ServiceAccessTokens;
+};
+
+export type ListServiceAccessTokensResponse = ListServiceAccessTokensResponses[keyof ListServiceAccessTokensResponses];
+
+export type IssueServiceAccessTokenData = {
+    body: IssueServiceAccessTokenRequest;
+    path: {
+        principal_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/service-principals/{principal_id}/tokens';
+};
+
+export type IssueServiceAccessTokenErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type IssueServiceAccessTokenError = IssueServiceAccessTokenErrors[keyof IssueServiceAccessTokenErrors];
+
+export type IssueServiceAccessTokenResponses = {
+    /**
+     * One-time service access-token disclosure and safe metadata.
+     */
+    201: IssuedServiceAccessToken;
+};
+
+export type IssueServiceAccessTokenResponse = IssueServiceAccessTokenResponses[keyof IssueServiceAccessTokenResponses];
+
+export type RevokeServiceAccessTokenData = {
+    body: ServiceAccessTokenRevocationRequest;
+    path: {
+        token_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/service-access-tokens/{token_id}/revoke';
+};
+
+export type RevokeServiceAccessTokenErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type RevokeServiceAccessTokenError = RevokeServiceAccessTokenErrors[keyof RevokeServiceAccessTokenErrors];
+
+export type RevokeServiceAccessTokenResponses = {
+    /**
+     * Session operation completed with no response body.
+     */
+    204: void;
+};
+
+export type RevokeServiceAccessTokenResponse = RevokeServiceAccessTokenResponses[keyof RevokeServiceAccessTokenResponses];
+
 export type ListGlobalAuditEventsData = {
     body?: never;
     path?: never;
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1154,12 +1652,46 @@ export type ListGlobalAuditEventsError = ListGlobalAuditEventsErrors[keyof ListG
 
 export type ListGlobalAuditEventsResponses = {
     /**
-     * Bounded audit-event snapshot.
+     * Backward-compatible bounded audit-event snapshot.
      */
     200: AuditEvents;
 };
 
 export type ListGlobalAuditEventsResponse = ListGlobalAuditEventsResponses[keyof ListGlobalAuditEventsResponses];
+
+export type PageGlobalAuditEventsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+        /**
+         * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+         */
+        cursor?: string;
+    };
+    url: '/v1/admin/audit/page';
+};
+
+export type PageGlobalAuditEventsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type PageGlobalAuditEventsError = PageGlobalAuditEventsErrors[keyof PageGlobalAuditEventsErrors];
+
+export type PageGlobalAuditEventsResponses = {
+    /**
+     * One deterministic cursor page of the audit stream.
+     */
+    200: AuditEventPage;
+};
+
+export type PageGlobalAuditEventsResponse = PageGlobalAuditEventsResponses[keyof PageGlobalAuditEventsResponses];
 
 export type IssueEnrollmentTokenData = {
     body: EnrollmentTokenRequest;
@@ -1216,7 +1748,7 @@ export type ListNetworksData = {
     path?: never;
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1300,7 +1832,7 @@ export type ListNetworkNodesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1325,6 +1857,38 @@ export type ListNetworkNodesResponses = {
 
 export type ListNetworkNodesResponse = ListNetworkNodesResponses[keyof ListNetworkNodesResponses];
 
+export type ListNetworkEndpointStatusesData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/networks/{network_id}/endpoint-statuses';
+};
+
+export type ListNetworkEndpointStatusesErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListNetworkEndpointStatusesError = ListNetworkEndpointStatusesErrors[keyof ListNetworkEndpointStatusesErrors];
+
+export type ListNetworkEndpointStatusesResponses = {
+    /**
+     * Bounded latest endpoint-status snapshot.
+     */
+    200: EndpointStatuses;
+};
+
+export type ListNetworkEndpointStatusesResponse = ListNetworkEndpointStatusesResponses[keyof ListNetworkEndpointStatusesResponses];
+
 export type ListNetworkRelaysData = {
     body?: never;
     path: {
@@ -1332,7 +1896,7 @@ export type ListNetworkRelaysData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1391,7 +1955,7 @@ export type ListNetworkAclRulesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1661,6 +2225,168 @@ export type DeleteAccessGrantResponses = {
 
 export type DeleteAccessGrantResponse = DeleteAccessGrantResponses[keyof DeleteAccessGrantResponses];
 
+export type CreateNetworkAccessResourceData = {
+    body: CreateAccessResourceRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/resources';
+};
+
+export type CreateNetworkAccessResourceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkAccessResourceError = CreateNetworkAccessResourceErrors[keyof CreateNetworkAccessResourceErrors];
+
+export type CreateNetworkAccessResourceResponses = {
+    /**
+     * Stable named Node or routed-prefix access target.
+     */
+    201: AccessResource;
+};
+
+export type CreateNetworkAccessResourceResponse = CreateNetworkAccessResourceResponses[keyof CreateNetworkAccessResourceResponses];
+
+export type UpdateAccessResourceData = {
+    body: UpdateAccessSelectorRequest;
+    path: {
+        resource_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/resources/{resource_id}';
+};
+
+export type UpdateAccessResourceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type UpdateAccessResourceError = UpdateAccessResourceErrors[keyof UpdateAccessResourceErrors];
+
+export type UpdateAccessResourceResponses = {
+    /**
+     * Stable named Node or routed-prefix access target.
+     */
+    200: AccessResource;
+};
+
+export type UpdateAccessResourceResponse = UpdateAccessResourceResponses[keyof UpdateAccessResourceResponses];
+
+export type CreateNetworkAccessServiceData = {
+    body: CreateAccessServiceRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/services';
+};
+
+export type CreateNetworkAccessServiceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkAccessServiceError = CreateNetworkAccessServiceErrors[keyof CreateNetworkAccessServiceErrors];
+
+export type CreateNetworkAccessServiceResponses = {
+    /**
+     * Stable named protocol and destination-port selector.
+     */
+    201: AccessService;
+};
+
+export type CreateNetworkAccessServiceResponse = CreateNetworkAccessServiceResponses[keyof CreateNetworkAccessServiceResponses];
+
+export type UpdateAccessServiceData = {
+    body: UpdateAccessSelectorRequest;
+    path: {
+        service_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/services/{service_id}';
+};
+
+export type UpdateAccessServiceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type UpdateAccessServiceError = UpdateAccessServiceErrors[keyof UpdateAccessServiceErrors];
+
+export type UpdateAccessServiceResponses = {
+    /**
+     * Stable named protocol and destination-port selector.
+     */
+    200: AccessService;
+};
+
+export type UpdateAccessServiceResponse = UpdateAccessServiceResponses[keyof UpdateAccessServiceResponses];
+
+export type CreateNetworkResourceAccessGrantData = {
+    body: CreateAccessResourceGrantRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/resource-access-grants';
+};
+
+export type CreateNetworkResourceAccessGrantErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkResourceAccessGrantError = CreateNetworkResourceAccessGrantErrors[keyof CreateNetworkResourceAccessGrantErrors];
+
+export type CreateNetworkResourceAccessGrantResponses = {
+    /**
+     * User or Team grant for one named Resource and Service.
+     */
+    201: AccessResourceGrant;
+};
+
+export type CreateNetworkResourceAccessGrantResponse = CreateNetworkResourceAccessGrantResponses[keyof CreateNetworkResourceAccessGrantResponses];
+
+export type DeleteAccessResourceGrantData = {
+    body?: never;
+    path: {
+        grant_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/resource-access-grants/{grant_id}';
+};
+
+export type DeleteAccessResourceGrantErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type DeleteAccessResourceGrantError = DeleteAccessResourceGrantErrors[keyof DeleteAccessResourceGrantErrors];
+
+export type DeleteAccessResourceGrantResponses = {
+    /**
+     * Updated network configuration epoch.
+     */
+    200: Epoch;
+};
+
+export type DeleteAccessResourceGrantResponse = DeleteAccessResourceGrantResponses[keyof DeleteAccessResourceGrantResponses];
+
 export type ListNetworkCertificatesData = {
     body?: never;
     path: {
@@ -1668,7 +2394,7 @@ export type ListNetworkCertificatesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1700,7 +2426,7 @@ export type ListNetworkRoutesData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1732,7 +2458,7 @@ export type ListNetworkAuditEventsData = {
     };
     query?: {
         /**
-         * Maximum number of records in the bounded snapshot. The current API has no cursor or total count. Omission or an empty value uses 100.
+         * Maximum number of records in the response. Omission or an empty value uses 100.
          */
         limit?: number;
     };
@@ -1750,12 +2476,48 @@ export type ListNetworkAuditEventsError = ListNetworkAuditEventsErrors[keyof Lis
 
 export type ListNetworkAuditEventsResponses = {
     /**
-     * Bounded audit-event snapshot.
+     * Backward-compatible bounded audit-event snapshot.
      */
     200: AuditEvents;
 };
 
 export type ListNetworkAuditEventsResponse = ListNetworkAuditEventsResponses[keyof ListNetworkAuditEventsResponses];
+
+export type PageNetworkAuditEventsData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+        /**
+         * Opaque continuation token returned as next_cursor by the preceding page. Clients must not inspect, modify, or reuse it with a different audit scope.
+         */
+        cursor?: string;
+    };
+    url: '/v1/admin/networks/{network_id}/audit/page';
+};
+
+export type PageNetworkAuditEventsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type PageNetworkAuditEventsError = PageNetworkAuditEventsErrors[keyof PageNetworkAuditEventsErrors];
+
+export type PageNetworkAuditEventsResponses = {
+    /**
+     * One deterministic cursor page of the audit stream.
+     */
+    200: AuditEventPage;
+};
+
+export type PageNetworkAuditEventsResponse = PageNetworkAuditEventsResponses[keyof PageNetworkAuditEventsResponses];
 
 export type RevokeNetworkCertificateData = {
     body: RevocationRequest;

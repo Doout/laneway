@@ -43,14 +43,30 @@ func (a *storeAccessController) Authenticate(ctx context.Context, request *http.
 		if browserContextBearer(request) {
 			return RequestActor{}, ErrUnauthenticated
 		}
-		actor, err := a.rootBearer(request)
+		actor, rootErr := a.rootBearer(request)
+		if rootErr == nil && actor.Valid() && actor.Kind == adminauth.ActorServicePrincipal && actor.ID != nil {
+			result := RequestActor{Credential: CredentialRootBearer, Subject: adminauth.RootSubject(*actor.ID)}
+			if !result.Valid() {
+				return RequestActor{}, ErrUnauthenticated
+			}
+			return result, nil
+		}
+		bearer, err := authorizationBearer(request)
 		if err != nil {
-			return RequestActor{}, err
+			return RequestActor{}, ErrUnauthenticated
 		}
-		if !actor.Valid() || actor.Kind != adminauth.ActorServicePrincipal || actor.ID == nil {
-			return RequestActor{}, ErrPermissionDenied
+		token, principal, err := a.store.AuthenticateServiceAccessToken(ctx, bearer)
+		if err != nil {
+			return RequestActor{}, ErrUnauthenticated
 		}
-		result := RequestActor{Credential: CredentialRootBearer, Subject: adminauth.RootSubject(*actor.ID)}
+		_, proof, err := adminauth.ParseServiceAccessToken(bearer)
+		if err != nil {
+			return RequestActor{}, ErrUnauthenticated
+		}
+		principalCopy := principal
+		result := RequestActor{Credential: CredentialServiceAccessToken,
+			Subject:          adminauth.ServicePrincipalTokenSubject(token.PrincipalID, token.ID, proof),
+			ServicePrincipal: &principalCopy}
 		if !result.Valid() {
 			return RequestActor{}, ErrUnauthenticated
 		}
@@ -85,7 +101,11 @@ func (a *storeAccessController) Authorize(_ context.Context, actor RequestActor,
 	if !actor.Valid() {
 		return adminauth.Decision{}, ErrUnauthenticated
 	}
-	if !adminauth.AuthorizeEarly(actor.Subject, actor.Principal, policy, target) {
+	authorized := adminauth.AuthorizeEarly(actor.Subject, actor.Principal, policy, target)
+	if actor.Credential == CredentialServiceAccessToken {
+		authorized = adminauth.AuthorizeServicePrincipalEarly(actor.Subject, actor.ServicePrincipal, policy, target)
+	}
+	if !authorized {
 		return adminauth.Decision{}, ErrPermissionDenied
 	}
 	decision, err := adminauth.NewDecision(actor.Subject, policy, target)
@@ -93,6 +113,21 @@ func (a *storeAccessController) Authorize(_ context.Context, actor RequestActor,
 		return adminauth.Decision{}, ErrPermissionDenied
 	}
 	return decision, nil
+}
+
+func authorizationBearer(request *http.Request) (string, error) {
+	if request == nil {
+		return "", ErrUnauthenticated
+	}
+	values := request.Header.Values("Authorization")
+	if len(values) != 1 {
+		return "", ErrUnauthenticated
+	}
+	scheme, bearer, ok := strings.Cut(values[0], " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || bearer == "" {
+		return "", ErrUnauthenticated
+	}
+	return bearer, nil
 }
 
 type administratorRequestContext struct {

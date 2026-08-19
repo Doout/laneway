@@ -18,11 +18,11 @@ The credential and request classes are intentionally distinct:
 | Request class | Required authentication | Origin and CSRF rules |
 | --- | --- | --- |
 | Authentication state | None | `GET /auth/state` ignores supplied credentials and is direct-peer rate limited. |
-| Public account lifecycle | None | Login, bootstrap, and recovery require an HTTPS same-origin `Origin` and reject active administrator or root credentials. Login may replace a stale or expired session cookie. No CSRF header is required before a session exists. |
+| Public account lifecycle | None | Login, bootstrap, and recovery require an HTTPS same-origin `Origin`. They reject every supplied bearer; login also rejects an active administrator session but may replace a stale or expired session cookie. No CSRF header is required before a session exists. |
 | Current session read | Administrator session cookie and CSRF cookie | `GET /auth/session` requires both cookies but does not require `Origin` or `X-Laneway-CSRF`. |
-| Safe protected resource read | Administrator session cookie **or** root bearer | No CSRF header is required. Ordinary authorization and network scoping still apply. |
+| Safe protected resource read | Administrator session cookie, root bearer, **or scoped service access token** | No CSRF header is required. Ordinary authorization, explicit operation grants, expiry, revocation, and network scoping still apply. |
 | Session lifecycle mutation | Administrator session cookie, CSRF cookie, and `X-Laneway-CSRF` | Rotate and logout are same-origin, session-only operations. |
-| Protected resource mutation | Administrator session cookie, CSRF cookie, and `X-Laneway-CSRF`, **or** root bearer | Cookie-authenticated mutations must be same-origin. Root automation does not use CSRF. |
+| Protected resource mutation | Administrator session cookie, CSRF cookie, and `X-Laneway-CSRF`, **or** a root/scoped automation bearer | Cookie-authenticated mutations must be same-origin. Automation bearers do not use CSRF and are rejected in browser contexts. |
 | Root-only automation | Root bearer | Any `Origin` or `Sec-Fetch-*` header causes authentication failure. |
 
 The session and CSRF cookies are `Secure`, `HttpOnly`, `SameSite=Strict`, and
@@ -36,9 +36,24 @@ both root-token rotation journal operations, and administrator recovery-grant
 issue. The exact `username` filter on `GET /administrators` is also root-only
 and cannot be combined with `limit`.
 
+Service access tokens use the versioned `lnw_spat_v1.<token-id>.<secret>`
+format. The controller returns a bearer only once, persists a purpose-separated
+SHA-256 digest, and reloads the token, principal, explicit operation grant,
+network grant, expiry, and revocation state inside every protected Store
+transaction. Service principals cannot receive administrator, session,
+service-principal, recovery, or root-token management permissions. Restoring a
+database revokes every live service access token so a pre-restore bearer cannot
+replay against the restored control plane.
+
+The controller admits at most 100 enabled service principals and 100 unrevoked
+tokens per principal. Enabled principals and live tokens sort before inactive
+history, so the default 100-record inventory always contains every authority
+that can still authorize a request. Disabling a principal is irreversible in
+v1 and atomically revokes all of its tokens.
+
 ## Current route inventory
 
-The contract contains exactly 43 operations:
+The contract contains exactly 66 operations:
 
 | Method | Path | Access class |
 | --- | --- | --- |
@@ -61,20 +76,43 @@ The contract contains exactly 43 operations:
 | `POST` | `/v1/admin/administrators/{principal_id}/recovery-grants` | Root-only automation |
 | `GET` | `/v1/admin/administrators/{principal_id}/sessions` | Safe protected read |
 | `POST` | `/v1/admin/sessions/{session_id}/revoke` | Protected mutation |
+| `GET` | `/v1/admin/service-principals` | Owner/root safe read |
+| `POST` | `/v1/admin/service-principals` | Owner/root protected mutation |
+| `POST` | `/v1/admin/service-principals/{principal_id}/disable` | Owner/root protected mutation |
+| `GET` | `/v1/admin/service-principals/{principal_id}/tokens` | Owner/root safe read |
+| `POST` | `/v1/admin/service-principals/{principal_id}/tokens` | Owner/root protected mutation |
+| `POST` | `/v1/admin/service-access-tokens/{token_id}/revoke` | Owner/root protected mutation |
 | `GET` | `/v1/admin/audit` | Safe protected read |
+| `GET` | `/v1/admin/audit/page` | Safe protected read |
 | `POST` | `/v1/admin/enrollment-tokens` | Protected mutation |
 | `POST` | `/v1/admin/bootstrap-bundles` | Protected mutation |
 | `GET` | `/v1/admin/networks` | Safe protected read |
 | `POST` | `/v1/admin/networks` | Protected mutation |
 | `GET` | `/v1/admin/networks/{network_id}` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/nodes` | Safe protected read |
+| `GET` | `/v1/admin/networks/{network_id}/endpoint-statuses` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/relays` | Safe protected read |
 | `POST` | `/v1/admin/networks/{network_id}/relays` | Protected mutation |
 | `GET` | `/v1/admin/networks/{network_id}/acl-rules` | Safe protected read |
 | `POST` | `/v1/admin/networks/{network_id}/acl-rules` | Protected mutation |
+| `GET` | `/v1/admin/networks/{network_id}/access-subjects` | Safe protected read |
+| `POST` | `/v1/admin/networks/{network_id}/users` | Protected mutation |
+| `PATCH` | `/v1/admin/users/{user_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/teams` | Protected mutation |
+| `PUT` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
+| `DELETE` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/access-grants` | Protected mutation |
+| `DELETE` | `/v1/admin/access-grants/{grant_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/resources` | Protected mutation |
+| `PATCH` | `/v1/admin/resources/{resource_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/services` | Protected mutation |
+| `PATCH` | `/v1/admin/services/{service_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/resource-access-grants` | Protected mutation |
+| `DELETE` | `/v1/admin/resource-access-grants/{grant_id}` | Protected mutation |
 | `GET` | `/v1/admin/networks/{network_id}/certificates` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/routes` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/audit` | Safe protected read |
+| `GET` | `/v1/admin/networks/{network_id}/audit/page` | Safe protected read |
 | `POST` | `/v1/admin/networks/{network_id}/certificates/{serial}/revoke` | Protected mutation |
 | `POST` | `/v1/admin/routes/assign` | Protected mutation |
 | `POST` | `/v1/admin/routes/{route_id}/approve` | Protected mutation |
@@ -86,7 +124,7 @@ The contract contains exactly 43 operations:
 | `POST` | `/v1/admin/relays/{relay_id}/disable` | Protected mutation |
 | `PUT` | `/v1/admin/relays/{relay_id}` | Protected mutation |
 
-## Bounded snapshots and mutation semantics
+## Collection pages and mutation semantics
 
 List operations return a bounded snapshot with one collection property and no
 pagination metadata:
@@ -95,18 +133,33 @@ pagination metadata:
 | --- | --- |
 | Administrators | `{ "administrators": [...] }` |
 | Administrator sessions | `{ "sessions": [...] }` |
+| Service principals | `{ "service_principals": [...] }` |
+| Service access tokens | `{ "tokens": [...] }` |
 | Networks | `{ "networks": [...] }` |
 | Nodes | `{ "nodes": [...] }` |
+| Endpoint status | `{ "endpoint_statuses": [...] }` |
 | Relays | `{ "relays": [...] }` |
 | ACL rules | `{ "acl_rules": [...] }` |
 | Certificates | `{ "certificates": [...] }` |
 | Routes | `{ "routes": [...] }` |
 | Audit events | `{ "events": [...] }` |
+| Audit cursor pages | `{ "events": [...], "next_cursor": "..." }` |
 
 When supported, `limit` is between 1 and 1000; omission or an empty value uses
-100. There is currently no cursor, next-page token, total count, or snapshot
-revision. Clients must not infer that a short response is a durable end-of-list
-marker across later requests.
+100. Most collection operations, including the existing global and network
+`/audit` routes, remain bounded snapshots with no cursor, total count, or
+snapshot revision. Their exact `{ "events": [...] }` response stays unchanged
+for strict v1 clients. Clients must not infer that a short response is a
+durable end-of-list marker for those resources.
+
+The explicit global and network `/audit/page` operations are cursor-paginated
+in authoritative `created_at DESC, event_id DESC` order. A response includes
+`next_cursor` only when the controller proved that older rows remain. Clients
+continue by sending that opaque value as `cursor` with the same global or
+network scope and the same `limit` semantics. Audit cursors are versioned
+implementation details: clients must not decode, alter, or transfer them
+between scopes. Invalid, empty, repeated, or out-of-scope cursors fail as
+malformed requests rather than silently restarting pagination.
 
 The v1 surface does not claim entity tags, `If-Match` preconditions, or a general
 idempotency-key header. Two operations have narrower documented replay behavior:
@@ -150,7 +203,7 @@ Successful login, session read, and session rotation responses require:
 - `X-Laneway-Session-Absolute-Expires-At`
 
 Protected successes authenticated by a browser session carry the same renewal
-headers when a live session remains. Root-authenticated responses omit them, and
+headers when a live session remains. Automation-bearer responses omit them, and
 a self-revoking operation may omit them after invalidating the caller's session.
 Expiry values are Unix seconds encoded as JSON-safe integers.
 
@@ -199,7 +252,7 @@ corepack pnpm api:check
 ```
 
 `api:lint` applies strict OpenAPI linting. `api:routes` rejects duplicate YAML
-mapping keys and verifies parity with all 43 registered management operations.
+mapping keys and verifies parity with all 66 registered management operations.
 Generation is deterministic: CI regenerates the SDK and fails on a diff. The
 repository-level equivalent is `make management-api-check`; CI installs the
 pinned lockfile and runs the same gate.

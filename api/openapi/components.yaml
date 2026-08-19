@@ -30,6 +30,14 @@ components:
         Static root service-principal credential for local file-based automation
         only. The controller rejects this credential when Origin or Sec-Fetch-*
         headers indicate a browser context. It is never a console credential.
+    serviceAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: lnw_spat_v1 opaque service access token
+      description: >-
+        Automation-only bearer bound to one durable service principal, explicit
+        operation grants, network scope, expiry, and revocation state. Origin or
+        Sec-Fetch-* browser-context headers are rejected.
 
   parameters:
     Limit:
@@ -37,13 +45,25 @@ components:
       in: query
       required: false
       description: >-
-        Maximum number of records in the bounded snapshot. The current API has no
-        cursor or total count. Omission or an empty value uses 100.
+        Maximum number of records in the response. Omission or an empty value
+        uses 100.
       schema:
         type: integer
         minimum: 1
         maximum: 1000
         default: 100
+    AuditCursor:
+      name: cursor
+      in: query
+      required: false
+      description: >-
+        Opaque continuation token returned as next_cursor by the preceding page.
+        Clients must not inspect, modify, or reuse it with a different audit scope.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 512
+        pattern: '^[A-Za-z0-9_-]+$'
     PrincipalID:
       name: principal_id
       in: path
@@ -52,6 +72,12 @@ components:
         $ref: '#/components/schemas/Identifier'
     SessionID:
       name: session_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Identifier'
+    TokenID:
+      name: token_id
       in: path
       required: true
       schema:
@@ -285,8 +311,83 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/AdministratorSessions'
+    ServicePrincipalCreated:
+      description: Newly created automation service principal.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Location:
+          required: true
+          schema:
+            type: string
+            pattern: '^/v1/admin/service-principals/(?!0{32}$)[0-9a-f]{32}$'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServicePrincipal'
+    ServicePrincipals:
+      description: Bounded automation service-principal snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServicePrincipals'
+    ServiceAccessTokenIssued:
+      description: One-time service access-token disclosure and safe metadata.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          required: true
+          schema:
+            type: string
+            const: no-store
+        Location:
+          required: true
+          schema:
+            type: string
+            pattern: '^/v1/admin/service-access-tokens/(?!0{32}$)[0-9a-f]{32}$'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/IssuedServiceAccessToken'
+    ServiceAccessTokens:
+      description: Bounded safe service access-token metadata snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ServiceAccessTokens'
     AuditEvents:
-      description: Bounded audit-event snapshot.
+      description: Backward-compatible bounded audit-event snapshot.
       headers:
         X-Laneway-Session-ID:
           $ref: '#/components/headers/SessionIDOptional'
@@ -300,6 +401,21 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/AuditEvents'
+    AuditEventPage:
+      description: One deterministic cursor page of the audit stream.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AuditEventPage'
     EnrollmentToken:
       description: Newly issued one-time enrollment token.
       headers:
@@ -375,6 +491,21 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Nodes'
+    EndpointStatuses:
+      description: Bounded latest endpoint-status snapshot.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EndpointStatuses'
     AccessInventory:
       description: Users, Teams, memberships, and effective grant definitions for one Network.
       headers:
@@ -435,6 +566,51 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/AccessGrant'
+    AccessResource:
+      description: Stable named Node or routed-prefix access target.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessResource'
+    AccessService:
+      description: Stable named protocol and destination-port selector.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessService'
+    AccessResourceGrant:
+      description: User or Team grant for one named Resource and Service.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessResourceGrant'
     Relays:
       description: Bounded relay snapshot.
       headers:
@@ -644,8 +820,29 @@ components:
         - audit.read_global
         - principal.manage
         - session.manage_others
+        - service_principal.manage
         - recovery.manage
         - root_token.rotate
+    AutomationPermission:
+      type: string
+      enum:
+        - network.list
+        - network.read
+        - network.create
+        - enrollment.issue
+        - bootstrap_bundle.create
+        - node.read
+        - node.manage
+        - route.read
+        - route.manage
+        - acl.read
+        - acl.manage
+        - relay.read
+        - relay.manage
+        - certificate.read
+        - certificate.revoke
+        - audit.read
+        - audit.read_global
     Username:
       type: string
       minLength: 3
@@ -955,6 +1152,160 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AdministratorSession'
+    ServicePrincipalName:
+      type: string
+      minLength: 3
+      maxLength: 64
+      pattern: '^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$'
+    CreateServicePrincipalRequest:
+      type: object
+      additionalProperties: false
+      required: [name, all_networks, network_ids, permissions]
+      properties:
+        name:
+          $ref: '#/components/schemas/ServicePrincipalName'
+        all_networks:
+          type: boolean
+        network_ids:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Identifier'
+        permissions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/AutomationPermission'
+      description: >-
+        Network-scoped permissions, including network.list, require either
+        all_networks=true or at least one network_id. Global-only permission
+        sets require all_networks=false and an empty network_ids array.
+    ServicePrincipal:
+      type: object
+      additionalProperties: false
+      required:
+        - principal_id
+        - name
+        - enabled
+        - all_networks
+        - network_ids
+        - permissions
+        - created_at_unix_seconds
+        - updated_at_unix_seconds
+      properties:
+        principal_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ServicePrincipalName'
+        enabled:
+          type: boolean
+        all_networks:
+          type: boolean
+        network_ids:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Identifier'
+        permissions:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/AutomationPermission'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        updated_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    ServicePrincipals:
+      type: object
+      additionalProperties: false
+      required: [service_principals]
+      properties:
+        service_principals:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServicePrincipal'
+    IssueServiceAccessTokenRequest:
+      type: object
+      additionalProperties: false
+      required: [label, expires_at_unix_seconds]
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Trimmed human-readable token purpose; 1..64 UTF-8 bytes without NUL.
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+      description: Expiry must be in the future and no more than 365 days away.
+    ServiceAccessTokenState:
+      type: string
+      enum: [active, expired, revoked]
+    ServiceAccessToken:
+      type: object
+      additionalProperties: false
+      required:
+        - token_id
+        - principal_id
+        - label
+        - state
+        - created_at_unix_seconds
+        - expires_at_unix_seconds
+      properties:
+        token_id:
+          $ref: '#/components/schemas/Identifier'
+        principal_id:
+          $ref: '#/components/schemas/Identifier'
+        label:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Trimmed human-readable token purpose; 1..64 UTF-8 bytes without NUL.
+        state:
+          $ref: '#/components/schemas/ServiceAccessTokenState'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        revoked_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        revocation_reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Present only for revoked tokens; 1..256 trimmed UTF-8 bytes without NUL.
+    IssuedServiceAccessToken:
+      type: object
+      additionalProperties: false
+      required: [access_token, token]
+      properties:
+        access_token:
+          type: string
+          readOnly: true
+          pattern: '^lnw_spat_v1\.(?!0{32}\.)[0-9a-f]{32}\.[A-Za-z0-9_-]{43}$'
+          description: Returned once. The controller never persists or returns it again.
+        token:
+          $ref: '#/components/schemas/ServiceAccessToken'
+    ServiceAccessTokens:
+      type: object
+      additionalProperties: false
+      required: [tokens]
+      properties:
+        tokens:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceAccessToken'
+    ServiceAccessTokenRevocationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: 1..256 trimmed UTF-8 bytes without NUL.
     EnrollmentClass:
       type: string
       enum: [durable, ephemeral, remembered]
@@ -1158,6 +1509,109 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Node'
+    EndpointStatusFreshness:
+      type: string
+      enum: [current, expired, never_reported, node_inactive]
+      description: >-
+        Only current includes a report. Expired preserves observation times as
+        evidence, never_reported has no observation, and node_inactive means
+        revocation, lease expiry, or absence of a currently valid certificate
+        prevents the retained report from representing live status.
+    EndpointPlatform:
+      type: string
+      enum: [linux, darwin, windows, other, unknown]
+    CertificateStatusState:
+      type: string
+      enum: [healthy, renewal_due, expired, revoked, unknown]
+    ConfigurationStatusState:
+      type: string
+      enum: [current, stale, expired, unknown]
+    CarrierStatusState:
+      type: string
+      enum: [direct, relay_quic, relay_tcp, negotiating, degraded, disconnected, unknown]
+    RouteStatusState:
+      type: string
+      enum: [ready, degraded, unavailable, unknown]
+    SelectedExitStatusState:
+      type: string
+      enum: [not_selected, ready, degraded, unavailable, unknown]
+    EndpointRuntimeReport:
+      type: object
+      additionalProperties: false
+      required:
+        - valid_for_seconds
+        - product_version
+        - platform
+        - certificate_state
+        - configuration_state
+        - carrier_state
+        - route_state
+        - selected_exit_state
+        - cleanup_failure_count
+        - configuration_epoch
+      properties:
+        valid_for_seconds:
+          type: integer
+          minimum: 10
+          maximum: 300
+        product_version:
+          type: string
+          pattern: '^[\x21-\x7e]{1,64}$'
+        platform:
+          $ref: '#/components/schemas/EndpointPlatform'
+        certificate_state:
+          $ref: '#/components/schemas/CertificateStatusState'
+        configuration_state:
+          $ref: '#/components/schemas/ConfigurationStatusState'
+        carrier_state:
+          $ref: '#/components/schemas/CarrierStatusState'
+        route_state:
+          $ref: '#/components/schemas/RouteStatusState'
+        selected_exit_state:
+          $ref: '#/components/schemas/SelectedExitStatusState'
+        cleanup_failure_count:
+          type: integer
+          minimum: 0
+          maximum: 1000000000
+        configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+    EndpointStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - node_id
+        - network_id
+        - node_name
+        - authoritative_configuration_epoch
+        - freshness
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        node_name:
+          $ref: '#/components/schemas/ResourceName'
+        authoritative_configuration_epoch:
+          $ref: '#/components/schemas/Uint64'
+        freshness:
+          $ref: '#/components/schemas/EndpointStatusFreshness'
+        last_reported_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        expires_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        report:
+          allOf:
+            - $ref: '#/components/schemas/EndpointRuntimeReport'
+          description: Present only when freshness is current.
+    EndpointStatuses:
+      type: object
+      additionalProperties: false
+      required: [endpoint_statuses]
+      properties:
+        endpoint_statuses:
+          type: array
+          items:
+            $ref: '#/components/schemas/EndpointStatus'
     AccessUser:
       type: object
       additionalProperties: false
@@ -1231,7 +1685,7 @@ components:
     AccessInventory:
       type: object
       additionalProperties: false
-      required: [users, teams, memberships, grants]
+      required: [users, teams, memberships, grants, resources, services, resource_grants]
       properties:
         users:
           type: array
@@ -1249,6 +1703,18 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AccessGrant'
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessResource'
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessService'
+        resource_grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessResourceGrant'
     CreateAccessSubjectRequest:
       type: object
       additionalProperties: false
@@ -1288,6 +1754,183 @@ components:
                   enum: [node, exit]
                 node_id:
                   $ref: '#/components/schemas/Identifier'
+    AccessResourceTargetKind:
+      type: string
+      enum: [node, prefix]
+    AccessServiceProtocol:
+      type: string
+      enum: [any, tcp, udp, icmp, icmpv6]
+    AccessServicePortRange:
+      type: object
+      additionalProperties: false
+      required: [first, last]
+      properties:
+        first:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        last:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      description: first must be less than or equal to last.
+    AccessResource:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [resource_id, network_id, name, target_kind, node_id, enabled, created_at_unix_seconds, updated_at_unix_seconds]
+          properties:
+            resource_id:
+              $ref: '#/components/schemas/Identifier'
+            network_id:
+              $ref: '#/components/schemas/Identifier'
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: node
+            node_id:
+              $ref: '#/components/schemas/Identifier'
+            enabled:
+              type: boolean
+            created_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+            updated_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+        - type: object
+          additionalProperties: false
+          required: [resource_id, network_id, name, target_kind, route_id, prefix, enabled, created_at_unix_seconds, updated_at_unix_seconds]
+          properties:
+            resource_id:
+              $ref: '#/components/schemas/Identifier'
+            network_id:
+              $ref: '#/components/schemas/Identifier'
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: prefix
+            route_id:
+              $ref: '#/components/schemas/Identifier'
+            prefix:
+              type: string
+              description: Canonical non-default IPv4 or IPv6 prefix inside the pinned route.
+            enabled:
+              type: boolean
+            created_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+            updated_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+    AccessService:
+      type: object
+      additionalProperties: false
+      required: [service_id, network_id, name, protocol, ports, enabled, created_at_unix_seconds, updated_at_unix_seconds]
+      properties:
+        service_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        protocol:
+          $ref: '#/components/schemas/AccessServiceProtocol'
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessServicePortRange'
+        enabled:
+          type: boolean
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        updated_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    AccessResourceGrant:
+      type: object
+      additionalProperties: false
+      required: [grant_id, network_id, subject_kind, subject_id, resource_id, service_id, created_at_unix_seconds]
+      properties:
+        grant_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        subject_kind:
+          $ref: '#/components/schemas/AccessSubjectKind'
+        subject_id:
+          $ref: '#/components/schemas/Identifier'
+        resource_id:
+          $ref: '#/components/schemas/Identifier'
+        service_id:
+          $ref: '#/components/schemas/Identifier'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    CreateAccessResourceRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [name, target_kind, node_id]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: node
+            node_id:
+              $ref: '#/components/schemas/Identifier'
+        - type: object
+          additionalProperties: false
+          required: [name, target_kind, route_id, prefix]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: prefix
+            route_id:
+              $ref: '#/components/schemas/Identifier'
+            prefix:
+              type: string
+    UpdateAccessSelectorRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    CreateAccessServiceRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [name, protocol, ports]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            protocol:
+              type: string
+              enum: [tcp, udp]
+            ports:
+              type: array
+              minItems: 1
+              maxItems: 256
+              items:
+                $ref: '#/components/schemas/AccessServicePortRange'
+        - type: object
+          additionalProperties: false
+          required: [name, protocol]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            protocol:
+              type: string
+              enum: [any, icmp, icmpv6]
+    CreateAccessResourceGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [subject_kind, subject_id, resource_id, service_id]
+      properties:
+        subject_kind:
+          $ref: '#/components/schemas/AccessSubjectKind'
+        subject_id:
+          $ref: '#/components/schemas/Identifier'
+        resource_id:
+          $ref: '#/components/schemas/Identifier'
+        service_id:
+          $ref: '#/components/schemas/Identifier'
     RelayEndpoint:
       type: string
       description: >-
@@ -1840,3 +2483,20 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AuditEvent'
+    AuditEventPage:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 512
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: >-
+            Opaque continuation token. Omitted only when the controller proved
+            that no older audit events remain in this scope.

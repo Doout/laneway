@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
 	"github.com/Doout/laneway/go/internal/adminauth"
@@ -212,24 +213,34 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/administrators/{principal_id}/recovery-grants", s.issueAdministratorRecoveryGrant)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/administrators/{principal_id}/sessions", s.readAdministratorSessions)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/sessions/{session_id}/revoke", s.revokeAdministratorSession)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-principals", s.createServicePrincipal)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/service-principals", s.readServicePrincipals)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-principals/{principal_id}/disable", s.disableServicePrincipal)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-principals/{principal_id}/tokens", s.issueServiceAccessToken)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/service-principals/{principal_id}/tokens", s.readServiceAccessTokens)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-access-tokens/{token_id}/revoke", s.revokeServiceAccessToken)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/audit", s.readGlobalAudit)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/audit/page", s.readGlobalAuditPage)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/enrollment-tokens", s.issueToken)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/bootstrap-bundles", s.createBootstrapBundle)
 	mux.HandleFunc("GET /v1/bootstrap-bundles/{bundle_id}", s.servePrivateBootstrapBundle)
 	mux.HandleFunc("POST /v1/enroll", s.enroll)
 	mux.HandleFunc("POST /v1/renew", s.renew)
 	mux.HandleFunc("POST /v1/configuration", s.configuration)
+	mux.HandleFunc("PUT /v1/status", s.recordEndpointStatus)
 	mux.HandleFunc("POST /v1/relay/configuration", s.relayConfiguration)
 	mux.HandleFunc("GET /v1/revocations/{serial}", s.revocation)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks", s.createNetwork)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks", s.readNetworks)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}", s.readNetwork)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/nodes", s.readNodes)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/endpoint-statuses", s.readEndpointStatuses)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/relays", s.readRelays)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/acl-rules", s.readACLRules)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/certificates", s.readCertificates)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/routes", s.readRoutes)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/audit", s.readAudit)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/audit/page", s.readAuditPage)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/access-subjects", s.readAccessInventory)
 	mux.HandleFunc("POST /v1/routes", s.advertiseRoute)
 	mux.HandleFunc("DELETE /v1/routes/{route_id}", s.withdrawRoute)
@@ -252,6 +263,12 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/teams/{team_id}/members/{user_id}", s.removeAccessTeamMember)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/access-grants", s.createAccessGrant)
 	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/access-grants/{grant_id}", s.deleteAccessGrant)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/resources", s.createAccessResource)
+	s.registerManagementRoute(mux, http.MethodPatch, "/v1/admin/resources/{resource_id}", s.updateAccessResource)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/services", s.createAccessService)
+	s.registerManagementRoute(mux, http.MethodPatch, "/v1/admin/services/{service_id}", s.updateAccessService)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/resource-access-grants", s.createAccessResourceGrant)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/resource-access-grants/{grant_id}", s.deleteAccessResourceGrant)
 	s.handler = s.observe(securityHeaders(s.administratorHTTPContract(mux)))
 	return s, nil
 }
@@ -807,6 +824,11 @@ func (s *Service) authenticatedNode(r *http.Request) (identity.NodeIdentity, err
 	if err != nil || node.NetworkID != nodeIdentity.NetworkID || node.RevokedAt != nil {
 		return identity.NodeIdentity{}, ErrPermissionDenied
 	}
+	now := s.now().UTC()
+	if node.EnrollmentClass == controller.EnrollmentClassEphemeral &&
+		(node.LeaseExpiresAt == nil || !now.Before(*node.LeaseExpiresAt)) {
+		return identity.NodeIdentity{}, ErrPermissionDenied
+	}
 	// The default mTLS path additionally checks the exact presented certificate
 	// against durable revocation state. Custom authorizers own equivalent
 	// credential revocation semantics.
@@ -815,7 +837,7 @@ func (s *Service) authenticatedNode(r *http.Request) (identity.NodeIdentity, err
 		if cert == nil {
 			return identity.NodeIdentity{}, ErrUnauthenticated
 		}
-		if !s.certificateCurrentlyValid(cert) {
+		if now.Before(cert.NotBefore) || !now.Before(cert.NotAfter) {
 			return identity.NodeIdentity{}, ErrPermissionDenied
 		}
 		record, err := s.store.CertificateBySerial(r.Context(), cert.SerialNumber.Bytes())
@@ -1293,6 +1315,9 @@ func (s *Service) decodeJSON(w http.ResponseWriter, r *http.Request, value any) 
 		return err
 	}
 	defer clear(data)
+	if !utf8.Valid(data) {
+		return malformed("malformed JSON request")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
