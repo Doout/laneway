@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	currentSchemaVersion        = 13
+	currentSchemaVersion        = 14
 	endpointStatusSchemaVersion = 13
+	namedAccessSchemaVersion    = 14
 	busyTimeoutMS               = 5_000
 )
 

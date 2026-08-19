@@ -340,11 +340,88 @@ type AccessGrant struct {
 	CreatedAt   time.Time
 }
 
+// AccessResourceTargetKind identifies the controller-authorized destination
+// behind a stable, human-facing resource name. Prefix resources are pinned to
+// one approved subnet route so they cannot silently move to another Connector.
+type AccessResourceTargetKind string
+
+const (
+	AccessResourceTargetNode   AccessResourceTargetKind = "node"
+	AccessResourceTargetPrefix AccessResourceTargetKind = "prefix"
+)
+
+func (kind AccessResourceTargetKind) Valid() bool {
+	return kind == AccessResourceTargetNode || kind == AccessResourceTargetPrefix
+}
+
+type AccessResource struct {
+	ID          identity.ID
+	NetworkID   identity.NetworkID
+	Name        string
+	TargetKind  AccessResourceTargetKind
+	NodeID      *identity.NodeID
+	RouteID     *identity.ID
+	RouteNodeID *identity.NodeID
+	RoutePrefix netip.Prefix
+	Prefix      netip.Prefix
+	Enabled     bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+type AccessServiceProtocol string
+
+const (
+	AccessServiceAny    AccessServiceProtocol = "any"
+	AccessServiceTCP    AccessServiceProtocol = "tcp"
+	AccessServiceUDP    AccessServiceProtocol = "udp"
+	AccessServiceICMP   AccessServiceProtocol = "icmp"
+	AccessServiceICMPv6 AccessServiceProtocol = "icmpv6"
+)
+
+func (protocol AccessServiceProtocol) Valid() bool {
+	return protocol == AccessServiceAny || protocol == AccessServiceTCP || protocol == AccessServiceUDP ||
+		protocol == AccessServiceICMP || protocol == AccessServiceICMPv6
+}
+
+func (protocol AccessServiceProtocol) SupportsPorts() bool {
+	return protocol == AccessServiceTCP || protocol == AccessServiceUDP
+}
+
+type AccessPortRange struct {
+	First uint16
+	Last  uint16
+}
+
+type AccessService struct {
+	ID        identity.ID
+	NetworkID identity.NetworkID
+	Name      string
+	Protocol  AccessServiceProtocol
+	Ports     []AccessPortRange
+	Enabled   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type AccessResourceGrant struct {
+	ID          identity.ID
+	NetworkID   identity.NetworkID
+	SubjectKind AccessSubjectKind
+	SubjectID   identity.ID
+	ResourceID  identity.ID
+	ServiceID   identity.ID
+	CreatedAt   time.Time
+}
+
 type AccessInventory struct {
-	Users       []AccessUser
-	Teams       []AccessTeam
-	Memberships []AccessTeamMember
-	Grants      []AccessGrant
+	Users          []AccessUser
+	Teams          []AccessTeam
+	Memberships    []AccessTeamMember
+	Grants         []AccessGrant
+	Resources      []AccessResource
+	Services       []AccessService
+	ResourceGrants []AccessResourceGrant
 }
 
 type RouteKind string

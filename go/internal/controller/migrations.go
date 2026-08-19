@@ -695,6 +695,142 @@ CREATE TRIGGER endpoint_status_latest_identity_immutable
 BEGIN
     SELECT RAISE(ABORT, 'endpoint status identity is immutable');
 END;
+`, `
+CREATE UNIQUE INDEX routes_network_identity ON routes(network_id,id);
+CREATE TRIGGER routes_identity_immutable
+    BEFORE UPDATE OF id,network_id,node_id,prefix_address,prefix_length,kind,mode,metric,valid_until,created_at ON routes
+BEGIN
+    SELECT RAISE(ABORT, 'route identity and target are immutable');
+END;
+
+CREATE TABLE access_resources (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253 AND name = trim(name)),
+    target_kind TEXT NOT NULL CHECK(target_kind IN ('node','prefix')),
+    node_id BLOB CHECK(node_id IS NULL OR (length(node_id) = 16 AND node_id <> zeroblob(16))),
+    route_id BLOB CHECK(route_id IS NULL OR (length(route_id) = 16 AND route_id <> zeroblob(16))),
+    route_node_id BLOB CHECK(route_node_id IS NULL OR (length(route_node_id) = 16 AND route_node_id <> zeroblob(16))),
+    route_prefix_address BLOB CHECK(route_prefix_address IS NULL OR length(route_prefix_address) IN (4,16)),
+    route_prefix_length INTEGER CHECK(route_prefix_length IS NULL OR route_prefix_length BETWEEN 1 AND 128),
+    prefix_address BLOB CHECK(prefix_address IS NULL OR length(prefix_address) IN (4,16)),
+    prefix_length INTEGER CHECK(prefix_length IS NULL OR prefix_length BETWEEN 1 AND 128),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    UNIQUE(network_id,name),
+    UNIQUE(network_id,id),
+    CHECK(
+        (target_kind='node' AND node_id IS NOT NULL AND route_id IS NULL AND route_node_id IS NULL AND
+            route_prefix_address IS NULL AND route_prefix_length IS NULL AND prefix_address IS NULL AND prefix_length IS NULL) OR
+        (target_kind='prefix' AND node_id IS NULL AND route_id IS NOT NULL AND route_node_id IS NOT NULL AND
+            route_prefix_address IS NOT NULL AND route_prefix_length IS NOT NULL AND prefix_address IS NOT NULL AND
+            length(route_prefix_address)=length(prefix_address) AND
+            ((length(route_prefix_address)=4 AND route_prefix_length BETWEEN 1 AND 32) OR
+             (length(route_prefix_address)=16 AND route_prefix_length BETWEEN 1 AND 128)) AND
+            ((length(prefix_address)=4 AND prefix_length BETWEEN 1 AND 32) OR
+             (length(prefix_address)=16 AND prefix_length BETWEEN 1 AND 128)))
+    ),
+    FOREIGN KEY(network_id,node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,route_node_id) REFERENCES nodes(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,route_id) REFERENCES routes(network_id,id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE access_services (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253 AND name = trim(name)),
+    protocol TEXT NOT NULL CHECK(protocol IN ('any','tcp','udp','icmp','icmpv6')),
+    ports_sealed INTEGER NOT NULL DEFAULT 0 CHECK(ports_sealed IN (0,1)),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    UNIQUE(network_id,name),
+    UNIQUE(network_id,id)
+) STRICT;
+CREATE TRIGGER access_services_staged_insert
+    BEFORE INSERT ON access_services WHEN NEW.ports_sealed<>0
+BEGIN
+    SELECT RAISE(ABORT, 'access service must begin with staged ports');
+END;
+
+CREATE TABLE access_service_ports (
+    service_id BLOB NOT NULL REFERENCES access_services(id) ON DELETE CASCADE
+        CHECK(length(service_id) = 16 AND service_id <> zeroblob(16)),
+    first_port INTEGER NOT NULL CHECK(first_port BETWEEN 1 AND 65535),
+    last_port INTEGER NOT NULL CHECK(last_port BETWEEN first_port AND 65535),
+    PRIMARY KEY(service_id,first_port,last_port)
+) STRICT;
+CREATE TRIGGER access_service_ports_staged_insert
+    BEFORE INSERT ON access_service_ports WHEN NOT EXISTS(
+        SELECT 1 FROM access_services WHERE id=NEW.service_id AND protocol IN ('tcp','udp') AND ports_sealed=0)
+BEGIN
+    SELECT RAISE(ABORT, 'ports may be inserted only while creating a TCP or UDP service');
+END;
+CREATE TRIGGER access_services_seal
+    BEFORE UPDATE OF ports_sealed ON access_services WHEN
+        OLD.ports_sealed<>0 OR NEW.ports_sealed<>1 OR
+        (NEW.protocol IN ('tcp','udp') AND NOT EXISTS(
+            SELECT 1 FROM access_service_ports WHERE service_id=NEW.id)) OR
+        (NEW.protocol NOT IN ('tcp','udp') AND EXISTS(
+            SELECT 1 FROM access_service_ports WHERE service_id=NEW.id))
+BEGIN
+    SELECT RAISE(ABORT, 'access service ports must be complete before sealing');
+END;
+CREATE TRIGGER access_service_ports_immutable_update
+    BEFORE UPDATE ON access_service_ports
+BEGIN
+    SELECT RAISE(ABORT, 'access service port ranges are immutable');
+END;
+CREATE TRIGGER access_service_ports_immutable_delete
+    BEFORE DELETE ON access_service_ports WHEN EXISTS(
+        SELECT 1 FROM access_services WHERE id=OLD.service_id AND ports_sealed=1)
+BEGIN
+    SELECT RAISE(ABORT, 'sealed access service port ranges cannot be deleted');
+END;
+
+CREATE TABLE access_resource_grants (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    subject_kind TEXT NOT NULL CHECK(subject_kind IN ('user','team')),
+    user_id BLOB CHECK(user_id IS NULL OR (length(user_id) = 16 AND user_id <> zeroblob(16))),
+    team_id BLOB CHECK(team_id IS NULL OR (length(team_id) = 16 AND team_id <> zeroblob(16))),
+    resource_id BLOB NOT NULL CHECK(length(resource_id) = 16 AND resource_id <> zeroblob(16)),
+    service_id BLOB NOT NULL CHECK(length(service_id) = 16 AND service_id <> zeroblob(16)),
+    created_at INTEGER NOT NULL,
+    CHECK((subject_kind='user' AND user_id IS NOT NULL AND team_id IS NULL) OR
+          (subject_kind='team' AND team_id IS NOT NULL AND user_id IS NULL)),
+    FOREIGN KEY(network_id,user_id) REFERENCES access_users(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,team_id) REFERENCES access_teams(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,resource_id) REFERENCES access_resources(network_id,id) ON DELETE CASCADE,
+    FOREIGN KEY(network_id,service_id) REFERENCES access_services(network_id,id) ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX access_resource_grants_user ON access_resource_grants(
+    network_id,user_id,resource_id,service_id) WHERE subject_kind='user';
+CREATE UNIQUE INDEX access_resource_grants_team ON access_resource_grants(
+    network_id,team_id,resource_id,service_id) WHERE subject_kind='team';
+CREATE INDEX access_resource_grants_resource ON access_resource_grants(network_id,resource_id);
+CREATE INDEX access_resource_grants_service ON access_resource_grants(network_id,service_id);
+
+CREATE TRIGGER access_resources_identity_immutable
+    BEFORE UPDATE OF id,network_id,name,target_kind,node_id,route_id,route_node_id,route_prefix_address,
+        route_prefix_length,prefix_address,prefix_length,created_at ON access_resources
+BEGIN
+    SELECT RAISE(ABORT, 'access resource identity is immutable');
+END;
+CREATE TRIGGER access_services_identity_immutable
+    BEFORE UPDATE OF id,network_id,name,protocol,created_at ON access_services
+BEGIN
+    SELECT RAISE(ABORT, 'access service identity is immutable');
+END;
+CREATE TRIGGER access_resource_grants_immutable
+    BEFORE UPDATE ON access_resource_grants
+BEGIN
+    SELECT RAISE(ABORT, 'access resource grant is immutable');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

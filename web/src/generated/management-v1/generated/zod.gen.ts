@@ -216,6 +216,22 @@ const validRoute = (value: { prefix: string; kind: string; mode: string }): bool
 
 export const zAclAction = z.enum(['accept', 'deny']);
 
+/**
+ * first must be less than or equal to last.
+ */
+export const zAccessServicePortRange = z.object({
+    first: z.int().gte(1).lte(65535),
+    last: z.int().gte(1).lte(65535)
+}).strict().refine((value) => value.first <= value.last, 'first must not exceed last');
+
+export const zAccessServiceProtocol = z.enum([
+    'any',
+    'tcp',
+    'udp',
+    'icmp',
+    'icmpv6'
+]);
+
 export const zAccessSubjectKind = z.enum(['user', 'team']);
 
 export const zAccessTargetKind = z.enum([
@@ -331,6 +347,13 @@ export const zCreateAccessGrantRequest = z.intersection(z.union([
     target_kind: zAccessTargetKind,
     node_id: zIdentifier.optional()
 }).strict());
+
+export const zCreateAccessResourceGrantRequest = z.object({
+    subject_kind: zAccessSubjectKind,
+    subject_id: zIdentifier,
+    resource_id: zIdentifier,
+    service_id: zIdentifier
+}).strict();
 
 export const zMutableRouteMode = z.enum(['nat', 'routed']);
 
@@ -476,6 +499,36 @@ export const zErrorEnvelope = z.object({
  * Non-empty trimmed name occupying at most 253 UTF-8 bytes and containing no NUL byte.
  */
 export const zResourceName = z.string().refine((value) => trimmedBytes(value, 253), 'name must be 1..253 trimmed UTF-8 bytes without NUL');
+
+export const zCreateAccessResourceRequest = z.union([
+    z.object({
+        name: zResourceName,
+        target_kind: z.literal('node'),
+        node_id: zIdentifier
+    }).strict(),
+    z.object({
+        name: zResourceName,
+        target_kind: z.literal('prefix'),
+        route_id: zIdentifier,
+        prefix: z.string().refine((value) => routableCidr(value, undefined, 1, 128, true), 'prefix must be a canonical masked non-default routable CIDR')
+    }).strict()
+]);
+
+export const zCreateAccessServiceRequest = z.union([
+    z.object({
+        name: zResourceName,
+        protocol: z.enum(['tcp', 'udp']),
+        ports: z.array(zAccessServicePortRange).min(1).max(256)
+    }).strict(),
+    z.object({
+        name: zResourceName,
+        protocol: z.enum([
+            'any',
+            'icmp',
+            'icmpv6'
+        ])
+    }).strict()
+]);
 
 export const zCreateAccessSubjectRequest = z.object({
     name: zResourceName
@@ -649,6 +702,51 @@ export const zAccessGrant = z.object({
     created_at_unix_seconds: zUnixSeconds
 }).strict();
 
+export const zAccessResource = z.union([
+    z.object({
+        resource_id: zIdentifier,
+        network_id: zIdentifier,
+        name: zResourceName,
+        target_kind: z.literal('node'),
+        node_id: zIdentifier,
+        enabled: z.boolean(),
+        created_at_unix_seconds: zUnixSeconds,
+        updated_at_unix_seconds: zUnixSeconds
+    }).strict(),
+    z.object({
+        resource_id: zIdentifier,
+        network_id: zIdentifier,
+        name: zResourceName,
+        target_kind: z.literal('prefix'),
+        route_id: zIdentifier,
+        prefix: z.string().refine((value) => routableCidr(value, undefined, 1, 128, true), 'prefix must be a canonical masked non-default routable CIDR'),
+        enabled: z.boolean(),
+        created_at_unix_seconds: zUnixSeconds,
+        updated_at_unix_seconds: zUnixSeconds
+    }).strict()
+]);
+
+export const zAccessResourceGrant = z.object({
+    grant_id: zIdentifier,
+    network_id: zIdentifier,
+    subject_kind: zAccessSubjectKind,
+    subject_id: zIdentifier,
+    resource_id: zIdentifier,
+    service_id: zIdentifier,
+    created_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zAccessService = z.object({
+    service_id: zIdentifier,
+    network_id: zIdentifier,
+    name: zResourceName,
+    protocol: zAccessServiceProtocol,
+    ports: z.array(zAccessServicePortRange),
+    enabled: z.boolean(),
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict().refine((value) => value.protocol === 'tcp' || value.protocol === 'udp' ? value.ports.length > 0 : value.ports.length === 0, 'TCP and UDP require ports; other protocols forbid them');
+
 export const zAccessTeam = z.object({
     team_id: zIdentifier,
     network_id: zIdentifier,
@@ -677,7 +775,10 @@ export const zAccessInventory = z.object({
     users: z.array(zAccessUser),
     teams: z.array(zAccessTeam),
     memberships: z.array(zAccessTeamMember),
-    grants: z.array(zAccessGrant)
+    grants: z.array(zAccessGrant),
+    resources: z.array(zAccessResource),
+    services: z.array(zAccessService),
+    resource_grants: z.array(zAccessResourceGrant)
 }).strict();
 
 export const zAdministratorSession = z.object({
@@ -879,6 +980,10 @@ export const zUpdateAclRuleRequest = z.object({
     selector: zTrafficSelectorInput,
     description: z.string().nullish().default('').refine((value) => value == null || utf8ByteLength(value) <= 1024 && !value.includes('\0'), 'description must occupy at most 1024 UTF-8 bytes without NUL'),
     enabled: z.boolean().nullish().default(false)
+}).strict();
+
+export const zUpdateAccessSelectorRequest = z.object({
+    enabled: z.boolean()
 }).strict();
 
 export const zUpdateAccessUserRequest = z.object({
@@ -1334,6 +1439,70 @@ export const zDeleteAccessGrantPath = z.object({
  * Updated network configuration epoch.
  */
 export const zDeleteAccessGrantResponse = zEpoch;
+
+export const zCreateNetworkAccessResourceBody = zCreateAccessResourceRequest;
+
+export const zCreateNetworkAccessResourcePath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named Node or routed-prefix access target.
+ */
+export const zCreateNetworkAccessResourceResponse = zAccessResource;
+
+export const zUpdateAccessResourceBody = zUpdateAccessSelectorRequest;
+
+export const zUpdateAccessResourcePath = z.object({
+    resource_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named Node or routed-prefix access target.
+ */
+export const zUpdateAccessResourceResponse = zAccessResource;
+
+export const zCreateNetworkAccessServiceBody = zCreateAccessServiceRequest;
+
+export const zCreateNetworkAccessServicePath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named protocol and destination-port selector.
+ */
+export const zCreateNetworkAccessServiceResponse = zAccessService;
+
+export const zUpdateAccessServiceBody = zUpdateAccessSelectorRequest;
+
+export const zUpdateAccessServicePath = z.object({
+    service_id: zIdentifier
+}).strict();
+
+/**
+ * Stable named protocol and destination-port selector.
+ */
+export const zUpdateAccessServiceResponse = zAccessService;
+
+export const zCreateNetworkResourceAccessGrantBody = zCreateAccessResourceGrantRequest;
+
+export const zCreateNetworkResourceAccessGrantPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * User or Team grant for one named Resource and Service.
+ */
+export const zCreateNetworkResourceAccessGrantResponse = zAccessResourceGrant;
+
+export const zDeleteAccessResourceGrantPath = z.object({
+    grant_id: zIdentifier
+}).strict();
+
+/**
+ * Updated network configuration epoch.
+ */
+export const zDeleteAccessResourceGrantResponse = zEpoch;
 
 export const zListNetworkCertificatesPath = z.object({
     network_id: zIdentifier

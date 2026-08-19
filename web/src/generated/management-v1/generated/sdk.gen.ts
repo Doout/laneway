@@ -3,8 +3,8 @@
 import type { InternalTransport as Client, Options as Options2, RequestResult, TDataShape } from '../transport';
 import * as z from 'zod';
 
-import type { AddAccessTeamMemberData, AddAccessTeamMemberErrors, AddAccessTeamMemberResponses, ApproveRouteData, ApproveRouteErrors, ApproveRouteResponses, AssignRouteData, AssignRouteErrors, AssignRouteResponses, BootstrapAdministratorData, BootstrapAdministratorErrors, BootstrapAdministratorResponses, CreateAdministratorData, CreateAdministratorErrors, CreateAdministratorResponses, CreateBootstrapBundleData, CreateBootstrapBundleErrors, CreateBootstrapBundleResponses, CreateNetworkAccessGrantData, CreateNetworkAccessGrantErrors, CreateNetworkAccessGrantResponses, CreateNetworkAccessTeamData, CreateNetworkAccessTeamErrors, CreateNetworkAccessTeamResponses, CreateNetworkAccessUserData, CreateNetworkAccessUserErrors, CreateNetworkAccessUserResponses, CreateNetworkAclRuleData, CreateNetworkAclRuleErrors, CreateNetworkAclRuleResponses, CreateNetworkData, CreateNetworkErrors, CreateNetworkResponses, DeleteAccessGrantData, DeleteAccessGrantErrors, DeleteAccessGrantResponses, DeleteAclRuleData, DeleteAclRuleErrors, DeleteAclRuleResponses, DisableRelayData, DisableRelayErrors, DisableRelayResponses, GetAdministratorAuthStateData, GetAdministratorAuthStateErrors, GetAdministratorAuthStateResponses, GetAdministratorData, GetAdministratorErrors, GetAdministratorResponses, GetAdministratorSessionData, GetAdministratorSessionErrors, GetAdministratorSessionResponses, GetNetworkAccessInventoryData, GetNetworkAccessInventoryErrors, GetNetworkAccessInventoryResponses, GetNetworkData, GetNetworkErrors, GetNetworkResponses, IssueEnrollmentTokenData, IssueEnrollmentTokenErrors, IssueEnrollmentTokenResponses, ListAdministratorsData, ListAdministratorsErrors, ListAdministratorSessionsData, ListAdministratorSessionsErrors, ListAdministratorSessionsResponses, ListAdministratorsResponses, ListGlobalAuditEventsData, ListGlobalAuditEventsErrors, ListGlobalAuditEventsResponses, ListNetworkAclRulesData, ListNetworkAclRulesErrors, ListNetworkAclRulesResponses, ListNetworkAuditEventsData, ListNetworkAuditEventsErrors, ListNetworkAuditEventsResponses, ListNetworkCertificatesData, ListNetworkCertificatesErrors, ListNetworkCertificatesResponses, ListNetworkEndpointStatusesData, ListNetworkEndpointStatusesErrors, ListNetworkEndpointStatusesResponses, ListNetworkNodesData, ListNetworkNodesErrors, ListNetworkNodesResponses, ListNetworkRelaysData, ListNetworkRelaysErrors, ListNetworkRelaysResponses, ListNetworkRoutesData, ListNetworkRoutesErrors, ListNetworkRoutesResponses, ListNetworksData, ListNetworksErrors, ListNetworksResponses, LoginAdministratorData, LoginAdministratorErrors, LoginAdministratorResponses, LogoutAdministratorData, LogoutAdministratorErrors, LogoutAdministratorResponses, PageGlobalAuditEventsData, PageGlobalAuditEventsErrors, PageGlobalAuditEventsResponses, PageNetworkAuditEventsData, PageNetworkAuditEventsErrors, PageNetworkAuditEventsResponses, RecoverAdministratorData, RecoverAdministratorErrors, RecoverAdministratorResponses, RegisterNetworkRelayData, RegisterNetworkRelayErrors, RegisterNetworkRelayResponses, RemoveAccessTeamMemberData, RemoveAccessTeamMemberErrors, RemoveAccessTeamMemberResponses, ReplaceAdministratorPasswordData, ReplaceAdministratorPasswordErrors, ReplaceAdministratorPasswordResponses, RevokeAdministratorSessionData, RevokeAdministratorSessionErrors, RevokeAdministratorSessionResponses, RevokeNetworkCertificateData, RevokeNetworkCertificateErrors, RevokeNetworkCertificateResponses, RevokeNodeData, RevokeNodeErrors, RevokeNodeResponses, RotateAdministratorSessionData, RotateAdministratorSessionErrors, RotateAdministratorSessionResponses, SetNodeCapabilitiesData, SetNodeCapabilitiesErrors, SetNodeCapabilitiesResponses, UpdateAccessUserData, UpdateAccessUserErrors, UpdateAccessUserResponses, UpdateAclRuleData, UpdateAclRuleErrors, UpdateAclRuleResponses, UpdateAdministratorData, UpdateAdministratorErrors, UpdateAdministratorResponses, UpdateRelayData, UpdateRelayErrors, UpdateRelayResponses, WithdrawRouteData, WithdrawRouteErrors, WithdrawRouteResponses } from './types.gen';
-import { zAddAccessTeamMemberPath, zAddAccessTeamMemberResponse, zApproveRoutePath, zApproveRouteResponse, zAssignRouteBody, zAssignRouteResponse, zBootstrapAdministratorBody, zBootstrapAdministratorResponse, zCreateAdministratorBody, zCreateAdministratorResponse, zCreateBootstrapBundleBody, zCreateBootstrapBundleResponse, zCreateNetworkAccessGrantBody, zCreateNetworkAccessGrantPath, zCreateNetworkAccessGrantResponse, zCreateNetworkAccessTeamBody, zCreateNetworkAccessTeamPath, zCreateNetworkAccessTeamResponse, zCreateNetworkAccessUserBody, zCreateNetworkAccessUserPath, zCreateNetworkAccessUserResponse, zCreateNetworkAclRuleBody, zCreateNetworkAclRulePath, zCreateNetworkAclRuleResponse, zCreateNetworkBody, zCreateNetworkResponse, zDeleteAccessGrantPath, zDeleteAccessGrantResponse, zDeleteAclRulePath, zDeleteAclRuleResponse, zDisableRelayPath, zDisableRelayResponse, zGetAdministratorAuthStateResponse, zGetAdministratorPath, zGetAdministratorResponse, zGetAdministratorSessionResponse, zGetNetworkAccessInventoryPath, zGetNetworkAccessInventoryResponse, zGetNetworkPath, zGetNetworkResponse, zIssueEnrollmentTokenBody, zIssueEnrollmentTokenResponse, zListAdministratorSessionsPath, zListAdministratorSessionsQuery, zListAdministratorSessionsResponse, zListAdministratorsQuery, zListAdministratorsResponse, zListGlobalAuditEventsQuery, zListGlobalAuditEventsResponse, zListNetworkAclRulesPath, zListNetworkAclRulesQuery, zListNetworkAclRulesResponse, zListNetworkAuditEventsPath, zListNetworkAuditEventsQuery, zListNetworkAuditEventsResponse, zListNetworkCertificatesPath, zListNetworkCertificatesQuery, zListNetworkCertificatesResponse, zListNetworkEndpointStatusesPath, zListNetworkEndpointStatusesQuery, zListNetworkEndpointStatusesResponse, zListNetworkNodesPath, zListNetworkNodesQuery, zListNetworkNodesResponse, zListNetworkRelaysPath, zListNetworkRelaysQuery, zListNetworkRelaysResponse, zListNetworkRoutesPath, zListNetworkRoutesQuery, zListNetworkRoutesResponse, zListNetworksQuery, zListNetworksResponse, zLoginAdministratorBody, zLoginAdministratorResponse, zLogoutAdministratorResponse, zPageGlobalAuditEventsQuery, zPageGlobalAuditEventsResponse, zPageNetworkAuditEventsPath, zPageNetworkAuditEventsQuery, zPageNetworkAuditEventsResponse, zRecoverAdministratorBody, zRecoverAdministratorResponse, zRegisterNetworkRelayBody, zRegisterNetworkRelayPath, zRegisterNetworkRelayResponse, zRemoveAccessTeamMemberPath, zRemoveAccessTeamMemberResponse, zReplaceAdministratorPasswordBody, zReplaceAdministratorPasswordPath, zReplaceAdministratorPasswordResponse, zRevokeAdministratorSessionBody, zRevokeAdministratorSessionPath, zRevokeAdministratorSessionResponse, zRevokeNetworkCertificateBody, zRevokeNetworkCertificatePath, zRevokeNetworkCertificateResponse, zRevokeNodeBody, zRevokeNodePath, zRevokeNodeResponse, zRotateAdministratorSessionResponse, zSetNodeCapabilitiesBody, zSetNodeCapabilitiesPath, zSetNodeCapabilitiesResponse, zUpdateAccessUserBody, zUpdateAccessUserPath, zUpdateAccessUserResponse, zUpdateAclRuleBody, zUpdateAclRulePath, zUpdateAclRuleResponse, zUpdateAdministratorBody, zUpdateAdministratorPath, zUpdateAdministratorResponse, zUpdateRelayBody, zUpdateRelayPath, zUpdateRelayResponse, zWithdrawRoutePath, zWithdrawRouteResponse } from './zod.gen';
+import type { AddAccessTeamMemberData, AddAccessTeamMemberErrors, AddAccessTeamMemberResponses, ApproveRouteData, ApproveRouteErrors, ApproveRouteResponses, AssignRouteData, AssignRouteErrors, AssignRouteResponses, BootstrapAdministratorData, BootstrapAdministratorErrors, BootstrapAdministratorResponses, CreateAdministratorData, CreateAdministratorErrors, CreateAdministratorResponses, CreateBootstrapBundleData, CreateBootstrapBundleErrors, CreateBootstrapBundleResponses, CreateNetworkAccessGrantData, CreateNetworkAccessGrantErrors, CreateNetworkAccessGrantResponses, CreateNetworkAccessResourceData, CreateNetworkAccessResourceErrors, CreateNetworkAccessResourceResponses, CreateNetworkAccessServiceData, CreateNetworkAccessServiceErrors, CreateNetworkAccessServiceResponses, CreateNetworkAccessTeamData, CreateNetworkAccessTeamErrors, CreateNetworkAccessTeamResponses, CreateNetworkAccessUserData, CreateNetworkAccessUserErrors, CreateNetworkAccessUserResponses, CreateNetworkAclRuleData, CreateNetworkAclRuleErrors, CreateNetworkAclRuleResponses, CreateNetworkData, CreateNetworkErrors, CreateNetworkResourceAccessGrantData, CreateNetworkResourceAccessGrantErrors, CreateNetworkResourceAccessGrantResponses, CreateNetworkResponses, DeleteAccessGrantData, DeleteAccessGrantErrors, DeleteAccessGrantResponses, DeleteAccessResourceGrantData, DeleteAccessResourceGrantErrors, DeleteAccessResourceGrantResponses, DeleteAclRuleData, DeleteAclRuleErrors, DeleteAclRuleResponses, DisableRelayData, DisableRelayErrors, DisableRelayResponses, GetAdministratorAuthStateData, GetAdministratorAuthStateErrors, GetAdministratorAuthStateResponses, GetAdministratorData, GetAdministratorErrors, GetAdministratorResponses, GetAdministratorSessionData, GetAdministratorSessionErrors, GetAdministratorSessionResponses, GetNetworkAccessInventoryData, GetNetworkAccessInventoryErrors, GetNetworkAccessInventoryResponses, GetNetworkData, GetNetworkErrors, GetNetworkResponses, IssueEnrollmentTokenData, IssueEnrollmentTokenErrors, IssueEnrollmentTokenResponses, ListAdministratorsData, ListAdministratorsErrors, ListAdministratorSessionsData, ListAdministratorSessionsErrors, ListAdministratorSessionsResponses, ListAdministratorsResponses, ListGlobalAuditEventsData, ListGlobalAuditEventsErrors, ListGlobalAuditEventsResponses, ListNetworkAclRulesData, ListNetworkAclRulesErrors, ListNetworkAclRulesResponses, ListNetworkAuditEventsData, ListNetworkAuditEventsErrors, ListNetworkAuditEventsResponses, ListNetworkCertificatesData, ListNetworkCertificatesErrors, ListNetworkCertificatesResponses, ListNetworkEndpointStatusesData, ListNetworkEndpointStatusesErrors, ListNetworkEndpointStatusesResponses, ListNetworkNodesData, ListNetworkNodesErrors, ListNetworkNodesResponses, ListNetworkRelaysData, ListNetworkRelaysErrors, ListNetworkRelaysResponses, ListNetworkRoutesData, ListNetworkRoutesErrors, ListNetworkRoutesResponses, ListNetworksData, ListNetworksErrors, ListNetworksResponses, LoginAdministratorData, LoginAdministratorErrors, LoginAdministratorResponses, LogoutAdministratorData, LogoutAdministratorErrors, LogoutAdministratorResponses, PageGlobalAuditEventsData, PageGlobalAuditEventsErrors, PageGlobalAuditEventsResponses, PageNetworkAuditEventsData, PageNetworkAuditEventsErrors, PageNetworkAuditEventsResponses, RecoverAdministratorData, RecoverAdministratorErrors, RecoverAdministratorResponses, RegisterNetworkRelayData, RegisterNetworkRelayErrors, RegisterNetworkRelayResponses, RemoveAccessTeamMemberData, RemoveAccessTeamMemberErrors, RemoveAccessTeamMemberResponses, ReplaceAdministratorPasswordData, ReplaceAdministratorPasswordErrors, ReplaceAdministratorPasswordResponses, RevokeAdministratorSessionData, RevokeAdministratorSessionErrors, RevokeAdministratorSessionResponses, RevokeNetworkCertificateData, RevokeNetworkCertificateErrors, RevokeNetworkCertificateResponses, RevokeNodeData, RevokeNodeErrors, RevokeNodeResponses, RotateAdministratorSessionData, RotateAdministratorSessionErrors, RotateAdministratorSessionResponses, SetNodeCapabilitiesData, SetNodeCapabilitiesErrors, SetNodeCapabilitiesResponses, UpdateAccessResourceData, UpdateAccessResourceErrors, UpdateAccessResourceResponses, UpdateAccessServiceData, UpdateAccessServiceErrors, UpdateAccessServiceResponses, UpdateAccessUserData, UpdateAccessUserErrors, UpdateAccessUserResponses, UpdateAclRuleData, UpdateAclRuleErrors, UpdateAclRuleResponses, UpdateAdministratorData, UpdateAdministratorErrors, UpdateAdministratorResponses, UpdateRelayData, UpdateRelayErrors, UpdateRelayResponses, WithdrawRouteData, WithdrawRouteErrors, WithdrawRouteResponses } from './types.gen';
+import { zAddAccessTeamMemberPath, zAddAccessTeamMemberResponse, zApproveRoutePath, zApproveRouteResponse, zAssignRouteBody, zAssignRouteResponse, zBootstrapAdministratorBody, zBootstrapAdministratorResponse, zCreateAdministratorBody, zCreateAdministratorResponse, zCreateBootstrapBundleBody, zCreateBootstrapBundleResponse, zCreateNetworkAccessGrantBody, zCreateNetworkAccessGrantPath, zCreateNetworkAccessGrantResponse, zCreateNetworkAccessResourceBody, zCreateNetworkAccessResourcePath, zCreateNetworkAccessResourceResponse, zCreateNetworkAccessServiceBody, zCreateNetworkAccessServicePath, zCreateNetworkAccessServiceResponse, zCreateNetworkAccessTeamBody, zCreateNetworkAccessTeamPath, zCreateNetworkAccessTeamResponse, zCreateNetworkAccessUserBody, zCreateNetworkAccessUserPath, zCreateNetworkAccessUserResponse, zCreateNetworkAclRuleBody, zCreateNetworkAclRulePath, zCreateNetworkAclRuleResponse, zCreateNetworkBody, zCreateNetworkResourceAccessGrantBody, zCreateNetworkResourceAccessGrantPath, zCreateNetworkResourceAccessGrantResponse, zCreateNetworkResponse, zDeleteAccessGrantPath, zDeleteAccessGrantResponse, zDeleteAccessResourceGrantPath, zDeleteAccessResourceGrantResponse, zDeleteAclRulePath, zDeleteAclRuleResponse, zDisableRelayPath, zDisableRelayResponse, zGetAdministratorAuthStateResponse, zGetAdministratorPath, zGetAdministratorResponse, zGetAdministratorSessionResponse, zGetNetworkAccessInventoryPath, zGetNetworkAccessInventoryResponse, zGetNetworkPath, zGetNetworkResponse, zIssueEnrollmentTokenBody, zIssueEnrollmentTokenResponse, zListAdministratorSessionsPath, zListAdministratorSessionsQuery, zListAdministratorSessionsResponse, zListAdministratorsQuery, zListAdministratorsResponse, zListGlobalAuditEventsQuery, zListGlobalAuditEventsResponse, zListNetworkAclRulesPath, zListNetworkAclRulesQuery, zListNetworkAclRulesResponse, zListNetworkAuditEventsPath, zListNetworkAuditEventsQuery, zListNetworkAuditEventsResponse, zListNetworkCertificatesPath, zListNetworkCertificatesQuery, zListNetworkCertificatesResponse, zListNetworkEndpointStatusesPath, zListNetworkEndpointStatusesQuery, zListNetworkEndpointStatusesResponse, zListNetworkNodesPath, zListNetworkNodesQuery, zListNetworkNodesResponse, zListNetworkRelaysPath, zListNetworkRelaysQuery, zListNetworkRelaysResponse, zListNetworkRoutesPath, zListNetworkRoutesQuery, zListNetworkRoutesResponse, zListNetworksQuery, zListNetworksResponse, zLoginAdministratorBody, zLoginAdministratorResponse, zLogoutAdministratorResponse, zPageGlobalAuditEventsQuery, zPageGlobalAuditEventsResponse, zPageNetworkAuditEventsPath, zPageNetworkAuditEventsQuery, zPageNetworkAuditEventsResponse, zRecoverAdministratorBody, zRecoverAdministratorResponse, zRegisterNetworkRelayBody, zRegisterNetworkRelayPath, zRegisterNetworkRelayResponse, zRemoveAccessTeamMemberPath, zRemoveAccessTeamMemberResponse, zReplaceAdministratorPasswordBody, zReplaceAdministratorPasswordPath, zReplaceAdministratorPasswordResponse, zRevokeAdministratorSessionBody, zRevokeAdministratorSessionPath, zRevokeAdministratorSessionResponse, zRevokeNetworkCertificateBody, zRevokeNetworkCertificatePath, zRevokeNetworkCertificateResponse, zRevokeNodeBody, zRevokeNodePath, zRevokeNodeResponse, zRotateAdministratorSessionResponse, zSetNodeCapabilitiesBody, zSetNodeCapabilitiesPath, zSetNodeCapabilitiesResponse, zUpdateAccessResourceBody, zUpdateAccessResourcePath, zUpdateAccessResourceResponse, zUpdateAccessServiceBody, zUpdateAccessServicePath, zUpdateAccessServiceResponse, zUpdateAccessUserBody, zUpdateAccessUserPath, zUpdateAccessUserResponse, zUpdateAclRuleBody, zUpdateAclRulePath, zUpdateAclRuleResponse, zUpdateAdministratorBody, zUpdateAdministratorPath, zUpdateAdministratorResponse, zUpdateRelayBody, zUpdateRelayPath, zUpdateRelayResponse, zWithdrawRoutePath, zWithdrawRouteResponse } from './zod.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -585,6 +585,109 @@ export const deleteAccessGrant = <ThrowOnError extends boolean = true>(options: 
     }).parseAsync(data),
     responseValidator: async (data) => await zDeleteAccessGrantResponse.parseAsync(data),
     url: '/v1/admin/access-grants/{grant_id}',
+});
+
+/**
+ * Create a named Node or routed-prefix resource.
+ *
+ * Prefix resources are pinned to one approved subnet route. If that route is no longer usable, every grant targeting the resource fails closed until an administrator deliberately repairs the mapping.
+ */
+export const createNetworkAccessResource = <ThrowOnError extends boolean = true>(options: Options<CreateNetworkAccessResourceData, ThrowOnError>): RequestResult<CreateNetworkAccessResourceResponses, CreateNetworkAccessResourceErrors, ThrowOnError> => options.client.post<CreateNetworkAccessResourceResponses, CreateNetworkAccessResourceErrors, ThrowOnError>({
+    ...options,
+    requestValidator: async (data) => await z.object({
+        body: zCreateNetworkAccessResourceBody,
+        path: zCreateNetworkAccessResourcePath,
+        query: z.never().optional()
+    }).parseAsync(data),
+    responseValidator: async (data) => await zCreateNetworkAccessResourceResponse.parseAsync(data),
+    url: '/v1/admin/networks/{network_id}/resources',
+    headers: {
+        'Content-Type': 'application/json',
+    }
+});
+
+/**
+ * Enable or disable a named resource and every grant that targets it.
+ */
+export const updateAccessResource = <ThrowOnError extends boolean = true>(options: Options<UpdateAccessResourceData, ThrowOnError>): RequestResult<UpdateAccessResourceResponses, UpdateAccessResourceErrors, ThrowOnError> => options.client.patch<UpdateAccessResourceResponses, UpdateAccessResourceErrors, ThrowOnError>({
+    ...options,
+    requestValidator: async (data) => await z.object({
+        body: zUpdateAccessResourceBody,
+        path: zUpdateAccessResourcePath,
+        query: z.never().optional()
+    }).parseAsync(data),
+    responseValidator: async (data) => await zUpdateAccessResourceResponse.parseAsync(data),
+    url: '/v1/admin/resources/{resource_id}',
+    headers: {
+        'Content-Type': 'application/json',
+    }
+});
+
+/**
+ * Create a named protocol and destination-port selector.
+ *
+ * TCP and UDP require at least one explicit port range. Other protocols forbid ranges. Overlapping and adjacent ranges are stored and returned in canonical merged order.
+ */
+export const createNetworkAccessService = <ThrowOnError extends boolean = true>(options: Options<CreateNetworkAccessServiceData, ThrowOnError>): RequestResult<CreateNetworkAccessServiceResponses, CreateNetworkAccessServiceErrors, ThrowOnError> => options.client.post<CreateNetworkAccessServiceResponses, CreateNetworkAccessServiceErrors, ThrowOnError>({
+    ...options,
+    requestValidator: async (data) => await z.object({
+        body: zCreateNetworkAccessServiceBody,
+        path: zCreateNetworkAccessServicePath,
+        query: z.never().optional()
+    }).parseAsync(data),
+    responseValidator: async (data) => await zCreateNetworkAccessServiceResponse.parseAsync(data),
+    url: '/v1/admin/networks/{network_id}/services',
+    headers: {
+        'Content-Type': 'application/json',
+    }
+});
+
+/**
+ * Enable or disable a named service and every grant that uses it.
+ */
+export const updateAccessService = <ThrowOnError extends boolean = true>(options: Options<UpdateAccessServiceData, ThrowOnError>): RequestResult<UpdateAccessServiceResponses, UpdateAccessServiceErrors, ThrowOnError> => options.client.patch<UpdateAccessServiceResponses, UpdateAccessServiceErrors, ThrowOnError>({
+    ...options,
+    requestValidator: async (data) => await z.object({
+        body: zUpdateAccessServiceBody,
+        path: zUpdateAccessServicePath,
+        query: z.never().optional()
+    }).parseAsync(data),
+    responseValidator: async (data) => await zUpdateAccessServiceResponse.parseAsync(data),
+    url: '/v1/admin/services/{service_id}',
+    headers: {
+        'Content-Type': 'application/json',
+    }
+});
+
+/**
+ * Grant a network-scoped User or Team one named Resource and Service.
+ */
+export const createNetworkResourceAccessGrant = <ThrowOnError extends boolean = true>(options: Options<CreateNetworkResourceAccessGrantData, ThrowOnError>): RequestResult<CreateNetworkResourceAccessGrantResponses, CreateNetworkResourceAccessGrantErrors, ThrowOnError> => options.client.post<CreateNetworkResourceAccessGrantResponses, CreateNetworkResourceAccessGrantErrors, ThrowOnError>({
+    ...options,
+    requestValidator: async (data) => await z.object({
+        body: zCreateNetworkResourceAccessGrantBody,
+        path: zCreateNetworkResourceAccessGrantPath,
+        query: z.never().optional()
+    }).parseAsync(data),
+    responseValidator: async (data) => await zCreateNetworkResourceAccessGrantResponse.parseAsync(data),
+    url: '/v1/admin/networks/{network_id}/resource-access-grants',
+    headers: {
+        'Content-Type': 'application/json',
+    }
+});
+
+/**
+ * Delete a named-resource access grant.
+ */
+export const deleteAccessResourceGrant = <ThrowOnError extends boolean = true>(options: Options<DeleteAccessResourceGrantData, ThrowOnError>): RequestResult<DeleteAccessResourceGrantResponses, DeleteAccessResourceGrantErrors, ThrowOnError> => options.client.delete<DeleteAccessResourceGrantResponses, DeleteAccessResourceGrantErrors, ThrowOnError>({
+    ...options,
+    requestValidator: async (data) => await z.object({
+        body: z.never().optional(),
+        path: zDeleteAccessResourceGrantPath,
+        query: z.never().optional()
+    }).parseAsync(data),
+    responseValidator: async (data) => await zDeleteAccessResourceGrantResponse.parseAsync(data),
+    url: '/v1/admin/resource-access-grants/{grant_id}',
 });
 
 /**

@@ -38,7 +38,7 @@ and cannot be combined with `limit`.
 
 ## Current route inventory
 
-The contract contains exactly 54 operations:
+The contract contains exactly 60 operations:
 
 | Method | Path | Access class |
 | --- | --- | --- |
@@ -82,18 +82,16 @@ The contract contains exactly 54 operations:
 | `DELETE` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
 | `POST` | `/v1/admin/networks/{network_id}/access-grants` | Protected mutation |
 | `DELETE` | `/v1/admin/access-grants/{grant_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/resources` | Protected mutation |
+| `PATCH` | `/v1/admin/resources/{resource_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/services` | Protected mutation |
+| `PATCH` | `/v1/admin/services/{service_id}` | Protected mutation |
+| `POST` | `/v1/admin/networks/{network_id}/resource-access-grants` | Protected mutation |
+| `DELETE` | `/v1/admin/resource-access-grants/{grant_id}` | Protected mutation |
 | `GET` | `/v1/admin/networks/{network_id}/certificates` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/routes` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/audit` | Safe protected read |
 | `GET` | `/v1/admin/networks/{network_id}/audit/page` | Safe protected read |
-| `GET` | `/v1/admin/networks/{network_id}/access-subjects` | Safe protected read |
-| `POST` | `/v1/admin/networks/{network_id}/users` | Protected mutation |
-| `PATCH` | `/v1/admin/users/{user_id}` | Protected mutation |
-| `POST` | `/v1/admin/networks/{network_id}/teams` | Protected mutation |
-| `PUT` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
-| `DELETE` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
-| `POST` | `/v1/admin/networks/{network_id}/access-grants` | Protected mutation |
-| `DELETE` | `/v1/admin/access-grants/{grant_id}` | Protected mutation |
 | `POST` | `/v1/admin/networks/{network_id}/certificates/{serial}/revoke` | Protected mutation |
 | `POST` | `/v1/admin/routes/assign` | Protected mutation |
 | `POST` | `/v1/admin/routes/{route_id}/approve` | Protected mutation |

@@ -66,6 +66,12 @@ func TestAdminNetworkManagementAuthValidationAndBodyLimit(t *testing.T) {
 		{http.MethodPut, "/v1/admin/nodes/not-an-id/capabilities"},
 		{http.MethodPost, "/v1/admin/networks/not-an-id/relays"},
 		{http.MethodPost, "/v1/admin/relays/not-an-id/disable"},
+		{http.MethodPost, "/v1/admin/networks/not-an-id/resources"},
+		{http.MethodPatch, "/v1/admin/resources/not-an-id"},
+		{http.MethodPost, "/v1/admin/networks/not-an-id/services"},
+		{http.MethodPatch, "/v1/admin/services/not-an-id"},
+		{http.MethodPost, "/v1/admin/networks/not-an-id/resource-access-grants"},
+		{http.MethodDelete, "/v1/admin/resource-access-grants/not-an-id"},
 	} {
 		denied := jsonRequest(t, f.service.Handler(), endpoint.method, endpoint.path, nil)
 		if denied.Code != http.StatusUnauthorized {
@@ -300,6 +306,93 @@ func TestAccessSubjectManagementLifecycle(t *testing.T) {
 	}
 	if result := jsonRequest(t, handler, http.MethodDelete, memberPath, nil); result.Code != http.StatusOK {
 		t.Fatalf("remove team member status=%d body=%s", result.Code, result.Body.String())
+	}
+}
+
+func TestNamedAccessResourceManagementLifecycle(t *testing.T) {
+	f := newFixture(t, 0, nil)
+	handler := f.service.Handler()
+	createdUser := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/users",
+		createAccessSubjectRequest{Name: "Morgan"})
+	if createdUser.Code != http.StatusCreated {
+		t.Fatalf("create user status=%d body=%s", createdUser.Code, createdUser.Body.String())
+	}
+	var user accessUserResponse
+	decodeJSONResponse(t, createdUser, &user)
+	token, err := f.store.IssueEnrollmentToken(context.Background(), f.network.ID, "named-target", time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := f.store.EnrollNode(context.Background(), token.Secret, "named-target", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createdResource := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/resources",
+		createAccessResourceRequest{Name: "Admin console", TargetKind: "node", NodeID: target.ID.String()})
+	if createdResource.Code != http.StatusCreated {
+		t.Fatalf("create resource status=%d body=%s", createdResource.Code, createdResource.Body.String())
+	}
+	var resource accessResourceResponse
+	decodeJSONResponse(t, createdResource, &resource)
+	if resource.Name != "Admin console" || resource.TargetKind != "node" || resource.NodeID != target.ID.String() || !resource.Enabled {
+		t.Fatalf("created resource=%+v", resource)
+	}
+
+	createdService := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/services",
+		createAccessServiceRequest{Name: "HTTPS", Protocol: "tcp", Ports: json.RawMessage(`[{"first":444,"last":445},{"first":443,"last":443}]`)})
+	if createdService.Code != http.StatusCreated {
+		t.Fatalf("create service status=%d body=%s", createdService.Code, createdService.Body.String())
+	}
+	var service accessServiceResponse
+	decodeJSONResponse(t, createdService, &service)
+	if service.Protocol != "tcp" || len(service.Ports) != 1 || service.Ports[0].First != 443 || service.Ports[0].Last != 445 || !service.Enabled {
+		t.Fatalf("created service=%+v", service)
+	}
+	invalidService := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/services",
+		createAccessServiceRequest{Name: "Bad", Protocol: "icmp", Ports: json.RawMessage(`[{"first":8,"last":8}]`)})
+	if invalidService.Code != http.StatusBadRequest {
+		t.Fatalf("invalid service status=%d body=%s", invalidService.Code, invalidService.Body.String())
+	}
+	for name, body := range map[string]any{
+		"missing": map[string]any{"name": "Missing ports", "protocol": "tcp"},
+		"null":    map[string]any{"name": "Null ports", "protocol": "tcp", "ports": nil},
+		"empty":   map[string]any{"name": "Empty ports", "protocol": "tcp", "ports": []any{}},
+	} {
+		result := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/services", body)
+		if result.Code != http.StatusBadRequest {
+			t.Fatalf("%s TCP ports status=%d body=%s", name, result.Code, result.Body.String())
+		}
+	}
+
+	createdGrant := jsonRequest(t, handler, http.MethodPost, "/v1/admin/networks/"+f.network.ID.String()+"/resource-access-grants",
+		createAccessResourceGrantRequest{SubjectKind: "user", SubjectID: user.UserID, ResourceID: resource.ResourceID, ServiceID: service.ServiceID})
+	if createdGrant.Code != http.StatusCreated {
+		t.Fatalf("create resource grant status=%d body=%s", createdGrant.Code, createdGrant.Body.String())
+	}
+	var grant accessResourceGrantResponse
+	decodeJSONResponse(t, createdGrant, &grant)
+	if grant.SubjectID != user.UserID || grant.ResourceID != resource.ResourceID || grant.ServiceID != service.ServiceID {
+		t.Fatalf("created resource grant=%+v", grant)
+	}
+
+	inventoryResult := jsonRequest(t, handler, http.MethodGet, "/v1/admin/networks/"+f.network.ID.String()+"/access-subjects", nil)
+	if inventoryResult.Code != http.StatusOK {
+		t.Fatalf("access inventory status=%d body=%s", inventoryResult.Code, inventoryResult.Body.String())
+	}
+	var inventory accessInventoryResponse
+	decodeJSONResponse(t, inventoryResult, &inventory)
+	if len(inventory.Resources) != 1 || len(inventory.Services) != 1 || len(inventory.ResourceGrants) != 1 {
+		t.Fatalf("named access inventory=%+v", inventory)
+	}
+
+	disabled := false
+	if result := jsonRequest(t, handler, http.MethodPatch, "/v1/admin/resources/"+resource.ResourceID,
+		updateAccessSelectorRequest{Enabled: &disabled}); result.Code != http.StatusOK {
+		t.Fatalf("disable resource status=%d body=%s", result.Code, result.Body.String())
+	}
+	if result := jsonRequest(t, handler, http.MethodDelete, "/v1/admin/resource-access-grants/"+grant.GrantID, nil); result.Code != http.StatusOK {
+		t.Fatalf("delete resource grant status=%d body=%s", result.Code, result.Body.String())
 	}
 }
 

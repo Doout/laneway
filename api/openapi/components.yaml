@@ -477,6 +477,51 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/AccessGrant'
+    AccessResource:
+      description: Stable named Node or routed-prefix access target.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessResource'
+    AccessService:
+      description: Stable named protocol and destination-port selector.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessService'
+    AccessResourceGrant:
+      description: User or Team grant for one named Resource and Service.
+      headers:
+        X-Laneway-Session-ID:
+          $ref: '#/components/headers/SessionIDOptional'
+        X-Laneway-Session-Idle-Expires-At:
+          $ref: '#/components/headers/SessionIdleExpiresAtOptional'
+        X-Laneway-Session-Absolute-Expires-At:
+          $ref: '#/components/headers/SessionAbsoluteExpiresAtOptional'
+        X-Laneway-Request-ID:
+          $ref: '#/components/headers/RequestID'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AccessResourceGrant'
     Relays:
       description: Bounded relay snapshot.
       headers:
@@ -1376,7 +1421,7 @@ components:
     AccessInventory:
       type: object
       additionalProperties: false
-      required: [users, teams, memberships, grants]
+      required: [users, teams, memberships, grants, resources, services, resource_grants]
       properties:
         users:
           type: array
@@ -1394,6 +1439,18 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/AccessGrant'
+        resources:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessResource'
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessService'
+        resource_grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessResourceGrant'
     CreateAccessSubjectRequest:
       type: object
       additionalProperties: false
@@ -1433,6 +1490,183 @@ components:
                   enum: [node, exit]
                 node_id:
                   $ref: '#/components/schemas/Identifier'
+    AccessResourceTargetKind:
+      type: string
+      enum: [node, prefix]
+    AccessServiceProtocol:
+      type: string
+      enum: [any, tcp, udp, icmp, icmpv6]
+    AccessServicePortRange:
+      type: object
+      additionalProperties: false
+      required: [first, last]
+      properties:
+        first:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        last:
+          type: integer
+          minimum: 1
+          maximum: 65535
+      description: first must be less than or equal to last.
+    AccessResource:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [resource_id, network_id, name, target_kind, node_id, enabled, created_at_unix_seconds, updated_at_unix_seconds]
+          properties:
+            resource_id:
+              $ref: '#/components/schemas/Identifier'
+            network_id:
+              $ref: '#/components/schemas/Identifier'
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: node
+            node_id:
+              $ref: '#/components/schemas/Identifier'
+            enabled:
+              type: boolean
+            created_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+            updated_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+        - type: object
+          additionalProperties: false
+          required: [resource_id, network_id, name, target_kind, route_id, prefix, enabled, created_at_unix_seconds, updated_at_unix_seconds]
+          properties:
+            resource_id:
+              $ref: '#/components/schemas/Identifier'
+            network_id:
+              $ref: '#/components/schemas/Identifier'
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: prefix
+            route_id:
+              $ref: '#/components/schemas/Identifier'
+            prefix:
+              type: string
+              description: Canonical non-default IPv4 or IPv6 prefix inside the pinned route.
+            enabled:
+              type: boolean
+            created_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+            updated_at_unix_seconds:
+              $ref: '#/components/schemas/UnixSeconds'
+    AccessService:
+      type: object
+      additionalProperties: false
+      required: [service_id, network_id, name, protocol, ports, enabled, created_at_unix_seconds, updated_at_unix_seconds]
+      properties:
+        service_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        name:
+          $ref: '#/components/schemas/ResourceName'
+        protocol:
+          $ref: '#/components/schemas/AccessServiceProtocol'
+        ports:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessServicePortRange'
+        enabled:
+          type: boolean
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+        updated_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    AccessResourceGrant:
+      type: object
+      additionalProperties: false
+      required: [grant_id, network_id, subject_kind, subject_id, resource_id, service_id, created_at_unix_seconds]
+      properties:
+        grant_id:
+          $ref: '#/components/schemas/Identifier'
+        network_id:
+          $ref: '#/components/schemas/Identifier'
+        subject_kind:
+          $ref: '#/components/schemas/AccessSubjectKind'
+        subject_id:
+          $ref: '#/components/schemas/Identifier'
+        resource_id:
+          $ref: '#/components/schemas/Identifier'
+        service_id:
+          $ref: '#/components/schemas/Identifier'
+        created_at_unix_seconds:
+          $ref: '#/components/schemas/UnixSeconds'
+    CreateAccessResourceRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [name, target_kind, node_id]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: node
+            node_id:
+              $ref: '#/components/schemas/Identifier'
+        - type: object
+          additionalProperties: false
+          required: [name, target_kind, route_id, prefix]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            target_kind:
+              const: prefix
+            route_id:
+              $ref: '#/components/schemas/Identifier'
+            prefix:
+              type: string
+    UpdateAccessSelectorRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    CreateAccessServiceRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [name, protocol, ports]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            protocol:
+              type: string
+              enum: [tcp, udp]
+            ports:
+              type: array
+              minItems: 1
+              maxItems: 256
+              items:
+                $ref: '#/components/schemas/AccessServicePortRange'
+        - type: object
+          additionalProperties: false
+          required: [name, protocol]
+          properties:
+            name:
+              $ref: '#/components/schemas/ResourceName'
+            protocol:
+              type: string
+              enum: [any, icmp, icmpv6]
+    CreateAccessResourceGrantRequest:
+      type: object
+      additionalProperties: false
+      required: [subject_kind, subject_id, resource_id, service_id]
+      properties:
+        subject_kind:
+          $ref: '#/components/schemas/AccessSubjectKind'
+        subject_id:
+          $ref: '#/components/schemas/Identifier'
+        resource_id:
+          $ref: '#/components/schemas/Identifier'
+        service_id:
+          $ref: '#/components/schemas/Identifier'
     RelayEndpoint:
       type: string
       description: >-

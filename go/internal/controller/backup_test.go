@@ -18,6 +18,7 @@ import (
 
 	"github.com/Doout/laneway/go/internal/adminauth"
 	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/protocol"
 )
 
 func TestBackupAndFreshRestore(t *testing.T) {
@@ -487,6 +488,209 @@ func TestRestoreRejectsEndpointStatusTTLViolation(t *testing.T) {
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("tampered endpoint TTL restore published destination: %v", err)
+	}
+}
+
+func TestRestoreRejectsMissingNamedAccessPolicyTables(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	for _, table := range []string{"access_resources", "access_services", "access_service_ports", "access_resource_grants"} {
+		t.Run(table, func(t *testing.T) {
+			directory := t.TempDir()
+			source := filepath.Join(directory, "missing.db")
+			if err := store.Backup(ctx, source); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`PRAGMA foreign_keys=OFF; DROP TABLE ` + table); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(directory, "restored.db")
+			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "required table "+table+" is missing") {
+				t.Fatalf("missing %s restore error=%v", table, err)
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("missing-table restore published destination: %v", err)
+			}
+		})
+	}
+}
+
+func TestRestoreRejectsWeakenedNamedAccessPolicySchema(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, _ := openTestStore(t)
+	source := filepath.Join(directory, "weakened-access.db")
+	if err := store.Backup(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var definition string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_schema WHERE type='table' AND name='access_resources'`).Scan(&definition); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	weakened := strings.Replace(definition, "target_kind TEXT NOT NULL CHECK(target_kind IN ('node','prefix'))", "target_kind TEXT NOT NULL", 1)
+	if weakened == definition {
+		db.Close()
+		t.Fatal("fixture did not find resource target constraint")
+	}
+	if _, err := db.Exec(`PRAGMA writable_schema=ON; UPDATE sqlite_schema SET sql=? WHERE type='table' AND name='access_resources'; PRAGMA writable_schema=OFF`, weakened); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "restored.db")
+	if err := RestoreDatabase(ctx, source, destination); err == nil ||
+		!strings.Contains(err.Error(), fmt.Sprintf("access policy schema does not match the canonical v%d definition", currentSchemaVersion)) {
+		t.Fatalf("weakened access restore error=%v", err)
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("weakened access restore published destination: %v", err)
+	}
+}
+
+func TestRestoreRejectsMissingNamedAccessPolicyGuardTriggers(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	for _, trigger := range []string{
+		"routes_identity_immutable",
+		"access_services_staged_insert",
+		"access_services_seal",
+		"access_service_ports_staged_insert",
+		"access_service_ports_immutable_update",
+		"access_service_ports_immutable_delete",
+	} {
+		t.Run(trigger, func(t *testing.T) {
+			directory := t.TempDir()
+			source := filepath.Join(directory, "missing-trigger.db")
+			if err := store.Backup(ctx, source); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`DROP TRIGGER ` + trigger); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(directory, "restored.db")
+			if err := RestoreDatabase(ctx, source, destination); err == nil ||
+				!strings.Contains(err.Error(), fmt.Sprintf("access policy schema does not match the canonical v%d definition", currentSchemaVersion)) {
+				t.Fatalf("missing trigger %s restore error=%v", trigger, err)
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("missing-trigger restore published destination: %v", err)
+			}
+		})
+	}
+}
+
+func TestRestoreRejectsNamedAccessPolicyDataTamperingWithRestoredGuards(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	network := resourceTestNetwork(t, store, "backup-named-access", "10.92.0.0/24")
+	firstConnector := resourceTestNode(t, store, network.ID, "backup-first-connector", protocol.CapabilitySubnetRouterV1)
+	secondConnector := resourceTestNode(t, store, network.ID, "backup-second-connector", protocol.CapabilitySubnetRouterV1)
+	route, err := store.AdvertiseRoute(ctx, firstConnector.ID, netip.MustParsePrefix("10.242.0.0/24"), RouteKindSubnet, RouteModeNAT, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApproveRoute(ctx, route.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AdministratorCreateAccessResource(ctx,
+		administratorRootDecision(t, store, administratorAccessResourceCreatePolicy, adminauth.NetworkTarget(network.ID)),
+		network.ID, "Backup database", AccessResourceTargetPrefix, nil, &route.ID, netip.MustParsePrefix("10.242.0.9/32")); err != nil {
+		t.Fatal(err)
+	}
+	service, _, err := store.AdministratorCreateAccessService(ctx,
+		administratorRootDecision(t, store, administratorAccessServiceCreatePolicy, adminauth.NetworkTarget(network.ID)),
+		network.ID, "Backup HTTPS", AccessServiceTCP, []AccessPortRange{{First: 443, Last: 443}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		trigger  string
+		mutation string
+		args     []any
+		want     string
+	}{
+		{name: "missing service ports", trigger: "access_service_ports_immutable_delete",
+			mutation: `DELETE FROM access_service_ports WHERE service_id=?`, args: []any{idBytes(service.ID)}, want: "service ports are missing or non-canonical"},
+		{name: "retargeted route", trigger: "routes_identity_immutable",
+			mutation: `UPDATE routes SET node_id=? WHERE id=?`, args: []any{idBytes(secondConnector.ID), idBytes(route.ID)}, want: "pinned route target changed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			source := filepath.Join(directory, "tampered.db")
+			if err := store.Backup(ctx, source); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			var definition string
+			if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?`, test.trigger).Scan(&definition); err != nil {
+				tx.Rollback()
+				db.Close()
+				t.Fatal(err)
+			}
+			if _, err := tx.ExecContext(ctx, `DROP TRIGGER `+test.trigger); err != nil {
+				tx.Rollback()
+				db.Close()
+				t.Fatal(err)
+			}
+			if _, err := tx.ExecContext(ctx, test.mutation, test.args...); err != nil {
+				tx.Rollback()
+				db.Close()
+				t.Fatal(err)
+			}
+			if _, err := tx.ExecContext(ctx, definition); err != nil {
+				tx.Rollback()
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(directory, "restored.db")
+			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("tampered restore error=%v want %q", err, test.want)
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("tampered restore published destination: %v", err)
+			}
+		})
 	}
 }
 

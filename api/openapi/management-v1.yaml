@@ -781,6 +781,158 @@ paths:
           $ref: './components.yaml#/components/responses/Epoch'
         default:
           $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/resources:
+    post:
+      operationId: createNetworkAccessResource
+      tags: [Access]
+      summary: Create a named Node or routed-prefix resource.
+      description: >-
+        Prefix resources are pinned to one approved subnet route. If that
+        route is no longer usable, every grant targeting the resource fails
+        closed until an administrator deliberately repairs the mapping.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessResourceRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessResource'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/resources/{resource_id}:
+    patch:
+      operationId: updateAccessResource
+      tags: [Access]
+      summary: Enable or disable a named resource and every grant that targets it.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - name: resource_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/UpdateAccessSelectorRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AccessResource'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/services:
+    post:
+      operationId: createNetworkAccessService
+      tags: [Access]
+      summary: Create a named protocol and destination-port selector.
+      description: >-
+        TCP and UDP require at least one explicit port range. Other protocols
+        forbid ranges. Overlapping and adjacent ranges are stored and returned
+        in canonical merged order.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessServiceRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessService'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/services/{service_id}:
+    patch:
+      operationId: updateAccessService
+      tags: [Access]
+      summary: Enable or disable a named service and every grant that uses it.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - name: service_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/UpdateAccessSelectorRequest'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/AccessService'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/resource-access-grants:
+    post:
+      operationId: createNetworkResourceAccessGrant
+      tags: [Access]
+      summary: Grant a network-scoped User or Team one named Resource and Service.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/CreateAccessResourceGrantRequest'
+      responses:
+        '201':
+          $ref: './components.yaml#/components/responses/AccessResourceGrant'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/resource-access-grants/{grant_id}:
+    delete:
+      operationId: deleteAccessResourceGrant
+      tags: [Access]
+      summary: Delete a named-resource access grant.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          $ref: './components.yaml#/components/responses/Epoch'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
   /v1/admin/networks/{network_id}/certificates:
     get:
       operationId: listNetworkCertificates

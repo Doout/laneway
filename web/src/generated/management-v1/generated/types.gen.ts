@@ -37,7 +37,73 @@ export type AccessInventory = {
     teams: Array<AccessTeam>;
     memberships: Array<AccessTeamMember>;
     grants: Array<AccessGrant>;
+    resources: Array<AccessResource>;
+    services: Array<AccessService>;
+    resource_grants: Array<AccessResourceGrant>;
 };
+
+export type AccessResource = {
+    resource_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    target_kind: 'node';
+    node_id: Identifier;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+} | {
+    resource_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    target_kind: 'prefix';
+    route_id: Identifier;
+    /**
+     * Canonical non-default IPv4 or IPv6 prefix inside the pinned route.
+     */
+    prefix: string;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+export type AccessResourceGrant = {
+    grant_id: Identifier;
+    network_id: Identifier;
+    subject_kind: AccessSubjectKind;
+    subject_id: Identifier;
+    resource_id: Identifier;
+    service_id: Identifier;
+    created_at_unix_seconds: UnixSeconds;
+};
+
+export type AccessService = {
+    service_id: Identifier;
+    network_id: Identifier;
+    name: ResourceName;
+    protocol: AccessServiceProtocol;
+    ports: Array<AccessServicePortRange>;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+/**
+ * first must be less than or equal to last.
+ */
+export type AccessServicePortRange = {
+    first: number;
+    last: number;
+};
+
+export const AccessServiceProtocol = {
+    ANY: 'any',
+    TCP: 'tcp',
+    UDP: 'udp',
+    ICMP: 'icmp',
+    ICMPV6: 'icmpv6'
+} as const;
+
+export type AccessServiceProtocol = typeof AccessServiceProtocol[keyof typeof AccessServiceProtocol];
 
 export const AccessSubjectKind = { USER: 'user', TEAM: 'team' } as const;
 
@@ -315,6 +381,33 @@ export type CreateAccessGrantRequest = ({
     subject_id: Identifier;
     target_kind: AccessTargetKind;
     node_id?: Identifier;
+};
+
+export type CreateAccessResourceGrantRequest = {
+    subject_kind: AccessSubjectKind;
+    subject_id: Identifier;
+    resource_id: Identifier;
+    service_id: Identifier;
+};
+
+export type CreateAccessResourceRequest = {
+    name: ResourceName;
+    target_kind: 'node';
+    node_id: Identifier;
+} | {
+    name: ResourceName;
+    target_kind: 'prefix';
+    route_id: Identifier;
+    prefix: string;
+};
+
+export type CreateAccessServiceRequest = {
+    name: ResourceName;
+    protocol: 'tcp' | 'udp';
+    ports: Array<AccessServicePortRange>;
+} | {
+    name: ResourceName;
+    protocol: 'any' | 'icmp' | 'icmpv6';
 };
 
 export type CreateAccessSubjectRequest = {
@@ -816,6 +909,10 @@ export type UpdateAclRuleRequest = {
      * Omission or null resets enabled to false.
      */
     enabled?: boolean | null;
+};
+
+export type UpdateAccessSelectorRequest = {
+    enabled: boolean;
 };
 
 export type UpdateAccessUserRequest = {
@@ -1845,6 +1942,168 @@ export type DeleteAccessGrantResponses = {
 };
 
 export type DeleteAccessGrantResponse = DeleteAccessGrantResponses[keyof DeleteAccessGrantResponses];
+
+export type CreateNetworkAccessResourceData = {
+    body: CreateAccessResourceRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/resources';
+};
+
+export type CreateNetworkAccessResourceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkAccessResourceError = CreateNetworkAccessResourceErrors[keyof CreateNetworkAccessResourceErrors];
+
+export type CreateNetworkAccessResourceResponses = {
+    /**
+     * Stable named Node or routed-prefix access target.
+     */
+    201: AccessResource;
+};
+
+export type CreateNetworkAccessResourceResponse = CreateNetworkAccessResourceResponses[keyof CreateNetworkAccessResourceResponses];
+
+export type UpdateAccessResourceData = {
+    body: UpdateAccessSelectorRequest;
+    path: {
+        resource_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/resources/{resource_id}';
+};
+
+export type UpdateAccessResourceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type UpdateAccessResourceError = UpdateAccessResourceErrors[keyof UpdateAccessResourceErrors];
+
+export type UpdateAccessResourceResponses = {
+    /**
+     * Stable named Node or routed-prefix access target.
+     */
+    200: AccessResource;
+};
+
+export type UpdateAccessResourceResponse = UpdateAccessResourceResponses[keyof UpdateAccessResourceResponses];
+
+export type CreateNetworkAccessServiceData = {
+    body: CreateAccessServiceRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/services';
+};
+
+export type CreateNetworkAccessServiceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkAccessServiceError = CreateNetworkAccessServiceErrors[keyof CreateNetworkAccessServiceErrors];
+
+export type CreateNetworkAccessServiceResponses = {
+    /**
+     * Stable named protocol and destination-port selector.
+     */
+    201: AccessService;
+};
+
+export type CreateNetworkAccessServiceResponse = CreateNetworkAccessServiceResponses[keyof CreateNetworkAccessServiceResponses];
+
+export type UpdateAccessServiceData = {
+    body: UpdateAccessSelectorRequest;
+    path: {
+        service_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/services/{service_id}';
+};
+
+export type UpdateAccessServiceErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type UpdateAccessServiceError = UpdateAccessServiceErrors[keyof UpdateAccessServiceErrors];
+
+export type UpdateAccessServiceResponses = {
+    /**
+     * Stable named protocol and destination-port selector.
+     */
+    200: AccessService;
+};
+
+export type UpdateAccessServiceResponse = UpdateAccessServiceResponses[keyof UpdateAccessServiceResponses];
+
+export type CreateNetworkResourceAccessGrantData = {
+    body: CreateAccessResourceGrantRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/resource-access-grants';
+};
+
+export type CreateNetworkResourceAccessGrantErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNetworkResourceAccessGrantError = CreateNetworkResourceAccessGrantErrors[keyof CreateNetworkResourceAccessGrantErrors];
+
+export type CreateNetworkResourceAccessGrantResponses = {
+    /**
+     * User or Team grant for one named Resource and Service.
+     */
+    201: AccessResourceGrant;
+};
+
+export type CreateNetworkResourceAccessGrantResponse = CreateNetworkResourceAccessGrantResponses[keyof CreateNetworkResourceAccessGrantResponses];
+
+export type DeleteAccessResourceGrantData = {
+    body?: never;
+    path: {
+        grant_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/resource-access-grants/{grant_id}';
+};
+
+export type DeleteAccessResourceGrantErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type DeleteAccessResourceGrantError = DeleteAccessResourceGrantErrors[keyof DeleteAccessResourceGrantErrors];
+
+export type DeleteAccessResourceGrantResponses = {
+    /**
+     * Updated network configuration epoch.
+     */
+    200: Epoch;
+};
+
+export type DeleteAccessResourceGrantResponse = DeleteAccessResourceGrantResponses[keyof DeleteAccessResourceGrantResponses];
 
 export type ListNetworkCertificatesData = {
     body?: never;

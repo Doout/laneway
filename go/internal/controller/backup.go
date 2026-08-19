@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -283,6 +285,9 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	if version >= endpointStatusSchemaVersion {
 		requiredTables = append(requiredTables, "endpoint_status_latest")
 	}
+	if version >= namedAccessSchemaVersion {
+		requiredTables = append(requiredTables, "access_resources", "access_services", "access_service_ports", "access_resource_grants")
+	}
 	if version >= 8 {
 		requiredTables = append(requiredTables, "administrator_principals", "administrator_principal_networks",
 			"administrator_credentials", "administrator_sessions", "administrator_recovery_grants", "administrator_auth_state")
@@ -313,6 +318,16 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 			return errors.New("backup endpoint status TTL is corrupt")
 		}
 	}
+	if version >= 11 {
+		if err := validateAccessPolicyBackupSchema(ctx, db, version); err != nil {
+			return err
+		}
+	}
+	if version >= namedAccessSchemaVersion {
+		if err := validateNamedAccessPolicyData(ctx, db); err != nil {
+			return err
+		}
+	}
 	if version >= 8 {
 		if err := validateAdministratorBackupSchema(ctx, db, version); err != nil {
 			return err
@@ -330,6 +345,203 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 		return fmt.Errorf("read SQLite foreign-key check: %w", err)
 	}
 	return nil
+}
+
+var accessPolicySchemaTables = map[string]struct{}{
+	"acl_rules":              {},
+	"access_users":           {},
+	"access_teams":           {},
+	"access_team_members":    {},
+	"access_grants":          {},
+	"access_resources":       {},
+	"access_services":        {},
+	"access_service_ports":   {},
+	"access_resource_grants": {},
+	"enrollment_tokens":      {},
+	"nodes":                  {},
+	"routes":                 {},
+}
+
+func validateAccessPolicyBackupSchema(ctx context.Context, db *sql.DB, version int) error {
+	want, wantObjects, err := expectedAccessPolicySchemaFingerprint(ctx, version)
+	if err != nil {
+		return fmt.Errorf("build canonical access policy schema: %w", err)
+	}
+	got, gotObjects, err := schemaFingerprintForTables(ctx, db, accessPolicySchemaTables)
+	if err != nil {
+		return fmt.Errorf("fingerprint backup access policy schema: %w", err)
+	}
+	if gotObjects != wantObjects || got != want {
+		return fmt.Errorf("backup schema is incomplete: access policy schema does not match the canonical v%d definition", version)
+	}
+	return nil
+}
+
+func expectedAccessPolicySchemaFingerprint(ctx context.Context, version int) ([sha256.Size]byte, int, error) {
+	if version < 11 || version > currentSchemaVersion {
+		return [sha256.Size]byte{}, 0, fmt.Errorf("unsupported access policy schema version %d", version)
+	}
+	reference, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	reference.SetMaxOpenConns(1)
+	defer reference.Close()
+	if _, err := reference.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	for migrationIndex, migration := range migrations[:version] {
+		if _, err := reference.ExecContext(ctx, migration); err != nil {
+			return [sha256.Size]byte{}, 0, fmt.Errorf("apply reference migration %d: %w", migrationIndex+1, err)
+		}
+	}
+	return schemaFingerprintForTables(ctx, reference, accessPolicySchemaTables)
+}
+
+func validateNamedAccessPolicyData(ctx context.Context, db *sql.DB) error {
+	serviceRows, err := db.QueryContext(ctx, `SELECT id,protocol,ports_sealed FROM access_services ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("read backup named services: %w", err)
+	}
+	type storedService struct {
+		id       []byte
+		protocol AccessServiceProtocol
+		sealed   int
+	}
+	var services []storedService
+	for serviceRows.Next() {
+		var service storedService
+		var protocol string
+		if err := serviceRows.Scan(&service.id, &protocol, &service.sealed); err != nil {
+			serviceRows.Close()
+			return fmt.Errorf("scan backup named service: %w", err)
+		}
+		if _, err := scanID(service.id); err != nil {
+			serviceRows.Close()
+			return errors.New("backup named access policy data is invalid: corrupt service ID")
+		}
+		service.protocol = AccessServiceProtocol(protocol)
+		services = append(services, service)
+	}
+	if err := serviceRows.Close(); err != nil {
+		return fmt.Errorf("close backup named services: %w", err)
+	}
+	if err := serviceRows.Err(); err != nil {
+		return fmt.Errorf("iterate backup named services: %w", err)
+	}
+	portsByService := make(map[string][]AccessPortRange, len(services))
+	portRows, err := db.QueryContext(ctx, `SELECT service_id,first_port,last_port FROM access_service_ports
+		ORDER BY service_id,first_port,last_port`)
+	if err != nil {
+		return fmt.Errorf("read backup named service ports: %w", err)
+	}
+	for portRows.Next() {
+		var serviceID []byte
+		var first, last uint16
+		if err := portRows.Scan(&serviceID, &first, &last); err != nil {
+			portRows.Close()
+			return fmt.Errorf("scan backup named service ports: %w", err)
+		}
+		if _, err := scanID(serviceID); err != nil {
+			portRows.Close()
+			return errors.New("backup named access policy data is invalid: corrupt service port owner")
+		}
+		key := string(serviceID)
+		portsByService[key] = append(portsByService[key], AccessPortRange{First: first, Last: last})
+	}
+	if err := portRows.Close(); err != nil {
+		return fmt.Errorf("close backup named service ports: %w", err)
+	}
+	if err := portRows.Err(); err != nil {
+		return fmt.Errorf("iterate backup named service ports: %w", err)
+	}
+	for _, service := range services {
+		if service.sealed != 1 || !service.protocol.Valid() {
+			return errors.New("backup named access policy data is invalid: service ports are not sealed")
+		}
+		ports := portsByService[string(service.id)]
+		canonical, err := canonicalAccessPortRanges(service.protocol, ports)
+		if err != nil || !equalAccessPortRanges(canonical, ports) {
+			return errors.New("backup named access policy data is invalid: service ports are missing or non-canonical")
+		}
+	}
+
+	resourceRows, err := db.QueryContext(ctx, `SELECT ar.route_node_id,ar.route_prefix_address,ar.route_prefix_length,
+		ar.prefix_address,ar.prefix_length,r.node_id,r.prefix_address,r.prefix_length,r.kind
+		FROM access_resources ar LEFT JOIN routes r ON r.id=ar.route_id AND r.network_id=ar.network_id
+		WHERE ar.target_kind='prefix' ORDER BY ar.id`)
+	if err != nil {
+		return fmt.Errorf("read backup named prefix resources: %w", err)
+	}
+	defer resourceRows.Close()
+	for resourceRows.Next() {
+		var pinnedNode, pinnedAddress, resourceAddress, routeNode, routeAddress []byte
+		var pinnedBits, resourceBits, routeBits sql.NullInt64
+		var routeKind sql.NullString
+		if err := resourceRows.Scan(&pinnedNode, &pinnedAddress, &pinnedBits, &resourceAddress, &resourceBits,
+			&routeNode, &routeAddress, &routeBits, &routeKind); err != nil {
+			return fmt.Errorf("scan backup named prefix resource: %w", err)
+		}
+		pinnedPrefix, pinnedOK := storedAccessPrefix(pinnedAddress, pinnedBits)
+		resourcePrefix, resourceOK := storedAccessPrefix(resourceAddress, resourceBits)
+		routePrefix, routeOK := storedAccessPrefix(routeAddress, routeBits)
+		if _, err := scanID(pinnedNode); err != nil {
+			pinnedOK = false
+		}
+		if _, err := scanID(routeNode); err != nil {
+			routeOK = false
+		}
+		if !pinnedOK || !resourceOK || !routeOK || !routeKind.Valid || routeKind.String != string(RouteKindSubnet) ||
+			!bytes.Equal(pinnedNode, routeNode) || pinnedPrefix != routePrefix ||
+			pinnedPrefix.Addr().BitLen() != resourcePrefix.Addr().BitLen() || pinnedPrefix.Bits() > resourcePrefix.Bits() ||
+			!pinnedPrefix.Contains(resourcePrefix.Addr()) {
+			return errors.New("backup named access policy data is invalid: pinned route target changed")
+		}
+	}
+	if err := resourceRows.Err(); err != nil {
+		return fmt.Errorf("iterate backup named prefix resources: %w", err)
+	}
+	return nil
+}
+
+func storedAccessPrefix(address []byte, bits sql.NullInt64) (netip.Prefix, bool) {
+	value, ok := netip.AddrFromSlice(address)
+	if !ok || value.Is4In6() || !bits.Valid {
+		return netip.Prefix{}, false
+	}
+	prefix := netip.PrefixFrom(value, int(bits.Int64))
+	return prefix, prefix.IsValid() && prefix == prefix.Masked() && prefix.Bits() > 0
+}
+
+func schemaFingerprintForTables(ctx context.Context, db *sql.DB, tables map[string]struct{}) ([sha256.Size]byte, int, error) {
+	rows, err := db.QueryContext(ctx, `SELECT type,name,tbl_name,sql
+		FROM sqlite_schema WHERE type IN ('table','index','trigger')
+		ORDER BY type,name,tbl_name`)
+	if err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	defer rows.Close()
+	hash := sha256.New()
+	objects := 0
+	for rows.Next() {
+		var objectType, name, table string
+		var definition sql.NullString
+		if err := rows.Scan(&objectType, &name, &table, &definition); err != nil {
+			return [sha256.Size]byte{}, 0, err
+		}
+		if _, included := tables[table]; !included {
+			continue
+		}
+		objects++
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00%t\x00%s\x00",
+			objectType, name, table, definition.Valid, definition.String)
+	}
+	if err := rows.Err(); err != nil {
+		return [sha256.Size]byte{}, 0, err
+	}
+	var result [sha256.Size]byte
+	copy(result[:], hash.Sum(nil))
+	return result, objects, nil
 }
 
 func validateAdministratorBackupSchema(ctx context.Context, db *sql.DB, version int) error {

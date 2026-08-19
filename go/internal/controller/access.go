@@ -137,6 +137,9 @@ func accessInventoryTx(ctx context.Context, tx *sql.Tx, networkID identity.Netwo
 	if err := grantRows.Err(); err != nil {
 		return result, fmt.Errorf("iterate access grants: %w", err)
 	}
+	if err := appendNamedAccessInventoryTx(ctx, tx, networkID, &result); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 

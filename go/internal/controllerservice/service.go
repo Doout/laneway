@@ -256,6 +256,12 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/teams/{team_id}/members/{user_id}", s.removeAccessTeamMember)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/access-grants", s.createAccessGrant)
 	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/access-grants/{grant_id}", s.deleteAccessGrant)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/resources", s.createAccessResource)
+	s.registerManagementRoute(mux, http.MethodPatch, "/v1/admin/resources/{resource_id}", s.updateAccessResource)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/services", s.createAccessService)
+	s.registerManagementRoute(mux, http.MethodPatch, "/v1/admin/services/{service_id}", s.updateAccessService)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/resource-access-grants", s.createAccessResourceGrant)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/resource-access-grants/{grant_id}", s.deleteAccessResourceGrant)
 	s.handler = s.observe(securityHeaders(s.administratorHTTPContract(mux)))
 	return s, nil
 }

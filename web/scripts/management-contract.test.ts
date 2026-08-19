@@ -11,6 +11,9 @@ import {
 import {
   zAdministratorAccessPatch,
   zAdministratorUpdateRequest,
+  zAccessResource,
+  zAccessService,
+  zAccessServicePortRange,
   zAssignRouteRequest,
   zAuditEvent,
   zAuditEventPage,
@@ -18,6 +21,8 @@ import {
   zBootstrapBundleRequest,
   zCreateAclRuleRequest,
   zCreateAdministratorRequest,
+  zCreateAccessResourceRequest,
+  zCreateAccessServiceRequest,
   zEnrollmentTokenRequest,
   zEndpointRuntimeReport,
   zEndpointStatus,
@@ -314,6 +319,91 @@ describe('network and protobuf-shaped refinements', () => {
     rejected(zTrafficSelector, {
       ip_protocol: 'IP_PROTOCOL_ICMP',
       destination_ports: [{ first: 8, last: 8 }],
+    })
+  })
+
+  it('keeps named Resource and Service selectors exact and fail-closed', () => {
+    accepted(zCreateAccessResourceRequest, {
+      name: 'Build server',
+      target_kind: 'node',
+      node_id: nodeId,
+    })
+    accepted(zCreateAccessResourceRequest, {
+      name: 'Database',
+      target_kind: 'prefix',
+      route_id: eventId,
+      prefix: '10.24.0.6/32',
+    })
+    rejected(zCreateAccessResourceRequest, {
+      name: 'Ambiguous',
+      target_kind: 'node',
+      node_id: nodeId,
+      route_id: eventId,
+    })
+    rejected(zCreateAccessResourceRequest, {
+      name: 'Unmasked',
+      target_kind: 'prefix',
+      route_id: eventId,
+      prefix: '10.24.0.6/24',
+    })
+
+    accepted(zAccessServicePortRange, { first: 443, last: 445 })
+    rejected(zAccessServicePortRange, { first: 445, last: 443 })
+    accepted(zCreateAccessServiceRequest, {
+      name: 'HTTPS',
+      protocol: 'tcp',
+      ports: [{ first: 443, last: 445 }],
+    })
+    rejected(zCreateAccessServiceRequest, { name: 'Missing HTTPS ports', protocol: 'tcp' })
+    rejected(zCreateAccessServiceRequest, { name: 'Empty HTTPS ports', protocol: 'tcp', ports: [] })
+    rejected(zCreateAccessServiceRequest, { name: 'Null HTTPS ports', protocol: 'tcp', ports: null })
+    accepted(zCreateAccessServiceRequest, { name: 'Ping', protocol: 'icmp' })
+    rejected(zCreateAccessServiceRequest, {
+      name: 'Invalid ping ports',
+      protocol: 'icmp',
+      ports: [],
+    })
+
+    accepted(zAccessResource, {
+      resource_id: principalId,
+      network_id: networkId,
+      name: 'Database',
+      target_kind: 'prefix',
+      route_id: eventId,
+      prefix: '10.24.0.6/32',
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
+    })
+    accepted(zAccessService, {
+      service_id: principalId,
+      network_id: networkId,
+      name: 'HTTPS',
+      protocol: 'tcp',
+      ports: [{ first: 443, last: 445 }],
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
+    })
+    rejected(zAccessService, {
+      service_id: principalId,
+      network_id: networkId,
+      name: 'Ping',
+      protocol: 'icmp',
+      ports: [{ first: 8, last: 8 }],
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
+    })
+    rejected(zAccessService, {
+      service_id: principalId,
+      network_id: networkId,
+      name: 'Missing HTTPS ports',
+      protocol: 'tcp',
+      ports: [],
+      enabled: true,
+      created_at_unix_seconds: 1,
+      updated_at_unix_seconds: 1,
     })
   })
 
