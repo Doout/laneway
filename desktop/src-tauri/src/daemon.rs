@@ -569,9 +569,20 @@ mod tests {
         assert_eq!(snapshot.status.name, "workstation");
         assert_eq!(snapshot.routes[0].prefix, "10.20.0.0/16");
         assert!(!snapshot.capabilities.connection_control);
-        assert!(!snapshot.capabilities.snapshot_coherence);
+        assert!(snapshot.capabilities.snapshot_coherence);
         assert!(!snapshot.capabilities.exit_selection);
         task.await.unwrap();
+    }
+
+    #[test]
+    fn accepts_an_explicit_legacy_status_without_restart_identity() {
+        let mut status: DaemonStatus = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(FIXTURE).unwrap()["status"].clone(),
+        )
+        .unwrap();
+        status.daemon_instance_id.clear();
+        status.api_revision = 0;
+        assert!(!snapshot_coherence(&status, &status).unwrap());
     }
 
     #[tokio::test]

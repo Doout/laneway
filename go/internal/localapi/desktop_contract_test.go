@@ -29,8 +29,11 @@ func TestSharedDesktopStatusContract(t *testing.T) {
 	if fixture.ContractVersion != 1 || fixture.Platform != "linux" || fixture.Ownership != "same-user-daemon" {
 		t.Fatalf("contract identity = version %d platform %q ownership %q", fixture.ContractVersion, fixture.Platform, fixture.Ownership)
 	}
-	if fixture.Capabilities["connection_control"] || fixture.Capabilities["exit_selection"] || fixture.Capabilities["snapshot_coherence"] {
+	if fixture.Capabilities["connection_control"] || fixture.Capabilities["exit_selection"] || !fixture.Capabilities["snapshot_coherence"] {
 		t.Fatalf("capabilities = %#v", fixture.Capabilities)
+	}
+	if fixture.Status.APIRevision != APIRevision || fixture.Status.DaemonInstanceID == "" {
+		t.Fatalf("status identity = revision %d instance %q", fixture.Status.APIRevision, fixture.Status.DaemonInstanceID)
 	}
 	if fixture.Status.Name != "workstation" || len(fixture.Peers) != 1 || fixture.Peers[0].Name != "office-exit" || len(fixture.Routes) != 1 || fixture.Routes[0].Prefix != "10.20.0.0/16" {
 		t.Fatalf("fixture drifted: status=%#v peers=%#v routes=%#v", fixture.Status, fixture.Peers, fixture.Routes)

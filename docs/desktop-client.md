@@ -16,7 +16,8 @@ ownership, exit selection, update installation, signing, rollback, packaging,
 launch at login, or tray behavior. Exit selection additionally requires an
 authoritative daemon capability and authorized candidate set. Those features
 require the per-user managed daemon described in
-[the local contract](../spec/local-daemon-api-v1.md).
+[the desktop endpoint contract](../spec/desktop-client-v1.md) and the
+[normative local daemon API](local-daemon-api-v1.md).
 
 ## Develop
 

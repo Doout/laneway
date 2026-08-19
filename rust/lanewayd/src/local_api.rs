@@ -662,7 +662,9 @@ mod tests {
         assert_eq!(fixture.ownership, "same-user-daemon");
         assert_eq!(fixture.capabilities.get("connection_control"), Some(&false));
         assert_eq!(fixture.capabilities.get("exit_selection"), Some(&false));
-        assert_eq!(fixture.capabilities.get("snapshot_coherence"), Some(&false));
+        assert_eq!(fixture.capabilities.get("snapshot_coherence"), Some(&true));
+        assert_eq!(fixture.status.api_revision, API_REVISION);
+        assert!(!fixture.status.daemon_instance_id.is_empty());
         assert_eq!(fixture.status.name, "workstation");
         assert_eq!(fixture.peers[0].name, "office-exit");
         assert_eq!(fixture.routes[0].prefix, "10.20.0.0/16");

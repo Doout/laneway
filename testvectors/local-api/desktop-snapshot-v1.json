@@ -5,7 +5,7 @@
   "capabilities": {
     "status": true,
     "private_routes": true,
-    "snapshot_coherence": false,
+    "snapshot_coherence": true,
     "exit_selection": false,
     "profile_management": false,
     "connection_control": false,
@@ -14,6 +14,8 @@
     "diagnostics": false
   },
   "status": {
+    "daemon_instance_id": "0123456789abcdef0123456789abcdef",
+    "api_revision": 1,
     "running": true,
     "actor": "user",
     "product_version": "1.2.3",
