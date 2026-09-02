@@ -959,6 +959,157 @@ CREATE TRIGGER automation_service_access_token_revocation_immutable
 BEGIN
     SELECT RAISE(ABORT, 'automation service access token revocation is immutable');
 END;
+`, `
+CREATE TABLE registered_applications (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    client_id TEXT NOT NULL UNIQUE CHECK(length(client_id) BETWEEN 40 AND 80),
+    name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 128 AND name=trim(name) AND instr(name,char(0))=0),
+    homepage_uri TEXT NOT NULL CHECK(length(homepage_uri) BETWEEN 1 AND 2048),
+    setup_uri TEXT NOT NULL CHECK(length(setup_uri) BETWEEN 1 AND 2048),
+    token_endpoint_auth_method TEXT NOT NULL CHECK(token_endpoint_auth_method='client_secret_basic'),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    creator_principal_id BLOB NOT NULL REFERENCES administrator_principals(id) ON DELETE RESTRICT CHECK(length(creator_principal_id)=16),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
+    disabled_at INTEGER,
+    CHECK((enabled=1 AND disabled_at IS NULL) OR (enabled=0 AND disabled_at IS NOT NULL AND disabled_at>=created_at))
+) STRICT;
+CREATE INDEX registered_applications_state ON registered_applications(enabled,created_at DESC,id DESC);
+
+CREATE TABLE registered_application_redirect_uris (
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE CASCADE CHECK(length(application_id)=16),
+    redirect_uri TEXT NOT NULL CHECK(length(redirect_uri) BETWEEN 1 AND 2048),
+    PRIMARY KEY(application_id,redirect_uri)
+) STRICT;
+
+CREATE TABLE registered_application_scopes (
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE CASCADE CHECK(length(application_id)=16),
+    scope TEXT NOT NULL CHECK(scope IN ('network.read','node.read','enrollment.issue','route.read','route.manage')),
+    PRIMARY KEY(application_id,scope)
+) STRICT;
+
+CREATE TABLE registered_application_credentials (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE CASCADE CHECK(length(application_id)=16),
+    secret_hash BLOB NOT NULL UNIQUE CHECK(length(secret_hash)=32),
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    CHECK(revoked_at IS NULL OR revoked_at>=created_at)
+) STRICT;
+CREATE INDEX registered_application_credentials_active ON registered_application_credentials(application_id,created_at DESC,id DESC) WHERE revoked_at IS NULL;
+
+CREATE TABLE application_registration_requests (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    manifest_json TEXT NOT NULL CHECK(length(CAST(manifest_json AS BLOB)) BETWEEN 2 AND 32768),
+    state TEXT NOT NULL CHECK(length(CAST(state AS BLOB)) BETWEEN 1 AND 1024 AND instr(state,char(0))=0),
+    pkce_challenge TEXT NOT NULL CHECK(length(pkce_challenge)=43),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at>created_at),
+    consumed_at INTEGER,
+    CHECK(consumed_at IS NULL OR consumed_at>=created_at)
+) STRICT;
+CREATE INDEX application_registration_requests_expiry ON application_registration_requests(expires_at,id);
+
+CREATE TABLE application_registration_codes (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE CASCADE CHECK(length(application_id)=16),
+    setup_uri TEXT NOT NULL CHECK(length(setup_uri) BETWEEN 1 AND 2048),
+    code_hash BLOB NOT NULL UNIQUE CHECK(length(code_hash)=32),
+    pkce_challenge TEXT NOT NULL CHECK(length(pkce_challenge)=43),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at>created_at),
+    consumed_at INTEGER,
+    CHECK(consumed_at IS NULL OR consumed_at>=created_at)
+) STRICT;
+CREATE INDEX application_registration_codes_expiry ON application_registration_codes(expires_at,id);
+
+CREATE TABLE application_installations (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE RESTRICT CHECK(length(application_id)=16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE CHECK(length(network_id)=16),
+    service_principal_id BLOB NOT NULL REFERENCES automation_service_principals(id) ON DELETE RESTRICT CHECK(length(service_principal_id)=16),
+    installer_principal_id BLOB NOT NULL REFERENCES administrator_principals(id) ON DELETE RESTRICT CHECK(length(installer_principal_id)=16),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
+    revoked_at INTEGER,
+    CHECK((enabled=1 AND revoked_at IS NULL) OR (enabled=0 AND revoked_at IS NOT NULL AND revoked_at>=created_at))
+) STRICT;
+CREATE UNIQUE INDEX application_installations_active_pair ON application_installations(application_id,network_id) WHERE enabled=1;
+CREATE INDEX application_installations_network ON application_installations(network_id,enabled,created_at DESC,id DESC);
+
+CREATE TABLE application_installation_scopes (
+    installation_id BLOB NOT NULL REFERENCES application_installations(id) ON DELETE CASCADE CHECK(length(installation_id)=16),
+    scope TEXT NOT NULL CHECK(scope IN ('network.read','node.read','enrollment.issue','route.read','route.manage')),
+    PRIMARY KEY(installation_id,scope)
+) STRICT;
+
+CREATE TABLE application_authorization_requests (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE CASCADE CHECK(length(application_id)=16),
+    redirect_uri TEXT NOT NULL CHECK(length(redirect_uri) BETWEEN 1 AND 2048),
+    state TEXT NOT NULL CHECK(length(CAST(state AS BLOB)) BETWEEN 1 AND 1024 AND instr(state,char(0))=0),
+    scopes_json TEXT NOT NULL CHECK(length(scopes_json) BETWEEN 2 AND 4096),
+    pkce_challenge TEXT NOT NULL CHECK(length(pkce_challenge)=43),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at>created_at),
+    consumed_at INTEGER,
+    CHECK(consumed_at IS NULL OR consumed_at>=created_at)
+) STRICT;
+CREATE INDEX application_authorization_requests_expiry ON application_authorization_requests(expires_at,id);
+
+CREATE TABLE application_authorization_codes (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    installation_id BLOB NOT NULL REFERENCES application_installations(id) ON DELETE CASCADE CHECK(length(installation_id)=16),
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE CASCADE CHECK(length(application_id)=16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE CHECK(length(network_id)=16),
+    redirect_uri TEXT NOT NULL CHECK(length(redirect_uri) BETWEEN 1 AND 2048),
+    scopes_json TEXT NOT NULL CHECK(length(scopes_json) BETWEEN 2 AND 4096),
+    code_hash BLOB NOT NULL UNIQUE CHECK(length(code_hash)=32),
+    pkce_challenge TEXT NOT NULL CHECK(length(pkce_challenge)=43),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at>created_at),
+    consumed_at INTEGER,
+    CHECK(consumed_at IS NULL OR consumed_at>=created_at)
+) STRICT;
+CREATE INDEX application_authorization_codes_expiry ON application_authorization_codes(expires_at,id);
+
+CREATE TABLE application_refresh_token_families (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    installation_id BLOB NOT NULL REFERENCES application_installations(id) ON DELETE CASCADE CHECK(length(installation_id)=16),
+    application_id BLOB NOT NULL REFERENCES registered_applications(id) ON DELETE CASCADE CHECK(length(application_id)=16),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at>created_at),
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(length(revocation_reason)<=256),
+    CHECK((revoked_at IS NULL AND revocation_reason='') OR (revoked_at IS NOT NULL AND revoked_at>=created_at AND length(revocation_reason)>0))
+) STRICT;
+CREATE INDEX application_refresh_token_families_expiry ON application_refresh_token_families(expires_at,id);
+
+CREATE TABLE application_refresh_tokens (
+    id BLOB PRIMARY KEY CHECK(length(id)=16 AND id<>zeroblob(16)),
+    family_id BLOB NOT NULL REFERENCES application_refresh_token_families(id) ON DELETE CASCADE CHECK(length(family_id)=16),
+    token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash)=32),
+    access_token_id BLOB REFERENCES automation_service_access_tokens(id) ON DELETE SET NULL CHECK(access_token_id IS NULL OR length(access_token_id)=16),
+    replaced_by BLOB REFERENCES application_refresh_tokens(id) ON DELETE SET NULL CHECK(replaced_by IS NULL OR length(replaced_by)=16),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at>created_at),
+    consumed_at INTEGER,
+    CHECK(consumed_at IS NULL OR consumed_at>=created_at)
+) STRICT;
+CREATE INDEX application_refresh_tokens_family ON application_refresh_tokens(family_id,created_at DESC,id DESC);
+CREATE INDEX application_refresh_tokens_expiry ON application_refresh_tokens(expires_at,id);
+
+DROP TRIGGER automation_service_access_token_unrevoked_limit;
+CREATE TRIGGER automation_service_access_token_unrevoked_limit
+    BEFORE INSERT ON automation_service_access_tokens
+    WHEN NEW.revoked_at IS NULL AND (
+        SELECT count(*) FROM automation_service_access_tokens
+        WHERE principal_id=NEW.principal_id AND revoked_at IS NULL AND expires_at>NEW.created_at
+    ) >= 100
+BEGIN
+    SELECT RAISE(ABORT, 'active automation service access token limit reached');
+END;
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

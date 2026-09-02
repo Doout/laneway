@@ -307,6 +307,7 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	service, err := controllerservice.New(controllerservice.Options{
 		Store: store, CACertificate: ca, CAKey: caKey, IssuerChain: issuerChain,
 		LeafValidity: cfg.Controller.LeafValidity.Duration(), AdminAuthorizer: adminAuthorizer,
+		AllowInsecureApplicationCallbacks: cfg.Controller.AllowInsecureApplicationCallbacks,
 	})
 	if err != nil {
 		return err

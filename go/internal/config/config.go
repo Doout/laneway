@@ -150,6 +150,9 @@ type Controller struct {
 	AdminTokenFile        string   `toml:"admin_token_file"`
 	LeafValidity          Duration `toml:"leaf_validity"`
 	PollInterval          Duration `toml:"poll_interval"`
+	// AllowInsecureApplicationCallbacks is an explicit local-development escape
+	// hatch for loopback HTTP application setup and OAuth redirect URIs.
+	AllowInsecureApplicationCallbacks bool `toml:"allow_insecure_application_callbacks"`
 }
 
 // ControllerInitialNetwork is the immutable topology a controller may create

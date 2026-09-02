@@ -38,6 +38,13 @@ var managementRoutes = []RoutePolicy{
 	{http.MethodPost, "/v1/admin/service-principals/{principal_id}/tokens", OperationServicePrincipalManage, ScopeObject, true},
 	{http.MethodGet, "/v1/admin/service-principals/{principal_id}/tokens", OperationServicePrincipalManage, ScopeObject, false},
 	{http.MethodPost, "/v1/admin/service-access-tokens/{token_id}/revoke", OperationServicePrincipalManage, ScopeObject, true},
+	{http.MethodGet, "/v1/admin/applications", OperationApplicationRead, ScopeGlobal, false},
+	{http.MethodGet, "/v1/admin/applications/{application_id}", OperationApplicationRead, ScopeObject, false},
+	{http.MethodPost, "/v1/admin/applications/{application_id}/client-secrets", OperationApplicationManage, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/applications/{application_id}/disable", OperationApplicationManage, ScopeObject, true},
+	{http.MethodGet, "/v1/admin/application-registration-requests/{request_id}", OperationApplicationRead, ScopeObject, false},
+	{http.MethodPost, "/v1/admin/application-registration-requests/{request_id}/approve", OperationApplicationManage, ScopeObject, true},
+	{http.MethodPost, "/v1/admin/application-registration-requests/{request_id}/cancel", OperationApplicationManage, ScopeObject, true},
 	{http.MethodGet, "/v1/admin/audit", OperationAuditReadGlobal, ScopeGlobal, false},
 	{http.MethodGet, "/v1/admin/audit/page", OperationAuditReadGlobal, ScopeGlobal, false},
 	{http.MethodPost, "/v1/admin/enrollment-tokens", OperationEnrollmentIssue, ScopeBody, true},
@@ -50,6 +57,10 @@ var managementRoutes = []RoutePolicy{
 	{http.MethodGet, "/v1/admin/networks/{network_id}/relays", OperationRelayRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/acl-rules", OperationACLRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/access-subjects", OperationACLRead, ScopePath, false},
+	{http.MethodGet, "/v1/admin/networks/{network_id}/application-installations", OperationApplicationInstallationRead, ScopePath, false},
+	{http.MethodPost, "/v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/approve", OperationApplicationInstallationManage, ScopePath, true},
+	{http.MethodPost, "/v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/cancel", OperationApplicationInstallationManage, ScopePath, true},
+	{http.MethodPost, "/v1/admin/networks/{network_id}/node-installers", OperationEnrollmentIssue, ScopePath, true},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/certificates", OperationCertificateRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/routes", OperationRouteRead, ScopePath, false},
 	{http.MethodGet, "/v1/admin/networks/{network_id}/audit", OperationAuditRead, ScopePath, false},
@@ -71,6 +82,7 @@ var managementRoutes = []RoutePolicy{
 	{http.MethodPatch, "/v1/admin/services/{service_id}", OperationACLManage, ScopeObject, true},
 	{http.MethodPost, "/v1/admin/networks/{network_id}/resource-access-grants", OperationACLManage, ScopePath, true},
 	{http.MethodDelete, "/v1/admin/resource-access-grants/{grant_id}", OperationACLManage, ScopeObject, true},
+	{http.MethodDelete, "/v1/admin/application-installations/{installation_id}", OperationApplicationInstallationManage, ScopeObject, true},
 	{http.MethodPut, "/v1/admin/acl-rules/{rule_id}", OperationACLManage, ScopeObject, true},
 	{http.MethodDelete, "/v1/admin/acl-rules/{rule_id}", OperationACLManage, ScopeObject, true},
 	{http.MethodPost, "/v1/admin/nodes/{node_id}/revoke", OperationNodeManage, ScopeObject, true},
@@ -109,6 +121,7 @@ func (p RoutePolicy) Valid() bool {
 	case ScopeObject:
 		return p.Operation.NetworkScoped() || p.Operation == OperationPrincipalManage ||
 			p.Operation == OperationSessionManage || p.Operation == OperationServicePrincipalManage ||
+			p.Operation == OperationApplicationRead || p.Operation == OperationApplicationManage ||
 			p.Operation == OperationRecoveryManage ||
 			p.Operation == OperationRootTokenRotate
 	default:

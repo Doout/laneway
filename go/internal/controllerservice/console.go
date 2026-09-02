@@ -37,7 +37,9 @@ func ConsoleHandler(api http.Handler, directory string) (http.Handler, error) {
 
 	files := http.FileServerFS(root.FS())
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/v1" || strings.HasPrefix(request.URL.Path, "/v1/") || strings.HasPrefix(request.URL.Path, "/.well-known/") {
+		if request.URL.Path == "/v1" || strings.HasPrefix(request.URL.Path, "/v1/") ||
+			request.URL.Path == "/applications/new" || strings.HasPrefix(request.URL.Path, "/oauth/") ||
+			strings.HasPrefix(request.URL.Path, "/.well-known/") {
 			api.ServeHTTP(writer, request)
 			return
 		}

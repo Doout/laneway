@@ -207,6 +207,12 @@ func (s *Store) IssueEnrollmentTokenWithOptions(ctx context.Context, networkID i
 // current durable authority before observing network existence or inserting
 // the one-time credential. Issuance and actor-aware audit are one transaction.
 func (s *Store) AdministratorIssueEnrollmentTokenWithOptions(ctx context.Context, decision adminauth.Decision, networkID identity.NetworkID, label string, expiresAt time.Time, options EnrollmentTokenOptions) (EnrollmentToken, error) {
+	return s.administratorIssueEnrollmentTokenWithPolicy(ctx, decision, administratorEnrollmentIssuePolicy, networkID, label, expiresAt, options)
+}
+
+func (s *Store) administratorIssueEnrollmentTokenWithPolicy(ctx context.Context, decision adminauth.Decision,
+	policy adminauth.RoutePolicy, networkID identity.NetworkID, label string, expiresAt time.Time,
+	options EnrollmentTokenOptions) (EnrollmentToken, error) {
 	if label != strings.TrimSpace(label) || len(label) > MaxTokenLabelLength || strings.IndexByte(label, 0) >= 0 {
 		return EnrollmentToken{}, fmt.Errorf("%w: invalid enrollment token label", ErrInvalid)
 	}
@@ -251,7 +257,7 @@ func (s *Store) AdministratorIssueEnrollmentTokenWithOptions(ctx context.Context
 		return EnrollmentToken{}, fmt.Errorf("begin authorized enrollment token issue: %w", err)
 	}
 	defer tx.Rollback()
-	actor, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, administratorEnrollmentIssuePolicy, networkID)
+	actor, err := s.authorizeAdministratorNetworkResourceTx(ctx, tx, decision, policy, networkID)
 	if err != nil {
 		return EnrollmentToken{}, err
 	}

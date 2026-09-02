@@ -495,9 +495,11 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 		administratorAccessResourceCreatePolicy, administratorAccessResourceUpdatePolicy,
 		administratorAccessServiceCreatePolicy, administratorAccessServiceUpdatePolicy,
 		administratorAccessResourceGrantCreatePolicy, administratorAccessResourceGrantDeletePolicy,
+		applicationInstallationListPolicy, applicationAuthorizationApprovePolicy,
+		applicationAuthorizationCancelPolicy, applicationInstallationDeletePolicy, applicationNodeInstallerPolicy,
 	}
-	if len(resourcePolicies) != 40 {
-		t.Fatalf("resource policies=%d want 40 non-bootstrap routes", len(resourcePolicies))
+	if len(resourcePolicies) != 45 {
+		t.Fatalf("resource policies=%d want 45 non-bootstrap routes", len(resourcePolicies))
 	}
 	identityPolicies := []adminauth.RoutePolicy{
 		administratorCreatePolicy, administratorListPolicy, administratorReadPolicy,
@@ -506,6 +508,8 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 		administratorBootstrapGrantPolicy, administratorOwnerRecoveryGrantPolicy,
 		servicePrincipalCreatePolicy, servicePrincipalListPolicy, servicePrincipalDisablePolicy, serviceTokenIssuePolicy,
 		serviceTokenListPolicy, serviceTokenRevokePolicy,
+		applicationListPolicy, applicationReadPolicy, applicationSecretPolicy, applicationDisablePolicy,
+		applicationRegistrationReadPolicy, applicationRegistrationApprovePolicy, applicationRegistrationCancelPolicy,
 	}
 	seen := make(map[string]string, len(resourcePolicies)+len(identityPolicies)+1)
 	for _, policy := range resourcePolicies {

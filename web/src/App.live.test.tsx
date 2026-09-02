@@ -335,4 +335,48 @@ describe('shipped live application authorization', () => {
     expect(paths.some((path) => path.includes('/network-connections'))).toBe(false)
     expect(paths.some((path) => path.includes(`/nodes/${nodeId}/move`))).toBe(false)
   })
+
+  it('limits application consent to the scopes the administrator chooses and may grant', async () => {
+    vi.stubEnv('MODE', 'live')
+    const requestId = '4'.repeat(32)
+    let approval: { scopes?: string[] } | undefined
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session([
+        'network.list', 'network.read', 'node.read', 'application_installation.manage',
+      ])))
+      if (path.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [
+        { network_id: networkId, name: 'Scoped network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 },
+      ] }))
+      if (path.includes('/nodes?')) return Promise.resolve(managementResponse({ nodes: [] }))
+      if (path.endsWith(`/oauth/authorization-requests/${requestId}`)) return Promise.resolve(response({
+        request_id: requestId,
+        application: {
+          application_id: '5'.repeat(32), client_id: `lnw_client_v1.${'5'.repeat(32)}`,
+          name: 'Example integration', homepage_uri: 'https://app.example.test', setup_uri: 'https://app.example.test/setup',
+          redirect_uris: ['https://app.example.test/callback'], scopes: ['network.read', 'node.read', 'route.manage'],
+          token_endpoint_auth_method: 'client_secret_basic', enabled: true,
+          created_at_unix_seconds: 1_700_000_000, updated_at_unix_seconds: 1_700_000_000,
+        },
+        redirect_uri: 'https://app.example.test/callback',
+        scopes: ['network.read', 'node.read', 'route.manage'],
+        expires_at_unix_seconds: 4_000_000_000,
+      }))
+      if (path.endsWith(`/application-authorization-requests/${requestId}/approve`)) {
+        approval = JSON.parse(String(init?.body)) as { scopes?: string[] }
+        return new Promise<Response>(() => {})
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderPath(`/applications/install?request=${requestId}`)
+    expect(await screen.findByRole('heading', { name: 'Connect Example integration' })).toBeVisible()
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Manage routes' })).toBeDisabled())
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'View nodes' })).toBeChecked())
+    fireEvent.click(screen.getByRole('checkbox', { name: 'View nodes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Allow access' }))
+
+    await waitFor(() => expect(approval).toEqual({ scopes: ['network.read'] }))
+  })
 })

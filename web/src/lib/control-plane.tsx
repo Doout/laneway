@@ -19,6 +19,10 @@ export const administratorPermissions = [
   'certificate.revoke',
   'audit.read',
   'audit.read_global',
+  'application.read',
+  'application.manage',
+  'application_installation.read',
+  'application_installation.manage',
   'principal.manage',
   'session.manage_others',
   'recovery.manage',
@@ -243,6 +247,7 @@ const permissionNames = new Set<string>(administratorPermissions)
 const networkScopedPermissionNames = new Set<AdministratorPermission>([
   'network.read', 'enrollment.issue', 'node.read', 'node.manage', 'route.read', 'route.manage',
   'acl.read', 'acl.manage', 'relay.read', 'relay.manage', 'certificate.read', 'certificate.revoke', 'audit.read',
+  'application_installation.read', 'application_installation.manage',
 ])
 const identityPattern = /^[0-9a-f]{32}$/
 const csrfPattern = /^[A-Za-z0-9_-]{43}$/

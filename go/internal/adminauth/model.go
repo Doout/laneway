@@ -164,28 +164,32 @@ func (p Principal) Valid() bool {
 type Operation string
 
 const (
-	OperationNetworkList            Operation = "network.list"
-	OperationNetworkRead            Operation = "network.read"
-	OperationNetworkCreate          Operation = "network.create"
-	OperationEnrollmentIssue        Operation = "enrollment.issue"
-	OperationBootstrapCreate        Operation = "bootstrap_bundle.create"
-	OperationNodeRead               Operation = "node.read"
-	OperationNodeManage             Operation = "node.manage"
-	OperationRouteRead              Operation = "route.read"
-	OperationRouteManage            Operation = "route.manage"
-	OperationACLRead                Operation = "acl.read"
-	OperationACLManage              Operation = "acl.manage"
-	OperationRelayRead              Operation = "relay.read"
-	OperationRelayManage            Operation = "relay.manage"
-	OperationCertificateRead        Operation = "certificate.read"
-	OperationCertificateManage      Operation = "certificate.revoke"
-	OperationAuditRead              Operation = "audit.read"
-	OperationAuditReadGlobal        Operation = "audit.read_global"
-	OperationPrincipalManage        Operation = "principal.manage"
-	OperationSessionManage          Operation = "session.manage_others"
-	OperationServicePrincipalManage Operation = "service_principal.manage"
-	OperationRecoveryManage         Operation = "recovery.manage"
-	OperationRootTokenRotate        Operation = "root_token.rotate"
+	OperationNetworkList                   Operation = "network.list"
+	OperationNetworkRead                   Operation = "network.read"
+	OperationNetworkCreate                 Operation = "network.create"
+	OperationEnrollmentIssue               Operation = "enrollment.issue"
+	OperationBootstrapCreate               Operation = "bootstrap_bundle.create"
+	OperationNodeRead                      Operation = "node.read"
+	OperationNodeManage                    Operation = "node.manage"
+	OperationRouteRead                     Operation = "route.read"
+	OperationRouteManage                   Operation = "route.manage"
+	OperationACLRead                       Operation = "acl.read"
+	OperationACLManage                     Operation = "acl.manage"
+	OperationRelayRead                     Operation = "relay.read"
+	OperationRelayManage                   Operation = "relay.manage"
+	OperationCertificateRead               Operation = "certificate.read"
+	OperationCertificateManage             Operation = "certificate.revoke"
+	OperationAuditRead                     Operation = "audit.read"
+	OperationAuditReadGlobal               Operation = "audit.read_global"
+	OperationPrincipalManage               Operation = "principal.manage"
+	OperationSessionManage                 Operation = "session.manage_others"
+	OperationServicePrincipalManage        Operation = "service_principal.manage"
+	OperationApplicationRead               Operation = "application.read"
+	OperationApplicationManage             Operation = "application.manage"
+	OperationApplicationInstallationRead   Operation = "application_installation.read"
+	OperationApplicationInstallationManage Operation = "application_installation.manage"
+	OperationRecoveryManage                Operation = "recovery.manage"
+	OperationRootTokenRotate               Operation = "root_token.rotate"
 )
 
 type operationPolicy struct {
@@ -201,22 +205,26 @@ var operationPolicies = map[Operation]operationPolicy{
 	// Bootstrap bundles have no network identifier in their current wire
 	// contract. Keep issuance global and owner-only until the request and the
 	// resulting bundle are durably bound to a canonical network.
-	OperationBootstrapCreate:        {owner: true},
-	OperationNodeRead:               {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationNodeManage:             {owner: true, operator: true, networkScoped: true},
-	OperationRouteRead:              {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationRouteManage:            {owner: true, operator: true, networkScoped: true},
-	OperationACLRead:                {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationACLManage:              {owner: true, operator: true, networkScoped: true},
-	OperationRelayRead:              {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationRelayManage:            {owner: true, operator: true, networkScoped: true},
-	OperationCertificateRead:        {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationCertificateManage:      {owner: true, operator: true, networkScoped: true},
-	OperationAuditRead:              {owner: true, operator: true, auditor: true, networkScoped: true},
-	OperationAuditReadGlobal:        {owner: true},
-	OperationPrincipalManage:        {owner: true},
-	OperationSessionManage:          {owner: true},
-	OperationServicePrincipalManage: {owner: true},
+	OperationBootstrapCreate:               {owner: true},
+	OperationNodeRead:                      {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationNodeManage:                    {owner: true, operator: true, networkScoped: true},
+	OperationRouteRead:                     {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationRouteManage:                   {owner: true, operator: true, networkScoped: true},
+	OperationACLRead:                       {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationACLManage:                     {owner: true, operator: true, networkScoped: true},
+	OperationRelayRead:                     {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationRelayManage:                   {owner: true, operator: true, networkScoped: true},
+	OperationCertificateRead:               {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationCertificateManage:             {owner: true, operator: true, networkScoped: true},
+	OperationAuditRead:                     {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationAuditReadGlobal:               {owner: true},
+	OperationPrincipalManage:               {owner: true},
+	OperationSessionManage:                 {owner: true},
+	OperationServicePrincipalManage:        {owner: true},
+	OperationApplicationRead:               {owner: true},
+	OperationApplicationManage:             {owner: true},
+	OperationApplicationInstallationRead:   {owner: true, operator: true, auditor: true, networkScoped: true},
+	OperationApplicationInstallationManage: {owner: true, operator: true, networkScoped: true},
 	// Recovery-grant issuance and root-token rotation are stable root service-
 	// principal capabilities, not human-role permissions. Root subjects bypass
 	// this role matrix and are revalidated against the durable singleton.
@@ -235,7 +243,8 @@ var permissionOrder = []Operation{
 	OperationRelayManage, OperationCertificateRead, OperationCertificateManage,
 	OperationAuditRead, OperationAuditReadGlobal, OperationPrincipalManage,
 	OperationSessionManage, OperationRecoveryManage, OperationRootTokenRotate,
-	OperationServicePrincipalManage,
+	OperationServicePrincipalManage, OperationApplicationRead, OperationApplicationManage,
+	OperationApplicationInstallationRead, OperationApplicationInstallationManage,
 }
 
 // Permissions returns a deterministic, defensive list of every operation
@@ -289,7 +298,9 @@ func AutomationGrantable(operation Operation) bool {
 	}
 	switch operation {
 	case OperationPrincipalManage, OperationSessionManage,
-		OperationServicePrincipalManage, OperationRecoveryManage, OperationRootTokenRotate:
+		OperationServicePrincipalManage, OperationApplicationRead, OperationApplicationManage,
+		OperationApplicationInstallationRead, OperationApplicationInstallationManage,
+		OperationRecoveryManage, OperationRootTokenRotate:
 		return false
 	default:
 		return true

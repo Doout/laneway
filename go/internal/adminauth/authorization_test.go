@@ -178,8 +178,8 @@ func TestDecisionBindsEveryRouteToItsExactTargetKind(t *testing.T) {
 		ObjectTarget(objectID),
 	}
 	routes := ManagementRoutes()
-	if len(routes) != 58 {
-		t.Fatalf("management routes=%d want 58", len(routes))
+	if len(routes) != 70 {
+		t.Fatalf("management routes=%d want 70", len(routes))
 	}
 	for _, policy := range routes {
 		policy := policy
@@ -281,6 +281,7 @@ func TestDecisionBindsGlobalObjectManagementPolicies(t *testing.T) {
 	operator := Principal{ID: identity.ID{1}, Username: "operator", Role: RoleOperator, Enabled: true}
 	for _, operation := range []Operation{
 		OperationPrincipalManage, OperationSessionManage, OperationServicePrincipalManage,
+		OperationApplicationRead, OperationApplicationManage,
 		OperationRecoveryManage, OperationRootTokenRotate,
 	} {
 		policy := RoutePolicy{
@@ -511,13 +512,15 @@ func managementPolicyForTest(t *testing.T, method, pattern string) RoutePolicy {
 func expectedRoleAllows(role Role, operation Operation) bool {
 	switch operation {
 	case OperationNetworkList, OperationNetworkRead, OperationNodeRead, OperationRouteRead,
-		OperationACLRead, OperationRelayRead, OperationCertificateRead, OperationAuditRead:
+		OperationACLRead, OperationRelayRead, OperationCertificateRead, OperationAuditRead,
+		OperationApplicationInstallationRead:
 		return role == RoleOwner || role == RoleOperator || role == RoleAuditor
 	case OperationEnrollmentIssue, OperationNodeManage, OperationRouteManage, OperationACLManage,
-		OperationRelayManage, OperationCertificateManage:
+		OperationRelayManage, OperationCertificateManage, OperationApplicationInstallationManage:
 		return role == RoleOwner || role == RoleOperator
 	case OperationNetworkCreate, OperationBootstrapCreate, OperationAuditReadGlobal,
-		OperationPrincipalManage, OperationSessionManage, OperationServicePrincipalManage:
+		OperationPrincipalManage, OperationSessionManage, OperationServicePrincipalManage,
+		OperationApplicationRead, OperationApplicationManage:
 		return role == RoleOwner
 	case OperationRecoveryManage, OperationRootTokenRotate:
 		return false
