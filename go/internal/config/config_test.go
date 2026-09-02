@@ -197,11 +197,12 @@ ca_private_key = "/etc/laneway/ca.key"
 issuer_certificate = "/etc/laneway/intermediate.crt"
 admin_token_file = "/etc/laneway/admin.token"
 leaf_validity = "720h"
+allow_insecure_application_callbacks = true
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Mode != ModeController || cfg.Controller.LeafValidity.Duration() != 30*24*time.Hour || cfg.Controller.IssuerCertificateFile != "/etc/laneway/intermediate.crt" {
+	if cfg.Mode != ModeController || cfg.Controller.LeafValidity.Duration() != 30*24*time.Hour || cfg.Controller.IssuerCertificateFile != "/etc/laneway/intermediate.crt" || !cfg.Controller.AllowInsecureApplicationCallbacks {
 		t.Fatalf("unexpected controller config: %#v", cfg)
 	}
 }

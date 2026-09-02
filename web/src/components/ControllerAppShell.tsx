@@ -1,4 +1,4 @@
-import { LayoutDashboard, LogOut, Network, RadioTower, RefreshCw, RotateCw, Route, ScrollText, ShieldCheck, Users } from 'lucide-react'
+import { AppWindow, LayoutDashboard, LogOut, Network, RadioTower, RefreshCw, RotateCw, Route, ScrollText, ShieldCheck, Users } from 'lucide-react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { useEffect, useState } from 'react'
@@ -13,13 +13,14 @@ const navigation: Array<{ group: 'Workspace' | 'Network' | 'Operations'; label: 
   { group: 'Network', label: 'Routes', to: '/routes', icon: Route, permission: 'route.read' },
   { group: 'Network', label: 'Access', to: '/access', icon: ShieldCheck, permission: 'acl.read' },
   { group: 'Operations', label: 'Infrastructure', to: '/infrastructure', icon: Network, permission: 'network.list' },
+  { group: 'Operations', label: 'Applications', to: '/applications', icon: AppWindow, permission: 'application.read' },
   { group: 'Operations', label: 'Security', to: '/security', icon: RadioTower, permission: 'certificate.read' },
   { group: 'Operations', label: 'Audit', to: '/audit', icon: ScrollText, permission: 'audit.read' },
 ]
 
 const pathLabels: Record<string, string> = {
   overview: 'Overview', networks: 'Networks', nodes: 'Nodes', users: 'Users', teams: 'Teams', routes: 'Routes', infrastructure: 'Infrastructure',
-  access: 'Access', security: 'Security', audit: 'Audit', new: 'New', approve: 'Approve', revoke: 'Revoke', capabilities: 'Capabilities',
+  access: 'Access', applications: 'Applications', consent: 'Review application', install: 'Connect application', security: 'Security', audit: 'Audit', new: 'New', approve: 'Approve', revoke: 'Revoke', capabilities: 'Capabilities',
 }
 
 function breadcrumbLabel(pathname: string) {
@@ -37,6 +38,7 @@ export function ControllerAppShell() {
   const networkId = inventory?.network?.network_id
   const visibleNavigation = navigation.filter((item) => {
     if (item.to === '/audit' && hasPermission('audit.read_global')) return true
+    if (item.to === '/applications' && hasPermission('application_installation.read')) return true
     if (!isNetworkScopedAdministratorPermission(item.permission)) return hasPermission(item.permission)
     return Boolean(networkId && hasPermission(item.permission, networkId))
   })

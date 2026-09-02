@@ -63,32 +63,37 @@ type Options struct {
 	NodeAuthorizer   NodeAuthorizer
 	Now              func() time.Time
 	SnapshotValidity time.Duration
+	// AllowInsecureApplicationCallbacks permits loopback HTTP setup and redirect
+	// URIs for explicit local-development deployments only.
+	AllowInsecureApplicationCallbacks bool
 }
 
 type Service struct {
-	store                 *controller.Store
-	ca                    *x509.Certificate
-	caKey                 crypto.Signer
-	issuerChain           []*x509.Certificate
-	validity              time.Duration
-	maxBody               int64
-	authorizeAdm          AdminAuthorizer
-	access                AccessController
-	passwordVerifier      *adminauth.PasswordVerifier
-	passwordHasher        func([]byte) (string, error)
-	passwordWorkSlots     chan struct{}
-	loginLimiter          *adminauth.LoginLimiter
-	recoveryLimiter       *adminauth.LoginLimiter
-	authStateLimiter      *adminauth.LoginLimiter
-	authorizeNode         NodeAuthorizer
-	verifyPeerCertificate bool
-	now                   func() time.Time
-	snapshotValidity      time.Duration
-	enrollmentLimiter     *enrollmentRateLimiter
-	bootstrapBundles      *bootstrapBundleStore
-	requestIDGenerator    func() (string, error)
-	handler               http.Handler
-	metrics               serviceMetrics
+	store                             *controller.Store
+	ca                                *x509.Certificate
+	caKey                             crypto.Signer
+	issuerChain                       []*x509.Certificate
+	validity                          time.Duration
+	maxBody                           int64
+	authorizeAdm                      AdminAuthorizer
+	access                            AccessController
+	passwordVerifier                  *adminauth.PasswordVerifier
+	passwordHasher                    func([]byte) (string, error)
+	passwordWorkSlots                 chan struct{}
+	loginLimiter                      *adminauth.LoginLimiter
+	recoveryLimiter                   *adminauth.LoginLimiter
+	authStateLimiter                  *adminauth.LoginLimiter
+	authorizeNode                     NodeAuthorizer
+	verifyPeerCertificate             bool
+	now                               func() time.Time
+	snapshotValidity                  time.Duration
+	enrollmentLimiter                 *enrollmentRateLimiter
+	bootstrapBundles                  *bootstrapBundleStore
+	applicationLimiter                *enrollmentRateLimiter
+	allowInsecureApplicationCallbacks bool
+	requestIDGenerator                func() (string, error)
+	handler                           http.Handler
+	metrics                           serviceMetrics
 }
 
 type serviceMetrics struct {
@@ -182,10 +187,12 @@ func New(opts Options) (*Service, error) {
 		}, passwordWorkSlots: make(chan struct{}, adminauth.DefaultConcurrentPasswordVerifications),
 		loginLimiter: loginLimiter, recoveryLimiter: recoveryLimiter, authStateLimiter: authStateLimiter,
 		authorizeNode: opts.NodeAuthorizer, verifyPeerCertificate: verifyPeerCertificate, now: opts.Now,
-		snapshotValidity:   opts.SnapshotValidity,
-		enrollmentLimiter:  newEnrollmentRateLimiter(),
-		bootstrapBundles:   newBootstrapBundleStore(opts.Now),
-		requestIDGenerator: generateAdministratorRequestID,
+		snapshotValidity:                  opts.SnapshotValidity,
+		enrollmentLimiter:                 newEnrollmentRateLimiter(),
+		bootstrapBundles:                  newBootstrapBundleStore(opts.Now),
+		applicationLimiter:                newEnrollmentRateLimiter(),
+		allowInsecureApplicationCallbacks: opts.AllowInsecureApplicationCallbacks,
+		requestIDGenerator:                generateAdministratorRequestID,
 	}
 	if s.access == nil {
 		s.access = &storeAccessController{store: s.store, rootBearer: func(request *http.Request) (adminauth.Actor, error) {
@@ -194,6 +201,12 @@ func New(opts Options) (*Service, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("POST /applications/new", s.startApplicationRegistration)
+	mux.HandleFunc("POST /v1/application-registrations/exchange", s.exchangeApplicationRegistration)
+	mux.HandleFunc("GET /oauth/authorize", s.startApplicationAuthorization)
+	mux.HandleFunc("GET /oauth/authorization-requests/{request_id}", s.readApplicationAuthorizationRequest)
+	mux.HandleFunc("POST /oauth/token", s.applicationToken)
+	mux.HandleFunc("POST /oauth/revoke", s.revokeApplicationToken)
 	mux.HandleFunc("GET /v1/admin/auth/state", s.administratorAuthState)
 	mux.HandleFunc("POST /v1/admin/auth/login", s.administratorLogin)
 	mux.HandleFunc("GET /v1/admin/auth/session", s.administratorSession)
@@ -219,6 +232,13 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-principals/{principal_id}/tokens", s.issueServiceAccessToken)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/service-principals/{principal_id}/tokens", s.readServiceAccessTokens)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-access-tokens/{token_id}/revoke", s.revokeServiceAccessToken)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/applications", s.readApplications)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/applications/{application_id}", s.readApplication)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/applications/{application_id}/client-secrets", s.rotateApplicationClientSecret)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/applications/{application_id}/disable", s.disableApplication)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/application-registration-requests/{request_id}", s.readApplicationRegistrationRequest)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/application-registration-requests/{request_id}/approve", s.approveApplicationRegistration)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/application-registration-requests/{request_id}/cancel", s.cancelApplicationRegistration)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/audit", s.readGlobalAudit)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/audit/page", s.readGlobalAuditPage)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/enrollment-tokens", s.issueToken)
@@ -242,6 +262,10 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/audit", s.readAudit)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/audit/page", s.readAuditPage)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/access-subjects", s.readAccessInventory)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/application-installations", s.readApplicationInstallations)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/approve", s.approveApplicationAuthorization)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/cancel", s.cancelApplicationAuthorization)
+	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/node-installers", s.createNodeInstaller)
 	mux.HandleFunc("POST /v1/routes", s.advertiseRoute)
 	mux.HandleFunc("DELETE /v1/routes/{route_id}", s.withdrawRoute)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/routes/assign", s.assignRoute)
@@ -269,6 +293,7 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodPatch, "/v1/admin/services/{service_id}", s.updateAccessService)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/networks/{network_id}/resource-access-grants", s.createAccessResourceGrant)
 	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/resource-access-grants/{grant_id}", s.deleteAccessResourceGrant)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/application-installations/{installation_id}", s.deleteApplicationInstallation)
 	s.handler = s.observe(securityHeaders(s.administratorHTTPContract(mux)))
 	return s, nil
 }

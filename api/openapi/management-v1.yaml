@@ -19,6 +19,8 @@ tags:
     description: Administrator principals, credentials, grants, and sessions.
   - name: Automation
     description: Scoped service principals and revocable access tokens.
+  - name: Applications
+    description: Registered applications, network installations, OAuth consent, and node installers.
   - name: Networks
     description: Network inventory and creation.
   - name: Enrollment
@@ -1378,6 +1380,505 @@ paths:
           $ref: './components.yaml#/components/responses/Relay'
         default:
           $ref: './components.yaml#/components/responses/Error'
+  /applications/new:
+    post:
+      operationId: startApplicationRegistration
+      tags: [Applications]
+      summary: Start browser registration for an application.
+      description: Rate-limited untrusted input. Production callback URIs require HTTPS; PKCE S256 is mandatory.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [manifest, state, code_challenge, code_challenge_method]
+              properties:
+                manifest:
+                  type: string
+                  description: JSON-encoded ApplicationManifest.
+                state:
+                  type: string
+                  minLength: 1
+                  maxLength: 1024
+                code_challenge:
+                  type: string
+                  pattern: '^[A-Za-z0-9_-]{43}$'
+                code_challenge_method:
+                  type: string
+                  const: S256
+      responses:
+        '303':
+          description: Continue on the same-origin registration consent page.
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+                pattern: '^/applications/consent\?request=(?!0{32}$)[0-9a-f]{32}$'
+        default:
+          description: OAuth-style JSON error with no-store caching.
+  /v1/application-registrations/exchange:
+    post:
+      operationId: exchangeApplicationRegistration
+      tags: [Applications]
+      summary: Exchange a one-time registration code for application credentials.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code, code_verifier]
+              properties:
+                code:
+                  type: string
+                  format: password
+                code_verifier:
+                  type: string
+                  minLength: 43
+                  maxLength: 128
+      responses:
+        '200':
+          description: One-time application credential disclosure.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [application_id, client_id, client_secret, name]
+                properties:
+                  application_id:
+                    $ref: './components.yaml#/components/schemas/Identifier'
+                  client_id:
+                    type: string
+                  client_secret:
+                    type: string
+                    format: password
+                  name:
+                    type: string
+        default:
+          description: OAuth-style JSON error with no-store caching.
+  /oauth/authorize:
+    get:
+      operationId: startApplicationAuthorization
+      tags: [Applications]
+      summary: Start an application authorization-code flow.
+      security: []
+      parameters:
+        - { name: response_type, in: query, required: true, schema: { type: string, const: code } }
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string, format: uri } }
+        - { name: scope, in: query, required: true, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 1024 } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string, pattern: '^[A-Za-z0-9_-]{43}$' } }
+        - { name: code_challenge_method, in: query, required: true, schema: { type: string, const: S256 } }
+      responses:
+        '303':
+          description: Continue on the same-origin network consent page.
+          headers:
+            Location:
+              required: true
+              schema:
+                type: string
+                pattern: '^/applications/install\?request=(?!0{32}$)[0-9a-f]{32}$'
+        default:
+          description: OAuth-style JSON error with no-store caching.
+  /oauth/authorization-requests/{request_id}:
+    get:
+      operationId: getApplicationAuthorizationRequest
+      tags: [Applications]
+      summary: Read the safe display data for a pending authorization request.
+      security: []
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          description: Pending authorization request.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [request_id, application, redirect_uri, scopes, expires_at_unix_seconds]
+                properties:
+                  request_id:
+                    $ref: './components.yaml#/components/schemas/Identifier'
+                  application:
+                    $ref: './components.yaml#/components/schemas/RegisteredApplication'
+                  redirect_uri:
+                    type: string
+                    format: uri
+                  scopes:
+                    type: array
+                    items:
+                      $ref: './components.yaml#/components/schemas/ApplicationScope'
+                  expires_at_unix_seconds:
+                    $ref: './components.yaml#/components/schemas/UnixSeconds'
+        default:
+          description: OAuth-style JSON error with no-store caching.
+  /oauth/token:
+    post:
+      operationId: exchangeApplicationToken
+      tags: [Applications]
+      summary: Exchange an authorization code or rotate a refresh token.
+      security:
+        - applicationClientBasic: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [grant_type]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [authorization_code, refresh_token]
+                code: { type: string, format: password }
+                code_verifier: { type: string, minLength: 43, maxLength: 128 }
+                redirect_uri: { type: string, format: uri }
+                refresh_token: { type: string, format: password }
+      responses:
+        '200':
+          description: Rotating application token grant. Access tokens expire after one hour.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [access_token, token_type, expires_in, refresh_token, scope, installation]
+                properties:
+                  access_token: { type: string, format: password }
+                  token_type: { type: string, const: Bearer }
+                  expires_in: { type: integer, const: 3600 }
+                  refresh_token: { type: string, format: password }
+                  scope: { type: string }
+                  installation:
+                    type: object
+                    additionalProperties: false
+                    required: [installation_id, application_id, network]
+                    properties:
+                      installation_id: { $ref: './components.yaml#/components/schemas/Identifier' }
+                      application_id: { $ref: './components.yaml#/components/schemas/Identifier' }
+                      network: { $ref: './components.yaml#/components/schemas/Network' }
+        default:
+          description: OAuth-style JSON error with no-store caching.
+  /oauth/revoke:
+    post:
+      operationId: revokeApplicationToken
+      tags: [Applications]
+      summary: Revoke a refresh-token family.
+      security:
+        - applicationClientBasic: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token, token_type_hint]
+              properties:
+                token: { type: string, format: password }
+                token_type_hint: { type: string, const: refresh_token }
+      responses:
+        '200':
+          description: Revocation completed without a response body.
+        default:
+          description: OAuth-style JSON error with no-store caching.
+  /v1/admin/applications:
+    get:
+      operationId: listRegisteredApplications
+      tags: [Applications]
+      summary: Read a bounded registered-application snapshot.
+      security:
+        - administratorSession: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Safe application metadata; no credentials are returned.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/RegisteredApplications'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/applications/{application_id}:
+    get:
+      operationId: getRegisteredApplication
+      tags: [Applications]
+      summary: Read one registered application.
+      security:
+        - administratorSession: []
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          description: Safe application metadata.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/RegisteredApplication'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/applications/{application_id}/client-secrets:
+    post:
+      operationId: rotateRegisteredApplicationClientSecret
+      tags: [Applications]
+      summary: Revoke the old client secret and return its replacement once.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '201':
+          description: One-time client-secret disclosure.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/ApplicationClientSecret'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/applications/{application_id}/disable:
+    post:
+      operationId: disableRegisteredApplication
+      tags: [Applications]
+      summary: Disable an application and revoke every installation and credential.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/application-registration-requests/{request_id}:
+    get:
+      operationId: getApplicationRegistrationRequest
+      tags: [Applications]
+      summary: Read a pending registration request for owner review.
+      security:
+        - administratorSession: []
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          description: Pending registration request.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/ApplicationRegistrationRequest'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/application-registration-requests/{request_id}/approve:
+    post:
+      operationId: approveApplicationRegistration
+      tags: [Applications]
+      summary: Register the application and return its exact setup callback.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          description: Validated callback carrying a single-use registration code and original state.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/ApplicationRedirect'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/application-registration-requests/{request_id}/cancel:
+    post:
+      operationId: cancelApplicationRegistration
+      tags: [Applications]
+      summary: Deny registration and return its exact setup callback.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          description: Validated access-denied callback carrying the original state.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/ApplicationRedirect'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/application-installations:
+    get:
+      operationId: listApplicationInstallations
+      tags: [Applications]
+      summary: Read application installations for one network.
+      security:
+        - administratorSession: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Safe installation metadata; no tokens or client credentials are returned.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/ApplicationInstallations'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/approve:
+    post:
+      operationId: approveApplicationAuthorization
+      tags: [Applications]
+      summary: Install or reauthorize an application in one network.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/ApplicationAuthorizationApprovalRequest'
+      responses:
+        '200':
+          description: Validated callback carrying a single-use authorization code and original state.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/ApplicationRedirect'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/cancel:
+    post:
+      operationId: cancelApplicationAuthorization
+      tags: [Applications]
+      summary: Deny network access and return the exact registered callback.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - name: request_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '200':
+          description: Validated access-denied callback carrying the original state.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/ApplicationRedirect'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/node-installers:
+    post:
+      operationId: createNodeInstaller
+      tags: [Applications]
+      summary: Create a one-time systemd node installer.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/NodeInstallerRequest'
+      responses:
+        '201':
+          description: One-time installer command bound to the requested network, name, and capabilities.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/NodeInstaller'
+        '422':
+          description: Stable unsupported_mode capability error for unavailable installer modes.
+          content:
+            application/json:
+              schema:
+                $ref: './components.yaml#/components/schemas/UnsupportedModeErrorEnvelope'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/application-installations/{installation_id}:
+    delete:
+      operationId: revokeApplicationInstallation
+      tags: [Applications]
+      summary: Revoke one installation without changing the registered application.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - name: installation_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
 
 components:
   securitySchemes:
@@ -1391,3 +1892,7 @@ components:
       $ref: './components.yaml#/components/securitySchemes/rootBearer'
     serviceAccessToken:
       $ref: './components.yaml#/components/securitySchemes/serviceAccessToken'
+    applicationClientBasic:
+      type: http
+      scheme: basic
+      description: Registered application client_id and one-time-issued client secret.

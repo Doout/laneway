@@ -19,6 +19,14 @@ const rootOnlyOperations = [
   'issueAdministratorRecoveryGrant',
   'probeRootAdministratorCredential',
 ];
+const publicApplicationOperations = [
+  'startApplicationRegistration',
+  'exchangeApplicationRegistration',
+  'startApplicationAuthorization',
+  'getApplicationAuthorizationRequest',
+  'exchangeApplicationToken',
+  'revokeApplicationToken',
+];
 
 const rootOnlyTypeNames = [
   'BeginRootAdministratorTokenRotation',
@@ -35,7 +43,11 @@ const rootOnlyTypeNames = [
   'RotationId',
   'ServiceAccessToken2',
 ];
-const rootOnlyLowerPrefixes = rootOnlyTypeNames.map((name) => name.toLowerCase());
+const excludedTypeNames = [
+  ...rootOnlyTypeNames,
+  ...publicApplicationOperations.map((name) => `${name[0].toUpperCase()}${name.slice(1)}`),
+];
+const excludedLowerPrefixes = excludedTypeNames.map((name) => name.toLowerCase());
 const rootOnlyZodNames = [
   'zBeginRootAdministratorTokenRotation',
   'zCompleteRootAdministratorTokenRotation',
@@ -44,13 +56,17 @@ const rootOnlyZodNames = [
   'zProbeRootAdministratorCredential',
   'zServiceAccessToken2',
 ];
+const publicApplicationZodNames = publicApplicationOperations.map(
+  (name) => `z${name[0].toUpperCase()}${name.slice(1)}`,
+);
+const excludedZodNames = [...rootOnlyZodNames, ...publicApplicationZodNames];
 
 const pruneNamedImports = (source) => source.replace(
   /import (type )?\{([^}]*)\} from ('\.\/types\.gen'|'\.\/zod\.gen');/gu,
   (statement, typeOnly, names, moduleName) => {
     const kept = names.split(',').map((name) => name.trim()).filter((name) =>
-      !rootOnlyLowerPrefixes.some((prefix) => name.toLowerCase().startsWith(prefix)) &&
-      !rootOnlyZodNames.some((prefix) => name.startsWith(prefix)),
+      !excludedLowerPrefixes.some((prefix) => name.toLowerCase().startsWith(prefix)) &&
+      !excludedZodNames.some((prefix) => name.startsWith(prefix)),
     );
     return `import ${typeOnly ?? ''}{ ${kept.join(', ')} } from ${moduleName};`;
   },
@@ -323,6 +339,7 @@ types = replaceRequired(types, `        /**
         username?: Username;
 `, '', 'root-only administrator username query');
 types = removeDeclarations(types, 'type', rootOnlyTypeNames.filter((name) => name !== 'ClientOptions'));
+types = removeDeclarations(types, 'type', publicApplicationOperations.map((name) => `${name[0].toUpperCase()}${name.slice(1)}`));
 await writeFile(typesPath, types);
 
 let zod = await readFile(zodPath, 'utf8');
@@ -379,6 +396,7 @@ const zodReplacements = [
 for (const [before, after] of zodReplacements) zod = replaceRequired(zod, before, after, before.slice(0, 80));
 zod = removeDeclarations(zod, 'const', [
   ...rootOnlyOperations.map((name) => `z${name[0].toUpperCase()}${name.slice(1)}`),
+  ...publicApplicationZodNames,
   'zAdministratorCsrfCookie',
   'zAdministratorCsrfHeader',
   'zAdministratorSession2',
@@ -390,12 +408,17 @@ zod = removeDeclarations(zod, 'const', [
 await writeFile(zodPath, zod);
 
 let sdk = await readFile(sdkPath, 'utf8');
-for (const operation of rootOnlyOperations) sdk = removeFunction(sdk, operation);
+for (const operation of [...rootOnlyOperations, ...publicApplicationOperations]) sdk = removeFunction(sdk, operation);
 sdk = pruneNamedImports(sdk);
 sdk = sdk.replace(/^ {4}\.\.\.options,?\n/gmu, '');
 sdk = sdk.replace(/=> options\.client\.(?:delete|get|patch|post|put)<[^\n]+>\(\{\n/gu, (match) => `${match}    ...options,\n`);
 sdk = sdk.replaceAll("        ...options.headers\n", '');
-sdk = replaceRequired(sdk, 'Client, ClientMeta, Options as Options2', 'InternalTransport as Client, Options as Options2', 'ClientMeta import');
+sdk = replaceRequired(
+  sdk,
+  "import { type Client, type ClientMeta, type Options as Options2, type RequestResult, type TDataShape, urlSearchParamsBodySerializer } from '../transport';",
+  "import { type InternalTransport as Client, type Options as Options2, type RequestResult, type TDataShape } from '../transport';",
+  'ClientMeta import',
+);
 sdk = sdk.replaceAll('returned by `createClient()`', 'injected by `createManagementApi()`');
 sdk = replaceRequired(sdk, `    /**
      * You can pass arbitrary values through the \`meta\` object. This can be

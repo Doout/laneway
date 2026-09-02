@@ -211,6 +211,13 @@ func TestManagementHandlersUseOnlyDecisionBoundStoreMethods(t *testing.T) {
 		"RevokeAdministratorSessionByDecision": {}, "UpdateAdministrator": {},
 		"CreateServicePrincipal": {}, "ServicePrincipals": {}, "DisableServicePrincipal": {},
 		"IssueServiceAccessToken": {}, "ServiceAccessTokens": {}, "RevokeServiceAccessToken": {},
+		"AdministratorApplications": {}, "AdministratorApplication": {},
+		"AdministratorRotateApplicationClientSecret": {}, "AdministratorDisableApplication": {},
+		"AdministratorApplicationRegistrationRequest": {},
+		"AdministratorApproveApplicationRegistration": {}, "AdministratorCancelApplicationRegistration": {},
+		"AdministratorApplicationInstallations":        {},
+		"AdministratorApproveApplicationAuthorization": {}, "AdministratorCancelApplicationAuthorization": {},
+		"AdministratorRevokeApplicationInstallation": {}, "AdministratorIssueNodeInstallerToken": {},
 	}
 
 	pending := make([]string, 0, len(managementHandlers))

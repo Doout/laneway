@@ -245,6 +245,59 @@ export type Administrators = {
     administrators: Array<Administrator>;
 };
 
+export type ApplicationAuthorizationApprovalRequest = {
+    scopes: Array<ApplicationScope>;
+};
+
+export type ApplicationClientSecret = {
+    application_id: Identifier;
+    client_secret: string;
+};
+
+export type ApplicationInstallation = {
+    installation_id: Identifier;
+    application_id: Identifier;
+    network_id: Identifier;
+    service_principal_id: Identifier;
+    scopes: Array<ApplicationScope>;
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+export type ApplicationInstallations = {
+    application_installations: Array<ApplicationInstallation>;
+};
+
+export type ApplicationManifest = {
+    name: string;
+    homepage_uri: string;
+    setup_uri: string;
+    redirect_uris: Array<string>;
+    scopes: Array<ApplicationScope>;
+    token_endpoint_auth_method: 'client_secret_basic';
+};
+
+export type ApplicationRedirect = {
+    redirect_uri: string;
+};
+
+export type ApplicationRegistrationRequest = {
+    request_id: Identifier;
+    manifest: ApplicationManifest;
+    expires_at_unix_seconds: UnixSeconds;
+};
+
+export const ApplicationScope = {
+    NETWORK_READ: 'network.read',
+    NODE_READ: 'node.read',
+    ENROLLMENT_ISSUE: 'enrollment.issue',
+    ROUTE_READ: 'route.read',
+    ROUTE_MANAGE: 'route.manage'
+} as const;
+
+export type ApplicationScope = typeof ApplicationScope[keyof typeof ApplicationScope];
+
 /**
  * Omission of metric assigns the current zero-value metric.
  */
@@ -685,6 +738,18 @@ export type NodeCapabilitiesRequest = {
     enabled_capabilities?: 0 | 8 | 16 | 24 | null;
 };
 
+export type NodeInstaller = {
+    installation_id: Identifier;
+    command: string;
+    expires_at_unix_seconds: UnixSeconds;
+};
+
+export type NodeInstallerRequest = {
+    name: string;
+    kind: 'node' | 'connector' | 'exit';
+    install_mode: 'systemd';
+};
+
 export type Nodes = {
     nodes: Array<Node>;
 };
@@ -716,6 +781,10 @@ export const Permission = {
     CERTIFICATE_REVOKE: 'certificate.revoke',
     AUDIT_READ: 'audit.read',
     AUDIT_READ_GLOBAL: 'audit.read_global',
+    APPLICATION_READ: 'application.read',
+    APPLICATION_MANAGE: 'application.manage',
+    APPLICATION_INSTALLATION_READ: 'application_installation.read',
+    APPLICATION_INSTALLATION_MANAGE: 'application_installation.manage',
     PRINCIPAL_MANAGE: 'principal.manage',
     SESSION_MANAGE_OTHERS: 'session.manage_others',
     SERVICE_PRINCIPAL_MANAGE: 'service_principal.manage',
@@ -784,6 +853,24 @@ export type RegisterRelayRequest = {
     node_id?: Identifier | null;
     name: ResourceName;
     endpoint: RelayEndpoint;
+};
+
+export type RegisteredApplication = {
+    application_id: Identifier;
+    client_id: string;
+    name: string;
+    homepage_uri: string;
+    setup_uri: string;
+    redirect_uris: Array<string>;
+    scopes: Array<ApplicationScope>;
+    token_endpoint_auth_method: 'client_secret_basic';
+    enabled: boolean;
+    created_at_unix_seconds: UnixSeconds;
+    updated_at_unix_seconds: UnixSeconds;
+};
+
+export type RegisteredApplications = {
+    applications: Array<RegisteredApplication>;
 };
 
 export type Relay = {
@@ -995,6 +1082,13 @@ export type Uint64 = number;
  * Whole seconds since the Unix epoch, transported as a JSON number. The browser boundary rejects values outside JavaScript's safe-integer range.
  */
 export type UnixSeconds = number;
+
+export type UnsupportedModeErrorEnvelope = {
+    request_id: RequestId;
+    code: 'unsupported_mode';
+    detail: string;
+    retryable: false;
+};
 
 /**
  * Full replacement. Omitted priority, description, and enabled fields reset to 0, the empty string, and false respectively.
@@ -2794,3 +2888,341 @@ export type UpdateRelayResponses = {
 };
 
 export type UpdateRelayResponse = UpdateRelayResponses[keyof UpdateRelayResponses];
+
+export type ListRegisteredApplicationsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/applications';
+};
+
+export type ListRegisteredApplicationsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListRegisteredApplicationsError = ListRegisteredApplicationsErrors[keyof ListRegisteredApplicationsErrors];
+
+export type ListRegisteredApplicationsResponses = {
+    /**
+     * Safe application metadata; no credentials are returned.
+     */
+    200: RegisteredApplications;
+};
+
+export type ListRegisteredApplicationsResponse = ListRegisteredApplicationsResponses[keyof ListRegisteredApplicationsResponses];
+
+export type GetRegisteredApplicationData = {
+    body?: never;
+    path: {
+        application_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/applications/{application_id}';
+};
+
+export type GetRegisteredApplicationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type GetRegisteredApplicationError = GetRegisteredApplicationErrors[keyof GetRegisteredApplicationErrors];
+
+export type GetRegisteredApplicationResponses = {
+    /**
+     * Safe application metadata.
+     */
+    200: RegisteredApplication;
+};
+
+export type GetRegisteredApplicationResponse = GetRegisteredApplicationResponses[keyof GetRegisteredApplicationResponses];
+
+export type RotateRegisteredApplicationClientSecretData = {
+    body?: never;
+    path: {
+        application_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/applications/{application_id}/client-secrets';
+};
+
+export type RotateRegisteredApplicationClientSecretErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type RotateRegisteredApplicationClientSecretError = RotateRegisteredApplicationClientSecretErrors[keyof RotateRegisteredApplicationClientSecretErrors];
+
+export type RotateRegisteredApplicationClientSecretResponses = {
+    /**
+     * One-time client-secret disclosure.
+     */
+    201: ApplicationClientSecret;
+};
+
+export type RotateRegisteredApplicationClientSecretResponse = RotateRegisteredApplicationClientSecretResponses[keyof RotateRegisteredApplicationClientSecretResponses];
+
+export type DisableRegisteredApplicationData = {
+    body?: never;
+    path: {
+        application_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/applications/{application_id}/disable';
+};
+
+export type DisableRegisteredApplicationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type DisableRegisteredApplicationError = DisableRegisteredApplicationErrors[keyof DisableRegisteredApplicationErrors];
+
+export type DisableRegisteredApplicationResponses = {
+    /**
+     * Operation completed with no response body.
+     */
+    204: void;
+};
+
+export type DisableRegisteredApplicationResponse = DisableRegisteredApplicationResponses[keyof DisableRegisteredApplicationResponses];
+
+export type GetApplicationRegistrationRequestData = {
+    body?: never;
+    path: {
+        request_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/application-registration-requests/{request_id}';
+};
+
+export type GetApplicationRegistrationRequestErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type GetApplicationRegistrationRequestError = GetApplicationRegistrationRequestErrors[keyof GetApplicationRegistrationRequestErrors];
+
+export type GetApplicationRegistrationRequestResponses = {
+    /**
+     * Pending registration request.
+     */
+    200: ApplicationRegistrationRequest;
+};
+
+export type GetApplicationRegistrationRequestResponse = GetApplicationRegistrationRequestResponses[keyof GetApplicationRegistrationRequestResponses];
+
+export type ApproveApplicationRegistrationData = {
+    body?: never;
+    path: {
+        request_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/application-registration-requests/{request_id}/approve';
+};
+
+export type ApproveApplicationRegistrationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ApproveApplicationRegistrationError = ApproveApplicationRegistrationErrors[keyof ApproveApplicationRegistrationErrors];
+
+export type ApproveApplicationRegistrationResponses = {
+    /**
+     * Validated callback carrying a single-use registration code and original state.
+     */
+    200: ApplicationRedirect;
+};
+
+export type ApproveApplicationRegistrationResponse = ApproveApplicationRegistrationResponses[keyof ApproveApplicationRegistrationResponses];
+
+export type CancelApplicationRegistrationData = {
+    body?: never;
+    path: {
+        request_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/application-registration-requests/{request_id}/cancel';
+};
+
+export type CancelApplicationRegistrationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CancelApplicationRegistrationError = CancelApplicationRegistrationErrors[keyof CancelApplicationRegistrationErrors];
+
+export type CancelApplicationRegistrationResponses = {
+    /**
+     * Validated access-denied callback carrying the original state.
+     */
+    200: ApplicationRedirect;
+};
+
+export type CancelApplicationRegistrationResponse = CancelApplicationRegistrationResponses[keyof CancelApplicationRegistrationResponses];
+
+export type ListApplicationInstallationsData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/networks/{network_id}/application-installations';
+};
+
+export type ListApplicationInstallationsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListApplicationInstallationsError = ListApplicationInstallationsErrors[keyof ListApplicationInstallationsErrors];
+
+export type ListApplicationInstallationsResponses = {
+    /**
+     * Safe installation metadata; no tokens or client credentials are returned.
+     */
+    200: ApplicationInstallations;
+};
+
+export type ListApplicationInstallationsResponse = ListApplicationInstallationsResponses[keyof ListApplicationInstallationsResponses];
+
+export type ApproveApplicationAuthorizationData = {
+    body: ApplicationAuthorizationApprovalRequest;
+    path: {
+        network_id: Identifier;
+        request_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/approve';
+};
+
+export type ApproveApplicationAuthorizationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ApproveApplicationAuthorizationError = ApproveApplicationAuthorizationErrors[keyof ApproveApplicationAuthorizationErrors];
+
+export type ApproveApplicationAuthorizationResponses = {
+    /**
+     * Validated callback carrying a single-use authorization code and original state.
+     */
+    200: ApplicationRedirect;
+};
+
+export type ApproveApplicationAuthorizationResponse = ApproveApplicationAuthorizationResponses[keyof ApproveApplicationAuthorizationResponses];
+
+export type CancelApplicationAuthorizationData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+        request_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/application-authorization-requests/{request_id}/cancel';
+};
+
+export type CancelApplicationAuthorizationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CancelApplicationAuthorizationError = CancelApplicationAuthorizationErrors[keyof CancelApplicationAuthorizationErrors];
+
+export type CancelApplicationAuthorizationResponses = {
+    /**
+     * Validated access-denied callback carrying the original state.
+     */
+    200: ApplicationRedirect;
+};
+
+export type CancelApplicationAuthorizationResponse = CancelApplicationAuthorizationResponses[keyof CancelApplicationAuthorizationResponses];
+
+export type CreateNodeInstallerData = {
+    body: NodeInstallerRequest;
+    path: {
+        network_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/networks/{network_id}/node-installers';
+};
+
+export type CreateNodeInstallerErrors = {
+    /**
+     * Stable unsupported_mode capability error for unavailable installer modes.
+     */
+    422: UnsupportedModeErrorEnvelope;
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type CreateNodeInstallerError = CreateNodeInstallerErrors[keyof CreateNodeInstallerErrors];
+
+export type CreateNodeInstallerResponses = {
+    /**
+     * One-time installer command bound to the requested network, name, and capabilities.
+     */
+    201: NodeInstaller;
+};
+
+export type CreateNodeInstallerResponse = CreateNodeInstallerResponses[keyof CreateNodeInstallerResponses];
+
+export type RevokeApplicationInstallationData = {
+    body?: never;
+    path: {
+        installation_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/application-installations/{installation_id}';
+};
+
+export type RevokeApplicationInstallationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type RevokeApplicationInstallationError = RevokeApplicationInstallationErrors[keyof RevokeApplicationInstallationErrors];
+
+export type RevokeApplicationInstallationResponses = {
+    /**
+     * Operation completed with no response body.
+     */
+    204: void;
+};
+
+export type RevokeApplicationInstallationResponse = RevokeApplicationInstallationResponses[keyof RevokeApplicationInstallationResponses];

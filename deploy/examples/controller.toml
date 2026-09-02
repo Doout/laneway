@@ -19,6 +19,8 @@ ca_private_key = "/etc/laneway/ca.key"
 # issuer_certificate = "/etc/laneway/intermediate.crt"
 admin_token_file = "/etc/laneway/admin.token"
 leaf_validity = "720h"
+# Local development only: permit HTTP application callbacks on loopback hosts.
+# allow_insecure_application_callbacks = true
 
 # Optional public discovery listener. This certificate MUST chain to public
 # Web PKI and is deliberately separate from the Laneway-CA controller identity.

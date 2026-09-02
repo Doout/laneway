@@ -8,6 +8,9 @@ import {
   AccessDetailPage,
   AccessPage,
   AddNodePage,
+  ApplicationInstallPage,
+  ApplicationRegistrationConsentPage,
+  ApplicationsPage,
   ApproveRoutePage,
   AuditPage,
   CreateAccessPage,
@@ -80,12 +83,20 @@ function RequireAuditPermission() {
   return networkId && hasPermission('audit.read', networkId) ? <Outlet /> : <Denied />
 }
 
+function RequireAnyPermission({ permissions }: { permissions: AdministratorPermission[] }) {
+  const { hasPermission } = useControlPlane()
+  return permissions.some((permission) => hasPermission(permission)) ? <Outlet /> : <Denied />
+}
+
 export function App() {
   return <ThemeProvider><Routes>
     <Route index element={<Landing />} />
     <Route path="/sign-in" element={<SignInPage />} />
     <Route path="/setup" element={<SetupRequiredPage />} />
     <Route element={<RequireSession />}><Route element={<ControllerAppShell />}>
+      <Route element={<RequirePermission permission="application.manage" />}><Route path="/applications/consent" element={<ApplicationRegistrationConsentPage />} /></Route>
+      <Route element={<RequireAnyPermission permissions={['application_installation.manage']} />}><Route path="/applications/install" element={<ApplicationInstallPage />} /></Route>
+      <Route element={<RequireAnyPermission permissions={['application.read', 'application_installation.read']} />}><Route path="/applications" element={<ApplicationsPage />} /></Route>
       <Route element={<RequirePermission permission="network.list" />}><Route path="/overview" element={<OverviewPage />} /><Route path="/infrastructure" element={<InfrastructurePage />} /></Route>
       <Route element={<RequirePermission permission="node.read" />}><Route path="/networks" element={<NetworksPage />} /><Route path="/nodes" element={<Navigate to="/networks" replace />} /><Route path="/nodes/:nodeId" element={<NodeDetailPage />} /></Route>
       <Route element={<RequirePermission permission="acl.read" />}><Route path="/users" element={<UsersPage />} /><Route path="/users/:userId" element={<UserDetailPage />} /><Route path="/teams" element={<TeamsPage />} /><Route path="/teams/:teamId" element={<TeamDetailPage />} /></Route>

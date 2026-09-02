@@ -1,0 +1,42 @@
+.applications-page, .application-consent-page { display: grid; gap: 20px; }
+.applications-page > .page-header, .application-consent-page > .page-header { margin-bottom: 0; }
+.applications-page .section { min-width: 0; }
+.applications-page .data-table th:nth-child(1) { width: 25%; }
+.applications-page .data-table th:nth-child(2) { width: 27%; }
+.applications-page .data-table th:nth-child(3) { width: 14%; }
+.applications-page .data-table th:nth-child(4) { width: 12%; }
+.applications-page .data-table th:nth-child(5) { width: 22%; }
+.application-name { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+.application-name > span:first-child { display: grid; flex: 0 0 auto; place-items: center; width: 35px; height: 35px; color: var(--primary); background: var(--primary-soft); border: 1px solid var(--primary-border); border-radius: 9px; }
+.application-name strong, .application-name small, .application-table-detail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.application-name small, .application-table-detail { margin-top: 2px; color: var(--faint); font-size: .7rem; }
+.button-row.compact { flex-wrap: nowrap; justify-content: flex-end; }
+.application-secret { display: grid; gap: 13px; padding: 16px; background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent); border-radius: 14px; box-shadow: var(--shadow-sm); }
+.application-secret > div:first-child { display: flex; align-items: center; gap: 10px; }
+.application-secret p { margin: 2px 0 0; font-size: .75rem; }
+.application-secret .token-box { margin: 0; }
+.application-secret > .button { justify-self: end; }
+.application-consent-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 18px; align-items: start; }
+.application-consent-card, .application-consent-summary { min-width: 0; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-sm); }
+.application-consent-summary { position: sticky; top: 82px; }
+.application-consent-summary p { margin: 18px 0 0; font-size: .78rem; }
+.application-consent-summary code { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.application-consent-identity { display: flex; align-items: center; gap: 13px; min-width: 0; margin-bottom: 24px; }
+.application-consent-identity > span { display: grid; flex: 0 0 auto; place-items: center; width: 46px; height: 46px; color: var(--primary); background: var(--primary-soft); border: 1px solid var(--primary-border); border-radius: 12px; }
+.application-consent-identity h2 { margin: 0 0 3px; overflow-wrap: anywhere; }
+.application-consent-identity a, .application-consent-identity small { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: .75rem; }
+.application-consent-identity.compact { margin-bottom: 12px; }
+.application-scopes { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.application-scopes li { padding: 11px 0; border-bottom: 1px solid var(--border); }
+.application-scopes li:last-child { border-bottom: 0; }
+.application-scope-row { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; }
+label.application-scope-row { cursor: pointer; }
+.application-scopes li.disabled { opacity: .62; }
+.application-scopes li.disabled .application-scope-row { cursor: not-allowed; }
+.application-scope-check { display: grid; place-items: center; width: 26px; height: 26px; color: var(--accent); background: var(--accent-soft); border-radius: 50%; }
+.application-scope-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--primary); }
+.application-scopes strong, .application-scopes small { display: block; }
+.application-scopes strong { font-size: .82rem; }
+.application-scopes small { margin-top: 2px; color: var(--muted); font-size: .72rem; line-height: 1.4; }
+.application-consent-actions { display: flex; justify-content: flex-end; gap: 9px; }
+@media (max-width: 880px) { .application-consent-layout { grid-template-columns: 1fr; } .application-consent-summary { position: static; } }

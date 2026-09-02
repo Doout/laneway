@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	currentSchemaVersion                    = 15
+	currentSchemaVersion                    = 16
 	endpointStatusSchemaVersion             = 13
 	namedAccessSchemaVersion                = 14
 	automationServicePrincipalSchemaVersion = 15
+	applicationIntegrationSchemaVersion     = 16
 	busyTimeoutMS                           = 5_000
 )
 

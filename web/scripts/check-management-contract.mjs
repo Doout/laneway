@@ -156,8 +156,8 @@ const duplicateAutomationSecurity = [...serviceAccessTokenAlternatives]
   .sort();
 const problems = [];
 if (duplicateYamlKeys.length) problems.push(`duplicate YAML mapping keys: ${duplicateYamlKeys.join(', ')}`);
-if (registered.size !== 66) problems.push(`controller registration count is ${registered.size}, expected 66`);
-if (documented.size !== 66) problems.push(`OpenAPI operation count is ${documented.size}, expected 66`);
+if (registered.size !== 78) problems.push(`controller registration count is ${registered.size}, expected 78`);
+if (documented.size !== 78) problems.push(`OpenAPI operation count is ${documented.size}, expected 78`);
 if (duplicateRegistrations.length) problems.push(`duplicate controller registrations: ${duplicateRegistrations.join(', ')}`);
 if (duplicateOperations.length) problems.push(`duplicate OpenAPI operations: ${duplicateOperations.join(', ')}`);
 if (missing.length) problems.push(`missing from OpenAPI: ${missing.join(', ')}`);
@@ -181,4 +181,4 @@ if (problems.length) {
   throw new Error(`management contract route drift:\n- ${problems.join('\n- ')}`);
 }
 
-console.log(`Management contract has unique YAML keys, matches all 66 registered administrator routes, and documents all ${automationRoutes.size} grantable service-token routes.`);
+console.log(`Management contract has unique YAML keys, matches all 78 registered administrator routes, and documents all ${automationRoutes.size} grantable service-token routes.`);

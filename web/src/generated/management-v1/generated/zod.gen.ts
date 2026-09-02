@@ -271,6 +271,31 @@ export const zAdministratorSessionState = z.enum([
     'revoked'
 ]);
 
+export const zApplicationRedirect = z.object({
+    redirect_uri: z.url().max(4096)
+}).strict();
+
+export const zApplicationScope = z.enum([
+    'network.read',
+    'node.read',
+    'enrollment.issue',
+    'route.read',
+    'route.manage'
+]);
+
+export const zApplicationAuthorizationApprovalRequest = z.object({
+    scopes: z.array(zApplicationScope).min(1).max(16)
+}).strict();
+
+export const zApplicationManifest = z.object({
+    name: z.string().min(1).max(128),
+    homepage_uri: z.url().max(2048),
+    setup_uri: z.url().max(2048),
+    redirect_uris: z.array(z.url().max(2048)).min(1).max(16),
+    scopes: z.array(zApplicationScope).min(1).max(16),
+    token_endpoint_auth_method: z.literal('client_secret_basic')
+}).strict();
+
 export const zAuthState = z.object({
     state: z.enum(['bootstrap_required', 'sign_in'])
 }).strict();
@@ -368,6 +393,11 @@ export const zIpProtocol = z.enum([
  */
 export const zIdentifier = z.string().regex(/^(?!0{32}$)[0-9a-f]{32}$/);
 
+export const zApplicationClientSecret = z.object({
+    application_id: zIdentifier,
+    client_secret: z.string().regex(/^lnw_client_secret_v1\.(?!0{32}$)[0-9a-f]{32}\.[A-Za-z0-9_-]{43}$/)
+}).strict();
+
 export const zCreateAccessGrantRequest = z.intersection(z.union([
     z.object({
         target_kind: z.literal('network').optional()
@@ -415,6 +445,16 @@ export const zNodeCapabilitiesRequest = z.object({
     ]).nullish().default(0)
 }).strict();
 
+export const zNodeInstallerRequest = z.object({
+    name: z.string().min(1).max(128),
+    kind: z.enum([
+        'node',
+        'connector',
+        'exit'
+    ]),
+    install_mode: z.enum(['systemd'])
+}).strict();
+
 /**
  * Administrator password; the controller requires 15..1024 UTF-8 bytes.
  */
@@ -442,6 +482,10 @@ export const zPermission = z.enum([
     'certificate.revoke',
     'audit.read',
     'audit.read_global',
+    'application.read',
+    'application.manage',
+    'application_installation.read',
+    'application_installation.manage',
     'principal.manage',
     'session.manage_others',
     'service_principal.manage',
@@ -858,6 +902,27 @@ export const zAdministratorSessions = z.object({
     sessions: z.array(zAdministratorSession)
 }).strict();
 
+export const zApplicationInstallation = z.object({
+    installation_id: zIdentifier,
+    application_id: zIdentifier,
+    network_id: zIdentifier,
+    service_principal_id: zIdentifier,
+    scopes: z.array(zApplicationScope).min(1),
+    enabled: z.boolean(),
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zApplicationInstallations = z.object({
+    application_installations: z.array(zApplicationInstallation)
+}).strict();
+
+export const zApplicationRegistrationRequest = z.object({
+    request_id: zIdentifier,
+    manifest: zApplicationManifest,
+    expires_at_unix_seconds: zUnixSeconds
+}).strict();
+
 export const zAuditEvent = z.object({
     event_id: zIdentifier,
     network_id: zIdentifier.optional(),
@@ -998,8 +1063,32 @@ export const zNode = z.object({
     lease_expires_at_unix_seconds: zUnixSeconds.optional()
 }).strict();
 
+export const zNodeInstaller = z.object({
+    installation_id: zIdentifier,
+    command: z.string().min(1),
+    expires_at_unix_seconds: zUnixSeconds
+}).strict();
+
 export const zNodes = z.object({
     nodes: z.array(zNode)
+}).strict();
+
+export const zRegisteredApplication = z.object({
+    application_id: zIdentifier,
+    client_id: z.string().regex(/^lnw_client_v1\.(?!0{32}$)[0-9a-f]{32}$/),
+    name: z.string().min(1).max(128),
+    homepage_uri: z.url().max(2048),
+    setup_uri: z.url().max(2048),
+    redirect_uris: z.array(z.url().max(2048)).min(1).max(16),
+    scopes: z.array(zApplicationScope).min(1).max(16),
+    token_endpoint_auth_method: z.literal('client_secret_basic'),
+    enabled: z.boolean(),
+    created_at_unix_seconds: zUnixSeconds,
+    updated_at_unix_seconds: zUnixSeconds
+}).strict();
+
+export const zRegisteredApplications = z.object({
+    applications: z.array(zRegisteredApplication)
 }).strict();
 
 export const zRelay = z.object({
@@ -1072,6 +1161,13 @@ export const zServicePrincipal = z.object({
 
 export const zServicePrincipals = z.object({
     service_principals: z.array(zServicePrincipal)
+}).strict();
+
+export const zUnsupportedModeErrorEnvelope = z.object({
+    request_id: zRequestId,
+    code: z.literal('unsupported_mode'),
+    detail: z.string(),
+    retryable: z.literal(false)
 }).strict();
 
 /**
@@ -1827,3 +1923,130 @@ export const zUpdateRelayPath = z.object({
  * Relay resource.
  */
 export const zUpdateRelayResponse = zRelay;
+
+/**
+ * One-time application credential disclosure.
+ */
+/**
+ * Pending authorization request.
+ */
+/**
+ * Rotating application token grant. Access tokens expire after one hour.
+ */
+export const zListRegisteredApplicationsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Safe application metadata; no credentials are returned.
+ */
+export const zListRegisteredApplicationsResponse = zRegisteredApplications;
+
+export const zGetRegisteredApplicationPath = z.object({
+    application_id: zIdentifier
+}).strict();
+
+/**
+ * Safe application metadata.
+ */
+export const zGetRegisteredApplicationResponse = zRegisteredApplication;
+
+export const zRotateRegisteredApplicationClientSecretPath = z.object({
+    application_id: zIdentifier
+}).strict();
+
+/**
+ * One-time client-secret disclosure.
+ */
+export const zRotateRegisteredApplicationClientSecretResponse = zApplicationClientSecret;
+
+export const zDisableRegisteredApplicationPath = z.object({
+    application_id: zIdentifier
+}).strict();
+
+/**
+ * Operation completed with no response body.
+ */
+export const zDisableRegisteredApplicationResponse = z.void();
+
+export const zGetApplicationRegistrationRequestPath = z.object({
+    request_id: zIdentifier
+}).strict();
+
+/**
+ * Pending registration request.
+ */
+export const zGetApplicationRegistrationRequestResponse = zApplicationRegistrationRequest;
+
+export const zApproveApplicationRegistrationPath = z.object({
+    request_id: zIdentifier
+}).strict();
+
+/**
+ * Validated callback carrying a single-use registration code and original state.
+ */
+export const zApproveApplicationRegistrationResponse = zApplicationRedirect;
+
+export const zCancelApplicationRegistrationPath = z.object({
+    request_id: zIdentifier
+}).strict();
+
+/**
+ * Validated access-denied callback carrying the original state.
+ */
+export const zCancelApplicationRegistrationResponse = zApplicationRedirect;
+
+export const zListApplicationInstallationsPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+export const zListApplicationInstallationsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Safe installation metadata; no tokens or client credentials are returned.
+ */
+export const zListApplicationInstallationsResponse = zApplicationInstallations;
+
+export const zApproveApplicationAuthorizationBody = zApplicationAuthorizationApprovalRequest;
+
+export const zApproveApplicationAuthorizationPath = z.object({
+    network_id: zIdentifier,
+    request_id: zIdentifier
+}).strict();
+
+/**
+ * Validated callback carrying a single-use authorization code and original state.
+ */
+export const zApproveApplicationAuthorizationResponse = zApplicationRedirect;
+
+export const zCancelApplicationAuthorizationPath = z.object({
+    network_id: zIdentifier,
+    request_id: zIdentifier
+}).strict();
+
+/**
+ * Validated access-denied callback carrying the original state.
+ */
+export const zCancelApplicationAuthorizationResponse = zApplicationRedirect;
+
+export const zCreateNodeInstallerBody = zNodeInstallerRequest;
+
+export const zCreateNodeInstallerPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+/**
+ * One-time installer command bound to the requested network, name, and capabilities.
+ */
+export const zCreateNodeInstallerResponse = zNodeInstaller;
+
+export const zRevokeApplicationInstallationPath = z.object({
+    installation_id: zIdentifier
+}).strict();
+
+/**
+ * Operation completed with no response body.
+ */
+export const zRevokeApplicationInstallationResponse = z.void();
