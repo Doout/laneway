@@ -18,6 +18,8 @@ FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc
 RUN apk add --no-cache \
       ca-certificates=20260611-r0 \
       iproute2-minimal=6.17.0-r0 \
+      libcrypto3=3.5.8-r0 \
+      libssl3=3.5.8-r0 \
       nftables=1.1.5-r2 \
       procps-ng=4.0.5-r0 \
       setpriv=2.41.4-r0 \
