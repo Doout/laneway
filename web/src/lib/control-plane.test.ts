@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { Permission } from '../generated/management-v1/generated/types.gen'
 import { administratorPermissions, parseAdministratorSession, parseConsoleBuildMode } from './control-plane'
 
 describe('console build mode', () => {
@@ -29,6 +30,10 @@ describe('administrator session parsing', () => {
       ...overrides,
     }
   }
+
+  it('recognizes every permission in the generated management contract', () => {
+    expect([...administratorPermissions].sort()).toEqual(Object.values(Permission).sort())
+  })
 
   it('maps the frozen flat DTO without retaining the CSRF token in the public session', () => {
     const parsed = parseAdministratorSession(session())
