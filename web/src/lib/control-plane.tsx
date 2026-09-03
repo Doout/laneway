@@ -25,6 +25,7 @@ export const administratorPermissions = [
   'application_installation.manage',
   'principal.manage',
   'session.manage_others',
+  'service_principal.manage',
   'recovery.manage',
   'root_token.rotate',
 ] as const
