@@ -1,8 +1,13 @@
 #!/bin/sh
 set -eu
 
-base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+deployment_dir=${LANEWAY_DEPLOY_DIR:-$script_dir}
+case "$deployment_dir" in /*) ;; *) echo "lane recovery: LANEWAY_DEPLOY_DIR must be absolute" >&2; exit 1 ;; esac
+base_dir=$(CDPATH='' cd -- "$deployment_dir" && pwd)
 env_file=$base_dir/.env
+compose_env_file=${LANEWAY_RECOVERY_COMPOSE_ENV_FILE:-$env_file}
+case "$compose_env_file" in /*) ;; *) echo "lane recovery: recovery Compose environment must be absolute" >&2; exit 1 ;; esac
 backup_dir=$base_dir/generated/backups
 recovery_dir=$base_dir/generated/recovery
 work=
@@ -49,7 +54,7 @@ trap 'exit 143' TERM
 
 die() { echo "lane recovery: $*" >&2; exit 1; }
 compose() {
-  docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
+  docker compose --project-directory "$base_dir" --env-file "$compose_env_file" -f "$base_dir/compose.yaml" "$@"
 }
 read_setting() {
   key=$1
@@ -79,6 +84,7 @@ case "${1:-}" in
     [ "$#" -eq 2 ] || die "usage: recovery.sh backup NAME.age"
     name=$2; validate_name "$name"
     require_regular "$env_file"
+    require_regular "$compose_env_file"
     recipient=$(read_setting LANEWAY_BACKUP_RECIPIENT)
     printf '%s\n' "$recipient" | grep -Eq '^age1[0-9a-z]{58}$' || die "LANEWAY_BACKUP_RECIPIENT must be an age X25519 recipient"
     if [ -e "$recovery_dir/$name" ] || [ -L "$recovery_dir/$name" ]; then

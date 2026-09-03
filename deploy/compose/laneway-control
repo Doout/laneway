@@ -103,12 +103,12 @@ compose() {
   docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
 }
 compose_with_env() {
-  candidate=$1; shift
-  docker compose --project-directory "$base_dir" --env-file "$candidate" -f "$base_dir/compose.yaml" "$@"
+  compose_env_path=$1; shift
+  docker compose --project-directory "$base_dir" --env-file "$compose_env_path" -f "$base_dir/compose.yaml" "$@"
 }
 compose_file_with_env() {
-  candidate=$1; compose_file=$2; shift 2
-  docker compose --project-directory "$base_dir" --env-file "$candidate" -f "$compose_file" "$@"
+  compose_file_env_path=$1; compose_file_path=$2; shift 2
+  docker compose --project-directory "$base_dir" --env-file "$compose_file_env_path" -f "$compose_file_path" "$@"
 }
 
 read_setting() {
@@ -208,7 +208,17 @@ cosign_verifier() {
   printf '%s' "$cosign_command"
 }
 
-backup_recovery() { "$base_dir/recovery.sh" backup "$1"; }
+backup_recovery() {
+  backup_env=$1
+  backup_name=$2
+  recovery_script=${LANEWAY_RECOVERY_SCRIPT:-$base_dir/recovery.sh}
+  case "$recovery_script" in /*) ;; *) die "recovery helper path must be absolute" ;; esac
+  if [ ! -f "$recovery_script" ] || [ -L "$recovery_script" ]; then
+    die "recovery helper must be a regular, non-symlink file"
+  fi
+  env LANEWAY_DEPLOY_DIR="$base_dir" LANEWAY_RECOVERY_COMPOSE_ENV_FILE="$backup_env" \
+    "$recovery_script" backup "$backup_name"
+}
 
 remove_database_artifacts() {
   rollback_remove_base=$1
@@ -257,6 +267,7 @@ cleanup_release_database_staging() {
 
 create_release_database_snapshot() {
   rollback_operation=$1
+  snapshot_env=$2
   rollback_backup_dir=$base_dir/generated/backups
   if [ "$(id -u)" -ne 0 ] || [ "$(stat -c '%a:%u:%g' "$state_dir")" != 700:0:0 ]; then
     echo "release database snapshots require a root-owned lifecycle directory with mode 0700" >&2
@@ -287,7 +298,7 @@ create_release_database_snapshot() {
     remove_current_database_snapshot || true
     return 1
   }
-  if ! compose run --rm --no-deps controller -config /etc/laneway/controller.toml \
+  if ! compose_with_env "$snapshot_env" run --rm --no-deps controller -config /etc/laneway/controller.toml \
     -backup "/backups/$rollback_staging_name"; then
     cleanup_release_database_staging || true
     remove_current_database_snapshot || true
@@ -1698,6 +1709,8 @@ restart_quiesced_source() {
 
 activate_release() {
   candidate=$1; operation=$2; migration_dir=${3:-}
+  source_backup_env=$candidate
+  [ "$operation" != rollback ] || source_backup_env=$env_file
   if [ -n "$migration_dir" ]; then
     case "$migration_dir" in /*) ;; *) die "deployment migration directory must be absolute" ;; esac
     for path in compose.yaml controller.toml relay.toml; do
@@ -1714,7 +1727,7 @@ activate_release() {
     run_step "Pull release images" compose_with_env "$candidate" pull || die "$operation image pull failed"
   fi
   backup_name="pre-${operation}-$(date -u +%Y%m%dT%H%M%SZ).age"
-  run_step "Create encrypted recovery backup" backup_recovery "$backup_name" || die "$operation recovery backup failed"
+  run_step "Create encrypted recovery backup" backup_recovery "$source_backup_env" "$backup_name" || die "$operation recovery backup failed"
   if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
     if [ ! -d "$state_dir" ] || [ -L "$state_dir" ]; then
       die "generated/lifecycle must be a real directory"
@@ -1747,7 +1760,7 @@ activate_release() {
     find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
     die "$operation could not stop the current stack; automatic recovery incomplete and the source stack may be stopped"
   fi
-  if ! run_step "Create protected pre-migration database snapshot" create_release_database_snapshot "$operation"; then
+  if ! run_step "Create protected pre-migration database snapshot" create_release_database_snapshot "$operation" "$source_backup_env"; then
     if restart_quiesced_source "$exit_was_running"; then
       find "$current_files" -depth -delete 2>/dev/null || true
       find "$current_copy" -maxdepth 0 -delete 2>/dev/null || true
@@ -1873,7 +1886,7 @@ case "$command" in
     ;;
   update) run_update "$@" ;;
   production-check) acquire_lock; run_production_check "$@" ;;
-  backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
+  backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "$env_file" "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
   restore)
     acquire_lock
     if [ "$#" -ne 3 ] || [ "$2" != --identity ]; then
