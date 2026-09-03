@@ -115,9 +115,11 @@ awk -v version="$package_version" -v controller="$controller_digest" -v relay="$
 ' "$destination/.env" > "$work_dir/candidate.env" || die "existing release environment is incomplete"
 install -m 0600 -o 0 -g 0 "$work_dir/candidate.env" "$candidate"
 
-if [ ! -f "$source_dir/laneway-control" ] || [ -L "$source_dir/laneway-control" ]; then
-  die "packaged laneway-control command is missing or unsafe"
-fi
+for helper in laneway-control recovery.sh; do
+  if [ ! -f "$source_dir/$helper" ] || [ -L "$source_dir/$helper" ]; then
+    die "packaged $helper is missing or unsafe"
+  fi
+done
 install -m 0755 -o 0 -g 0 "$source_dir/laneway-control" "$destination/.laneway-control.new"
 mv "$destination/.laneway-control.new" "$destination/laneway-control"
 
@@ -194,7 +196,9 @@ install -m 0444 "$work_dir/relay.toml" "$migration_dir/relay.toml"
 printf '\nApplying Laneway control-plane release\n'
 printf '  Version: v%s -> %s\n' "$current_version" "$tag"
 printf '  Network identity, PKI, state, ports, firewall, and host networking remain unchanged.\n\n'
-if ! (cd "$destination" && ./laneway-control upgrade "$candidate" "$migration_dir"); then
+if ! (cd "$destination" && env LANEWAY_DEPLOY_DIR="$destination" \
+  LANEWAY_RECOVERY_SCRIPT="$source_dir/recovery.sh" \
+  ./laneway-control upgrade "$candidate" "$migration_dir"); then
   die "upgrade failed; restoring the previous deployment files and containers"
 fi
 public_ready=false

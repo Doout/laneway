@@ -69,7 +69,11 @@ if [ "${LANEWAY_TEST_ALLOW_NEW_BACKUP:-0}" = 0 ] && grep -Eq '^\[bootstrap\]' "$
   echo "new controller configuration was installed before the old-controller backup" >&2
   exit 1
 fi
-printf 'recovery <%s> <%s>\n' "$1" "$2" >> "$LANEWAY_TEST_LOG"
+[ -n "${LANEWAY_RECOVERY_COMPOSE_ENV_FILE:-}" ] || {
+  echo "verified candidate environment was not selected for recovery" >&2
+  exit 1
+}
+printf 'recovery <%s> <%s> compose-env <%s>\n' "$1" "$2" "$LANEWAY_RECOVERY_COMPOSE_ENV_FILE" >> "$LANEWAY_TEST_LOG"
 EOF
 cat > "$deployment/validate.sh" <<'EOF'
 #!/bin/sh
@@ -77,6 +81,7 @@ printf 'validate\n' >> "$LANEWAY_TEST_LOG"
 [ "${LANEWAY_TEST_FAIL_VALIDATE:-0}" = 0 ] || exit 1
 EOF
 chmod 0755 "$deployment/lane" "$deployment/recovery.sh" "$deployment/validate.sh"
+cp "$deployment/recovery.sh" "$compose_source/recovery.sh"
 
 cat > "$test_root/image-digests.txt" <<'EOF'
 ghcr.io/doout/laneway-controller@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
@@ -192,7 +197,13 @@ case " $* " in
     ;;
   *" run --rm --no-deps controller "*" -backup /backups/"*)
     name=${*##* /backups/}; name=${name%% *}
-    version=$(sed -n 's/^LANEWAY_VERSION=//p' "$LANEWAY_DEPLOY_DIR/.env")
+    compose_env=$LANEWAY_DEPLOY_DIR/.env
+    previous=
+    for argument do
+      if [ "$previous" = --env-file ]; then compose_env=$argument; break; fi
+      previous=$argument
+    done
+    version=$(sed -n 's/^LANEWAY_VERSION=//p' "$compose_env")
     first_line=$(sed -n '1p' "$LANEWAY_DEPLOY_DIR/database.state")
     if [ "$version" = 0.2.14 ] && [ "$first_line" = 'migrated database' ]; then
       echo "old controller rejected migrated database backup" >&2
@@ -376,6 +387,9 @@ test -x "$deployment/generated/lifecycle/lane-before-0.2.15"
 test -L "$system_command"
 test "$(readlink "$system_command")" = "$deployment/laneway-control"
 grep -F 'recovery <backup> <pre-upgrade-' "$log" >/dev/null
+grep -F "compose-env <$deployment/generated/lifecycle/upgrade-0.2.15.env>" "$log" >/dev/null
+grep -F "<--env-file> <$deployment/generated/lifecycle/upgrade-0.2.15.env>" "$log" |
+  grep -F '<run> <--rm> <--no-deps> <controller>' >/dev/null
 grep -F 'docker <compose>' "$log" >/dev/null
 grep -E '<-f> <.*/migration/compose.yaml> <pull>' "$log" >/dev/null
 grep -F 'cosign <verify>' "$log" >/dev/null
@@ -428,6 +442,9 @@ fi
 test "$(grep -c '^cosign <verify>' "$log")" -eq 4
 grep -F "<-f> <$previous_generation/files/compose.yaml> <pull>" "$log" >/dev/null
 grep -F 'control-plane rollback complete' "$test_root/rollback-output" >/dev/null
+grep -F "compose-env <$deployment/.env>" "$log" >/dev/null
+grep -F "<--env-file> <$deployment/.env>" "$log" |
+  grep -F '<run> <--rm> <--no-deps> <controller>' >/dev/null
 grep -Fx 'pre-migration database' "$deployment/database.state" >/dev/null
 grep -Fx 'private-row-fixture' "$deployment/database.state" >/dev/null
 assert_source_selection
