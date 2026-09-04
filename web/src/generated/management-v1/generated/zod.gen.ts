@@ -1942,6 +1942,15 @@ export const zListRegisteredApplicationsQuery = z.object({
  */
 export const zListRegisteredApplicationsResponse = zRegisteredApplications;
 
+export const zDeleteRegisteredApplicationPath = z.object({
+    application_id: zIdentifier
+}).strict();
+
+/**
+ * Operation completed with no response body.
+ */
+export const zDeleteRegisteredApplicationResponse = z.void();
+
 export const zGetRegisteredApplicationPath = z.object({
     application_id: zIdentifier
 }).strict();

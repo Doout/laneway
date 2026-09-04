@@ -140,7 +140,15 @@ func TestPublicHTTPSProxiesConsoleAndAdministratorOnly(t *testing.T) {
 		t.Fatalf("administrator status=%d cookies=%v body=%q", administrator.Code, administrator.Result().Cookies(), administrator.Body.String())
 	}
 
-	for _, path := range []string{"/v1/enroll", "/v1/configuration", "/.well-known/unrelated"} {
+	registration := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "https://console.example.test/v1/application-registrations/exchange", strings.NewReader(`{"code":"code","code_verifier":"verifier"}`))
+	request.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(registration, request)
+	if registration.Code != http.StatusOK || !strings.Contains(registration.Body.String(), "console") {
+		t.Fatalf("application registration status=%d body=%q", registration.Code, registration.Body.String())
+	}
+
+	for _, path := range []string{"/v1/enroll", "/v1/configuration", "/v1/application-registrations/exchange/", "/.well-known/unrelated"} {
 		result := httptest.NewRecorder()
 		handler.ServeHTTP(result, httptest.NewRequest(http.MethodGet, "https://console.example.test"+path, nil))
 		if result.Code != http.StatusNotFound {

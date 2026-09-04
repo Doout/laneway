@@ -508,7 +508,7 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 		administratorBootstrapGrantPolicy, administratorOwnerRecoveryGrantPolicy,
 		servicePrincipalCreatePolicy, servicePrincipalListPolicy, servicePrincipalDisablePolicy, serviceTokenIssuePolicy,
 		serviceTokenListPolicy, serviceTokenRevokePolicy,
-		applicationListPolicy, applicationReadPolicy, applicationSecretPolicy, applicationDisablePolicy,
+		applicationListPolicy, applicationReadPolicy, applicationDeletePolicy, applicationSecretPolicy, applicationDisablePolicy,
 		applicationRegistrationReadPolicy, applicationRegistrationApprovePolicy, applicationRegistrationCancelPolicy,
 	}
 	seen := make(map[string]string, len(resourcePolicies)+len(identityPolicies)+1)

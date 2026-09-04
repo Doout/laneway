@@ -40,6 +40,7 @@ var managementRoutes = []RoutePolicy{
 	{http.MethodPost, "/v1/admin/service-access-tokens/{token_id}/revoke", OperationServicePrincipalManage, ScopeObject, true},
 	{http.MethodGet, "/v1/admin/applications", OperationApplicationRead, ScopeGlobal, false},
 	{http.MethodGet, "/v1/admin/applications/{application_id}", OperationApplicationRead, ScopeObject, false},
+	{http.MethodDelete, "/v1/admin/applications/{application_id}", OperationApplicationManage, ScopeObject, true},
 	{http.MethodPost, "/v1/admin/applications/{application_id}/client-secrets", OperationApplicationManage, ScopeObject, true},
 	{http.MethodPost, "/v1/admin/applications/{application_id}/disable", OperationApplicationManage, ScopeObject, true},
 	{http.MethodGet, "/v1/admin/application-registration-requests/{request_id}", OperationApplicationRead, ScopeObject, false},

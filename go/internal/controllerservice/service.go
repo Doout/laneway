@@ -234,6 +234,7 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/service-access-tokens/{token_id}/revoke", s.revokeServiceAccessToken)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/applications", s.readApplications)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/applications/{application_id}", s.readApplication)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/applications/{application_id}", s.deleteApplication)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/applications/{application_id}/client-secrets", s.rotateApplicationClientSecret)
 	s.registerManagementRoute(mux, http.MethodPost, "/v1/admin/applications/{application_id}/disable", s.disableApplication)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/application-registration-requests/{request_id}", s.readApplicationRegistrationRequest)

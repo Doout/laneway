@@ -39,4 +39,44 @@ label.application-scope-row { cursor: pointer; }
 .application-scopes strong { font-size: .82rem; }
 .application-scopes small { margin-top: 2px; color: var(--muted); font-size: .72rem; line-height: 1.4; }
 .application-consent-actions { display: flex; justify-content: flex-end; gap: 9px; }
-@media (max-width: 880px) { .application-consent-layout { grid-template-columns: 1fr; } .application-consent-summary { position: static; } }
+.application-registration-consent { width: min(100%, 1040px); margin-inline: auto; }
+.application-registration-panel { min-width: 0; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-sm); }
+.application-registration-header { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 15px; align-items: center; padding: 24px 26px; border-bottom: 1px solid var(--border); }
+.application-registration-icon { display: grid; place-items: center; width: 52px; height: 52px; color: var(--primary); background: var(--primary-soft); border: 1px solid var(--primary-border); border-radius: 13px; }
+.application-registration-header p { margin: 0 0 3px; color: var(--muted); font-size: .72rem; font-weight: 600; }
+.application-registration-header h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; overflow-wrap: anywhere; }
+.application-registration-header a { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--muted); font-size: .75rem; }
+.application-registration-body { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); }
+.application-registration-permissions, .application-registration-details { min-width: 0; padding: 24px 26px; }
+.application-registration-details { background: var(--surface-raised); border-left: 1px solid var(--border); }
+.application-registration-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.application-registration-section-heading h2, .application-registration-details h2 { margin: 0; font-size: .95rem; letter-spacing: -.01em; }
+.application-registration-section-heading > span, .application-registration-details dt > span { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 7px; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; font-size: .68rem; font-weight: 650; }
+.application-registration-details > h2 { margin-bottom: 13px; }
+.application-registration-details dl { margin: 0; }
+.application-registration-details dl > div { min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.application-registration-details dl > div:first-child { padding-top: 0; }
+.application-registration-details dl > div:last-child { padding-bottom: 0; border-bottom: 0; }
+.application-registration-details dt { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: .68rem; font-weight: 650; }
+.application-registration-details dd { min-width: 0; margin: 5px 0 0; font-size: .8rem; }
+.application-registration-details ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.application-registration-details code { display: block; max-width: 100%; color: var(--text); font-size: .72rem; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
+.application-registration-url > span { white-space: nowrap; }
+.application-registration-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 16px 26px; border-top: 1px solid var(--border); }
+.application-registration-boundary { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; align-items: start; color: var(--muted); }
+.application-registration-boundary svg { margin-top: 1px; color: var(--accent); }
+.application-registration-boundary p { margin: 0; max-width: 620px; font-size: .72rem; line-height: 1.45; }
+@media (max-width: 880px) {
+  .application-consent-layout { grid-template-columns: 1fr; }
+  .application-consent-summary { position: static; }
+  .application-registration-body { grid-template-columns: 1fr; }
+  .application-registration-details { border-top: 1px solid var(--border); border-left: 0; }
+  .application-registration-footer { grid-template-columns: 1fr; }
+  .application-registration-footer .application-consent-actions { justify-content: flex-start; }
+}
+@media (max-width: 560px) {
+  .application-registration-header, .application-registration-permissions, .application-registration-details { padding: 19px; }
+  .application-registration-footer { padding: 15px 19px; }
+  .application-registration-footer .application-consent-actions, .application-registration-footer .button { width: 100%; }
+  .application-registration-footer .button { flex: 1; }
+}

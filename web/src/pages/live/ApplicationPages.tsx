@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { AppWindow, Check, ExternalLink, KeyRound, Link2, Network, ShieldCheck, Trash2, X } from 'lucide-react'
-import { Button, DataTable, EmptyState, Field, FilterSelect, PageHeader, RecordList, Section, Status, TokenBox } from '../../components/ui'
+import { Button, DataTable, EmptyState, Field, FilterSelect, PageHeader, Section, Status, TokenBox } from '../../components/ui'
 import { useControlPlane, type AdministratorPermission, type ControllerNetwork } from '../../lib/control-plane'
 import { ErrorMessage } from './shared'
 import './applications.css'
@@ -52,11 +52,11 @@ type RedirectResponse = { redirect_uri: string }
 
 const requestPattern = /^[0-9a-f]{32}$/
 const scopeCopy: Record<string, { label: string; detail: string }> = {
-  'network.read': { label: 'View network', detail: 'Read this network and its address space.' },
-  'node.read': { label: 'View nodes', detail: 'Read nodes and their connection status.' },
-  'enrollment.issue': { label: 'Add nodes', detail: 'Create short-lived node enrollment credentials.' },
-  'route.read': { label: 'View routes', detail: 'Read routes configured for this network.' },
-  'route.manage': { label: 'Manage routes', detail: 'Assign and change routes through selected nodes.' },
+  'network.read': { label: 'View network', detail: 'See the network name and address range.' },
+  'node.read': { label: 'View nodes', detail: 'See nodes and whether they are connected.' },
+  'enrollment.issue': { label: 'Add nodes', detail: 'Create short-lived credentials for new nodes.' },
+  'route.read': { label: 'View routes', detail: 'See routes in this network.' },
+  'route.manage': { label: 'Manage routes', detail: 'Add or change routes through selected nodes.' },
 }
 const scopePermissions: Record<string, AdministratorPermission> = {
   'network.read': 'network.read',
@@ -83,6 +83,16 @@ function ScopeList({ scopes, selected, disabled, onChange }: { scopes: string[];
 
 function callbackHost(uri: string) {
   try { return new URL(uri).host } catch { return uri }
+}
+
+function BreakableURL({ value }: { value: string }) {
+  try {
+    const url = new URL(value)
+    const remainder = `${url.pathname}${url.search}${url.hash}`
+    return <code title={value} className="application-registration-url"><span>{url.origin}</span>{remainder !== '/' ? <><wbr /><span>{remainder}</span></> : null}</code>
+  } catch {
+    return <code title={value} className="application-registration-url">{value}</code>
+  }
 }
 
 function navigateToCallback(uri: string) {
@@ -127,17 +137,63 @@ export function ApplicationRegistrationConsentPage() {
 
   if (pending) return <PageHeader title="Review application" description="Loading registration request…" />
   if (!value) return <><PageHeader title="Registration unavailable" /><ErrorMessage value={error} /></>
-  return <div className="application-consent-page">
-    <PageHeader title="Review application" description={`${value.manifest.name} wants to register with Laneway.`} />
-    <div className="application-consent-layout">
-      <section className="application-consent-card">
-        <div className="application-consent-identity"><span><AppWindow aria-hidden="true" size={23} /></span><div><h2>{value.manifest.name}</h2><a href={value.manifest.homepage_uri} target="_blank" rel="noreferrer">{callbackHost(value.manifest.homepage_uri)} <ExternalLink aria-hidden="true" size={13} /></a></div></div>
-        <h3>Maximum access</h3><ScopeList scopes={value.manifest.scopes} />
-      </section>
-      <aside className="application-consent-summary"><h2>Registration details</h2><RecordList rows={[["Setup callback", <code title={value.manifest.setup_uri}>{value.manifest.setup_uri}</code>], ["OAuth callbacks", value.manifest.redirect_uris.length], ["Authentication", "Client secret + PKCE"]]} /><p>Approval creates a reusable application. It does not grant access to a network.</p></aside>
-    </div>
-    <ErrorMessage value={error} />
-    <div className="application-consent-actions"><Button variant="quiet" disabled={submitting} onClick={() => void decide('cancel')}><X size={16} />Cancel</Button><Button variant="primary" disabled={submitting} onClick={() => void decide('approve')}><Check size={16} />Register application</Button></div>
+  const permissionCount = value.manifest.scopes.length
+  const callbackCount = value.manifest.redirect_uris.length
+  return <div className="application-consent-page application-registration-consent">
+    <section className="application-registration-panel" aria-labelledby="application-registration-title">
+      <header className="application-registration-header">
+        <span className="application-registration-icon"><AppWindow aria-hidden="true" size={25} /></span>
+        <div>
+          <p>Application registration</p>
+          <h1 id="application-registration-title">Register {value.manifest.name}?</h1>
+          <a href={value.manifest.homepage_uri} target="_blank" rel="noreferrer">
+            {callbackHost(value.manifest.homepage_uri)} <ExternalLink aria-hidden="true" size={13} />
+          </a>
+        </div>
+      </header>
+
+      <div className="application-registration-body">
+        <section className="application-registration-permissions" aria-labelledby="application-permissions-title">
+          <div className="application-registration-section-heading">
+            <h2 id="application-permissions-title">Permissions it can request</h2>
+            <span>{permissionCount}</span>
+          </div>
+          <ScopeList scopes={value.manifest.scopes} />
+        </section>
+
+        <aside className="application-registration-details" aria-labelledby="application-details-title">
+          <h2 id="application-details-title">Connection details</h2>
+          <dl>
+            <div>
+              <dt>Setup URL</dt>
+              <dd><BreakableURL value={value.manifest.setup_uri} /></dd>
+            </div>
+            <div>
+              <dt>OAuth redirect {callbackCount === 1 ? 'URL' : 'URLs'} <span>{callbackCount}</span></dt>
+              <dd>
+                <ul>{value.manifest.redirect_uris.map((uri) => <li key={uri}><BreakableURL value={uri} /></li>)}</ul>
+              </dd>
+            </div>
+            <div>
+              <dt>Client authentication</dt>
+              <dd>Client secret and PKCE</dd>
+            </div>
+          </dl>
+        </aside>
+      </div>
+
+      <ErrorMessage value={error} />
+      <footer className="application-registration-footer">
+        <div className="application-registration-boundary">
+          <ShieldCheck aria-hidden="true" size={18} />
+          <p>Registration does not give {value.manifest.name} network access. You choose a network and approve its permissions when you connect it.</p>
+        </div>
+        <div className="application-consent-actions">
+          <Button variant="quiet" disabled={submitting} onClick={() => void decide('cancel')}><X size={16} />Cancel</Button>
+          <Button variant="primary" disabled={submitting} onClick={() => void decide('approve')}><Check size={16} />Register application</Button>
+        </div>
+      </footer>
+    </section>
   </div>
 }
 
@@ -251,6 +307,12 @@ export function ApplicationsPage() {
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Application removal failed.') }
   }
 
+  async function remove(application: RegisteredApplication) {
+    if (!window.confirm(`Delete ${application.name}? This permanently removes the registration. Audit records remain.`)) return
+    try { await request(`/v1/admin/applications/${application.application_id}`, { method: 'DELETE' }); await load() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Application deletion failed.') }
+  }
+
   async function revoke(installation: ApplicationInstallation) {
     if (!window.confirm('Remove this application from the selected network?')) return
     try { await request(`/v1/admin/application-installations/${installation.installation_id}`, { method: 'DELETE' }); await load() }
@@ -259,16 +321,16 @@ export function ApplicationsPage() {
 
   const applicationsByID = new Map(applications.map((application) => [application.application_id, application]))
   return <div className="applications-page">
-    <PageHeader title="Applications" description="Registered tools and their network access." />
+    <PageHeader title="Applications" description="Applications registered with Laneway and the networks they can access." />
     <ErrorMessage value={error} />
     {secret ? <div className="application-secret"><div><KeyRound aria-hidden="true" size={20} /><div><strong>Save this client secret now</strong><p>It will not be shown again.</p></div></div><TokenBox label="Client secret" value={secret} /><Button variant="quiet" onClick={() => setSecret('')}>Done</Button></div> : null}
     {canReadApplications ? <Section title="Registered applications" meta={pending ? 'Loading…' : `${applications.length} total`}>
       <DataTable columns={[
         { key: 'application', label: 'Application', render: (application: RegisteredApplication) => <span className="application-name"><span><AppWindow size={18} /></span><span><strong>{application.name}</strong><small>{callbackHost(application.homepage_uri)}</small></span></span> },
         { key: 'client', label: 'Client ID', render: (application: RegisteredApplication) => <code title={application.client_id}>{application.client_id}</code> },
-        { key: 'access', label: 'Scope ceiling', render: (application: RegisteredApplication) => `${application.scopes.length} ${application.scopes.length === 1 ? 'permission' : 'permissions'}` },
+        { key: 'access', label: 'Can request', render: (application: RegisteredApplication) => `${application.scopes.length} ${application.scopes.length === 1 ? 'permission' : 'permissions'}` },
         { key: 'state', label: 'State', render: (application: RegisteredApplication) => <Status tone={application.enabled ? 'positive' : 'muted'}>{application.enabled ? 'Enabled' : 'Disabled'}</Status> },
-        { key: 'actions', label: '', align: 'end', render: (application: RegisteredApplication) => canManageApplications && application.enabled ? <div className="button-row compact"><Button variant="quiet" onClick={() => void rotate(application)}><KeyRound size={14} />New secret</Button><Button variant="quiet" onClick={() => void disable(application)}><Trash2 size={14} />Disable</Button></div> : null },
+        { key: 'actions', label: '', align: 'end', render: (application: RegisteredApplication) => canManageApplications ? application.enabled ? <div className="button-row compact"><Button variant="quiet" onClick={() => void rotate(application)}><KeyRound size={14} />New secret</Button><Button variant="quiet" onClick={() => void disable(application)}><Trash2 size={14} />Disable</Button></div> : <Button variant="danger" onClick={() => void remove(application)}><Trash2 size={14} />Delete</Button> : null },
       ]} rows={applications} rowKey={(application) => application.application_id} empty={<EmptyState icon={<AppWindow />} title="No registered applications" description="Applications appear here after an owner approves registration." />} />
     </Section> : null}
     <Section title="Network access" meta={networkID ? `${installations.filter((item) => item.enabled).length} active` : undefined} action={readableNetworks.length ? <FilterSelect label="Network" value={networkID} onChange={setNetworkID}>{readableNetworks.map((network: ControllerNetwork) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</FilterSelect> : undefined}>
