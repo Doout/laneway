@@ -11,7 +11,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/Doout/laneway/go/internal/bootstrap"
@@ -353,12 +352,7 @@ func publicBootstrapHandlerFromSource(client publicBootstrapSource, limiter *pub
 }
 
 func proxyPublicConsole(writer http.ResponseWriter, request *http.Request, client publicBootstrapSource) {
-	path := request.URL.Path
-	administrator := path == "/v1/admin" || strings.HasPrefix(path, "/v1/admin/")
-	applicationRegistration := path == "/v1/application-registrations/exchange"
-	reserved := path == "/v1" || strings.HasPrefix(path, "/v1/") ||
-		path == "/.well-known" || strings.HasPrefix(path, "/.well-known/")
-	if !administrator && !applicationRegistration && reserved {
+	if !controllerclient.PublicConsolePathAllowed(request.URL.Path) {
 		http.NotFound(writer, request)
 		return
 	}

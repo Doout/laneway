@@ -77,7 +77,16 @@ func TestPublicConsoleUsesAuthenticatedTransportAndNarrowSurface(t *testing.T) {
 	}
 	response.Body.Close()
 
-	for _, path := range []string{"/v1/enroll", "/v1/configuration", "/.well-known/laneway/bootstrap.json"} {
+	registration := httptest.NewRequest(http.MethodPost, "https://public.example.test/v1/application-registrations/exchange", strings.NewReader(`{"code":"code","code_verifier":"verifier"}`))
+	registration.Header.Set("Origin", "https://public.example.test")
+	registration.RemoteAddr = "192.0.2.1:43210"
+	response, err = client.PublicConsole(registration)
+	if err != nil || response.StatusCode != http.StatusNoContent {
+		t.Fatalf("application registration exchange = %#v, %v", response, err)
+	}
+	response.Body.Close()
+
+	for _, path := range []string{"/v1/enroll", "/v1/configuration", "/v1/application-registrations/exchange/", "/.well-known/laneway/bootstrap.json"} {
 		request := httptest.NewRequest(http.MethodGet, "https://public.example.test"+path, nil)
 		if _, err := client.PublicConsole(request); err == nil {
 			t.Fatalf("public console accepted private path %q", path)
