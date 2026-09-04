@@ -1636,6 +1636,26 @@ paths:
                 $ref: './components.yaml#/components/schemas/RegisteredApplication'
         default:
           $ref: './components.yaml#/components/responses/Error'
+    delete:
+      operationId: deleteRegisteredApplication
+      tags: [Applications]
+      summary: Permanently delete a disabled application registration.
+      description: Audit events and disabled service principals remain available after deletion.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+      parameters:
+        - name: application_id
+          in: path
+          required: true
+          schema:
+            $ref: './components.yaml#/components/schemas/Identifier'
+      responses:
+        '204':
+          $ref: './components.yaml#/components/responses/NoContent'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
   /v1/admin/applications/{application_id}/client-secrets:
     post:
       operationId: rotateRegisteredApplicationClientSecret

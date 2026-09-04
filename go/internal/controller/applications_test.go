@@ -276,6 +276,10 @@ func TestRevokingInstallationAndApplicationUsesExpectedBoundary(t *testing.T) {
 	}
 	first := authorizeTestInstallation(t, store, owner, firstApplication, networkOne, strings.Repeat("i", 48))
 	second := authorizeTestInstallation(t, store, owner, firstApplication, networkTwo, strings.Repeat("j", 48))
+	if err := store.AdministratorDeleteApplication(ctx, applicationDecision(t, owner,
+		applicationDeletePolicy, adminauth.ObjectTarget(firstApplication.Application.ID)), firstApplication.Application.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("enabled application delete error=%v", err)
+	}
 	if err := store.AdministratorRevokeApplicationInstallation(ctx, applicationDecision(t, owner,
 		applicationInstallationDeletePolicy, adminauth.ObjectTarget(first.Installation.ID)), first.Installation.ID); err != nil {
 		t.Fatal(err)
@@ -298,6 +302,32 @@ func TestRevokingInstallationAndApplicationUsesExpectedBoundary(t *testing.T) {
 	}
 	if err := store.AuthenticateApplicationClient(ctx, firstApplication.Application.ClientID, firstApplication.ClientSecret); !errors.Is(err, ErrCredentialInvalid) {
 		t.Fatalf("application disable left credential active: %v", err)
+	}
+	if err := store.AdministratorDeleteApplication(ctx, applicationDecision(t, owner,
+		applicationDeletePolicy, adminauth.ObjectTarget(firstApplication.Application.ID)), firstApplication.Application.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdministratorApplication(ctx, applicationDecision(t, owner,
+		applicationReadPolicy, adminauth.ObjectTarget(firstApplication.Application.ID)), firstApplication.Application.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted application read error=%v", err)
+	}
+	for table, query := range map[string]string{
+		"application":  `SELECT count(*) FROM registered_applications WHERE id=?`,
+		"credential":   `SELECT count(*) FROM registered_application_credentials WHERE application_id=?`,
+		"installation": `SELECT count(*) FROM application_installations WHERE application_id=?`,
+	} {
+		var count int
+		if err := store.db.QueryRowContext(ctx, query, idBytes(firstApplication.Application.ID)).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("deleted %s rows=%d err=%v", table, count, err)
+		}
+	}
+	var deleteAudits int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM audit_events WHERE action='application.delete' AND target_id=?`,
+		idBytes(firstApplication.Application.ID)).Scan(&deleteAudits); err != nil || deleteAudits != 1 {
+		t.Fatalf("application delete audits=%d err=%v", deleteAudits, err)
+	}
+	if err := store.AuthenticateApplicationClient(ctx, secondApplication.Application.ClientID, secondApplication.ClientSecret); err != nil {
+		t.Fatalf("deleting one application affected another: %v", err)
 	}
 }
 

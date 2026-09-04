@@ -379,4 +379,67 @@ describe('shipped live application authorization', () => {
 
     await waitFor(() => expect(approval).toEqual({ scopes: ['network.read'] }))
   })
+
+  it('shows registration permissions and callback URLs in one review', async () => {
+    vi.stubEnv('MODE', 'live')
+    const requestId = '6'.repeat(32)
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['application.manage'])))
+      if (path.endsWith(`/application-registration-requests/${requestId}`)) return Promise.resolve(managementResponse({
+        request_id: requestId,
+        manifest: {
+          name: 'Dispatch', homepage_uri: 'https://dispatch.example.test', setup_uri: 'https://dispatch.example.test/setup',
+          redirect_uris: ['https://dispatch.example.test/oauth/callback', 'https://dispatch.example.test/oauth/device'],
+          scopes: ['network.read', 'node.read'], token_endpoint_auth_method: 'client_secret_basic',
+        },
+        expires_at_unix_seconds: 4_000_000_000,
+      }))
+      throw new Error(`Unexpected request ${path}`)
+    }))
+
+    renderPath(`/applications/consent?request=${requestId}`)
+    expect(await screen.findByRole('heading', { name: 'Register Dispatch?' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Permissions it can request' })).toBeVisible()
+    expect(screen.getByTitle('https://dispatch.example.test/setup')).toHaveTextContent('https://dispatch.example.test/setup')
+    expect(screen.getByTitle('https://dispatch.example.test/oauth/callback')).toHaveTextContent('https://dispatch.example.test/oauth/callback')
+    expect(screen.getByTitle('https://dispatch.example.test/oauth/device')).toHaveTextContent('https://dispatch.example.test/oauth/device')
+    expect(screen.getByText('Registration does not give Dispatch network access. You choose a network and approve its permissions when you connect it.')).toBeVisible()
+    expect(screen.queryByText('Maximum access')).not.toBeInTheDocument()
+  })
+
+  it('deletes a disabled registered application', async () => {
+    vi.stubEnv('MODE', 'live')
+    const applicationId = '7'.repeat(32)
+    let deleted = false
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['application.read', 'application.manage'])))
+      if (path.includes('/applications?')) return Promise.resolve(managementResponse({ applications: deleted ? [] : [{
+        application_id: applicationId, client_id: `lnw_client_v1.${applicationId}`, name: 'Dispatch',
+        homepage_uri: 'https://dispatch.example.test', setup_uri: 'https://dispatch.example.test/setup',
+        redirect_uris: ['https://dispatch.example.test/oauth/callback'], scopes: ['network.read'],
+        token_endpoint_auth_method: 'client_secret_basic', enabled: false,
+        created_at_unix_seconds: 1_700_000_000, updated_at_unix_seconds: 1_700_000_100,
+      }] }))
+      if (path.endsWith(`/applications/${applicationId}`) && init?.method === 'DELETE') {
+        deleted = true
+        const now = Math.floor(Date.now() / 1000)
+        return Promise.resolve(new Response(null, { status: 204, headers: {
+          'X-Laneway-Session-ID': '2'.repeat(32),
+          'X-Laneway-Session-Idle-Expires-At': String(now + 1800),
+          'X-Laneway-Session-Absolute-Expires-At': String(now + 3600),
+        } }))
+      }
+      throw new Error(`Unexpected request ${path}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('confirm', vi.fn(() => true))
+
+    renderPath('/applications')
+    expect(await screen.findByText('Dispatch')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(screen.queryByText('Dispatch')).not.toBeInTheDocument())
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining(`/applications/${applicationId}`), expect.objectContaining({ method: 'DELETE' }))
+  })
 })

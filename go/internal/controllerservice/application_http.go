@@ -342,6 +342,24 @@ func (s *Service) readApplication(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, applicationJSON(value))
 }
 
+func (s *Service) deleteApplication(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIDPath(r, "application_id")
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	decision, err := s.administratorDecision(r, adminauth.ObjectTarget(id))
+	if err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	if err := s.store.AdministratorDeleteApplication(r.Context(), decision, id); err != nil {
+		s.writeError(w, err, false)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Service) rotateApplicationClientSecret(w http.ResponseWriter, r *http.Request) {
 	id, err := parseIDPath(r, "application_id")
 	if err != nil {

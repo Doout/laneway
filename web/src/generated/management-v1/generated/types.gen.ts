@@ -2919,6 +2919,33 @@ export type ListRegisteredApplicationsResponses = {
 
 export type ListRegisteredApplicationsResponse = ListRegisteredApplicationsResponses[keyof ListRegisteredApplicationsResponses];
 
+export type DeleteRegisteredApplicationData = {
+    body?: never;
+    path: {
+        application_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/applications/{application_id}';
+};
+
+export type DeleteRegisteredApplicationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type DeleteRegisteredApplicationError = DeleteRegisteredApplicationErrors[keyof DeleteRegisteredApplicationErrors];
+
+export type DeleteRegisteredApplicationResponses = {
+    /**
+     * Operation completed with no response body.
+     */
+    204: void;
+};
+
+export type DeleteRegisteredApplicationResponse = DeleteRegisteredApplicationResponses[keyof DeleteRegisteredApplicationResponses];
+
 export type GetRegisteredApplicationData = {
     body?: never;
     path: {

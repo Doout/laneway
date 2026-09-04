@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"time"
 
@@ -472,6 +473,42 @@ func (s *Store) AdministratorDisableApplication(ctx context.Context, decision ad
 		return err
 	}
 	if err := auditActorTx(ctx, tx, nil, actor, "application.disable", "application", &applicationID, "{}", now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AdministratorDeleteApplication permanently removes a disabled application
+// and its installation records. Audit events and disabled service principals
+// remain available for investigation.
+func (s *Store) AdministratorDeleteApplication(ctx context.Context, decision adminauth.Decision, applicationID identity.ID) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	actor, err := authorizeAdministratorManagementObjectTx(ctx, s, tx, decision, applicationDeletePolicy, applicationID, adminauth.OperationApplicationManage)
+	if err != nil {
+		return err
+	}
+	application, err := registeredApplicationRecord(ctx, tx, applicationID)
+	if err != nil {
+		return err
+	}
+	if application.Enabled {
+		return fmt.Errorf("%w: disable the application before deleting it", ErrConflict)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM application_installations WHERE application_id=?`, idBytes(applicationID)); err != nil {
+		return err
+	}
+	deleted, err := tx.ExecContext(ctx, `DELETE FROM registered_applications WHERE id=? AND enabled=0`, idBytes(applicationID))
+	if err != nil {
+		return err
+	}
+	if count, _ := deleted.RowsAffected(); count != 1 {
+		return ErrNotFound
+	}
+	if err := auditActorTx(ctx, tx, nil, actor, "application.delete", "application", &applicationID, "{}", s.now()); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -25,6 +25,7 @@ const (
 var (
 	applicationListPolicy                = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/applications")
 	applicationReadPolicy                = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/applications/{application_id}")
+	applicationDeletePolicy              = mustAdministratorResourcePolicy(http.MethodDelete, "/v1/admin/applications/{application_id}")
 	applicationSecretPolicy              = mustAdministratorResourcePolicy(http.MethodPost, "/v1/admin/applications/{application_id}/client-secrets")
 	applicationDisablePolicy             = mustAdministratorResourcePolicy(http.MethodPost, "/v1/admin/applications/{application_id}/disable")
 	applicationRegistrationReadPolicy    = mustAdministratorResourcePolicy(http.MethodGet, "/v1/admin/application-registration-requests/{request_id}")

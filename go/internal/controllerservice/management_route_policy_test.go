@@ -213,6 +213,7 @@ func TestManagementHandlersUseOnlyDecisionBoundStoreMethods(t *testing.T) {
 		"IssueServiceAccessToken": {}, "ServiceAccessTokens": {}, "RevokeServiceAccessToken": {},
 		"AdministratorApplications": {}, "AdministratorApplication": {},
 		"AdministratorRotateApplicationClientSecret": {}, "AdministratorDisableApplication": {},
+		"AdministratorDeleteApplication":              {},
 		"AdministratorApplicationRegistrationRequest": {},
 		"AdministratorApproveApplicationRegistration": {}, "AdministratorCancelApplicationRegistration": {},
 		"AdministratorApplicationInstallations":        {},
