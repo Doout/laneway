@@ -128,15 +128,19 @@ func (c *Client) BootstrapBundle(ctx context.Context, id string) ([]byte, error)
 // relay's authenticated controller connection. Node APIs, root bearer
 // credentials, and public bootstrap paths are deliberately outside this
 // boundary.
+func PublicConsolePathAllowed(path string) bool {
+	administrator := path == "/v1/admin" || strings.HasPrefix(path, "/v1/admin/")
+	applicationRegistration := path == "/v1/application-registrations/exchange"
+	reserved := path == "/v1" || strings.HasPrefix(path, "/v1/") ||
+		path == "/.well-known" || strings.HasPrefix(path, "/.well-known/")
+	return administrator || applicationRegistration || !reserved
+}
+
 func (c *Client) PublicConsole(request *http.Request) (*http.Response, error) {
 	if request == nil || request.URL == nil {
 		return nil, errors.New("controller client: public console request is required")
 	}
-	path := request.URL.Path
-	administrator := path == "/v1/admin" || strings.HasPrefix(path, "/v1/admin/")
-	reserved := path == "/v1" || strings.HasPrefix(path, "/v1/") ||
-		path == "/.well-known" || strings.HasPrefix(path, "/.well-known/")
-	if !administrator && reserved {
+	if !PublicConsolePathAllowed(request.URL.Path) {
 		return nil, errors.New("controller client: public console request path is not allowed")
 	}
 	if len(request.Header.Values("Authorization")) != 0 || len(request.Header.Values("Proxy-Authorization")) != 0 {
