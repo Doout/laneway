@@ -455,6 +455,33 @@ export const zNodeInstallerRequest = z.object({
     install_mode: z.enum(['systemd'])
 }).strict();
 
+export const zNodeLocation = z.object({
+    node_id: zIdentifier,
+    source: z.enum([
+        'unknown',
+        'ip',
+        'manual'
+    ]),
+    observed_at_unix_seconds: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    last_seen_unix_seconds: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    online: z.boolean().optional(),
+    identity_active: z.boolean().optional(),
+    public_ip: z.string().optional(),
+    stale: z.boolean(),
+    location: z.object({
+        label: z.string(),
+        latitude: z.number().gte(-90).lte(90),
+        longitude: z.number().gte(-180).lte(180),
+        accuracy_km: z.int().gte(0).lte(65535)
+    }).strict().optional()
+}).strict();
+
+export const zNodeLocationOverride = z.object({
+    label: z.string().min(1).max(253),
+    latitude: z.number().gte(-90).lte(90),
+    longitude: z.number().gte(-180).lte(180)
+}).strict();
+
 /**
  * Administrator password; the controller requires 15..1024 UTF-8 bytes.
  */
@@ -1564,6 +1591,47 @@ export const zListNetworkNodesQuery = z.object({
  * Bounded node snapshot.
  */
 export const zListNetworkNodesResponse = zNodes;
+
+export const zListNetworkNodeLocationsPath = z.object({
+    network_id: zIdentifier
+}).strict();
+
+export const zListNetworkNodeLocationsQuery = z.object({
+    limit: z.int().gte(1).lte(1000).optional().default(100)
+}).strict();
+
+/**
+ * Latest approximate locations; manual overrides take precedence.
+ */
+export const zListNetworkNodeLocationsResponse = z.object({
+    automatic_enabled: z.boolean(),
+    location_provider: z.enum([
+        '',
+        'db-ip',
+        'maxmind'
+    ]).optional(),
+    node_locations: z.array(zNodeLocation)
+}).strict();
+
+export const zClearNodeLocationPath = z.object({
+    node_id: zIdentifier
+}).strict();
+
+/**
+ * Manual override cleared.
+ */
+export const zClearNodeLocationResponse = z.void();
+
+export const zSetNodeLocationBody = zNodeLocationOverride;
+
+export const zSetNodeLocationPath = z.object({
+    node_id: zIdentifier
+}).strict();
+
+/**
+ * Manual location saved.
+ */
+export const zSetNodeLocationResponse = z.void();
 
 export const zListNetworkEndpointStatusesPath = z.object({
     network_id: zIdentifier

@@ -50,9 +50,10 @@ const (
 )
 
 type Options struct {
-	Store         *controller.Store
-	CACertificate *x509.Certificate
-	CAKey         crypto.Signer
+	LocationResolver LocationResolver
+	Store            *controller.Store
+	CACertificate    *x509.Certificate
+	CAKey            crypto.Signer
 	// IssuerChain is issuer-first and may end in the out-of-band trust root.
 	// Enrollment responses omit the self-signed root.
 	IssuerChain      []*x509.Certificate
@@ -69,6 +70,7 @@ type Options struct {
 }
 
 type Service struct {
+	locationResolver                  LocationResolver
 	store                             *controller.Store
 	ca                                *x509.Certificate
 	caKey                             crypto.Signer
@@ -180,7 +182,8 @@ func New(opts Options) (*Service, error) {
 		return nil, fmt.Errorf("initialize administrator auth-state limiter: %w", err)
 	}
 	s := &Service{
-		store: opts.Store, ca: opts.CACertificate, caKey: opts.CAKey, issuerChain: issuerChain, validity: opts.LeafValidity,
+		locationResolver: opts.LocationResolver,
+		store:            opts.Store, ca: opts.CACertificate, caKey: opts.CAKey, issuerChain: issuerChain, validity: opts.LeafValidity,
 		maxBody: opts.MaxBodyBytes, authorizeAdm: opts.AdminAuthorizer, access: opts.AccessController,
 		passwordVerifier: passwordVerifier, passwordHasher: func(password []byte) (string, error) {
 			return adminauth.HashPassword(password, nil)
@@ -256,6 +259,9 @@ func New(opts Options) (*Service, error) {
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}", s.readNetwork)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/nodes", s.readNodes)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/endpoint-statuses", s.readEndpointStatuses)
+	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/node-locations", s.readNodeLocations)
+	s.registerManagementRoute(mux, http.MethodPut, "/v1/admin/nodes/{node_id}/location", s.setNodeLocation)
+	s.registerManagementRoute(mux, http.MethodDelete, "/v1/admin/nodes/{node_id}/location", s.setNodeLocation)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/relays", s.readRelays)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/acl-rules", s.readACLRules)
 	s.registerManagementRoute(mux, http.MethodGet, "/v1/admin/networks/{network_id}/certificates", s.readCertificates)
@@ -893,6 +899,7 @@ func (s *Service) configuration(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, true)
 		return
 	}
+	s.observeNodeLocation(r, caller)
 	if _, _, err := s.store.ExpireApprovedRoutes(r.Context(), caller.NetworkID, s.now()); err != nil {
 		s.writeError(w, err, true)
 		return

@@ -3,6 +3,7 @@ module github.com/Doout/laneway/go
 go 1.26
 
 require (
+	github.com/oschwald/maxminddb-golang/v2 v2.6.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/quic-go/quic-go v0.60.0
 	github.com/spf13/cobra v1.10.2

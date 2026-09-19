@@ -57,7 +57,7 @@ jobs:
         working-directory: web
         run: |
           corepack pnpm build:live
-          LANEWAY_EXPECTED_BUILD_MODE=live corepack pnpm exec playwright test e2e/build-mode.spec.ts
+          LANEWAY_EXPECTED_BUILD_MODE=live corepack pnpm exec playwright test e2e/build-mode.spec.ts e2e/node-map.spec.ts
 
   desktop:
     name: Desktop foundation (macOS)
@@ -178,6 +178,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate Compose security, storage, health, and port model
         run: |
+          python3 -m unittest discover -s deploy/compose -p test_service_certificate_renewal.py
           ./integration/compose-config.sh
           bash -n deploy/ephemeral-exit/bootstrap.sh
           shellcheck deploy/ephemeral-exit/bootstrap.sh

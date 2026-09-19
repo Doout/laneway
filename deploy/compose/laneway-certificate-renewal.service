@@ -1,0 +1,10 @@
+[Unit]
+Description=Renew Laneway internal service certificates before expiry
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/laneway/renew-service-certificates.py
+UMask=0077
+TimeoutStartSec=10min

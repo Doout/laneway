@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Laneway service certificate expiry daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30m
+Persistent=true
+OnBootSec=5m
+Unit=laneway-certificate-renewal.service
+
+[Install]
+WantedBy=timers.target

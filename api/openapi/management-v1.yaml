@@ -651,6 +651,77 @@ paths:
           $ref: './components.yaml#/components/responses/Nodes'
         default:
           $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/networks/{network_id}/node-locations:
+    get:
+      operationId: listNetworkNodeLocations
+      tags: [Nodes]
+      summary: Read approximate node locations without exposing source IPs.
+      security:
+        - administratorSession: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NetworkID'
+        - $ref: './components.yaml#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Latest approximate locations; manual overrides take precedence.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [node_locations, automatic_enabled]
+                properties:
+                  automatic_enabled: { type: boolean }
+                  location_provider: { type: string, enum: ['', db-ip, maxmind] }
+                  node_locations:
+                    type: array
+                    items:
+                      $ref: './components.yaml#/components/schemas/NodeLocation'
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+  /v1/admin/nodes/{node_id}/location:
+    put:
+      operationId: setNodeLocation
+      tags: [Nodes]
+      summary: Set an audited manual node location override.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NodeID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './components.yaml#/components/schemas/NodeLocationOverride'
+      responses:
+        '204':
+          description: Manual location saved.
+        default:
+          $ref: './components.yaml#/components/responses/Error'
+    delete:
+      operationId: clearNodeLocation
+      tags: [Nodes]
+      summary: Clear a manual override and return to automatic location.
+      security:
+        - administratorSession: []
+          administratorCsrfCookie: []
+          administratorCsrfHeader: []
+        - rootBearer: []
+        - serviceAccessToken: []
+      parameters:
+        - $ref: './components.yaml#/components/parameters/NodeID'
+      responses:
+        '204':
+          description: Manual override cleared.
+        default:
+          $ref: './components.yaml#/components/responses/Error'
   /v1/admin/networks/{network_id}/endpoint-statuses:
     get:
       operationId: listNetworkEndpointStatuses

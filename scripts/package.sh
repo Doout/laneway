@@ -67,6 +67,8 @@ cp "$project_dir/deploy/systemd/lanewayd.service" \
 cp "$project_dir"/deploy/nftables/* "$package_dir/nftables/"
 cp "$project_dir/deploy/README.md" "$package_dir/docs/deployment.md"
 cp "$project_dir/docs/benchmarks.md" "$package_dir/docs/benchmarks.md"
+cp "$project_dir/docs/node-locations.md" "$package_dir/docs/node-locations.md"
+cp "$project_dir/docs/service-certificate-renewal.md" "$package_dir/docs/service-certificate-renewal.md"
 cp "$project_dir/docs/rust-controller-node.md" "$package_dir/docs/rust-controller-node.md"
 cp "$project_dir/spec/threat-model.md" "$package_dir/docs/threat-model.md"
 cp "$project_dir"/spec/*.md "$package_dir/spec/"
@@ -78,10 +80,10 @@ for directory in containers ephemeral-exit examples nftables systemd; do
 done
 install -m 0644 "$project_dir/deploy/README.md" "$package_dir/deploy/README.md"
 install -d -m 0755 "$package_dir/deploy/compose/generated/config"
-for name in .env.example README.md compose.dev.yaml compose.yaml; do
+for name in .env.example README.md compose.dev.yaml compose.yaml laneway-certificate-renewal.service laneway-certificate-renewal.timer; do
 	install -m 0644 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
 done
-for name in bootstrap.sh install-control-plane.sh prepare-control-plane.sh upgrade-control-plane.sh preflight.sh prepare.sh recovery.sh validate.sh laneway-control; do
+for name in bootstrap.sh install-control-plane.sh prepare-control-plane.sh upgrade-control-plane.sh preflight.sh prepare.sh recovery.sh validate.sh laneway-control renew-service-certificates.py; do
 	install -m 0755 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
 done
 install -m 0644 "$project_dir"/deploy/compose/generated/config/*.example \

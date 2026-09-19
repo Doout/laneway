@@ -5,13 +5,16 @@ import { ActionPanel, Button, Callout, DetailLayout, EmptyState, EntityTitle, Fi
 import { controllerOrigin, useControlPlane, type ControllerNetwork, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
 import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
 import { durableNodeEnrollmentCommand, userEnrollmentCommand } from '../../lib/enrollment-commands'
+import { NodeMap } from './NodeMap'
+import { NodePresence, useNodePresence } from './NodePresence'
 import { ErrorMessage, Missing, NetworkWorkspaceTabs, emptyNodes, exitNodeCapability, nodeState, routeState, subnetRouterCapability, time, type NetworkWorkspaceView, type RecordVisibility } from './shared'
 
 export function NetworksPage() {
   const { inventory, hasPermission, request, refresh } = useControlPlane()
+  const presence = useNodePresence((inventory?.networks ?? []).filter(network => hasPermission('node.read', network.network_id)).map(network => network.network_id))
   const [searchParams] = useSearchParams()
   const requestedView = searchParams.get('view')
-  const workspaceView: NetworkWorkspaceView = requestedView === 'nodes' || requestedView === 'connectivity' ? requestedView : 'networks'
+  const workspaceView: NetworkWorkspaceView = requestedView === 'nodes' || requestedView === 'connectivity' || requestedView === 'map' ? requestedView : 'networks'
   const networkId = inventory?.network?.network_id
   const records = inventory?.nodes ?? emptyNodes
   const [visibility, setVisibility] = useState<RecordVisibility>('current')
@@ -92,7 +95,7 @@ export function NetworksPage() {
     ? hasPermission('network.create') ? <Button variant="primary" onClick={() => { setCreatingNetwork((value) => !value); setNetworkError('') }}><Plus size={16} />Add network</Button> : undefined
     : workspaceView === 'nodes'
       ? networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/nodes/new" variant="primary"><Plus size={16} />Add node</Button> : undefined
-    : otherNetworks.length ? <Button onClick={() => setCreatingConnection((value) => !value)}><Link2 size={16} />Connect network</Button> : undefined
+    : workspaceView === 'connectivity' && otherNetworks.length ? <Button onClick={() => setCreatingConnection((value) => !value)}><Link2 size={16} />Connect network</Button> : undefined
   return <div className="network-workspace-page">
     <PageHeader title="Networks" action={workspaceAction} />
     <NetworkWorkspaceTabs view={workspaceView} networks={inventory?.networks.length ?? 0} nodes={currentNodes.length} />
@@ -102,14 +105,15 @@ export function NetworksPage() {
       <ErrorMessage value={networkError} /><footer className="button-row"><Button type="submit" variant="primary" disabled={networkPending}>{networkPending ? 'Creating…' : 'Create network'}</Button><Button type="button" variant="quiet" disabled={networkPending} onClick={() => setCreatingNetwork(false)}>Cancel</Button></footer>
     </form> : null}
     {inventory?.network ? <>
+      {workspaceView === 'map' ? <NodeMap networks={inventory.networks} /> : null}
       {workspaceView === 'networks' ? <section className="network-groups" aria-labelledby="network-groups-title"><header><h2 id="network-groups-title">{inventory.networks.length} {inventory.networks.length === 1 ? 'Network' : 'Networks'}</h2></header><div className="network-group-list">{inventory.networks.map((network) => { const nodes = currentNodes.filter((node) => node.network_id === network.network_id); const exits = networkExits.filter((route) => route.network_id === network.network_id); return <article key={network.network_id}><span className="network-group-list__icon"><Network aria-hidden="true" size={18} /></span><div><strong>{network.name}</strong><code>{network.ipv4_pool}</code></div><div className="network-group-list__stats"><span><strong>{nodes.length}</strong><small>Nodes</small></span><span><strong>{exits.length}</strong><small>{exits.length === 1 ? 'Exit' : 'Exits'}</small></span></div></article> })}</div></section> : null}
       {workspaceView === 'nodes' ? <section className="network-nodes" aria-labelledby="network-nodes-title">
         <header className="network-nodes__header"><div><h2 id="network-nodes-title">Nodes</h2></div></header>
         <Toolbar filters={<><FilterSelect label="Network" value={networkFilter} onChange={setNetworkFilter}><option value="all">All networks</option>{inventory.networks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}<option value="unassigned">Unassigned</option></FilterSelect><FilterSelect label="Record visibility" value={visibility} onChange={(value) => setVisibility(value as RecordVisibility)}><option value="current">Current only</option><option value="all">All records</option></FilterSelect><span className="inventory-result-count" aria-live="polite">{visibleRecords.length} of {visibility === 'all' ? assignedRecords.length : currentAssignedRecords.length} shown</span></>}><SearchField label="Search nodes" placeholder="Search name, address, or node ID" value={query} onChange={setQuery} /></Toolbar>
-        {activeVisibleRecords.length ? <div className="node-list" role="list" aria-label="Current nodes">{activeVisibleRecords.map((node) => { const state = nodeState(node); const exitLocked = networkExits.some((route) => route.node_id === node.node_id); return <article className="node-list__row" role="listitem" key={node.node_id}>
+        {activeVisibleRecords.length ? <div className="node-list" role="list" aria-label="Current nodes">{activeVisibleRecords.map((node) => { const exitLocked = networkExits.some((route) => route.node_id === node.node_id); return <article className="node-list__row" role="listitem" key={node.node_id}>
           <EntityTitle icon={<MonitorDot size={16} />} subtitle={node.node_id}>{node.name || node.node_id}</EntityTitle>
           <div className="node-list__placement"><span>Placement</span><strong>{inventory.networks.find((network) => network.network_id === node.network_id)?.name ?? 'Unassigned'}</strong><code>{[node.ipv4_address, node.ipv6_address].filter(Boolean).join(' · ') || 'No address'}</code></div>
-          <div className="node-list__posture"><span>Role &amp; state</span><div>{routingRole(node)}<Status tone={state.tone}>{state.label}</Status></div><small>{node.enrollment_class} enrollment</small></div>
+          <div className="node-list__posture"><span>Connection</span><div>{routingRole(node)}</div><NodePresence record={presence.records[node.node_id]} unavailable={presence.unavailable} /></div>
           <div className="node-list__action">{exitLocked ? <span className="node-move-locked">Exit locked</span> : <Button variant="quiet" onClick={() => setMovingNodeId(node.node_id)}>Move</Button>}</div>
         </article> })}</div> : null}
         {visibility === 'all' && historicalVisibleRecords.length ? <section className="node-history" aria-labelledby="node-history-title"><header><h3 id="node-history-title">History</h3><span>{historicalVisibleRecords.length} inactive</span></header><div role="list">{historicalVisibleRecords.map((node) => { const state = nodeState(node); const network = inventory.networks.find((candidate) => candidate.network_id === node.network_id); return <article className="node-history__row" role="listitem" key={node.node_id}>

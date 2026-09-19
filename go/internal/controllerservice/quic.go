@@ -245,7 +245,7 @@ func (s *QUICServer) serveConnection(ctx context.Context, conn *quic.Conn) {
 		deadline := time.Now().Add(controllerRequestTimeout)
 		_ = stream.SetReadDeadline(deadline)
 		_ = stream.SetWriteDeadline(deadline)
-		if err := s.handleStream(ctx, stream, &state, peer); err != nil {
+		if err := s.handleStream(ctx, stream, &state, peer, conn.RemoteAddr().String()); err != nil {
 			stream.CancelRead(0x103)
 			stream.CancelWrite(0x103)
 			_ = conn.CloseWithError(0x103, "invalid controller request")
@@ -255,7 +255,7 @@ func (s *QUICServer) serveConnection(ctx context.Context, conn *quic.Conn) {
 	}
 }
 
-func (s *QUICServer) handleStream(ctx context.Context, stream io.ReadWriter, state *tls.ConnectionState, peer identity.AuthenticatedIdentity) error {
+func (s *QUICServer) handleStream(ctx context.Context, stream io.ReadWriter, state *tls.ConnectionState, peer identity.AuthenticatedIdentity, remoteAddr string) error {
 	if len(state.PeerCertificates) == 0 || !s.service.certificateCurrentlyValid(state.PeerCertificates[0]) {
 		return errors.New("client certificate is outside its validity interval")
 	}
@@ -297,6 +297,7 @@ func (s *QUICServer) handleStream(ctx context.Context, stream io.ReadWriter, sta
 	}
 	httpRequest.Header.Set("Content-Type", "application/x-protobuf")
 	httpRequest.TLS = state
+	httpRequest.RemoteAddr = remoteAddr
 	recorder := httptest.NewRecorder()
 	s.handler.ServeHTTP(recorder, httpRequest)
 	response, err := controllerResponse(request.GetRequestId(), responseKind, recorder.Result())

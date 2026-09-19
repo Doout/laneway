@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { Link2, MonitorDot, Network, TriangleAlert } from 'lucide-react'
+import { Globe, Link2, MonitorDot, Network, TriangleAlert } from 'lucide-react'
 import { Button, Callout, EmptyState, FilterSelect, Toolbar } from '../../components/ui'
 import type { ControllerACLRule, ControllerAuditEvent, ControllerCertificate, ControllerNode, ControllerRoute } from '../../lib/control-plane'
 
@@ -16,7 +16,7 @@ export function nodeState(node: ControllerNode) {
   const leaseExpired = node.enrollment_class === 'ephemeral' && timestampExpired(node.lease_expires_at_unix_seconds)
   if (leaseExpired) return { label: 'Lease expired', tone: 'muted' as const, inactive: true }
   if (node.revoked_at_unix_seconds !== undefined) return { label: 'Revoked', tone: 'danger' as const, inactive: true }
-  return { label: 'Enrolled', tone: 'positive' as const, inactive: false }
+  return { label: 'Enrolled', tone: 'muted' as const, inactive: false }
 }
 
 export function routeMode(mode: ControllerRoute['mode']) {
@@ -171,7 +171,7 @@ export function Missing({ title, back }: { title: string; back: string }) {
 }
 
 export type RecordVisibility = 'current' | 'all'
-export type NetworkWorkspaceView = 'networks' | 'nodes' | 'connectivity'
+export type NetworkWorkspaceView = 'networks' | 'nodes' | 'connectivity' | 'map'
 export const subnetRouterCapability = 1 << 3
 export const exitNodeCapability = 1 << 4
 export const emptyNodes: ControllerNode[] = []
@@ -205,7 +205,8 @@ export function NetworkWorkspaceTabs({ view, networks, nodes, connections }: { v
   const items: Array<{ id: NetworkWorkspaceView; label: string; count: ReactNode; icon: ReactNode }> = [
     { id: 'networks', label: 'Networks', count: networks, icon: <Network size={15} /> },
     { id: 'nodes', label: 'Nodes', count: nodes, icon: <MonitorDot size={15} /> },
+    { id: 'map', label: 'Map', count: null, icon: <Globe size={15} /> },
     { id: 'connectivity', label: 'Connectivity', count: connections ?? '—', icon: <Link2 size={15} /> },
   ]
-  return <nav className="network-workspace-tabs" aria-label="Network workspace views">{items.map((item) => <Link key={item.id} to={item.id === 'networks' ? '/networks' : `/networks?view=${item.id}`} aria-current={view === item.id ? 'page' : undefined}><span aria-hidden="true">{item.icon}</span><span>{item.label}</span><em aria-hidden="true">{item.count}</em></Link>)}</nav>
+  return <nav className="network-workspace-tabs" aria-label="Network workspace views">{items.map((item) => <Link key={item.id} to={item.id === 'networks' ? '/networks' : `/networks?view=${item.id}`} aria-current={view === item.id ? 'page' : undefined}><span aria-hidden="true">{item.icon}</span><span>{item.label}</span>{item.count !== null && <em aria-hidden="true">{item.count}</em>}</Link>)}</nav>
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/Doout/laneway/go/internal/controller"
 	"github.com/Doout/laneway/go/internal/controllerservice"
 	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/nodelocation"
 	"github.com/Doout/laneway/go/internal/observability"
 	"github.com/Doout/laneway/go/internal/pki"
 )
@@ -304,8 +305,19 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	if err != nil {
 		return err
 	}
+	var locationResolver controllerservice.LocationResolver
+	if cfg.Controller.LocationDatabase != "" {
+		db, locationErr := nodelocation.Open(cfg.Controller.LocationDatabase)
+		if locationErr != nil {
+			fmt.Fprintln(os.Stderr, "Node location lookup disabled: could not open local City database")
+		} else {
+			defer db.Close()
+			locationResolver = db
+		}
+	}
 	service, err := controllerservice.New(controllerservice.Options{
-		Store: store, CACertificate: ca, CAKey: caKey, IssuerChain: issuerChain,
+		LocationResolver: locationResolver,
+		Store:            store, CACertificate: ca, CAKey: caKey, IssuerChain: issuerChain,
 		LeafValidity: cfg.Controller.LeafValidity.Duration(), AdminAuthorizer: adminAuthorizer,
 		AllowInsecureApplicationCallbacks: cfg.Controller.AllowInsecureApplicationCallbacks,
 	})

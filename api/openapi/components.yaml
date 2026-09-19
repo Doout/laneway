@@ -1594,6 +1594,37 @@ components:
           maximum: 1000000000
         configuration_epoch:
           $ref: '#/components/schemas/Uint64'
+    NodeLocationOverride:
+      type: object
+      additionalProperties: false
+      required: [label, latitude, longitude]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 253 }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+    NodeLocation:
+      type: object
+      additionalProperties: false
+      required: [node_id, source, observed_at_unix_seconds, stale]
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        source: { type: string, enum: [unknown, ip, manual] }
+        observed_at_unix_seconds: { type: integer, format: int64 }
+        last_seen_unix_seconds: { type: integer, format: int64 }
+        online: { type: boolean }
+        identity_active: { type: boolean }
+        public_ip: { type: string }
+        stale: { type: boolean }
+        location:
+          type: object
+          additionalProperties: false
+          required: [label, latitude, longitude, accuracy_km]
+          properties:
+            label: { type: string }
+            latitude: { type: number, minimum: -90, maximum: 90 }
+            longitude: { type: number, minimum: -180, maximum: 180 }
+            accuracy_km: { type: integer, minimum: 0, maximum: 65535 }
     EndpointStatus:
       type: object
       additionalProperties: false

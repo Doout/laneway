@@ -750,6 +750,29 @@ export type NodeInstallerRequest = {
     install_mode: 'systemd';
 };
 
+export type NodeLocation = {
+    node_id: Identifier;
+    source: 'unknown' | 'ip' | 'manual';
+    observed_at_unix_seconds: number;
+    last_seen_unix_seconds?: number;
+    online?: boolean;
+    identity_active?: boolean;
+    public_ip?: string;
+    stale: boolean;
+    location?: {
+        label: string;
+        latitude: number;
+        longitude: number;
+        accuracy_km: number;
+    };
+};
+
+export type NodeLocationOverride = {
+    label: string;
+    latitude: number;
+    longitude: number;
+};
+
 export type Nodes = {
     nodes: Array<Node>;
 };
@@ -1950,6 +1973,96 @@ export type ListNetworkNodesResponses = {
 };
 
 export type ListNetworkNodesResponse = ListNetworkNodesResponses[keyof ListNetworkNodesResponses];
+
+export type ListNetworkNodeLocationsData = {
+    body?: never;
+    path: {
+        network_id: Identifier;
+    };
+    query?: {
+        /**
+         * Maximum number of records in the response. Omission or an empty value uses 100.
+         */
+        limit?: number;
+    };
+    url: '/v1/admin/networks/{network_id}/node-locations';
+};
+
+export type ListNetworkNodeLocationsErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ListNetworkNodeLocationsError = ListNetworkNodeLocationsErrors[keyof ListNetworkNodeLocationsErrors];
+
+export type ListNetworkNodeLocationsResponses = {
+    /**
+     * Latest approximate locations; manual overrides take precedence.
+     */
+    200: {
+        automatic_enabled: boolean;
+        location_provider?: '' | 'db-ip' | 'maxmind';
+        node_locations: Array<NodeLocation>;
+    };
+};
+
+export type ListNetworkNodeLocationsResponse = ListNetworkNodeLocationsResponses[keyof ListNetworkNodeLocationsResponses];
+
+export type ClearNodeLocationData = {
+    body?: never;
+    path: {
+        node_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/nodes/{node_id}/location';
+};
+
+export type ClearNodeLocationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type ClearNodeLocationError = ClearNodeLocationErrors[keyof ClearNodeLocationErrors];
+
+export type ClearNodeLocationResponses = {
+    /**
+     * Manual override cleared.
+     */
+    204: void;
+};
+
+export type ClearNodeLocationResponse = ClearNodeLocationResponses[keyof ClearNodeLocationResponses];
+
+export type SetNodeLocationData = {
+    body: NodeLocationOverride;
+    path: {
+        node_id: Identifier;
+    };
+    query?: never;
+    url: '/v1/admin/nodes/{node_id}/location';
+};
+
+export type SetNodeLocationErrors = {
+    /**
+     * Stable JSON error envelope.
+     */
+    default: ErrorEnvelope;
+};
+
+export type SetNodeLocationError = SetNodeLocationErrors[keyof SetNodeLocationErrors];
+
+export type SetNodeLocationResponses = {
+    /**
+     * Manual location saved.
+     */
+    204: void;
+};
+
+export type SetNodeLocationResponse = SetNodeLocationResponses[keyof SetNodeLocationResponses];
 
 export type ListNetworkEndpointStatusesData = {
     body?: never;
