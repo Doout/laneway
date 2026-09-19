@@ -1110,6 +1110,16 @@ CREATE TRIGGER automation_service_access_token_unrevoked_limit
 BEGIN
     SELECT RAISE(ABORT, 'active automation service access token limit reached');
 END;
+`, `
+CREATE TABLE node_locations (
+    node_id BLOB PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+    automatic_json TEXT,
+    observed_at INTEGER NOT NULL,
+    manual_json TEXT,
+    manual_updated_at INTEGER
+) STRICT;
+`, `
+ALTER TABLE node_locations ADD COLUMN public_ip TEXT NOT NULL DEFAULT '';
 `}
 
 func (s *Store) migrate(ctx context.Context) error {

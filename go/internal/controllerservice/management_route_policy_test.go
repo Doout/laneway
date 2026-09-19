@@ -184,6 +184,7 @@ func TestManagementHandlersUseOnlyDecisionBoundStoreMethods(t *testing.T) {
 	}
 
 	decisionBoundStoreMethods := map[string]struct{}{
+		"AdministratorNodeLocations": {}, "AdministratorSetNodeLocation": {},
 		"AdministratorIssueEnrollmentTokenWithOptions": {},
 		"AdministratorAddACLRule":                      {}, "AdministratorApproveRoute": {},
 		"AdministratorAssignRoute": {}, "AdministratorAuditEvents": {},

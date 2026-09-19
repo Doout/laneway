@@ -178,8 +178,8 @@ func TestDecisionBindsEveryRouteToItsExactTargetKind(t *testing.T) {
 		ObjectTarget(objectID),
 	}
 	routes := ManagementRoutes()
-	if len(routes) != 71 {
-		t.Fatalf("management routes=%d want 71", len(routes))
+	if len(routes) != 74 {
+		t.Fatalf("management routes=%d want 74", len(routes))
 	}
 	for _, policy := range routes {
 		policy := policy

@@ -59,6 +59,7 @@ func (s *Service) recordEndpointStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, err, false)
 		return
 	}
+	s.observeNodeLocation(r, caller)
 	w.WriteHeader(http.StatusNoContent)
 }
 

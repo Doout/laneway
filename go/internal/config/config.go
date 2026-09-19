@@ -133,6 +133,8 @@ type WireGuard struct {
 }
 
 type Controller struct {
+	// LocationDatabase enables optional, local-only public IP geolocation.
+	LocationDatabase string                   `toml:"location_database"`
 	Listen           string                   `toml:"listen"`
 	QUICListen       string                   `toml:"quic_listen"`
 	Endpoint         string                   `toml:"endpoint"`

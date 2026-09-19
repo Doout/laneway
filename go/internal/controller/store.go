@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	currentSchemaVersion                    = 16
+	currentSchemaVersion                    = 18
 	endpointStatusSchemaVersion             = 13
 	namedAccessSchemaVersion                = 14
 	automationServicePrincipalSchemaVersion = 15

@@ -479,6 +479,7 @@ func TestAdministratorAssignRouteRechecksExpiryBeforeApproval(t *testing.T) {
 
 func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 	resourcePolicies := []adminauth.RoutePolicy{
+		administratorNodeLocationsPolicy, administratorNodeLocationSetPolicy, administratorNodeLocationClearPolicy,
 		administratorEnrollmentIssuePolicy, administratorNetworkCreatePolicy, administratorNetworkListPolicy,
 		administratorNetworkReadPolicy, administratorNodeListPolicy, administratorRelayListPolicy,
 		administratorEndpointStatusListPolicy,
@@ -498,8 +499,8 @@ func TestAdministratorResourcePoliciesMirrorManagementRegistry(t *testing.T) {
 		applicationInstallationListPolicy, applicationAuthorizationApprovePolicy,
 		applicationAuthorizationCancelPolicy, applicationInstallationDeletePolicy, applicationNodeInstallerPolicy,
 	}
-	if len(resourcePolicies) != 45 {
-		t.Fatalf("resource policies=%d want 45 non-bootstrap routes", len(resourcePolicies))
+	if len(resourcePolicies) != 48 {
+		t.Fatalf("resource policies=%d want 48 non-bootstrap routes", len(resourcePolicies))
 	}
 	identityPolicies := []adminauth.RoutePolicy{
 		administratorCreatePolicy, administratorListPolicy, administratorReadPolicy,
