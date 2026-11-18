@@ -11,8 +11,9 @@ Keep one controller writing to each database.
 The Rust runtime is opt-in. Keep Go as the production default until these
 checks pass on the candidate you intend to deploy:
 
-1. Run the native release matrix, including Linux AMD64 systemd packet tests
-   and the installed macOS helper on Intel and Apple Silicon. Verify the
+1. Run the native release matrix on the release commit, including the Linux
+   systemd packet tests and the installed macOS helper on Intel and Apple
+   Silicon. Verify the
    published archive checksums and image signatures, then install and roll
    back the signed candidate on the lab host. The unsigned lab builds do
    not establish this.
@@ -48,7 +49,7 @@ AMD64 build, signing, and publication were not exercised locally.
 ## Linux release preview
 
 The Linux release workflow builds the Rust runtime candidates on native
-AMD64 and ARM64 runners. The existing signed Linux archive carries them as
+AMD64 and ARM64 runners and includes them in the signed archives as
 `sbin/laneway-controller-rs`, `sbin/laneway-relay-rs`,
 `sbin/lanewayd-rs`, `sbin/laneway-healthcheck-rs`, and
 `sbin/laneway-update-rs`. The Go binaries,
@@ -77,6 +78,11 @@ a disposable directory and point `LANEWAY_NODE_TEST_RUST_RUNTIME_DIR` at that
 directory when running `integration/rust-controller-node-netns.sh` on the
 isolated host. The package alone does not satisfy the systemd or cutover gates.
 
+The unsigned native AMD64 archive `0.0.9102` passed the package check at
+SHA-256 `b65960975cc6f38a7c694b88a5a89c4d7e33b5c1a085b98025046a153b1f531c`.
+All five packaged Rust binaries ran and reported that version. The default
+Go daemon link remained unchanged.
+
 The release builds run `integration/rust-release-systemd.sh` on native AMD64
 and ARM64 runners. It extracts the actual archive binaries and runs the
 isolated systemd packet gate against both the Go and Rust controller/relay.
@@ -96,6 +102,14 @@ with a Go peer over QUIC and TCP using both controller/relay pairs. The tests
 also covered policy withdrawal, partition recovery, and NAT and revocation
 after an invitation through Rust HTTPS. This archive was unsigned; it did not
 exercise the fleet updater or a signed release.
+
+The disposable native AMD64 systemd VM passed the same three phases using
+the exact unsigned `0.0.9102` archive above. The packaged peers exercised
+QUIC and full-MTU TCP, policy changes, partition drain and recovery, and
+exit NAT through both controller/relay pairs. The Rust HTTPS invitation
+phase verified one-use enrollment, NAT, revocation, and carrier cleanup.
+The isolated QUIC listener explicitly opts into non-loopback binding;
+the controller still refuses it without the opt-in and node trust inputs.
 
 For the compatibility baseline, Cosign 3.1.3 verified the published
 `v0.2.72` manifest under the pinned release workflow identity. The ARM64

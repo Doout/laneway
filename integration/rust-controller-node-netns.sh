@@ -497,6 +497,7 @@ if [[ "${node_controller}" == "rust" ]]; then
   start_process "${controller_ns}" "${work_dir}/native-controller.log" \
     "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
     "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
+    --listen-on-network \
     --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
     --root-token-file "${work_dir}/admin.token" \
     --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity "${snapshot_seconds}" \
