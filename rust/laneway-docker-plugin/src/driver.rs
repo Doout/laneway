@@ -19,7 +19,8 @@ use crate::{
 /// Host networking behind the Linux privilege boundary. Join must be
 /// idempotent for the same recorded endpoint, including after restart.
 pub trait Backend: Send + Sync {
-    fn apply(&self, network: &Network) -> Result<()>;
+    fn apply(&self, network: &Network, lease: Option<OffsetDateTime>) -> Result<()>;
+    fn set_authorization(&self, network: &Network, lease: Option<OffsetDateTime>) -> Result<()>;
     fn remove(&self, network: &Network) -> Result<()>;
     fn join(&self, network: &Network, endpoint: &Endpoint) -> Result<()>;
     fn leave(&self, network: &Network, endpoint: &Endpoint) -> Result<()>;
@@ -32,6 +33,8 @@ pub struct Reply {
 
 pub struct Driver<B> {
     store: Mutex<Store>,
+    // Access only while holding the journal lock so refresh cannot race cleanup.
+    leases: Mutex<BTreeMap<String, Option<OffsetDateTime>>>,
     backend: B,
     authorization_path: PathBuf,
     version: String,
@@ -42,6 +45,7 @@ impl<B: Backend> Driver<B> {
     pub fn new(store: Store, backend: B, authorization_path: PathBuf, version: String) -> Self {
         Self {
             store: Mutex::new(store),
+            leases: Mutex::new(BTreeMap::new()),
             backend,
             authorization_path,
             version,
@@ -55,6 +59,12 @@ impl<B: Backend> Driver<B> {
             .map_err(|_| conflict("ownership journal lock poisoned"))
     }
 
+    fn leases(&self) -> Result<MutexGuard<'_, BTreeMap<String, Option<OffsetDateTime>>>> {
+        self.leases
+            .lock()
+            .map_err(|_| conflict("authorization lease lock poisoned"))
+    }
+
     #[cfg(test)]
     pub(crate) fn set_clock(&mut self, now: fn() -> OffsetDateTime) {
         self.now = now;
@@ -63,26 +73,99 @@ impl<B: Backend> Driver<B> {
     /// Recover recorded networks before advertising Docker readiness.
     pub fn reconcile(&self) -> Result<()> {
         let mut store = self.store()?;
+        let mut leases = self.leases()?;
         let known = store.networks().clone();
+        let mut authorized = BTreeMap::new();
+        let mut failure = None;
         for network in known
             .values()
             .filter(|network| network.phase == Phase::Active)
         {
-            self.authorize_recorded(network)?;
+            match self.authorize_recorded(network) {
+                Ok(grant) => {
+                    authorized.insert(&network.id, grant.map(|grant| grant.valid_until));
+                }
+                Err(error) => {
+                    // An older runtime may have left a firewall with no lease guard.
+                    failure.get_or_insert(self.fence_on_recovery(network, error));
+                }
+            }
         }
-        for (id, network) in known {
+        for (id, network) in &known {
+            if let Some(&lease) = authorized.get(id) {
+                match self.backend.apply(network, lease) {
+                    Ok(()) => {
+                        if let Some(lease) = lease {
+                            leases.insert(id.clone(), Some(lease));
+                        }
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(self.fence_on_recovery(network, error));
+                    }
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        for (id, network) in &known {
             if network.phase == Phase::Creating {
                 // Keep the journal if the backend could not prove cleanup.
-                self.backend.remove(&network)?;
+                self.backend.remove(network)?;
                 store.update(|networks| {
-                    networks.remove(&id);
+                    networks.remove(id);
                     Ok(())
                 })?;
-            } else {
-                self.backend.apply(&network)?;
             }
         }
         Ok(())
+    }
+
+    fn fence_on_recovery(&self, network: &Network, error: Error) -> Error {
+        if network.policy.needs_grant()
+            && let Err(fence) = self.backend.set_authorization(network, None)
+        {
+            return Error::Backend(format!(
+                "could not fence network {}: {fence} ({error})",
+                network.id
+            ));
+        }
+        error
+    }
+
+    pub(crate) fn refresh_authorization(&self) -> Result<()> {
+        let store = self.store()?;
+        let mut leases = self.leases()?;
+        leases.retain(|id, _| store.networks().contains_key(id));
+        let granted = store
+            .networks()
+            .values()
+            .filter(|network| network.phase == Phase::Active && network.policy.needs_grant());
+        let mut granted = granted.peekable();
+        if granted.peek().is_none() {
+            return Ok(());
+        }
+        let snapshot = self.read_grant().ok();
+        let mut failure = None;
+        for network in granted {
+            let lease = snapshot.as_ref().and_then(|grant| {
+                self.check_recorded_grant(network, Some(grant))
+                    .ok()
+                    .map(|()| grant.valid_until)
+            });
+            if leases.get(&network.id) == Some(&lease) {
+                continue;
+            }
+            match self.backend.set_authorization(network, lease) {
+                Ok(()) => {
+                    leases.insert(network.id.clone(), lease);
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 
     /// Handle one local Docker HTTP request using the same result shape as
@@ -149,25 +232,44 @@ impl<B: Backend> Driver<B> {
         }
     }
 
-    fn authorize(&self, network: &Network) -> Result<Vec<Ipv4Net>> {
-        if !network.policy.needs_grant() {
-            return Ok(Vec::new());
-        }
-        let grant: Authorization =
-            read_private(&self.authorization_path, 1 << 20).map_err(|error| {
-                Error::Unauthorized(format!("cannot read private controller snapshot: {error}"))
-            })?;
-        grant.authorize((self.now)(), network.subnet, &network.policy)?;
-        Ok(grant.bypass_cidrs)
+    fn read_grant(&self) -> Result<Authorization> {
+        read_private(&self.authorization_path, 1 << 20).map_err(|error| {
+            Error::Unauthorized(format!("cannot read private controller snapshot: {error}"))
+        })
     }
 
-    fn authorize_recorded(&self, network: &Network) -> Result<()> {
-        if self.authorize(network)? != network.bypass_cidrs {
+    fn authorize(&self, network: &Network) -> Result<Option<Authorization>> {
+        if !network.policy.needs_grant() {
+            return Ok(None);
+        }
+        let grant = self.read_grant()?;
+        grant.authorize((self.now)(), network.subnet, &network.policy)?;
+        Ok(Some(grant))
+    }
+
+    fn check_recorded_grant(&self, network: &Network, grant: Option<&Authorization>) -> Result<()> {
+        let bypasses = if let Some(grant) = grant {
+            grant.authorize((self.now)(), network.subnet, &network.policy)?;
+            grant.bypass_cidrs.as_slice()
+        } else {
+            &[]
+        };
+        if bypasses != network.bypass_cidrs {
             return Err(Error::Unauthorized(
                 "controller bypasses changed; recorded policy cannot be reused".into(),
             ));
         }
         Ok(())
+    }
+
+    fn authorize_recorded(&self, network: &Network) -> Result<Option<Authorization>> {
+        let grant = network
+            .policy
+            .needs_grant()
+            .then(|| self.read_grant())
+            .transpose()?;
+        self.check_recorded_grant(network, grant.as_ref())?;
+        Ok(grant)
     }
 
     fn create_network(&self, request: CreateNetwork) -> Result<Value> {
@@ -217,12 +319,16 @@ impl<B: Backend> Driver<B> {
                 "network already exists with other settings or needs recovery",
             ));
         }
-        network.bypass_cidrs = self.authorize(&network)?;
+        let grant = self.authorize(&network)?;
+        let lease = grant.as_ref().map(|grant| grant.valid_until);
+        if let Some(grant) = grant {
+            network.bypass_cidrs = grant.bypass_cidrs;
+        }
         store.update(|networks| {
             networks.insert(request.id.clone(), network.clone());
             Ok(())
         })?;
-        if let Err(error) = self.backend.apply(&network) {
+        if let Err(error) = self.backend.apply(&network, lease) {
             if let Err(cleanup) = self.backend.remove(&network) {
                 return Err(Error::Backend(format!(
                     "{error}; cleanup pending: {cleanup}"
@@ -238,6 +344,9 @@ impl<B: Backend> Driver<B> {
             networks.get_mut(&request.id).ok_or(Error::NotFound)?.phase = Phase::Active;
             Ok(())
         })?;
+        if let Some(lease) = lease {
+            self.leases()?.insert(request.id, Some(lease));
+        }
         Ok(json!({}))
     }
 
@@ -252,6 +361,7 @@ impl<B: Backend> Driver<B> {
                 networks.remove(&request.network);
                 Ok(())
             })?;
+            self.leases()?.remove(&request.network);
         }
         Ok(json!({}))
     }
@@ -414,6 +524,7 @@ impl<B: Backend> Driver<B> {
 
     fn status(&self) -> Result<Value> {
         let store = self.store()?;
+        let leases = self.leases()?;
         let mut endpoints = 0;
         let mut policies = BTreeMap::new();
         let mut diagnostics = BTreeMap::new();
@@ -442,8 +553,21 @@ impl<B: Backend> Driver<B> {
                     &network.id,
                     String::from("endpoint join recovery is pending"),
                 );
-            } else if let Err(error) = self.authorize_recorded(network) {
-                diagnostics.insert(&network.id, error.to_string());
+            } else {
+                match self.authorize_recorded(network) {
+                    Ok(Some(grant))
+                        if leases.get(&network.id) != Some(&Some(grant.valid_until)) =>
+                    {
+                        diagnostics.insert(
+                            &network.id,
+                            String::from("applying controller authorization"),
+                        );
+                    }
+                    Err(error) => {
+                        diagnostics.insert(&network.id, error.to_string());
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(

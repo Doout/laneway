@@ -43,8 +43,12 @@ impl Fake {
 }
 
 impl Backend for Fake {
-    fn apply(&self, network: &Network) -> Result<()> {
+    fn apply(&self, network: &Network, _: Option<OffsetDateTime>) -> Result<()> {
         self.capture(format!("apply:{}", network.id), |state| state.fail_apply)
+    }
+    fn set_authorization(&self, network: &Network, lease: Option<OffsetDateTime>) -> Result<()> {
+        let action = if lease.is_some() { "renew" } else { "fence" };
+        self.capture(format!("{action}:{}", network.id), |_| false)
     }
     fn remove(&self, network: &Network) -> Result<()> {
         self.capture(format!("remove:{}", network.id), |state| state.fail_remove)
@@ -250,7 +254,8 @@ fn go_v1_state_and_grants_survive_a_rust_restart_without_broadening_access() {
         [
             "apply:net-fixture",
             "leave:lwhb3d89ecb0d",
-            "apply:net-fixture"
+            "apply:net-fixture",
+            "fence:net-fixture"
         ]
     );
 }
@@ -290,6 +295,46 @@ fn missing_invalid_and_expired_authorization_never_reaches_the_backend() {
     );
     assert!(!state.exists());
     assert!(backend.calls().is_empty());
+}
+
+#[test]
+fn authorization_refresh_fences_revoked_networks_and_accepts_renewal() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (state, authorization) = paths(temporary.path());
+    write_private(&state, GO_STATE);
+    write_private(&authorization, GO_GRANT);
+    let backend = Fake::default();
+    let driver = driver(temporary.path(), backend.clone());
+    driver.reconcile().unwrap();
+    driver.refresh_authorization().unwrap();
+    let mut grant: Value = serde_json::from_slice(GO_GRANT).unwrap();
+    grant["egress_cidrs"] = json!([]);
+    write_private(&authorization, &serde_json::to_vec(&grant).unwrap());
+    driver.refresh_authorization().unwrap();
+    driver.refresh_authorization().unwrap();
+    assert_eq!(driver.handle("GET", "/status", b"").body["ready"], false);
+    write_private(&authorization, GO_GRANT);
+    driver.refresh_authorization().unwrap();
+    assert_eq!(driver.handle("GET", "/status", b"").body["ready"], true);
+    assert_eq!(
+        backend.calls(),
+        [
+            "apply:net-fixture",
+            "fence:net-fixture",
+            "renew:net-fixture"
+        ]
+    );
+}
+
+#[test]
+fn reconcile_fences_legacy_networks_before_refusing_to_serve() {
+    let temporary = tempfile::tempdir().unwrap();
+    let (state, _) = paths(temporary.path());
+    write_private(&state, GO_STATE);
+    let backend = Fake::default();
+    let driver = driver(temporary.path(), backend.clone());
+    assert!(driver.reconcile().is_err());
+    assert_eq!(backend.calls(), ["fence:net-fixture"]);
 }
 
 #[test]

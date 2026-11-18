@@ -1,6 +1,7 @@
 use std::{fmt::Write, time::Instant};
 
 use serde_json::Value;
+use time::OffsetDateTime;
 
 use super::{LinuxBackend, marker};
 use crate::{Egress, Ingress, Network, Result, conflict};
@@ -56,15 +57,21 @@ impl LinuxBackend {
         &self,
         network: &Network,
         old: Option<u64>,
+        lease: Option<OffsetDateTime>,
         deadline: Instant,
     ) -> Result<()> {
-        let script = firewall_script(network, &self.tunnel, old);
+        let script = firewall_script(network, &self.tunnel, old, lease);
         self.nft(&["-f", "-"], Some(&script), deadline)?
             .check("apply atomic network firewall")
     }
 }
 
-pub(super) fn firewall_script(network: &Network, tunnel: &str, old: Option<u64>) -> String {
+pub(super) fn firewall_script(
+    network: &Network,
+    tunnel: &str,
+    old: Option<u64>,
+    lease: Option<OffsetDateTime>,
+) -> String {
     let name = table(network);
     let owner = marker(network);
     let bridge = &network.bridge;
@@ -95,9 +102,41 @@ pub(super) fn firewall_script(network: &Network, tunnel: &str, old: Option<u64>)
         )
         .unwrap();
     }
+    if network.policy.needs_grant() {
+        writeln!(
+            script,
+            "add set inet {name} live_grant {{ typeof iifname; flags timeout; }}"
+        )
+        .unwrap();
+        // Use an absolute cutoff as well as a monotonic timeout. The cutoff
+        // covers delays applying a transaction; the timeout covers clock rollback.
+        if let Some(until) = lease {
+            let millis = (until - OffsetDateTime::now_utc()).whole_milliseconds();
+            if millis > 0 {
+                writeln!(
+                    script,
+                    "add element inet {name} live_grant {{ \"{bridge}\" timeout {millis}ms }}"
+                )
+                .unwrap();
+            }
+        }
+    }
     let mut forward = |body: &str| {
         writeln!(script, "add rule inet {name} forward {body}").unwrap();
     };
+    if network.policy.needs_grant() {
+        for interface in ["iifname", "oifname"] {
+            forward(&format!(
+                "{interface} \"{bridge}\" {interface} != @live_grant drop"
+            ));
+            if let Some(until) = lease {
+                forward(&format!(
+                    "{interface} \"{bridge}\" meta time >= {} drop",
+                    until.unix_timestamp()
+                ));
+            }
+        }
+    }
     // The plugin allocates only IPv4. A container's independently configured
     // IPv6 address must not bypass its IPv4 policy.
     forward(&format!("iifname \"{bridge}\" meta nfproto ipv6 drop"));

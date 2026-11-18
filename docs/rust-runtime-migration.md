@@ -279,6 +279,12 @@ plugin's v1 network journal and controller authorization format. It preserves
 the derived bridge, route table, and veth names. It checks authorization before
 creation, join, or startup reconciliation. Failed cleanup keeps the ownership
 record, and an interrupted join stays pending until the backend confirms it.
+Controller-authorized container networks also stop forwarding at lease expiry,
+even if the plugin stops and the tunnel stays up. The running plugin watches the
+local controller snapshot to fence removed grants and apply renewals without
+recreating the network. Direct networks that don't require a grant are unchanged.
+If startup cannot validate a recorded grant, it fences the owned firewall and
+refuses readiness; restore the snapshot and restart the plugin.
 
 The Linux backend uses the same bridge and veth aliases as Go. It installs
 the nftables policy as one transaction and removes exact recorded routes and
@@ -289,9 +295,11 @@ default to Go.
 
 The isolated Linux ARM64 lab verified in-place adoption of a Go-created
 network, preservation of unrelated routes and rules, and authorized packets
-through the tunnel. After removing the tunnel, the container's traffic was
-rejected even though the host could still reach the destination. The Rust
-image also recovered persisted state across restart through its Unix socket.
+through the tunnel. Revoking or expiring the lease stopped container traffic
+with the tunnel still up, and renewal restored traffic. After removing the
+tunnel, the container's traffic was rejected even though the host could still
+reach the destination. The Rust image also recovered persisted state across
+restart through its Unix socket.
 
 ## Linux node image
 

@@ -18,7 +18,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
     sync::Semaphore,
     task::JoinSet,
-    time::timeout,
+    time::{MissedTickBehavior, interval, timeout},
 };
 
 use crate::{Backend, Driver, Error, Reply, Result, conflict};
@@ -45,12 +45,28 @@ pub async fn serve_until<B: Backend + 'static>(
     fs::set_permissions(path, Permissions::from_mode(0o660))?;
     let permits = Arc::new(Semaphore::new(32));
     let mut connections = JoinSet::new();
+    let mut authorization_check = JoinSet::new();
+    let mut refresh = interval(Duration::from_secs(3));
+    refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
             _ = connections.join_next(), if !connections.is_empty() => {},
+            result = authorization_check.join_next(), if !authorization_check.is_empty() => {
+                if let Some(Err(error)) = result {
+                    eprintln!("authorization refresh worker failed: {error}");
+                }
+            },
+            _ = refresh.tick(), if authorization_check.is_empty() => {
+                let driver = Arc::clone(&driver);
+                authorization_check.spawn_blocking(move || {
+                    if let Err(error) = driver.refresh_authorization() {
+                        eprintln!("network authorization refresh failed: {error}");
+                    }
+                });
+            },
             next = listener.accept() => {
                 let (stream, _) = next?;
                 let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else { continue; };

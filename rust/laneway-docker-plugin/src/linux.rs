@@ -14,6 +14,7 @@ use std::{
 };
 
 use serde_json::Value;
+use time::OffsetDateTime;
 use wait_timeout::ChildExt;
 
 use crate::{
@@ -111,8 +112,13 @@ impl LinuxBackend {
 }
 
 impl Backend for LinuxBackend {
-    fn apply(&self, network: &Network) -> Result<()> {
+    fn apply(&self, network: &Network, lease: Option<OffsetDateTime>) -> Result<()> {
         network.validate(&network.id)?;
+        if network.policy.needs_grant() != lease.is_some() {
+            return Err(invalid(
+                "authorization deadline does not match network policy",
+            ));
+        }
         let deadline = operation_deadline();
         if network.policy.egress != Egress::Direct && self.link(&self.tunnel, deadline)?.is_none() {
             return Err(Error::Backend(
@@ -125,10 +131,27 @@ impl Backend for LinuxBackend {
         self.bridge(network, bridge.is_some(), deadline)?;
         // Install the fail-closed packet filter before adding policy routes
         // or bringing up a newly created bridge.
-        self.apply_firewall(network, table, deadline)?;
+        self.apply_firewall(network, table, lease, deadline)?;
         self.apply_routes(network, routes, deadline)?;
         self.ip(&["link", "set", "dev", &network.bridge, "up"], deadline)?
             .check("bring bridge up")
+    }
+
+    fn set_authorization(&self, network: &Network, lease: Option<OffsetDateTime>) -> Result<()> {
+        network.validate(&network.id)?;
+        if !network.policy.needs_grant() {
+            return Err(invalid("this network does not use a controller lease"));
+        }
+        let deadline = operation_deadline();
+        let bridge = self.owned_link(&network.bridge, "bridge", &marker(network), deadline)?;
+        if lease.is_some() && bridge.is_none() {
+            return Err(conflict("recorded bridge is missing"));
+        }
+        let table = self.firewall_handle(network, deadline)?;
+        if bridge.is_none() && table.is_none() {
+            return Ok(());
+        }
+        self.apply_firewall(network, table, lease, deadline)
     }
 
     fn remove(&self, network: &Network) -> Result<()> {

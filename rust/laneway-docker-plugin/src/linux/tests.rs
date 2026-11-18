@@ -7,6 +7,11 @@ use std::{
 
 use super::{LinuxBackend, firewall::firewall_script, marker, operation_deadline};
 use crate::{Backend, Egress, Endpoint, Network, Policy, Result};
+use time::OffsetDateTime;
+
+fn lease(seconds: i64) -> Option<OffsetDateTime> {
+    Some(OffsetDateTime::now_utc() + time::Duration::seconds(seconds))
+}
 
 fn fixture() -> Network {
     let state: serde_json::Value = serde_json::from_slice(include_bytes!(
@@ -21,7 +26,7 @@ fn firewall_plan_keeps_transport_bypasses_and_guard_order() {
     let mut network = fixture();
     network.policy = Policy::from_options(Some(&serde_json::json!({"laneway.policy":"full-tunnel", "laneway.exit":"east", "laneway.nat":"true"}))).unwrap();
     network.bypass_cidrs = vec!["192.0.2.0/24".parse().unwrap()];
-    let script = firewall_script(&network, "lane0", Some(123));
+    let script = firewall_script(&network, "lane0", Some(123), lease(60));
     assert!(
         script.starts_with("delete table inet handle 123\ncreate table inet laneway_e528879dad\n")
     );
@@ -32,6 +37,11 @@ fn firewall_plan_keeps_transport_bypasses_and_guard_order() {
     );
     assert!(script.contains("oifname != \"lane0\" masquerade"));
     assert!(script.contains("meta nfproto ipv6 drop"));
+    assert!(
+        script.find("!= @live_grant drop").unwrap() < script.find("ct state established").unwrap()
+    );
+    network.policy = Policy::from_options(None).unwrap();
+    assert!(!firewall_script(&network, "lane0", None, None).contains("live_grant"));
 }
 
 fn ip(args: &[&str]) -> bool {
@@ -67,7 +77,7 @@ fn linux_backend_real_ownership_and_policy_lifecycle() -> Result<()> {
     let endpoint: Endpoint = network.endpoints["endpoint-fixture"].clone();
     let mut empty_network = network.clone();
     empty_network.endpoints = BTreeMap::new();
-    assert!(backend.apply(&network).is_err()); // no tunnel available
+    assert!(backend.apply(&network, lease(60)).is_err()); // no tunnel available
     assert!(ip(&["link", "add", "name", "lane0", "type", "dummy"]));
     assert!(ip(&["link", "set", "dev", "lane0", "up"]));
 
@@ -79,7 +89,7 @@ fn linux_backend_real_ownership_and_policy_lifecycle() -> Result<()> {
         "type",
         "bridge"
     ]));
-    assert!(backend.apply(&network).is_err());
+    assert!(backend.apply(&network, lease(60)).is_err());
     assert!(backend.remove(&empty_network).is_err());
     assert!(
         backend
@@ -100,7 +110,7 @@ fn linux_backend_real_ownership_and_policy_lifecycle() -> Result<()> {
         "lookup",
         "main"
     ]));
-    assert!(backend.apply(&network).is_err());
+    assert!(backend.apply(&network, lease(60)).is_err());
     assert!(
         backend
             .link(&network.bridge, operation_deadline())?
@@ -118,8 +128,8 @@ fn linux_backend_real_ownership_and_policy_lifecycle() -> Result<()> {
         "main"
     ]));
 
-    backend.apply(&network)?;
-    backend.apply(&network)?;
+    backend.apply(&network, lease(60))?;
+    backend.apply(&network, lease(60))?;
     backend.join(&network, &endpoint)?;
     backend.join(&network, &endpoint)?;
     let host = backend
@@ -249,7 +259,7 @@ impl Drop for Namespace {
 
 #[test]
 #[ignore = "changes only the disposable --network none test namespace"]
-fn linux_backend_packet_path_fails_closed_without_tunnel() -> Result<()> {
+fn linux_backend_packet_path_fails_closed_without_grant_or_tunnel() -> Result<()> {
     let backend = LinuxBackend::new("lane0")?;
     require_isolated_namespace(&backend)?;
     let network = fixture();
@@ -303,7 +313,7 @@ fn linux_backend_packet_path_fails_closed_without_tunnel() -> Result<()> {
     ));
     assert!(ip(&["route", "add", "10.60.0.2/32", "via", "203.0.113.2"]));
 
-    backend.apply(&network)?;
+    backend.apply(&network, lease(60))?;
     let endpoint = &network.endpoints["endpoint-fixture"];
     backend.join(&network, endpoint)?;
     client.move_link(&endpoint.peer_veth, "172.30.60.2/24");
@@ -312,6 +322,28 @@ fn linux_backend_packet_path_fails_closed_without_tunnel() -> Result<()> {
         client.run("ping", &["-c", "1", "-W", "2", "10.60.0.2"]),
         "authorized tunnel traffic failed"
     );
+    backend.set_authorization(&network, None)?;
+    assert!(
+        !client.run("ping", &["-c", "1", "-W", "1", "10.60.0.2"]),
+        "traffic passed after revocation"
+    );
+    let expires = lease(5).unwrap();
+    backend.set_authorization(&network, Some(expires))?;
+    assert!(
+        client.run("ping", &["-c", "1", "-W", "2", "10.60.0.2"]),
+        "renewal did not restore tunnel traffic"
+    );
+    std::thread::sleep(
+        (expires - OffsetDateTime::now_utc())
+            .try_into()
+            .unwrap_or(Duration::ZERO),
+    );
+    assert!(backend.link("lane0", operation_deadline())?.is_some());
+    assert!(
+        !client.run("ping", &["-c", "1", "-W", "1", "10.60.0.2"]),
+        "traffic passed after lease expiry with the tunnel still up"
+    );
+    backend.set_authorization(&network, lease(60))?;
     assert!(ip(&["link", "del", "dev", "lane0"]));
     assert!(
         Command::new("ping")
