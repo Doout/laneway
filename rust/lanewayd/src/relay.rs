@@ -113,6 +113,7 @@ struct QuicSession {
 
 struct TcpSession {
     connection: tcp_fallback::Session,
+    relay_service: Id,
     negotiated: u64,
     inbound_sequence: u64,
 }
@@ -281,20 +282,11 @@ impl RelayClient {
     }
 
     async fn prepare_tcp(&self) -> Result<TcpSession> {
-        if self.state.relay_targets().is_some() {
-            let service =
-                Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
-            let address = self
-                .config
-                .relay
-                .address
-                .context("relay QUIC address is disabled")?;
-            ensure!(
-                self.state.relay_authorized(service, address),
-                "configured TCP fallback relay is no longer controller-authorized"
-            );
-        }
-        let mut connection = tcp_fallback::connect(&self.config, self.network).await?;
+        let service = Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
+        let mut connection = tcp_fallback::connect(&self.config, self.network, |address| {
+            self.state.relay_authorized_ip(service, address.ip())
+        })
+        .await?;
         let offered = hello_capabilities_for(&self.config, REQUIRED_TCP_CAPABILITIES);
         let hello = ControlEnvelope {
             schema_version: SCHEMA_VERSION,
@@ -335,6 +327,7 @@ impl RelayClient {
             .await?;
         Ok(TcpSession {
             connection,
+            relay_service: service,
             negotiated,
             inbound_sequence: 1,
         })
@@ -490,9 +483,10 @@ impl RelayClient {
                         recovery = Some(Box::pin(self.prepare_quic()));
                     }
                     _ = authority_check.tick() => {
-                        let service = Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
-                        let address = self.config.relay.address.context("relay QUIC address is disabled")?;
-                        ensure!(self.state.relay_authorized(service, address), "active TCP relay was withdrawn by controller");
+                        ensure!(
+                            self.state.relay_authorized_ip(session.relay_service, session.connection.remote.ip()),
+                            "active TCP relay was withdrawn by controller"
+                        );
                     }
                     prepared = async { recovery.as_mut().expect("recovery future exists").await }, if recovery.is_some() => {
                         match prepared {

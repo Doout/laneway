@@ -38,3 +38,11 @@ pub use config::{
 };
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};
+
+fn product_version() -> &'static str {
+    option_env!("LANEWAY_PRODUCT_VERSION")
+        .filter(|value| {
+            (1..=64).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic())
+        })
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}

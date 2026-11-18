@@ -12,7 +12,11 @@ async fn main() -> Result<()> {
         )
         .init();
     let arguments = arguments()?;
-    let config = Config::load(&arguments.config)?;
+    let config = if arguments.connector_state {
+        Config::load_connector_state(&arguments.config)?
+    } else {
+        Config::load(&arguments.config)?
+    };
     let agent = Agent::new(config)?;
     if arguments.check {
         println!("configuration is valid");
@@ -42,6 +46,7 @@ async fn shutdown_signal() {
 
 struct Arguments {
     config: PathBuf,
+    connector_state: bool,
     check: bool,
 }
 
@@ -54,14 +59,17 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
     let binary = arguments.next().unwrap_or_default();
     let Some(argument) = arguments.next() else {
         bail!(
-            "usage: {} --config PATH [--check-config]",
+            "usage: {} (--config PATH | --connector-state DIR) [--check-config]",
             PathBuf::from(binary).display()
         );
     };
-    if argument != "--config" {
-        bail!("first argument must be --config");
+    let connector_state = argument == "--connector-state";
+    if !connector_state && argument != "--config" {
+        bail!("first argument must be --config or --connector-state");
     }
-    let path = arguments.next().context("--config requires a path")?;
+    let path = arguments
+        .next()
+        .context("configuration path or state directory is required")?;
     let mut check = false;
     for argument in arguments {
         if argument == "--check-config" {
@@ -72,6 +80,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
     }
     Ok(Arguments {
         config: path.into(),
+        connector_state,
         check,
     })
 }

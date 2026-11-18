@@ -207,15 +207,40 @@ It does not act as an exit gateway.
 
 Build the separate `connector` image target for a pre-provisioned workload.
 It needs a readable identity and configuration at `/etc/laneway`, but no
-network capabilities or devices. The Go connector's enrollment, existing
-configuration conversion, and image update workflows have not switched
-over to this image.
+network capabilities or devices.
 
 ```sh
 docker build --target connector -f deploy/containers/Dockerfile.rust-relay \
   -t laneway-rust-connector:migration-lab .
 bash integration/rust-lab/connector-image.sh
 ```
+
+For existing Docker Connectors, the opt-in `rust-connector` target in
+`deploy/containers/Dockerfile.connector` holds the current image entrypoint
+and named volume contract. The one-time Go installer keeps the setup-token
+and encrypted bootstrap commands. For normal service it replaces itself
+with the Rust agent. Rust reads `/var/lib/laneway/connector` in place and does
+not rewrite the identity or Go configuration. It uses the controller's relay
+list for QUIC and only dials TCP fallback addresses authorized for the
+configured relay. The updater's read-only, offline preflight checks the saved
+certificate chain, expiry, identity, private key, and settings before stopping
+the old container. Configuration stays usable by the Go image for rollback.
+The default release target still uses Go until promotion is approved.
+
+```sh
+docker build -f deploy/containers/Dockerfile.connector -t lane-edge:go-migration-lab .
+docker build --target rust-connector -f deploy/containers/Dockerfile.connector \
+  -t lane-edge:rust-migration-lab .
+bash integration/rust-lab/connector-cutover.sh
+bash integration/rust-lab/connector-cutover.sh lane-edge:go-migration-lab lane-edge:rust-migration-lab tcp-fallback
+```
+
+The cutover gate uses an isolated controller and disposable enrollment tokens
+to verify a Go-to-Rust swap, offline validation, rollback, and first start with
+the Rust-backed image. For existing identity it compares the original node ID
+and the bytes of every rollback file across both image swaps. It checks
+QUIC and forced TCP fallback separately and verifies that local status
+reports the running image's build version.
 
 ### Verified on the local ARM64 Linux VM
 

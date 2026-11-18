@@ -54,7 +54,13 @@ printf '%s\n' "$*" >> "$LANEWAY_UPDATER_DOCKER_LOG"
 command=$1
 shift
 case "$command" in
-  version|pull|run|stop|rename|start|rm|logs) exit 0 ;;
+  run)
+    case "$*" in
+      *" connector validate "*) exit "${LANEWAY_UPDATER_PREFLIGHT_RC:-0}" ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  version|pull|stop|rename|start|rm|logs) exit 0 ;;
   volume) exit 0 ;;
   inspect)
     if [ "${1:-}" != --format ]; then exit 0; fi
@@ -83,6 +89,7 @@ run_updater() {
     LANEWAY_UPDATER_DOCKER_LOG="$work_dir/docker.log" \
     LANEWAY_UPDATER_HEALTH="${LANEWAY_UPDATER_HEALTH:-}" \
     LANEWAY_UPDATER_RUNNING="${LANEWAY_UPDATER_RUNNING:-}" \
+    LANEWAY_UPDATER_PREFLIGHT_RC="${LANEWAY_UPDATER_PREFLIGHT_RC:-0}" \
     "$@"
 }
 
@@ -94,6 +101,7 @@ grep -F -- '--volume laneway-connector-test-state:/var/lib/laneway' "$work_dir/d
 grep -F 'ghcr.io/doout/lane-edge:9.8.7@sha256:1111111111111111111111111111111111111111111111111111111111111111' \
   "$work_dir/docker.log" >/dev/null
 grep -F 'connector validate --state-dir /var/lib/laneway/connector' "$work_dir/docker.log" >/dev/null
+grep -F -- '--network none' "$work_dir/docker.log" >/dev/null
 if grep -F -- '--entrypoint /bin/sh' "$work_dir/docker.log" >/dev/null; then
   echo "Connector updater still requires a shell in the target image" >&2
   exit 1
@@ -108,6 +116,18 @@ if grep -F 'config-backup' "$work_dir/docker.log" >/dev/null; then
 fi
 if grep -F 'SETUP_TOKEN' "$work_dir/docker.log" >/dev/null; then
   echo "Connector updater reused an enrollment token" >&2
+  exit 1
+fi
+
+: > "$work_dir/docker.log"
+if output=$(LANEWAY_UPDATER_PREFLIGHT_RC=1 run_updater \
+  sh "$repo_dir/deploy/containers/update-connector.sh" laneway-connector-test 2>&1); then
+  echo "invalid replacement configuration passed preflight" >&2
+  exit 1
+fi
+printf '%s\n' "$output" | grep -F 'existing container was not changed' >/dev/null
+if grep -Eq '^stop |^rename ' "$work_dir/docker.log"; then
+  echo "updater touched an active Connector after failed preflight" >&2
   exit 1
 fi
 

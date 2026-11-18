@@ -130,7 +130,7 @@ docker pull "$target" >/dev/null
 
 # Refuse to stop the serving Connector until the replacement image proves that
 # the durable volume contains the complete identity needed without enrollment.
-docker run --rm --pull never \
+docker run --rm --pull never --network none \
   --user 65532:65532 --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --volume "$state_volume:/var/lib/laneway:ro" \

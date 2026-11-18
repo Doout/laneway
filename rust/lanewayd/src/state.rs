@@ -156,6 +156,21 @@ impl State {
         })
     }
 
+    pub(crate) fn relay_authorized_ip(&self, service: Id, address: std::net::IpAddr) -> bool {
+        if !self.controller_managed {
+            return true;
+        }
+        self.authority_snapshot().is_some_and(|snapshot| {
+            !snapshot.expired()
+                && snapshot.relays.get(&service).is_some_and(|relay| {
+                    relay
+                        .resolved
+                        .iter()
+                        .any(|endpoint| endpoint.ip() == address)
+                })
+        })
+    }
+
     /// Removes all dynamic authority, routes, relay handles, and direct paths.
     pub(crate) fn fail_close(&self) {
         self.authority.store(None);
@@ -479,10 +494,13 @@ mod tests {
             ]
         );
         assert!(state.relay_authorized(relay_a, "127.0.0.1:4433".parse().unwrap()));
+        assert!(state.relay_authorized_ip(relay_a, "127.0.0.1".parse().unwrap()));
         let mut withdrawn = (*original).clone();
         withdrawn.relays.remove(&relay_a);
         state.publish_authority(Arc::new(withdrawn));
         assert!(!state.relay_authorized(relay_a, "127.0.0.1:4433".parse().unwrap()));
+        assert!(!state.relay_authorized_ip(relay_a, "127.0.0.1".parse().unwrap()));
+        assert!(state.relay_authorized_ip(relay_b, "127.0.0.1".parse().unwrap()));
         state.publish_authority(Arc::new(original.renew(now + 4).unwrap()));
         tokio::time::sleep(Duration::from_millis(1_200)).await;
         let mut packet = vec![0_u8; 20];

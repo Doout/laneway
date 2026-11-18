@@ -14,7 +14,9 @@ COPY api/ ./api/
 RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-healthcheck
 
 FROM build AS node-build
-RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs
+ARG VERSION=dev
+RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS node
 RUN apk add --no-cache ca-certificates iproute2-minimal nftables procps-ng setpriv tini \

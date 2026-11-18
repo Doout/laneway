@@ -794,7 +794,7 @@ impl RuntimeControl {
             api_revision: 0,
             running: true,
             actor: if serving_exit { "exit-node" } else { "node" }.to_owned(),
-            product_version: "1.0.0".to_owned(),
+            product_version: crate::product_version().to_owned(),
             control_version: "1.0".to_owned(),
             packet_version: 1,
             capabilities: capability_names(advertised_capabilities(&effective)),

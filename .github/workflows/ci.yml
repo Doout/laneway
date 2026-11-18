@@ -215,6 +215,15 @@ jobs:
           ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci
           ./integration/connector-bootstrap.sh lane-edge:ci
           ./integration/connector-upgrade.sh lane-edge:ci
+      - name: Test Rust Connector cutover and rollback
+        run: |
+          docker build --file deploy/containers/Dockerfile.connector \
+            --target rust-connector --build-arg VERSION=ci --tag lane-edge-rust:ci .
+          ! docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true
+          docker build --tag laneway-rust-lab:local integration/rust-lab
+          bash integration/rust-lab/connector-cutover.sh --prime-cache
+          bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci
+          bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci tcp-fallback
 
   rust:
     name: Rust workspace and Go interoperability

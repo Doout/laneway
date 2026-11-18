@@ -273,7 +273,8 @@ require 'HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6'
 require 'CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
 require 'ENTRYPOINT ["/usr/local/bin/laneway"]' "$connector_dockerfile"
 require 'CMD ["connector", "run"]' "$connector_dockerfile"
-if grep -E '^RUN apk|/bin/sh|/sbin/tini|/bin/setpriv' "$connector_dockerfile" >/dev/null; then
+if awk '/^FROM / { runtime = ($2 == "scratch") } runtime { print }' "$connector_dockerfile" |
+  grep -E '^RUN apk|/bin/sh|/sbin/tini|/bin/setpriv' >/dev/null; then
   echo "scratch Connector image contains an OS package or interactive runtime tool" >&2
   exit 1
 fi
@@ -307,6 +308,7 @@ require './integration/console-image-boundary.sh laneway-controller:ci laneway-r
 require '! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true' "$ci_workflow"
 require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
 require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
+require 'bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci' "$ci_workflow"
 require './integration/connector-updater.sh' "$ci_workflow"
 require './integration/administrator-lifecycle.sh' "$ci_workflow"
 if ! grep -Eq '^[[:space:]]+\./integration/administrator-lifecycle\.sh[[:space:]]*$' "$ci_workflow" ||

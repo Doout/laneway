@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
@@ -52,6 +52,7 @@ impl Writer {
 }
 
 pub(crate) struct Session {
+    pub(crate) remote: SocketAddr,
     pub(crate) control: mpsc::Receiver<Vec<u8>>,
     pub(crate) packets: mpsc::Receiver<Bytes>,
     pub(crate) writer: Writer,
@@ -67,18 +68,24 @@ impl Session {
     }
 }
 
-pub(crate) async fn connect(config: &Config, network: Id) -> Result<Session> {
+pub(crate) async fn connect(
+    config: &Config,
+    network: Id,
+    permitted: impl Fn(SocketAddr) -> bool,
+) -> Result<Session> {
     let fallback = config
         .tcp_fallback
         .as_ref()
         .context("TCP fallback is disabled")?;
-    let raw = timeout(
-        fallback.handshake_timeout,
-        TcpStream::connect(fallback.address),
-    )
+    let raw = timeout(fallback.handshake_timeout, async {
+        let targets = resolve_targets(&fallback.address, permitted).await?;
+        TcpStream::connect(targets.as_slice())
+            .await
+            .context("connect TCP fallback")
+    })
     .await
-    .context("TCP fallback connect timed out")?
-    .context("connect TCP fallback")?;
+    .context("TCP fallback connect timed out")??;
+    let remote = raw.peer_addr().context("read TCP fallback peer address")?;
     raw.set_nodelay(true).context("set TCP_NODELAY")?;
     let server_name = ServerName::try_from(config.relay.server_name.clone())
         .context("invalid relay.server_name")?;
@@ -167,6 +174,7 @@ pub(crate) async fn connect(config: &Config, network: Id) -> Result<Session> {
         }
     });
     Ok(Session {
+        remote,
         control,
         packets,
         writer: Writer {
@@ -177,6 +185,30 @@ pub(crate) async fn connect(config: &Config, network: Id) -> Result<Session> {
         stop,
         tasks,
     })
+}
+
+async fn resolve_targets(
+    address: &str,
+    permitted: impl Fn(SocketAddr) -> bool,
+) -> Result<Vec<SocketAddr>> {
+    let mut addresses = if let Ok(numeric) = address.parse::<SocketAddr>() {
+        vec![numeric]
+    } else {
+        let canonical = laneway_protocol::relay_endpoint::canonical_host_port(address)
+            .context("invalid TCP fallback relay endpoint")?;
+        tokio::net::lookup_host(canonical.as_str())
+            .await
+            .context("resolve TCP fallback endpoint")?
+            .take(17)
+            .collect()
+    };
+    ensure!(addresses.len() <= 16, "too many TCP fallback addresses");
+    addresses.retain(|address| permitted(*address));
+    ensure!(
+        !addresses.is_empty(),
+        "TCP fallback has no authorized addresses"
+    );
+    Ok(addresses)
 }
 
 pub(crate) async fn wait_done(done: &mut watch::Receiver<Option<Arc<str>>>) -> Arc<str> {
@@ -236,6 +268,16 @@ async fn write_record<W: AsyncWrite + Unpin>(write: &mut W, record: &Record) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fallback_names_only_dial_an_authorized_ip() {
+        let chosen: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let targets = resolve_targets("localhost:443", |address| address == chosen)
+            .await
+            .unwrap();
+        assert!(targets.iter().all(|address| *address == chosen));
+        assert!(resolve_targets("localhost:443", |_| false).await.is_err());
+    }
 
     #[tokio::test]
     async fn stable_record_layout_and_bounds() {

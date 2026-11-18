@@ -12,6 +12,9 @@ use ipnet::IpNet;
 use laneway_protocol::Id;
 use serde::Deserialize;
 
+#[path = "connector_state.rs"]
+mod connector_state;
+
 const MAX_CONFIG_BYTES: u64 = 1 << 20;
 
 fn default_mtu() -> u16 {
@@ -333,8 +336,9 @@ pub struct RelayConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpFallbackConfig {
-    /// Relay TCP fallback socket address.
-    pub address: SocketAddr,
+    /// Relay TCP fallback host and port. DNS names are allowed only for a
+    /// controller-managed userspace connector.
+    pub address: String,
     /// TLS handshake deadline.
     #[serde(default = "default_handshake_timeout", with = "humantime_serde")]
     pub handshake_timeout: Duration,
@@ -685,7 +689,9 @@ impl Config {
         );
         Id::from_str(&self.relay.service_id).context("relay.service_id")?;
         ensure!(
-            self.relay.address.is_some() || self.tcp_fallback.is_some(),
+            self.controller.is_some()
+                || self.relay.address.is_some()
+                || self.tcp_fallback.is_some(),
             "at least one relay carrier must be configured"
         );
         if let Some(address) = self.relay.address {
@@ -719,7 +725,13 @@ impl Config {
         );
         if let Some(tcp) = &self.tcp_fallback {
             ensure!(
-                tcp.address.port() != 0
+                (tcp.address
+                    .parse::<SocketAddr>()
+                    .is_ok_and(|addr| addr.port() != 0)
+                    || (self.connector.userspace
+                        && self.controller.is_some()
+                        && laneway_protocol::relay_endpoint::canonical_host_port(&tcp.address)
+                            .is_some()))
                     && tcp.handshake_timeout <= Duration::from_secs(300)
                     && tcp.write_timeout <= Duration::from_secs(300)
                     && tcp.idle_timeout <= Duration::from_secs(300)
@@ -991,8 +1003,12 @@ impl Config {
         if let Some(address) = self.relay.address {
             values.push(address.ip());
         }
-        if let Some(fallback) = &self.tcp_fallback {
-            values.push(fallback.address.ip());
+        if let Some(address) = self
+            .tcp_fallback
+            .as_ref()
+            .and_then(|fallback| fallback.address.parse::<SocketAddr>().ok())
+        {
+            values.push(address.ip());
         }
         values.extend(
             self.direct_peers

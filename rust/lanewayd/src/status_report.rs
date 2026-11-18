@@ -78,7 +78,7 @@ impl Reporter {
         };
         Report {
             valid_for_seconds: 30,
-            product_version: env!("CARGO_PKG_VERSION").to_owned(),
+            product_version: crate::product_version().to_owned(),
             platform: Platform::Linux,
             certificate_state: if authority
                 .as_ref()
