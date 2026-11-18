@@ -14,10 +14,11 @@ if [[ $# != 2 || ! $2 =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 fi
 assets=$(realpath -e -- "$1")
 tag=$2
-name=laneway-release.localhost
+name='laneway-release.localhost'
 if [[ $(getent ahostsv4 "$name" | awk '{print $1}' | sort -u) != 127.0.0.1 ||
-      $(docker context inspect --format '{{.Endpoints.docker.Host}}') != unix:///var/run/docker.sock ]]; then
-  echo "The signed release lab requires $name on loopback and the standard local Docker socket." >&2
+      $(docker context inspect --format '{{.Endpoints.docker.Host}}') != unix:///var/run/docker.sock ||
+      ! -c /dev/net/tun ]]; then
+  echo "The signed release lab requires $name on loopback, the standard local Docker socket, and /dev/net/tun." >&2
   exit 2
 fi
 for path in /usr/local/bin/laneway /usr/local/bin/lane /usr/local/sbin/laneway-control /usr/local/share/laneway; do
@@ -74,8 +75,10 @@ cleanup() {
   fi
   if [[ -f $restore/.env ]]; then restore_compose down --volumes >/dev/null 2>&1 || true; fi
   if [[ -f $destination/.env ]]; then
-    if (( result != 0 )); then compose "$destination" logs --no-color --tail=20 controller relay >&2 || true; fi
-    compose "$destination" down --volumes >/dev/null 2>&1 || true
+    if (( result != 0 )); then
+      compose "$destination" --profile exit-node logs --no-color --tail=20 controller relay exit-node >&2 || true
+    fi
+    compose "$destination" --profile exit-node down --volumes >/dev/null 2>&1 || true
   fi
   if [[ $install_started == true ]]; then
     if [[ $(readlink /usr/local/sbin/laneway-control 2>/dev/null || true) == "$destination/laneway-control" ]]; then
@@ -216,6 +219,69 @@ docker restart --time 10 "$connector" >/dev/null
 [[ $(connector_node_id) == "$node_id" ]]
 echo "PASS: Connector enrolled through the one-time HTTPS bootstrap and restarted with the same identity."
 
+# Start the digest-pinned, optional durable Exit Node with fresh credentials.
+# The packaged client is used for enrollment and route approval only.
+setting() { sed -n "s/^$1=//p" "$destination/.env"; }
+network_id=$(setting LANEWAY_NETWORK_ID)
+controller_id=$(setting LANEWAY_CONTROLLER_SERVICE_ID)
+relay_id=$(setting LANEWAY_RELAY_SERVICE_ID)
+exit_digest=$(setting LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST)
+[[ $network_id =~ ^[a-f0-9]{32}$ && $controller_id =~ ^[a-f0-9]{32}$ &&
+  $relay_id =~ ^[a-f0-9]{32}$ && $exit_digest =~ ^sha256:[a-f0-9]{64}$ ]]
+exit_image="ghcr.io/doout/laneway-exit-node-rust:${tag#v}@$exit_digest"
+laneway=/usr/local/bin/laneway
+pki="$destination/generated/pki"
+remote=(--controller "https://127.0.0.1:$(setting LANEWAY_CONTROLLER_PORT)"
+  --ca "$pki/ca.crt" --server-name "$name"
+  --controller-network-id "$network_id" --controller-service-id "$controller_id")
+admin=(--admin-token-file "$destination/generated/secrets/admin.token")
+(
+  umask 077
+  "$laneway" controller enrollment-token issue --network-id "$network_id" \
+    --label release-exit --requested-name exit-node --class durable --expires-in 10m \
+    "${remote[@]}" "${admin[@]}" | jq -er '.enrollment_token' >"$work/exit.token"
+)
+joined=$("$laneway" join --token-file "$work/exit.token" --name exit-node "${remote[@]}" \
+  --out-cert "$pki/exit-node.crt" --out-key "$pki/exit-node.key" --out-wireguard-key "$work/exit.wg")
+exit_node=$(sed -n 's/.* node=\([a-f0-9]\{32\}\) .*/\1/p' <<<"$joined")
+[[ $exit_node =~ ^[a-f0-9]{32}$ ]]
+unlink "$work/exit.token"
+unlink "$work/exit.wg"
+install -m 0444 /dev/null "$destination/generated/config/exit-node.toml"
+sed -e "s/REPLACE_NETWORK_ID/$network_id/g" \
+  -e "s/REPLACE_CONTROLLER_SERVICE_ID/$controller_id/g" -e "s/REPLACE_RELAY_SERVICE_ID/$relay_id/g" \
+  -e "s/relay\.example\.com/$name/g" -e "s/controller\.example\.com/$name/g" \
+  /usr/local/share/laneway/deploy/compose/generated/config/exit-node.toml.example \
+  > "$destination/generated/config/exit-node.toml"
+chmod 0444 "$pki/exit-node.crt"
+chown 65532:65532 "$pki/exit-node.key"
+chmod 0400 "$pki/exit-node.key"
+# An Exit-scoped invitation auto-approves IPv4; use an ordinary invitation
+# so this rehearsal exercises a separate administrative approval.
+"$laneway" controller node capabilities --node-id "$exit_node" --exit-node "${remote[@]}" "${admin[@]}" >/dev/null
+docker pull --quiet "$exit_image" >/dev/null
+route=$(compose "$destination" run --rm --no-deps --pull never -T --entrypoint /usr/local/bin/laneway \
+  exit-node exit enable --family ipv4 --config /etc/laneway/exit-node.toml |
+  jq -er 'select(.approval_needed == true) | .advertisements[0].route_id | select(test("^[a-f0-9]{32}$"))')
+"$laneway" controller route approve --route-id "$route" "${remote[@]}" "${admin[@]}" >/dev/null
+compose "$destination" up -d --pull never --wait --wait-timeout 90 exit-node
+exit_container=$(compose "$destination" ps -q exit-node)
+[[ -n $exit_container && $(docker inspect --format '{{.Config.Image}}' "$exit_container") == "$exit_image" ]]
+ready=false
+for _ in {1..90}; do
+  if status=$(compose "$destination" exec -T exit-node /usr/local/bin/laneway status --socket /run/laneway/lanewayd.sock --json) &&
+    jq -e --arg version "${tag#v}" --arg id "$exit_node" '
+      .running and .product_version == $version and .node_id == $id and
+      .exit.serving and .exit.forwarding_ready and .exit.nat_ready
+    ' <<<"$status" >/dev/null; then
+    ready=true
+    break
+  fi
+  sleep 1
+done
+"$ready"
+echo "PASS: approved Rust Exit Node is running with forwarding and IPv4 NAT ready."
+
 # Verify the installer's original encrypted bundle in a separate, empty
 # controller volume, leaving the first database untouched.
 shopt -s nullglob
@@ -230,7 +296,6 @@ cp "$destination"/{compose.yaml,compose.rust.yaml,recovery.sh,validate.sh} "$res
 sed -i "s/^    name: laneway-/    name: $project-restore-/" "$restore/compose.yaml"
 COMPOSE_PROJECT_NAME="$project-restore" LANEWAY_RUST_CONTROLLER_STATE_VOLUME="$restore_volume" \
   "$restore/recovery.sh" --rust restore "${bundles[0]}" "$work/recovery/laneway-recovery.identity"
-network_id=$(sed -n 's/^LANEWAY_NETWORK_ID=//p' "$destination/.env")
 restore_compose run --rm --no-deps --pull never controller inventory networks /var/lib/laneway-controller/controller.db |
   jq -e --arg id "$network_id" '.networks | length == 1 and .[0].network_id == $id' >/dev/null
-echo "PASS: signed $tag installed from empty state, passed HTTPS readiness and Connector enrollment, and restored its encrypted backup into a separate volume."
+echo "PASS: signed $tag installed from empty state, passed HTTPS, Connector, and Exit Node readiness, and restored its encrypted backup into a separate volume."

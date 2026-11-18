@@ -29,7 +29,9 @@ the release installer, verifies the running digest-pinned services and HTTPS
 discovery, and restores its encrypted backup into a separate, empty controller
 volume. It also redeems a one-time HTTPS invitation with the pinned Connector
 image, checks for a live controller lease and QUIC relay path, and restarts the
-Rust process with the same identity and no enrollment token. Download transport
+Rust process with the same identity and no enrollment token. The gate also
+enrolls a fresh Docker Exit Node and verifies its forwarding and IPv4 NAT
+readiness after route approval. Download transport
 and the relay's public certificate are local to the disposable runner; release
 signature verification and image pulls are real.
 The same gate passed an ARM64 rehearsal using fixture signatures and local
@@ -803,12 +805,15 @@ sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_DURABLE_EXIT=1 \
   ./integration/rust-controller-node-netns.sh
 ```
 
-For an existing durable Docker Exit Node, the opt-in `rust-exit` target
-accepts the same read-only Go TOML, certificates, state volume, health socket,
-and `-config` command. It keeps the fixed direct port and the controller TLS
-name even when the private Docker hostname differs. The process uses the same
-non-root user and `NET_ADMIN`-only container contract. The Go CLI remains
-available for one-shot administration; the daemon and readiness probe are Rust.
+The release builds the durable Docker Exit Node from the `rust-exit` target.
+On a fresh Rust control plane, the optional Compose profile uses that pinned
+image. Enroll it, render the packaged Exit Node template with the network and
+service identities, then request and approve its exit route. The container
+runs as a non-root user with only `NET_ADMIN`; the daemon and readiness probe
+are Rust. The Go CLI is used only for one-shot administration.
+
+Historical Go-to-Rust cutover experiments are not release requirements. The
+following gate checks the legacy NAT profile and its existing state layout:
 
 ```sh
 docker build -f deploy/containers/Dockerfile.exit-node --build-arg VERSION=go-exit-lab \
@@ -827,9 +832,8 @@ old container before starting the replacement against the same mounts. Run
 `lanewayd-rs --exit-config /etc/laneway/exit-node.toml --check-config` in the new
 image with the original mounts to validate the configuration without networking.
 
-The release default remains Go until promotion. The supported legacy profile
-uses NAT and enables direct paths. WireGuard-enabled, routed-only and shared-host
-ephemeral exits are separate migration work.
+This Docker profile uses NAT and enables direct paths. The shared-host
+ephemeral Exit uses the separate native WireGuard process described below.
 
 ### Ephemeral exit control
 
