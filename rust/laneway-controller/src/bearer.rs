@@ -87,15 +87,16 @@ fn automation_proof(token: &str) -> Result<(Id, [u8; 32]), SessionError> {
     if secret.len() != 43 || URL_SAFE_NO_PAD.decode_slice(secret, &mut *buf) != Ok(32) {
         return Err(SessionError::Invalid);
     }
-    Ok((
-        id,
-        Sha256::new()
-            .chain_update(b"laneway-service-access-token-v1\0")
-            .chain_update(id.as_bytes())
-            .chain_update(secret.as_bytes())
-            .finalize()
-            .into(),
-    ))
+    Ok((id, automation_digest(id, secret)))
+}
+
+pub(crate) fn automation_digest(id: Id, secret: &str) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(b"laneway-service-access-token-v1\0")
+        .chain_update(id.as_bytes())
+        .chain_update(secret.as_bytes())
+        .finalize()
+        .into()
 }
 
 pub(crate) struct BearerActor {

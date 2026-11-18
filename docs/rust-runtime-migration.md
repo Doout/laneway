@@ -192,6 +192,14 @@ checks. Access updates protect the last enabled owner, and a password or
 access change revokes affected sessions in the same transaction. Revoking a
 rotated session also revokes its successors.
 
+Automation credentials no longer need Go for issuance or retirement. Owners
+and the configured root bearer can create, list, and disable service
+principals, and issue, list, or revoke their access tokens. Rust issues the
+same `lnw_spat_v1` token format as Go. Only the issuance response contains
+the plaintext; the database holds a digest. Network boundaries and the
+100-active-token cap per principal apply in both implementations. Disabling
+a service principal revokes its outstanding tokens atomically.
+
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly
 granted `network.create`. The Rust transaction creates the IPv4 or dual-stack

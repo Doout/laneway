@@ -16,6 +16,7 @@ use tokio::sync::Semaphore;
 mod access_admin;
 mod administrators;
 mod audit;
+mod automation;
 mod endpoint_status;
 mod enroll;
 mod form;
@@ -312,6 +313,9 @@ async fn dispatch(
     }
     if let Some(route) = administrators::Route::parse(&pieces) {
         return administrators::handle(req, state, id, route).await;
+    }
+    if let Some(route) = automation::Route::parse(&pieces) {
+        return automation::handle(req, state, id, route).await;
     }
     let root_probe = path == "/v1/admin/auth/root";
     let logout = path == "/v1/admin/auth/logout";

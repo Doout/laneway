@@ -176,7 +176,7 @@ pub(super) async fn handle(
     with_session_headers(response(S::OK, id, data, head), meta)
 }
 
-fn failure(err: anyhow::Error) -> Failure {
+pub(super) fn failure(err: anyhow::Error) -> Failure {
     if let Some(reason) = err.downcast_ref::<AdministratorError>() {
         return match reason {
             AdministratorError::Id("rotation_id") => malformed("invalid rotation_id"),

@@ -13,6 +13,7 @@ use serde::Serialize;
 pub mod access_admin;
 pub mod administrators;
 pub mod audit;
+pub mod automation;
 mod bearer;
 mod browser;
 pub use bearer::{RootCredential, bearer_inventory, bearer_network};

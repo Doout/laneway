@@ -225,6 +225,9 @@ func testRustAdministratorRecovery(t *testing.T, client *http.Client, pair tls.C
 	t.Run("changes", func(t *testing.T) {
 		testRustAdministratorChanges(t, f, client, goServer.URL, rustURL, owner, ownerSession, labCredentials{bearer: automation})
 	})
+	t.Run("automation", func(t *testing.T) {
+		testRustAutomationCredentials(t, f, client, goServer.URL, rustURL, ownerSession, labCredentials{bearer: automation})
+	})
 	t.Run("root-rotation", func(t *testing.T) {
 		testRustRootRotation(t, f, client, goServer.URL, rustURL, stop, cert, key, ownerSession, labCredentials{bearer: automation})
 	})

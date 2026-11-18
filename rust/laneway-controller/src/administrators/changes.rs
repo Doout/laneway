@@ -67,7 +67,7 @@ impl Principal {
 }
 
 impl SessionStore {
-    fn administrator_operation<T>(
+    pub(crate) fn administrator_operation<T>(
         &mut self,
         caller: Caller<'_>,
         run: impl FnOnce(&Transaction<'_>, AuditActor, Option<(Id, Id)>, i64) -> Result<T>,
