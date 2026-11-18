@@ -129,7 +129,8 @@ fn linux_backend_real_ownership_and_policy_lifecycle() -> Result<()> {
     ]));
 
     backend.apply(&network, lease(60))?;
-    backend.apply(&network, lease(60))?;
+    // A long imported lease exceeds the nft parser's millisecond-component limit.
+    backend.apply(&network, lease(365 * 24 * 60 * 60))?;
     backend.join(&network, &endpoint)?;
     backend.join(&network, &endpoint)?;
     let host = backend

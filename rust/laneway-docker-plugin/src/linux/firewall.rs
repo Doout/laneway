@@ -113,9 +113,11 @@ pub(super) fn firewall_script(
         if let Some(until) = lease {
             let millis = (until - OffsetDateTime::now_utc()).whole_milliseconds();
             if millis > 0 {
+                // nft parses each duration component as u32 (including ms).
+                let timeout = format!("{}s{}ms", millis / 1000, millis % 1000);
                 writeln!(
                     script,
-                    "add element inet {name} live_grant {{ \"{bridge}\" timeout {millis}ms }}"
+                    "add element inet {name} live_grant {{ \"{bridge}\" timeout {timeout} }}"
                 )
                 .unwrap();
             }
