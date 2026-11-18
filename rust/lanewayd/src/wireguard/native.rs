@@ -3,10 +3,10 @@
 use std::{
     collections::BTreeMap,
     fmt::Write,
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     future::Future,
     io::{ErrorKind, Read},
-    net::{Ipv4Addr, UdpSocket as StdUdpSocket},
+    net::{Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket},
     num::NonZeroU64,
     os::unix::{fs::MetadataExt, fs::OpenOptionsExt},
     path::Path,
@@ -14,7 +14,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use laneway_protocol::Id;
 use tokio::{
@@ -24,7 +23,10 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
-use super::{MAX_WIREGUARD_DATAGRAM, WireGuardDatagram, WireGuardRelay, plan::DevicePlan};
+use super::{
+    MAX_WIREGUARD_DATAGRAM, WireGuardDatagram, WireGuardRelay, netlink::WireGuardControl,
+    plan::DevicePlan,
+};
 use crate::{
     Config,
     controller::Snapshot,
@@ -35,13 +37,33 @@ use crate::{
 /// This profile does not install shared-host credentials or renew certificates.
 pub struct WireGuardNode {
     relay: WireGuardRelay,
-    private_key: Zeroizing<String>,
+    private_key: Zeroizing<[u8; 32]>,
 }
 
 impl WireGuardNode {
     /// Validate the native profile and read the same raw 32-byte key format
     /// used by existing nodes. This does not create links or firewall state.
     pub fn new(config: Config, key_path: &Path, generation: Option<NonZeroU64>) -> Result<Self> {
+        ensure!(
+            key_path.is_absolute(),
+            "WireGuard private key path must be absolute"
+        );
+        Self::from_key(config, read_private_key(key_path)?, generation)
+    }
+
+    pub(in crate::wireguard) fn from_credential(
+        config: Config,
+        file: File,
+        generation: NonZeroU64,
+    ) -> Result<Self> {
+        Self::from_key(config, read_raw_private_key(file)?, Some(generation))
+    }
+
+    fn from_key(
+        config: Config,
+        private_key: Zeroizing<[u8; 32]>,
+        generation: Option<NonZeroU64>,
+    ) -> Result<Self> {
         ensure!(
             config
                 .controller
@@ -69,18 +91,9 @@ impl WireGuardNode {
             !config.forwarding.exit_gateway || config.forwarding.exit_gateway_controller_sources,
             "native WireGuard NAT requires controller-approved source ownership"
         );
-        ensure!(
-            key_path.is_absolute(),
-            "WireGuard private key path must be absolute"
-        );
         config.validate()?;
-        let private_key = read_private_key(key_path)?;
-        let exec = ExecRunner::with_timeout(config.forwarding.shutdown_timeout);
-        let public_key = exec.sensitive("wg", &["pubkey".to_owned()], private_key.as_bytes())?;
-        let public_key = STANDARD
-            .decode(std::str::from_utf8(&public_key)?.trim())?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("invalid WireGuard public key"))?;
+        let secret = x25519_dalek::StaticSecret::from(*private_key);
+        let public_key = x25519_dalek::PublicKey::from(&secret).to_bytes();
         let relay = WireGuardRelay::new(config, public_key, generation)?;
         Ok(Self { relay, private_key })
     }
@@ -114,7 +127,7 @@ impl WireGuardNode {
 pub(super) struct NativeKernel {
     node: Id,
     config: Arc<Config>,
-    private_key: Zeroizing<String>,
+    private_key: Zeroizing<[u8; 32]>,
     outbound: mpsc::Sender<WireGuardDatagram>,
     slot: Mutex<Slot>,
 }
@@ -133,7 +146,7 @@ impl NativeKernel {
             "refuse an older native WireGuard configuration"
         );
         slot.epoch = snapshot.epoch;
-        if renewed && let Some(device) = slot.active.as_mut() {
+        if renewed && let Some(device) = slot.active.as_mut().filter(|d| !d.draining) {
             device.snapshot = snapshot;
             return Ok(());
         }
@@ -142,8 +155,8 @@ impl NativeKernel {
             && let Some(device) = slot.active.as_mut()
             && device.plan.same_paths(plan)
         {
-            if device.plan != *plan {
-                if let Err(error) = device.replace_acl(plan) {
+            if device.plan != *plan || device.draining {
+                if let Err(error) = device.replace_acl(plan, false) {
                     let mut device = slot.active.take().expect("active device checked above");
                     return Err(match device.close() {
                         Ok(()) => error,
@@ -182,16 +195,33 @@ impl NativeKernel {
         Ok(())
     }
 
+    pub(super) async fn drain(&self, snapshot: &Arc<Snapshot>) -> Result<bool> {
+        let mut slot = self.slot.lock().await;
+        if let Some(device) = slot.active.as_mut()
+            && snapshot.wireguard_drain_eligible()
+            && Arc::ptr_eq(&device.snapshot, snapshot)
+            && device.forwarding.is_some()
+        {
+            let plan = device.plan.clone();
+            device.replace_acl(&plan, true)?;
+            tracing::info!("draining established WireGuard exit flows");
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     async fn inject(&self, datagram: WireGuardDatagram) {
         let slot = self.slot.lock().await;
-        if let Some(device) = slot
-            .active
-            .as_ref()
-            .filter(|device| !device.snapshot.wireguard_authority_expired())
-            && let Some(peer) = device
-                .peers
-                .get(&datagram.peer())
-                .filter(|peer| peer.key == datagram.peer_key())
+        if let Some(device) = slot.active.as_ref().filter(|device| {
+            if device.draining {
+                device.snapshot.wireguard_drain_eligible()
+            } else {
+                !device.snapshot.wireguard_authority_expired()
+            }
+        }) && let Some(peer) = device
+            .peers
+            .get(&datagram.peer())
+            .filter(|peer| peer.key == datagram.peer_key())
             && let Err(error) = peer.socket.try_send(datagram.payload())
         {
             tracing::trace!(%error, "drop WireGuard kernel datagram");
@@ -214,9 +244,10 @@ impl Drop for PeerSocket {
 struct Device {
     config: Arc<Config>,
     exec: ExecRunner,
-    ifindex: Option<u64>,
+    ifindex: Option<u32>,
     table: String,
     listen_port: u16,
+    draining: bool,
     owned_rules: Option<serde_json::Value>,
     forwarding: Option<KernelManager>,
     peers: BTreeMap<Id, PeerSocket>,
@@ -229,7 +260,7 @@ impl Device {
         config: Arc<Config>,
         plan: DevicePlan,
         snapshot: Arc<Snapshot>,
-        private_key: &str,
+        private_key: &[u8; 32],
         outbound: &mpsc::Sender<WireGuardDatagram>,
     ) -> Result<Self> {
         let exec = ExecRunner::with_timeout(config.forwarding.shutdown_timeout);
@@ -242,6 +273,7 @@ impl Device {
             owned_rules: None,
             table,
             listen_port: 0,
+            draining: false,
             forwarding: None,
             peers: BTreeMap::new(),
             plan,
@@ -258,7 +290,7 @@ impl Device {
 
     fn activate(
         &mut self,
-        private_key: &str,
+        private_key: &[u8; 32],
         outbound: &mpsc::Sender<WireGuardDatagram>,
     ) -> Result<()> {
         ensure!(
@@ -271,7 +303,8 @@ impl Device {
             None,
         )
         .context("create dedicated WireGuard link (existing links are not adopted)")?;
-        self.ifindex = Some(self.read_ifindex()?);
+        let ifindex = self.read_ifindex()?;
+        self.ifindex = Some(ifindex);
         self.ip(
             &[
                 "link",
@@ -289,20 +322,8 @@ impl Device {
             .context("reserve WireGuard loopback port")?;
         let listen_port = port.local_addr()?.port();
         self.listen_port = listen_port;
-        // Compute a conservative bound up front so the buffer never grows
-        // after it begins holding the base64 private key.
-        let capacity = 96
-            + self
-                .plan
-                .peers
-                .values()
-                .map(|peer| 144 + peer.prefixes.len() * 68)
-                .sum::<usize>();
-        let mut config = Zeroizing::new(String::with_capacity(capacity));
-        writeln!(
-            config,
-            "[Interface]\nPrivateKey = {private_key}\nListenPort = {listen_port}"
-        )?;
+        let mut control = WireGuardControl::open()?;
+        control.configure_device(ifindex, private_key, listen_port)?;
         let mut routes = String::new();
         for prefix in &self.plan.overlays {
             writeln!(
@@ -320,19 +341,14 @@ impl Device {
                 .context("bind WireGuard peer adapter")?;
             socket.set_nonblocking(true)?;
             socket.connect((Ipv4Addr::LOCALHOST, listen_port))?;
-            let address = socket.local_addr()?;
+            let SocketAddr::V4(address) = socket.local_addr()? else {
+                bail!("WireGuard loopback endpoint is not IPv4");
+            };
             let socket = Arc::new(UdpSocket::from_std(socket)?);
-            let mut allowed = Vec::with_capacity(peer.prefixes.len());
+            control.configure_peer(ifindex, &peer.key, address, &peer.prefixes)?;
             for prefix in &peer.prefixes {
                 writeln!(routes, "route add {prefix} dev {interface}")?;
-                allowed.push(prefix.to_string());
             }
-            write!(
-                config,
-                "\n[Peer]\nPublicKey = {}\nEndpoint = {address}\nAllowedIPs = {}\n",
-                STANDARD.encode(peer.key),
-                allowed.join(", ")
-            )?;
             let key = peer.key;
             let reader_socket = Arc::clone(&socket);
             let outbound = outbound.clone();
@@ -365,12 +381,7 @@ impl Device {
                 },
             );
         }
-        self.exec.sensitive(
-            "wg",
-            &args(&["setconf", interface, "/dev/stdin"]),
-            config.as_bytes(),
-        )?;
-        let rules = self.rules(&self.plan)?;
+        let rules = self.rules(&self.plan, false)?;
         self.nft(&["-f", "-"], Some(rules.as_bytes()))?;
         self.owned_rules = Some(self.read_table()?);
         if !self.plan.nat_sources.is_empty() {
@@ -398,24 +409,30 @@ impl Device {
         Ok(())
     }
 
-    fn rules(&self, plan: &DevicePlan) -> Result<String> {
+    fn rules(&self, plan: &DevicePlan, draining: bool) -> Result<String> {
         plan.firewall(
             &self.table,
             &self.config.tun.name,
             self.listen_port,
             self.config.forwarding.exit_output_interface.as_deref(),
+            draining,
         )
     }
 
-    fn replace_acl(&mut self, plan: &DevicePlan) -> Result<()> {
+    fn replace_acl(&mut self, plan: &DevicePlan, draining: bool) -> Result<()> {
         ensure!(
             self.owned_rules.as_ref() == Some(&self.read_table()?),
             "WireGuard nftables ownership changed"
         );
-        let rules = format!("delete table inet {}\n{}", self.table, self.rules(plan)?);
+        let rules = format!(
+            "delete table inet {}\n{}",
+            self.table,
+            self.rules(plan, draining)?
+        );
         // No packet sees an unprotected interface between the old and new ACL.
         self.nft(&["-f", "-"], Some(rules.as_bytes()))?;
         self.owned_rules = Some(self.read_table()?);
+        self.draining = draining;
         Ok(())
     }
 
@@ -445,11 +462,11 @@ impl Device {
         Ok(())
     }
 
-    fn read_ifindex(&self) -> Result<u64> {
+    fn read_ifindex(&self) -> Result<u32> {
         #[derive(serde::Deserialize)]
         struct Link {
             ifname: String,
-            ifindex: u64,
+            ifindex: u32,
             linkinfo: LinkInfo,
         }
         #[derive(serde::Deserialize)]
@@ -525,8 +542,8 @@ fn args(arguments: &[&str]) -> Vec<String> {
     arguments.iter().map(|value| (*value).to_owned()).collect()
 }
 
-fn read_private_key(path: &Path) -> Result<Zeroizing<String>> {
-    let mut file = OpenOptions::new()
+fn read_private_key(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
@@ -542,20 +559,23 @@ fn read_private_key(path: &Path) -> Result<Zeroizing<String>> {
             && matches!(metadata.mode() & 0o777, 0o600 | 0o640),
         "WireGuard key must be a single-linked owned raw 32-byte file with mode 0600 or 0640"
     );
-    let mut raw = Zeroizing::new([0u8; 33]);
-    file.read_exact(&mut raw[..32])?;
-    match file.read_exact(&mut raw[32..]) {
+    read_raw_private_key(file)
+}
+
+fn read_raw_private_key(mut file: File) -> Result<Zeroizing<[u8; 32]>> {
+    let mut raw = Zeroizing::new([0u8; 32]);
+    file.read_exact(raw.as_mut())?;
+    let mut extra = Zeroizing::new([0u8; 1]);
+    match file.read_exact(extra.as_mut()) {
         Err(error) if error.kind() == ErrorKind::UnexpectedEof => (),
         Ok(()) => bail!("WireGuard key size changed while reading"),
         Err(error) => return Err(error).context("read native WireGuard key"),
     }
     ensure!(
-        raw[..32].iter().any(|byte| *byte != 0),
+        raw.iter().any(|byte| *byte != 0),
         "WireGuard key must not be zero"
     );
-    let mut encoded = Zeroizing::new(String::with_capacity(44));
-    STANDARD.encode_string(&raw[..32], &mut encoded);
-    Ok(encoded)
+    Ok(raw)
 }
 
 #[cfg(test)]

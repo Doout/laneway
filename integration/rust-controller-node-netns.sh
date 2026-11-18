@@ -37,6 +37,20 @@ node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
 test_durable_exit="${LANEWAY_NODE_TEST_DURABLE_EXIT:-0}"
 test_wireguard="${LANEWAY_NODE_TEST_WIREGUARD:-0}"
 wireguard_native="${LANEWAY_NODE_WIREGUARD_NATIVE:-1}"
+test_drain="${LANEWAY_NODE_WIREGUARD_DRAIN:-0}"
+test_credentials="${LANEWAY_NODE_WIREGUARD_CREDENTIALS:-0}"
+credential_dir=""
+snapshot_seconds=2
+if [[ "${test_drain}" == "1" ]]; then
+  [[ "${test_wireguard}:${wireguard_native}" == "1:1" ]] || { echo "Drain requires native WireGuard" >&2; exit 1; }
+  snapshot_seconds=30
+fi
+if [[ "${test_credentials}" == "1" ]]; then
+  [[ "${test_wireguard}:${wireguard_native}" == "1:1" && -d /run/credentials &&
+     "$(stat -f -c %T /run/credentials)" == tmpfs &&
+     -e /run/credentials/.laneway-isolated-credential-lab ]] ||
+    { echo "Credential gate requires the disposable container's marked tmpfs" >&2; exit 1; }
+fi
 case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 
 cleanup() {
@@ -49,6 +63,11 @@ cleanup() {
   for namespace in "${namespaces[@]:-}"; do
     ip netns delete "${namespace}" >/dev/null 2>&1 || true
   done
+  if [[ -n "${credential_dir}" ]]; then
+    rm -f -- "${credential_dir}/ca.crt" "${credential_dir}/node.crt" "${credential_dir}/node.key" \
+      "${credential_dir}/wireguard.key" "${credential_dir}/config"
+    rmdir -- "${credential_dir}"
+  fi
   if [[ "${LANEWAY_KEEP_INTEGRATION_WORK:-0}" == "1" ]]; then
     echo "integration artifacts retained at ${work_dir}" >&2
   else
@@ -86,8 +105,8 @@ stop_process() {
 }
 
 wait_log() {
-  local pid="$1" log="$2" pattern="$3"
-  for _ in $(seq 1 240); do
+  local pid="$1" log="$2" pattern="$3" attempts="${4:-240}"
+  for _ in $(seq 1 "${attempts}"); do
     if grep -q -- "${pattern}" "${log}" 2>/dev/null; then
       return 0
     fi
@@ -263,7 +282,7 @@ controller_command=(
   -controller-cert "${work_dir}/pki/controller.crt"
   -controller-key "${work_dir}/pki/controller.key"
   -admin-token-file "${work_dir}/admin.token"
-  -snapshot-validity 2s
+  -snapshot-validity "${snapshot_seconds}s"
   -initial-node-delay 1500ms
 )
 if [[ "${test_wireguard}" != "1" ]]; then
@@ -372,7 +391,7 @@ if [[ "${node_controller}" == "rust" ]]; then
     "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
     --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
     --root-token-file "${work_dir}/admin.token" \
-    --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity 2 \
+    --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity "${snapshot_seconds}" \
     --location-database "${location_fixture}"
   native_controller_pid="${last_pid}"
   wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
@@ -544,21 +563,77 @@ EOF
     ip link add "wr$$" type veth peer name "wl$$"
     ip link set "wr$$" netns "${rust_ns}"
     ip link set "wl$$" netns "${lan_ns}"
-    ip -n "${rust_ns}" link set "wr$$" name wgwan
+    ip -n "${rust_ns}" link set "wr$$" name uplink0
     ip -n "${lan_ns}" link set "wl$$" name wgout
-    ip -n "${rust_ns}" address add 203.0.113.1/24 dev wgwan
+    ip -n "${rust_ns}" address add 203.0.113.1/24 dev uplink0
     ip -n "${lan_ns}" address add 203.0.113.2/24 dev wgout
-    ip -n "${rust_ns}" link set wgwan up
+    ip -n "${rust_ns}" link set uplink0 up
     ip -n "${lan_ns}" link set wgout up
     ip netns exec "${rust_ns}" sysctl -qw net.ipv4.ip_forward=0
     cat >>"${work_dir}/wireguard-native.toml" <<'EOF'
 [forwarding]
 exit_gateway = true
 exit_gateway_controller_sources = true
-exit_output_interface = "wgwan"
+exit_output_interface = "uplink0"
 EOF
     bridge_command=("${work_dir}/rust-node" --wireguard-config "${work_dir}/wireguard-native.toml"
       --wireguard-key "${work_dir}/pki/rust.wireguard.key" --exit-generation "${rust_generation}")
+    if [[ "${test_credentials}" == "1" ]]; then
+      transient_name="laneway-ephemeral-exit-$(printf '%016x' "$$")"
+      target_credentials="/run/credentials/${transient_name}.service"
+      mkdir -m 0700 -- "${target_credentials}"
+      credential_dir="${target_credentials}"
+      install -m 0400 "${work_dir}/pki/ca.crt" "${credential_dir}/ca.crt"
+      install -m 0400 "${work_dir}/pki/rust.crt" "${credential_dir}/node.crt"
+      install -m 0400 "${work_dir}/pki/rust.key" "${credential_dir}/node.key"
+      install -m 0400 "${work_dir}/pki/rust.wireguard.key" "${credential_dir}/wireguard.key"
+      cat >"${credential_dir}/config" <<EOF
+mode = "node"
+state_dir = "/run/${transient_name}/state"
+socket_path = "/run/${transient_name}/lanewayd.sock"
+[tls]
+certificate = "@credential/node.crt"
+private_key = "@credential/node.key"
+ca = "@credential/ca.crt"
+server_name = ""
+[node]
+relay_address = "10.254.0.2:4433"
+relay_network_id = "${network_id}"
+relay_service_id = "${relay_service}"
+reconnect_min = "50ms"
+reconnect_max = "500ms"
+[controller]
+endpoint = "${node_endpoint}"
+quic_endpoint = "${node_quic_endpoint}"
+server_name = "${node_server_name}"
+network_id = "${network_id}"
+service_id = "${controller_service}"
+poll_interval = "100ms"
+[routing]
+output_interface = "uplink0"
+[wireguard]
+enabled = true
+private_key = "@credential/wireguard.key"
+interface = "lane0"
+mtu = 1280
+[exit]
+serve = true
+lease_generation = ${rust_generation}
+failure_mode = "closed"
+[direct]
+enabled = false
+[tcp_fallback]
+address = "10.254.0.2:4435"
+handshake_timeout = "1s"
+EOF
+      chmod 0400 "${credential_dir}/config"
+      bridge_command=(env CREDENTIALS_DIRECTORY="${credential_dir}" "${work_dir}/rust-node" --shared-host-exit)
+      if ip netns exec "${rust_ns}" "${bridge_command[@]}" --check-config 9</dev/null >"${work_dir}/inherited-fd.log" 2>&1; then
+        echo "ERROR: shared-host runtime accepted an inherited descriptor" >&2
+        exit 1
+      fi
+      grep -F 'unexpected inherited shared-host descriptor' "${work_dir}/inherited-fd.log" >/dev/null
+    fi
     ip netns exec "${rust_ns}" "${bridge_command[@]}" --check-config
     if ip -n "${rust_ns}" link show dev lane0 >/dev/null 2>&1; then
       echo "ERROR: configuration check created a WireGuard interface" >&2
@@ -671,7 +746,7 @@ EOF
       ip netns exec "${rust_ns}" nft list table inet laneway_rs_exit |
         grep -F "ip saddr ${gateway_address}" >/dev/null
       start_process "${lan_ns}" "${work_dir}/wg-nat-probe.log" \
-        "${work_dir}/netprobe" udp-server -listen 203.0.113.2:9793 -max-packets 8
+        "${work_dir}/netprobe" udp-server -listen 203.0.113.2:9793 -max-packets 16 -timeout 90s
       nat_pid="${last_pid}"
       wait_log "${nat_pid}" "${work_dir}/wg-nat-probe.log" "ready=udp-server"
       # Point only this disposable destination at the Go peer's existing
@@ -681,10 +756,35 @@ EOF
       ip -n "${gateway_ns}" route add 203.0.113.2/32 dev lane0
       for _ in $(seq 1 8); do
         if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
-          -target 203.0.113.2:9793 -message native-wireguard-nat -timeout 1s; then break; fi
+          -target 203.0.113.2:9793 -source-port 57801 -message native-wireguard-nat -timeout 1s; then break; fi
       done
       grep -Eq 'remote=203\.0\.113\.1:[0-9]+ payload=native-wireguard-nat' "${work_dir}/wg-nat-probe.log"
       [[ "$(ip netns exec "${rust_ns}" sysctl -n net.ipv4.ip_forward)" == "1" ]]
+      if [[ "${test_drain}" == "1" ]]; then
+        echo "==> a controller partition drains only established forwarded traffic"
+        # Leave the relay and Go peer connected to the controller. Only the
+        # Rust exit loses its independent control channel in this namespace.
+        ip netns exec "${rust_ns}" nft add table inet lab_drain
+        ip netns exec "${rust_ns}" nft add chain inet lab_drain output '{ type filter hook output priority 0; policy accept; }'
+        ip netns exec "${rust_ns}" nft add rule inet lab_drain output ip daddr "${node_quic_endpoint%:*}" udp dport "${node_quic_endpoint##*:}" drop
+        wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "draining established WireGuard exit flows" 640
+        ip netns exec "${rust_ns}" nft list table inet "${wg_table}" | grep -E 'ct state.*jump inbound' >/dev/null
+        ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+          -target 203.0.113.2:9793 -source-port 57801 -message drained-existing-flow -timeout 4s
+        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+          -target 203.0.113.2:9793 -source-port 57802 -message drained-new-flow -timeout 2s; then
+          echo "ERROR: a new flow escaped the WireGuard drain" >&2
+          exit 1
+        fi
+        ip netns exec "${rust_ns}" nft delete table inet lab_drain
+        for _ in $(seq 1 12); do
+          if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+            -target 203.0.113.2:9793 -source-port 57802 -message recovered-new-flow -timeout 1s; then break; fi
+        done
+        grep -F 'payload=recovered-new-flow' "${work_dir}/wg-nat-probe.log" >/dev/null
+        [[ "$(ip -n "${rust_ns}" -j link show dev lane0 | jq -er '.[0].ifindex')" == "${wg_ifindex}" ]]
+        echo "==> a fresh controller session reopened new flows without replacing the WireGuard device"
+      fi
       ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
         --route-id "${wg_route_id}" --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt" \
         --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \

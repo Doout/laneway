@@ -1280,6 +1280,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wait-timeout",
+ "x25519-dalek",
  "x509-parser",
  "zeroize",
 ]

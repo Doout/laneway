@@ -127,6 +127,7 @@ impl DevicePlan {
         interface: &str,
         port: u16,
         uplink: Option<&str>,
+        draining: bool,
     ) -> Result<String> {
         let mut script = format!(
             "create table inet {table}\n\
@@ -140,26 +141,33 @@ impl DevicePlan {
                 "WireGuard policy exceeds byte limit"
             );
         }
-        let _ = write!(
+        let local_in = if draining { "drop" } else { "jump inbound" };
+        let local_out = if draining { "drop" } else { "jump outbound" };
+        let state = if draining {
+            " ct state established,related"
+        } else {
+            ""
+        };
+        write!(
             script,
             "add rule inet {table} inbound drop\n\
              add rule inet {table} outbound drop\n\
              add chain inet {table} local_in {{ type filter hook input priority -10; policy accept; }}\n\
              add chain inet {table} local_out {{ type filter hook output priority -10; policy accept; }}\n\
              add chain inet {table} transit {{ type filter hook forward priority -10; policy accept; }}\n\
-             add rule inet {table} local_in iifname \"{interface}\" jump inbound\n\
+             add rule inet {table} local_in iifname \"{interface}\" {local_in}\n\
              add rule inet {table} local_in iifname != \"lo\" udp dport {port} drop\n\
-             add rule inet {table} local_out oifname \"{interface}\" jump outbound\n\
+             add rule inet {table} local_out oifname \"{interface}\" {local_out}\n\
              add rule inet {table} transit iifname \"{interface}\" oifname \"{interface}\" drop\n"
-        );
+        )?;
         if let Some(uplink) = uplink.filter(|_| !self.nat_sources.is_empty()) {
             writeln!(
                 script,
-                "add rule inet {table} transit iifname \"{interface}\" oifname \"{uplink}\" jump inbound"
+                "add rule inet {table} transit iifname \"{interface}\" oifname \"{uplink}\"{state} jump inbound"
             )?;
             writeln!(
                 script,
-                "add rule inet {table} transit iifname \"{uplink}\" oifname \"{interface}\" jump outbound"
+                "add rule inet {table} transit iifname \"{uplink}\" oifname \"{interface}\"{state} jump outbound"
             )?;
         }
         writeln!(

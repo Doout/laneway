@@ -12,12 +12,14 @@ version=
 authority=
 name=
 max_runtime=8h
+runtime=go
 while (($#)); do
 	case "$1" in
 		--version) (($# >= 2)) || die '--version requires a value'; version=$2; shift 2 ;;
 		--authority) (($# >= 2)) || die '--authority requires a value'; authority=$2; shift 2 ;;
 		--name) (($# >= 2)) || die '--name requires a value'; name=$2; shift 2 ;;
 		--max-runtime) (($# >= 2)) || die '--max-runtime requires a value'; max_runtime=$2; shift 2 ;;
+		--runtime) (($# >= 2)) || die '--runtime requires a value'; runtime=$2; shift 2 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
@@ -27,6 +29,7 @@ done
 [[ $authority =~ ^[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]] || die 'invalid controller authority'
 [[ $name =~ ^[A-Za-z0-9._-]{1,253}$ ]] || die 'invalid Exit name'
 [[ $max_runtime =~ ^([1-9][0-9]*(ms|s|m|min|h|d|w))+$ ]] || die 'invalid maximum runtime'
+[[ $runtime == go || $runtime == rust ]] || die 'runtime must be go or rust'
 [[ -d /run && ! -L /run ]] || die '/run must be a real directory'
 [[ $(stat -f -c %T /run) == tmpfs ]] || die '/run is not RAM-backed tmpfs'
 [[ $(stat -c '%u:%g:%a' /run) == 0:0:755 ]] || die '/run has unsafe ownership or mode'
@@ -40,7 +43,9 @@ for command in awk curl find findmnt grep install ip mount nft nsenter od readli
 done
 systemd_state=$(systemctl is-system-running 2>/dev/null || true)
 [[ $systemd_state == running || $systemd_state == degraded ]] || die 'systemd is not the active service manager'
-[[ -c /dev/net/tun ]] || die '/dev/net/tun is unavailable'
+if [[ $runtime == go ]]; then
+	[[ -c /dev/net/tun ]] || die '/dev/net/tun is unavailable'
+fi
 [[ $(sysctl -n net.ipv4.ip_forward 2>/dev/null) == 1 ]] || die 'host IPv4 forwarding must already be enabled'
 
 architecture=$(uname -m)
@@ -171,6 +176,18 @@ entries=$(tar -tzf "$work/$archive")
 [[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/bin/laneway') == 1 ]] || die 'release archive has no unique laneway executable'
 tar -xzf "$work/$archive" -C "$work" laneway/bin/laneway
 install -m 0555 "$work/laneway/bin/laneway" "$runtime_dir/laneway"
+runtime_binary=laneway
+runtime_command="/run/$runtime_name/laneway node run -config \"\$CREDENTIALS_DIRECTORY/config\""
+device_allow=(--property=DeviceAllow='/dev/net/tun rw')
+if [[ $runtime == rust ]]; then
+	[[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/sbin/lanewayd-rs') == 1 ]] ||
+		die 'verified release does not contain the Rust Exit runtime'
+	tar -xzf "$work/$archive" -C "$work" laneway/sbin/lanewayd-rs
+	install -m 0555 "$work/laneway/sbin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
+	runtime_binary=lanewayd-rs
+	runtime_command="/run/$runtime_name/lanewayd-rs --shared-host-exit"
+	device_allow=()
+fi
 
 printf 'One-use Exit invitation: ' >&2
 stty -echo </dev/tty
@@ -211,7 +228,7 @@ while [ ! -e /run/$runtime_name/network.ready ]; do
   [ \$attempt -le 600 ] || exit 1
   sleep 0.05
 done
-exec /run/$runtime_name/laneway node run -config "\$CREDENTIALS_DIRECTORY/config"
+exec $runtime_command
 EOF
 chmod 0555 "$runtime_dir/entrypoint"
 systemd-run --unit="$unit" --collect --quiet \
@@ -229,7 +246,7 @@ systemd-run --unit="$unit" --collect --quiet \
 	--property=RestrictSUIDSGID=yes --property=RestrictRealtime=yes --property=RemoveIPC=yes \
 	--property=CapabilityBoundingSet='CAP_NET_ADMIN CAP_IPC_LOCK' \
 	--property=AmbientCapabilities='CAP_NET_ADMIN CAP_IPC_LOCK' \
-	--property=DevicePolicy=closed --property=DeviceAllow='/dev/net/tun rw' \
+	--property=DevicePolicy=closed "${device_allow[@]}" \
 	--property=RestrictAddressFamilies='AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
 	--property=LimitCORE=0 --property=LimitMEMLOCK=infinity --property=MemoryMax=512M --property=TasksMax=128 --property=UMask=0077 \
 	--property=StandardOutput=null --property=StandardError=null --property=RuntimeMaxSec="$max_runtime" \
@@ -274,7 +291,7 @@ touch "$runtime_dir/network.ready"
 
 executed=false
 for _ in $(seq 1 200); do
-	if [[ $(readlink "/proc/$pid/exe" 2>/dev/null || true) == "$runtime_dir/laneway" ]]; then
+	if [[ $(readlink "/proc/$pid/exe" 2>/dev/null || true) == "$runtime_dir/$runtime_binary" ]]; then
 		executed=true
 		break
 	fi
@@ -285,7 +302,7 @@ done
 
 install -m 0600 /dev/null "$cleanup_ready_path"
 rm -f "$runtime_dir/ca.crt" "$runtime_dir/node.crt" "$runtime_dir/node.key" "$runtime_dir/wireguard.key" "$runtime_dir/laneway.toml" "$runtime_dir/resolv.conf" \
-	"$runtime_dir/cosign-v3.1.3" "$runtime_dir/entrypoint" "$runtime_dir/laneway" "$runtime_dir/network.ready"
+	"$runtime_dir/cosign-v3.1.3" "$runtime_dir/entrypoint" "$runtime_dir/laneway" "$runtime_dir/lanewayd-rs" "$runtime_dir/network.ready"
 find "$work" -depth -delete
 claimed_runtime=false
 carrier_created=false

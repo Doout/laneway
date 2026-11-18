@@ -40,7 +40,7 @@ pub use config::{
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};
 #[cfg(target_os = "linux")]
-pub use wireguard::WireGuardNode;
+pub use wireguard::{SharedHostExit, WireGuardNode};
 pub use wireguard::{WireGuardDatagram, WireGuardRelay};
 
 fn product_version() -> &'static str {

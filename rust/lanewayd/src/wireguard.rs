@@ -30,9 +30,15 @@ use crate::{
 #[cfg(target_os = "linux")]
 mod native;
 #[cfg(target_os = "linux")]
+mod netlink;
+#[cfg(target_os = "linux")]
 mod plan;
 #[cfg(target_os = "linux")]
+mod shared_host;
+#[cfg(target_os = "linux")]
 pub use native::WireGuardNode;
+#[cfg(target_os = "linux")]
+pub use shared_host::SharedHostExit;
 
 pub(crate) const MAX_WIREGUARD_DATAGRAM: usize = 2048;
 
@@ -318,6 +324,28 @@ impl SnapshotApplier for CarrierAuthority {
                 native.fail_close().await?;
             }
             Ok(())
+        })
+    }
+
+    fn expire(
+        &self,
+        _snapshot: Arc<Snapshot>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            #[cfg(target_os = "linux")]
+            if let Some(native) = &self.native {
+                match native.drain(&_snapshot).await {
+                    Ok(true) => {
+                        self.state.enter_wireguard_drain(_snapshot);
+                        return Ok(());
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "WireGuard could not install the drain guard")
+                    }
+                }
+            }
+            self.fail_close().await
         })
     }
 

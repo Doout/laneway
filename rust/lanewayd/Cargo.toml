@@ -44,6 +44,7 @@ x509-parser.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.189"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1.9.0"
 
 [dev-dependencies]

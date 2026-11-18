@@ -6,6 +6,7 @@ project_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 version=${VERSION-dev}
 package_goos=${PACKAGE_GOOS:-$(cd "$project_dir/go" && go env GOOS)}
 package_goarch=${PACKAGE_GOARCH:-$(cd "$project_dir/go" && go env GOARCH)}
+package_rust_node=${PACKAGE_RUST_NODE:-}
 
 case "$package_goos" in linux|darwin) ;; *) echo "unsupported package operating system: $package_goos" >&2; exit 1;; esac
 case "$package_goarch" in
@@ -16,6 +17,17 @@ case "$package_goarch" in
     ;;
 esac
 [ -n "$version" ] || { echo "version is empty" >&2; exit 1; }
+if [ -n "$package_rust_node" ]; then
+  [ "$package_goos" = linux ] && [ -f "$package_rust_node" ] && [ ! -L "$package_rust_node" ] && [ -x "$package_rust_node" ] ||
+    { echo "PACKAGE_RUST_NODE must be an executable Linux runtime file" >&2; exit 1; }
+  case "$package_goarch" in
+    amd64) rust_machine='Advanced Micro Devices X86-64' ;;
+    arm64) rust_machine='AArch64' ;;
+  esac
+  LC_ALL=C readelf -h "$package_rust_node" |
+    awk -F: -v expected="$rust_machine" '$1 ~ /^[[:space:]]*Machine$/ {gsub(/^[[:space:]]+/, "", $2); if ($2 == expected) valid=1} END {exit !valid}' ||
+    { echo "PACKAGE_RUST_NODE architecture does not match the package" >&2; exit 1; }
+fi
 case "$version" in
   *[!0-9A-Za-z._+-]*)
     echo "version contains unsupported characters" >&2
@@ -32,6 +44,9 @@ mkdir -p "$package_dir/bin" "$package_dir/docs" "$project_dir/dist"
 if [ "$package_goos" = linux ]; then
 	mkdir -p "$package_dir/sbin" "$package_dir/examples" "$package_dir/systemd" \
 		"$package_dir/nftables" "$package_dir/spec" "$package_dir/deploy" "$package_dir/integration"
+	if [ -n "$package_rust_node" ]; then
+		install -m 0755 "$package_rust_node" "$package_dir/sbin/lanewayd-rs"
+	fi
 fi
 
 ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$version"

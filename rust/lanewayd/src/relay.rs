@@ -490,7 +490,9 @@ impl RelayClient {
                 }
                 _ = authority_check.tick() => {
                     ensure!(
-                        self.state.relay_authorized(session.relay_service, session.relay_address),
+                        self.state.relay_authorized(session.relay_service, session.relay_address)
+                            || (self.wireguard.is_some()
+                                && self.state.wireguard_drain_relay(session.relay_service, session.relay_address, false)),
                         "active relay was withdrawn by controller"
                     );
                 }
@@ -537,7 +539,9 @@ impl RelayClient {
                     }
                     _ = authority_check.tick() => {
                         ensure!(
-                            self.state.relay_authorized_ip(session.relay_service, session.connection.remote.ip()),
+                            self.state.relay_authorized_ip(session.relay_service, session.connection.remote.ip())
+                                || (self.wireguard.is_some()
+                                    && self.state.wireguard_drain_relay(session.relay_service, session.connection.remote, true)),
                             "active TCP relay was withdrawn by controller"
                         );
                     }

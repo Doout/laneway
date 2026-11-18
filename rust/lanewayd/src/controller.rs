@@ -192,6 +192,14 @@ impl Client {
         }
     }
 
+    pub(crate) async fn reconnect_quic(&self) {
+        if let Some(control) = &self.quic {
+            control
+                .invalidate(b"ephemeral Exit proof of possession required")
+                .await;
+        }
+    }
+
     pub(crate) async fn report_status(
         &self,
         report: &laneway_protocol::endpoint_status::Report,
@@ -457,12 +465,16 @@ fn controller_tls(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
         .build()?;
-    rustls::ClientConfig::builder_with_provider(provider)
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedController { expected, web }))
         .with_client_auth_cert(certificates, key)
-        .context("load node controller identity")
+        .context("load node controller identity")?;
+    if options.exit_generation.is_some() {
+        config.resumption = rustls::client::Resumption::disabled();
+    }
+    Ok(config)
 }
 
 impl QuicControl {
@@ -568,7 +580,7 @@ impl QuicControl {
                     laneway_protocol::v1::ErrorCode::Unauthenticated
                         | laneway_protocol::v1::ErrorCode::PermissionDenied
                 ) {
-                    self.invalidate().await;
+                    self.invalidate(b"controller authorization rejected").await;
                     return Err(AuthorityRejected(error.code()).into());
                 }
                 bail!(
@@ -594,9 +606,9 @@ impl QuicControl {
         }
     }
 
-    async fn invalidate(&self) {
+    async fn invalidate(&self, reason: &'static [u8]) {
         if let Some(connection) = self.connection.lock().await.take() {
-            connection.close(0_u32.into(), b"controller authorization rejected");
+            connection.close(0_u32.into(), reason);
         }
     }
 
@@ -1208,6 +1220,19 @@ impl Snapshot {
         self.expired() || expired(self.certificate_not_after)
     }
 
+    /// A shorter snapshot lease can mean an earlier peer or route deadline.
+    /// Only the explicit heartbeat boundary is eligible for disconnect drain.
+    pub(crate) fn wireguard_drain_eligible(&self) -> bool {
+        self.ephemeral_exit.as_ref().is_some_and(|lease| {
+            self.valid_until == lease.suspect_at
+                && self.expired()
+                && self
+                    .exit_terminal_at()
+                    .is_some_and(|deadline| !expired(deadline))
+                && !self.local_certificate_revoked
+        })
+    }
+
     pub(crate) fn renew(&self, valid_until: u64) -> Result<Self> {
         ensure!(
             self.ephemeral_exit.is_none(),
@@ -1625,6 +1650,41 @@ pub(crate) mod tests {
     }
 
     pub(crate) const EXIT_TEST_GENERATION: u64 = 17;
+
+    #[test]
+    fn wireguard_drain_is_only_for_the_heartbeat_boundary_and_before_terminal() -> Result<()> {
+        let wire = ephemeral_configuration();
+        let now = unix_now();
+        let mut snapshot = Snapshot::compile_for(
+            wire,
+            id(1),
+            id(2),
+            &local_certificate(),
+            NonZeroU64::new(EXIT_TEST_GENERATION),
+        )?;
+        assert!(!snapshot.wireguard_drain_eligible());
+        snapshot
+            .ephemeral_exit
+            .as_mut()
+            .expect("test lease")
+            .suspect_at = now;
+        snapshot.valid_until = now - 1;
+        assert!(
+            !snapshot.wireguard_drain_eligible(),
+            "an earlier deadline fails closed"
+        );
+        snapshot.valid_until = now;
+        assert!(
+            snapshot.wireguard_drain_eligible(),
+            "the heartbeat boundary can drain"
+        );
+        snapshot.identity_lease_expires_at = now;
+        assert!(
+            !snapshot.wireguard_drain_eligible(),
+            "the enrollment lease ends drain"
+        );
+        Ok(())
+    }
 
     pub(crate) fn ephemeral_configuration() -> NodeConfiguration {
         let mut configuration = valid();

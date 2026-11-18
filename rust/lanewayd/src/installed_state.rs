@@ -114,12 +114,27 @@ struct StoredExit {
     selected_node_id: String,
     #[serde(default)]
     lease_generation: u64,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    failure_mode: String,
 }
 
 #[derive(Default, Deserialize)]
 struct StoredWireGuard {
     #[serde(default)]
     enabled: bool,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    private_key: PathBuf,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    interface: String,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    mtu: u16,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    listen_port: u16,
 }
 
 #[derive(Default, Deserialize)]
@@ -157,6 +172,8 @@ fn legacy_state_dir() -> PathBuf {
 enum InstalledRole<'a> {
     Connector(&'a Path),
     ExitGateway,
+    #[cfg(target_os = "linux")]
+    SharedHost,
 }
 
 impl Config {
@@ -208,6 +225,31 @@ impl Config {
         }
         stored.convert(tls, InstalledRole::ExitGateway)
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn load_shared_host_config(
+        file: fs::File,
+        tls: TlsConfig,
+        runtime_dir: &Path,
+    ) -> Result<(Self, std::num::NonZeroU64)> {
+        let stored = Stored::read_file(file)?;
+        ensure!(
+            stored.tls.ca == Path::new("@credential/ca.crt")
+                && stored.tls.certificate == Path::new("@credential/node.crt")
+                && stored.tls.private_key == Path::new("@credential/node.key")
+                && stored.wireguard.private_key == Path::new("@credential/wireguard.key")
+                && stored.state_dir == runtime_dir.join("state")
+                && stored.socket_path == runtime_dir.join("lanewayd.sock"),
+            "shared-host config does not match its protected credentials and runtime"
+        );
+        let generation = std::num::NonZeroU64::new(stored.exit.lease_generation)
+            .context("shared-host Exit lease generation is missing")?;
+        ensure!(
+            generation.get() <= i64::MAX as u64,
+            "invalid shared-host lease generation"
+        );
+        Ok((stored.convert(tls, InstalledRole::SharedHost)?, generation))
+    }
 }
 
 impl Stored {
@@ -216,9 +258,12 @@ impl Stored {
             fs::symlink_metadata(path)?.is_file(),
             "installed node configuration is not a regular file"
         );
+        Self::read_file(fs::File::open(path)?)
+    }
+
+    fn read_file(file: fs::File) -> Result<Self> {
         let mut source = String::new();
-        fs::File::open(path)?
-            .take(MAX_CONFIG_BYTES + 1)
+        file.take(MAX_CONFIG_BYTES + 1)
             .read_to_string(&mut source)
             .context("read installed node configuration")?;
         ensure!(
@@ -246,21 +291,40 @@ impl Stored {
             && nat
             && !self.routing.output_interface.is_empty()
             && self.direct.enabled;
+        #[cfg(target_os = "linux")]
+        let shared_host = matches!(role, InstalledRole::SharedHost);
+        #[cfg(not(target_os = "linux"))]
+        let shared_host = false;
         let (userspace, state_dir, supported) = match role {
             InstalledRole::Connector(directory) => (true, directory, modern || legacy),
             InstalledRole::ExitGateway => (false, self.state_dir.as_path(), legacy),
+            #[cfg(target_os = "linux")]
+            InstalledRole::SharedHost => (
+                false,
+                self.state_dir.as_path(),
+                self.wireguard.enabled
+                    && self.wireguard.interface == "lane0"
+                    && self.wireguard.mtu == 1280
+                    && self.wireguard.listen_port == 0
+                    && self.exit.serve
+                    && self.exit.failure_mode == "closed"
+                    && nat
+                    && !self.direct.enabled
+                    && !self.connector.userspace
+                    && self.routing.output_interface == "uplink0",
+            ),
         };
         ensure!(
             self.mode == "node"
                 && supported
-                && !self.wireguard.enabled
+                && self.wireguard.enabled == shared_host
                 && !self.exit.enabled
                 && self.exit.selected_node_id.is_empty()
-                && self.exit.lease_generation == 0
+                && (self.exit.lease_generation != 0) == shared_host
                 && self.peers.is_empty()
                 && self.node.overlay_addresses.is_empty()
                 && self.routing.advertise.is_empty(),
-            "saved configuration does not match the requested Docker node role"
+            "saved configuration does not match the requested node role"
         );
         ensure!(
             valid_absolute_path(state_dir, 4096),
@@ -279,7 +343,17 @@ impl Stored {
             .context("invalid installed controller QUIC endpoint")?;
         let relay = canonical_host_port(&self.node.relay_address)
             .context("invalid saved relay endpoint")?;
-        let relay_name = self.tls.server_name;
+        let relay_name = if shared_host && self.tls.server_name.is_empty() {
+            relay
+                .rsplit_once(':')
+                .context("invalid shared-host relay")?
+                .0
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_owned()
+        } else {
+            self.tls.server_name
+        };
         ServerName::try_from(relay_name.as_str()).context("invalid relay TLS name")?;
         let tcp = self.tcp_fallback;
         let tcp_fallback = if tcp.address.is_empty() {
@@ -321,7 +395,7 @@ impl Stored {
             tls,
             controller: Some(ControllerConfig {
                 auto_renew_certificate: false, // Keep identity bytes intact for a reversible image swap.
-                disable_status_reporting: false,
+                disable_status_reporting: shared_host,
                 endpoint: self.controller.endpoint,
                 quic_endpoint: Some(quic_endpoint),
                 server_name: controller_name,
@@ -333,7 +407,7 @@ impl Stored {
                 name: if userspace { "userspace" } else { "lane0" }.to_owned(),
                 // Match the old Go TUN limit on IPv4-only networks. An
                 // initial IPv6 overlay raises it to the IPv6 minimum.
-                mtu: if userspace { 1280 } else { 1200 },
+                mtu: if userspace || shared_host { 1280 } else { 1200 },
                 addresses: vec![],
                 configure: !userspace,
             },

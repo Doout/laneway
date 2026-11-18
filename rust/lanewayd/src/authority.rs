@@ -25,6 +25,10 @@ pub(crate) trait ConfigurationSource: Send + Sync {
         &'a self,
         known_epoch: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + 'a>>;
+
+    fn reconnect_after_expiry(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
 }
 
 impl ConfigurationSource for Arc<Client> {
@@ -38,6 +42,10 @@ impl ConfigurationSource for Arc<Client> {
     ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + 'a>> {
         Box::pin(async move { self.as_ref().poll(known_epoch).await })
     }
+
+    fn reconnect_after_expiry(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(self.as_ref().reconnect_quic())
+    }
 }
 
 /// Runtime transaction boundary for controller authority. Implementations must
@@ -49,6 +57,15 @@ pub(crate) trait SnapshotApplier: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     fn fail_close<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+    /// Normal snapshot expiry, not revocation. A runtime may retain only
+    /// bounded, explicitly eligible drain authority instead of tearing down.
+    fn expire<'a>(
+        &'a self,
+        _snapshot: Arc<Snapshot>,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+        self.fail_close()
+    }
 
     fn renew<'a>(
         &'a self,
@@ -210,10 +227,13 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
                     bail!("ephemeral Exit lease is terminal");
                 }
                 _ = wait_deadline((!failed_closed).then_some(retained.valid_until)) => {
-                    self.applier.fail_close().await.context("fail close expired controller authority")?;
+                    self.applier.expire(Arc::clone(&retained)).await.context("expire controller authority")?;
+                    if terminal.is_some() && retained.wireguard_drain_eligible() {
+                        self.client.reconnect_after_expiry().await;
+                    }
                     failed_closed = true;
                     delay = Duration::from_millis(250).min(self.poll_interval);
-                    warn!(epoch = retained.epoch, "controller node authority expired; dataplane failed closed");
+                    warn!(epoch = retained.epoch, "controller node authority expired");
                     continue;
                 }
                 result = async {

@@ -21,9 +21,12 @@ docker run --rm --network none --cap-drop ALL \
     bash integration/rust-lab/exit-lease.sh'
 docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
   --security-opt systempaths=unconfined --device /dev/net/tun \
+  --tmpfs /run/credentials:rw,nosuid,nodev,noexec,mode=0755 \
   -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
   -e LANEWAY_RUN_PRIVILEGED=1 "${mounts[@]}" laneway-rust-lab:local sh -ec '
     export PATH=/opt/rootless-lab:$PATH
+    touch /run/credentials/.laneway-isolated-credential-lab
+    cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs wireguard_kernel_accepts_batched_peer_prefixes -- --ignored
     ./integration/rust-kernel-netns.sh
     ./integration/rust-node-interop.sh
     ./integration/rust-controller-node-netns.sh
@@ -31,4 +34,5 @@ docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
     LANEWAY_NODE_TEST_DURABLE_EXIT=1 ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_DURABLE_EXIT=1 LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_WIREGUARD=1 ./integration/rust-controller-node-netns.sh
-    LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh'
+    LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_WIREGUARD_DRAIN=1 LANEWAY_NODE_WIREGUARD_CREDENTIALS=1 ./integration/rust-controller-node-netns.sh
+    LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_WIREGUARD_DRAIN=1 LANEWAY_NODE_WIREGUARD_CREDENTIALS=1 LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh'

@@ -147,11 +147,15 @@ func udpServer(args []string) error {
 	fs := flag.NewFlagSet("udp-server", flag.ContinueOnError)
 	listen := fs.String("listen", "", "UDP listen address")
 	maxPackets := fs.Int("max-packets", 1, "maximum packets to echo before exiting")
+	timeout := fs.Duration("timeout", 20*time.Second, "overall probe deadline")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *maxPackets <= 0 {
 		return fmt.Errorf("max-packets must be positive")
+	}
+	if *timeout <= 0 || *timeout > 5*time.Minute {
+		return errors.New("UDP server deadline must be between zero and five minutes")
 	}
 	address, err := net.ResolveUDPAddr("udp", *listen)
 	if err != nil {
@@ -163,7 +167,7 @@ func udpServer(args []string) error {
 	}
 	defer conn.Close()
 	fmt.Println("ready=udp-server")
-	if err := conn.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(*timeout)); err != nil {
 		return err
 	}
 	buffer := make([]byte, 2048)
@@ -186,6 +190,7 @@ func udpClient(args []string) error {
 	message := fs.String("message", "laneway-netprobe", "payload to exchange")
 	timeout := fs.Duration("timeout", 12*time.Second, "overall retry timeout")
 	once := fs.Bool("once", false, "send only once")
+	sourcePort := fs.Int("source-port", 0, "reuse a local test port across probes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -193,7 +198,10 @@ func udpClient(args []string) error {
 	if err != nil {
 		return err
 	}
-	conn, err := net.ListenUDP("udp", nil)
+	if *sourcePort < 0 || *sourcePort > 65535 {
+		return errors.New("invalid UDP source port")
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: *sourcePort})
 	if err != nil {
 		return err
 	}

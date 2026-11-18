@@ -36,35 +36,15 @@ pub(crate) struct ExecRunner {
     timeout: Duration,
 }
 
-impl CommandRunner for ExecRunner {
-    fn run(&self, command: &str, arguments: &[String], input: Option<&[u8]>) -> Result<Vec<u8>> {
-        self.exec(command, arguments, input, false)
-    }
-}
-
 impl ExecRunner {
     #[cfg(target_os = "linux")]
     pub(crate) fn with_timeout(timeout: Duration) -> Self {
         Self { timeout }
     }
+}
 
-    #[cfg(target_os = "linux")]
-    pub(crate) fn sensitive(
-        &self,
-        program: &str,
-        args: &[String],
-        input: &[u8],
-    ) -> Result<Vec<u8>> {
-        self.exec(program, args, Some(input), true)
-    }
-
-    fn exec(
-        &self,
-        command: &str,
-        arguments: &[String],
-        input: Option<&[u8]>,
-        sensitive: bool,
-    ) -> Result<Vec<u8>> {
+impl CommandRunner for ExecRunner {
+    fn run(&self, command: &str, arguments: &[String], input: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut child = Command::new(command)
             .args(arguments)
             .stdin(if input.is_some() {
@@ -73,16 +53,12 @@ impl ExecRunner {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
-            .stderr(if sensitive {
-                Stdio::null()
-            } else {
-                Stdio::piped()
-            })
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("run {command} {}", arguments.join(" ")))?;
         let stdin = child.stdin.take();
         let mut stdout = child.stdout.take().context("command stdout missing")?;
-        let stderr = child.stderr.take();
+        let mut stderr = child.stderr.take().context("command stderr missing")?;
         let (status, stdout, stderr, written) = std::thread::scope(|scope| -> Result<_> {
             let writer = scope.spawn(move || match (stdin, input) {
                 (Some(mut stdin), Some(input)) => {
@@ -98,9 +74,7 @@ impl ExecRunner {
             });
             let stderr = scope.spawn(move || {
                 let mut output = Vec::new();
-                if let Some(mut stderr) = stderr {
-                    stderr.read_to_end(&mut output)?;
-                }
+                stderr.read_to_end(&mut output)?;
                 std::io::Result::Ok(output)
             });
             let status = match child

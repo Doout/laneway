@@ -16,6 +16,12 @@ one-use invitation to stdout. Run the command on the Linux host, then paste the
 invitation at its hidden `/dev/tty` prompt. Never put the invitation in argv,
 an environment variable, shell history, or a pipe shared with another user.
 
+The Go daemon remains the default. For a signed Linux preview archive built
+with `PACKAGE_RUST_NODE` pointing to the matching `lanewayd-rs` binary, append
+`--runtime rust` to the immutable bootstrap command. The Rust service uses
+the same transient systemd credentials and invitation. It requires a kernel
+with WireGuard support, but does not require a `wg` executable or a TUN device.
+
 ## Runtime and failure semantics
 
 The bootstrap verifies the signed release manifest, creates a bounded executable
@@ -38,7 +44,9 @@ is mounted into the runtime namespace.
 The controller accepts one active control session for the identity. A
 configuration request is also its 10-second heartbeat. After 20 seconds without
 a heartbeat the local configuration enters drain: it refuses new outbound flows
-and permits only established or related traffic. At 60 seconds the controller
+and permits only established or related traffic. Rust drains only on the
+heartbeat deadline itself; an earlier authorization deadline fails closed.
+At 60 seconds the controller
 atomically terminates the lease, revokes its certificate,
 withdraws its route, releases its overlay address, increments the network epoch,
 and records a system audit event. Reconnection before revocation requires a new

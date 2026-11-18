@@ -4,14 +4,24 @@ use anyhow::{Context, Result, bail};
 use lanewayd_rs::{Agent, Config};
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let arguments = arguments()?;
+    #[cfg(target_os = "linux")]
+    if arguments.profile == Profile::SharedHostExit {
+        return shared_host_exit(arguments.check);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(arguments))
+}
+
+async fn run(arguments: Arguments) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    let arguments = arguments()?;
     if arguments.profile == Profile::WireGuard {
         #[cfg(target_os = "linux")]
         {
@@ -40,6 +50,7 @@ async fn main() -> Result<()> {
         Profile::ExitGateway => Config::load_exit_config(&arguments.config)?,
         Profile::Native => Config::load(&arguments.config)?,
         Profile::WireGuard => unreachable!("handled before selecting the raw agent"),
+        Profile::SharedHostExit => bail!("the shared-host Exit requires Linux"),
     };
     let agent = Agent::new(config)?;
     if arguments.check {
@@ -47,6 +58,36 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     agent.run_until(shutdown_signal()?).await
+}
+
+#[cfg(target_os = "linux")]
+fn shared_host_exit(check: bool) -> Result<()> {
+    let path: PathBuf = env::var_os("CREDENTIALS_DIRECTORY")
+        .context("missing systemd credentials directory")?
+        .into();
+    lanewayd_rs::SharedHostExit::harden_process()?;
+    let keys: Vec<_> = env::vars_os().map(|(key, _)| key).collect();
+    // SAFETY: main is still single-threaded; the Tokio runtime and tracing
+    // subscriber have not been constructed. No environment readers run here.
+    unsafe {
+        for key in keys {
+            env::remove_var(key);
+        }
+        env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
+    }
+    let node = lanewayd_rs::SharedHostExit::load(&path)?;
+    if check {
+        println!("configuration is valid");
+        return Ok(());
+    }
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(async { node.run_until(shutdown_signal()?).await })
 }
 
 #[cfg(unix)]
@@ -86,6 +127,7 @@ enum Profile {
     Connector,
     ExitGateway,
     WireGuard,
+    SharedHostExit,
 }
 
 fn arguments() -> Result<Arguments> {
@@ -97,7 +139,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
     let binary = arguments.next().unwrap_or_default();
     let Some(argument) = arguments.next() else {
         bail!(
-            "usage: {} (--config PATH | --connector-state DIR | --exit-config PATH | --wireguard-config PATH --wireguard-key PATH [--exit-generation N]) [--check-config]",
+            "usage: {} (--config PATH | --connector-state DIR | --exit-config PATH | --wireguard-config PATH --wireguard-key PATH [--exit-generation N] | --shared-host-exit) [--check-config]",
             PathBuf::from(binary).display()
         );
     };
@@ -106,11 +148,17 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
         Some("--connector-state") => Profile::Connector,
         Some("--exit-config") => Profile::ExitGateway,
         Some("--wireguard-config") => Profile::WireGuard,
+        Some("--shared-host-exit") => Profile::SharedHostExit,
         _ => bail!("unknown configuration profile"),
     };
-    let path = arguments
-        .next()
-        .context("configuration path or state directory is required")?;
+    let path = if profile == Profile::SharedHostExit {
+        PathBuf::new()
+    } else {
+        arguments
+            .next()
+            .context("configuration path or state directory is required")?
+            .into()
+    };
     let mut check = false;
     let mut wireguard_key = None;
     let mut exit_generation = None;
@@ -144,7 +192,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
         bail!("--wireguard-config requires --wireguard-key");
     }
     Ok(Arguments {
-        config: path.into(),
+        config: path,
         profile,
         check,
         wireguard_key,

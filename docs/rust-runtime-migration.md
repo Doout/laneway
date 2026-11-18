@@ -314,7 +314,7 @@ relay carries only encrypted UDP messages. Optional NAT opens only with live
 controller approval, for authorized overlay sources and the configured uplink;
 both directions still pass through the decrypted traffic ACL.
 
-In a dedicated Linux network namespace with `ip`, `nft`, `wg` and
+In a dedicated Linux network namespace with `ip`, `nft` and
 `CAP_NET_ADMIN`, run the opt-in profile with a native node TOML and an existing
 raw WireGuard private key (owned by the service user, mode 0600 or 0640):
 
@@ -329,7 +329,8 @@ Keep automatic certificate renewal, exit selection on this node and diagnostics
 disabled in the native node TOML for this profile. Enabling gateway NAT requires
 `forwarding.exit_gateway = true`, `forwarding.exit_gateway_controller_sources = true`
 and an explicit `forwarding.exit_output_interface`. The kernel must provide
-WireGuard. Existing links and firewall tables are not adopted; discard or
+WireGuard. The daemon sends keys directly to the kernel over netlink; only the
+lab fixture requires the `wg` command. Existing links and firewall tables are not adopted; discard or
 clean up the isolated namespace after an unclean kill.
 
 The packet gate requires the same tools and isolated network namespaces:
@@ -345,10 +346,13 @@ executable against a Go peer. It exercises QUIC and forced TLS/TCP, including
 ciphertext larger than the legacy raw-IP ceiling. It checks a live ACL change,
 source NAT through the approved exit, route withdrawal, live revocation and
 device cleanup. Set `LANEWAY_NODE_WIREGUARD_NATIVE=0` to run just the
-fixture-managed encrypted transport gate. This does not validate connection
-draining, routed-only egress, IPv6 NAT on the encrypted profile, or the
-shared-host credential sandbox. Keep using the existing launcher for those
-profiles until their gates pass.
+fixture-managed encrypted transport gate. Set `LANEWAY_NODE_WIREGUARD_DRAIN=1`
+to partition the controller after opening an exit flow: the same flow continues,
+new flows are blocked, and fresh mTLS restores forwarding without replacing the
+device. The full rootless lab also exercises the shared-host credential entrypoint
+using a marked disposable tmpfs. It does not replace testing the actual systemd
+transient unit on a dedicated Linux host, routed-only egress, or IPv6 NAT on the
+encrypted profile.
 
 ### Verified on the local ARM64 Linux VM
 

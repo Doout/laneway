@@ -51,6 +51,7 @@ pub struct State {
     /// Current authenticated direct connections keyed by peer.
     pub direct: ArcSwap<HashMap<Id, DirectPath>>,
     authority: ArcSwapOption<Snapshot>,
+    wireguard_drain: ArcSwapOption<Snapshot>,
     exit_sources: ArcSwapOption<Vec<ipnet::IpNet>>,
     controller_managed: bool,
     local_node: Option<Id>,
@@ -77,6 +78,7 @@ impl State {
             handles: ArcSwap::from_pointee(Handles::default()),
             direct: ArcSwap::from_pointee(HashMap::new()),
             authority: ArcSwapOption::empty(),
+            wireguard_drain: ArcSwapOption::empty(),
             exit_sources: ArcSwapOption::empty(),
             controller_managed,
             local_node,
@@ -86,6 +88,7 @@ impl State {
     /// Publishes a complete authority snapshot and closes direct paths whose
     /// peer or certificate is no longer authorized.
     pub(crate) fn publish_authority(&self, snapshot: Arc<Snapshot>) {
+        self.wireguard_drain.store(None);
         let paths = self.direct.swap(Arc::new(HashMap::new()));
         let mut retained = HashMap::new();
         for (peer, path) in paths.iter() {
@@ -110,7 +113,22 @@ impl State {
     /// handles are unchanged; every packet rechecks the published peer key.
     #[cfg(target_os = "linux")]
     pub(crate) fn suspend_wireguard_authority(&self) {
+        self.wireguard_drain.store(None);
         self.authority.store(None);
+    }
+
+    /// This snapshot only supports the encrypted carrier of a device whose
+    /// kernel is already enforcing its established-only forward guard.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn enter_wireguard_drain(&self, snapshot: Arc<Snapshot>) {
+        self.authority.store(None);
+        self.wireguard_drain.store(Some(snapshot));
+    }
+
+    fn wireguard_drain(&self) -> Option<Arc<Snapshot>> {
+        self.wireguard_drain
+            .load_full()
+            .filter(|snapshot| snapshot.wireguard_drain_eligible())
     }
 
     pub(crate) fn wireguard_peer_key(
@@ -119,9 +137,11 @@ impl State {
         peer: Id,
         local_key: &[u8; 32],
     ) -> Option<[u8; 32]> {
-        let snapshot = self.authority.load_full()?;
+        let snapshot = self
+            .authority_snapshot()
+            .filter(|s| !s.wireguard_authority_expired())
+            .or_else(|| self.wireguard_drain())?;
         if local == peer
-            || snapshot.wireguard_authority_expired()
             || snapshot.local_certificate_revoked
             || snapshot.peers.get(&local)?.wireguard_key.as_ref() != Some(local_key)
         {
@@ -197,9 +217,32 @@ impl State {
         })
     }
 
+    /// Drain can keep an existing authenticated relay session alive. It
+    /// never authorizes dialing a new or replacement relay session.
+    pub(crate) fn wireguard_drain_relay(
+        &self,
+        service: Id,
+        address: std::net::SocketAddr,
+        tcp: bool,
+    ) -> bool {
+        self.wireguard_drain().is_some_and(|snapshot| {
+            if tcp {
+                snapshot.relays.get(&service).is_some_and(|relay| {
+                    relay
+                        .resolved
+                        .iter()
+                        .any(|endpoint| endpoint.ip() == address.ip())
+                })
+            } else {
+                snapshot.authorizes_relay(service, Some(address))
+            }
+        })
+    }
+
     /// Removes all dynamic authority, routes, relay handles, and direct paths.
     pub(crate) fn fail_close(&self) {
         self.suspend_gateway();
+        self.wireguard_drain.store(None);
         self.authority.store(None);
         self.routes.store(Arc::new(
             RoutingTable::compile(&[]).expect("empty routes compile"),
