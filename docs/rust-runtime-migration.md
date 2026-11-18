@@ -126,16 +126,22 @@ TCP or UDP and requires the node issuer and client CA there. It cannot start
 in that mode with insecure application callbacks enabled.
 
 Rehearse on an isolated, restored copy first. Place `checksums.txt`,
-`checksums.sigstore.json`, and `image-digests.txt` from the same tagged
-release in a staging directory. From the trusted package or checkout, run
+`checksums.sigstore.json`, `image-digests.txt`, and `bootstrap-artifacts.toml`
+from the same tagged release in a staging directory. From the trusted
+package or checkout, run
 `sh deploy/compose/verify-rust-release.sh vVERSION METADATA_DIRECTORY`.
 The verifier checks the release identity and each immutable image signature
 before printing all four `LANEWAY_RUST_*` settings. It does not read or change
 the deployment. Copy those settings into the lab's `.env`; keep the Go
-`LANEWAY_VERSION` and digests unchanged. From the Compose directory, run
-`sudo python3 prepare-rust.py` (Python 3.11+). It reads only the existing
-prepared TOML files, stages the Rust discovery and relay inputs without
-overwriting the originals, and keeps a private relay renewal directory.
+`LANEWAY_VERSION` and digests unchanged. Stage `compose.rust.yaml`,
+`prepare-rust.py`, and `verify-rust-release.sh` as protected, root-owned
+files from the same verified package in the lab's Compose directory. Then
+run `sudo python3 prepare-rust.py --release-metadata /absolute/path/to/METADATA_DIRECTORY`
+(Python 3.11+). It rechecks the signature, confirms the Rust image pins in
+`.env` match, and stages only the four client archives for that Rust release in
+discovery. It does not replace the Go configuration or its advertised
+downloads. The separate `--lab` mode reuses the Go downloads for an unsigned,
+isolated rehearsal only.
 The relay uses a Compose alias matching the existing controller certificate
 name. Custom controller settings are rejected rather than silently dropped.
 
@@ -179,6 +185,10 @@ replaced Go with Rust, used the Go admin CLI to write another network,
 checked the console and bootstrap discovery over HTTPS, and then confirmed
 that Go could read both networks after rollback. The run did not change the
 database schema.
+The fixture uses an offline signature stub and checks that Rust advertises
+all four candidate downloads over HTTPS, rejects mismatched image pins, and
+leaves Go's bootstrap files unchanged. A real signed Go-only release is not
+a Rust cutover candidate.
 With recovery enabled on ARM64, the gate verified authenticated status,
 rejected an image mismatch, and restored both networks and the refreshed TLS
 seeds into a new project. The original volume was still usable for Go rollback.

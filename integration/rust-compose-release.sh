@@ -62,6 +62,20 @@ printf '%s\n' LANEWAY_RUST_VERSION=0.0.9103 \
   "LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:$three" | diff - settings
 reject v0.0.9104 'checksum signature did not match'
 reject v0.0.9103-test 'expected a stable release tag'
+printf '[bootstrap]\n' > metadata/bootstrap-artifacts.toml
+(cd metadata
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum bootstrap-artifacts.toml;
+  else shasum -a 256 bootstrap-artifacts.toml; fi >> checksums.txt
+)
+sh "$root/deploy/compose/verify-rust-release.sh" --prepare v0.0.9103 metadata > candidate
+tail -n +5 candidate | diff - metadata/bootstrap-artifacts.toml
+printf 'tampered bootstrap\n' >> metadata/bootstrap-artifacts.toml
+if sh "$root/deploy/compose/verify-rust-release.sh" --prepare v0.0.9103 metadata > settings 2> diagnostic; then
+  echo 'expected mismatched bootstrap metadata to fail verification' >&2
+  exit 1
+fi
+test ! -s settings
+grep -F 'bootstrap-artifacts.toml differs from its signed checksum' diagnostic >/dev/null
 printf 'tampered after signing\n' >> metadata/image-digests.txt
 reject v0.0.9103 'differs from its signed checksum'
 write_images > metadata/image-digests.txt

@@ -345,7 +345,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify with the Rust Compose trust policy before publishing
-        run: sh deploy/compose/verify-rust-release.sh "$GITHUB_REF_NAME" dist
+        run: sh deploy/compose/verify-rust-release.sh --prepare "$GITHUB_REF_NAME" dist >/dev/null
       - name: Attest release artifact provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:

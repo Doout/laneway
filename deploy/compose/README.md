@@ -35,7 +35,8 @@ The first command is fail-closed. The installer does not change host DNS,
 firewall rules, routes, interfaces, or sysctls.
 
 For a Rust cutover rehearsal, download `checksums.txt`,
-`checksums.sigstore.json`, and `image-digests.txt` from the same stable tag.
+`checksums.sigstore.json`, `image-digests.txt`, and `bootstrap-artifacts.toml`
+from the same stable tag.
 Run `sh verify-rust-release.sh vVERSION METADATA_DIRECTORY` with Cosign
 installed. The command verifies the release and all three Compose image
 signatures before printing the Rust settings. It does not pull or deploy images.

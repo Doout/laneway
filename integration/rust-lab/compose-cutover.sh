@@ -17,7 +17,7 @@ project=laneway-cutover-${work##*.}
 project=${project,,}
 base="$work/deploy"
 mkdir -p "$base" "$work/bin" "$work/issuer"
-for file in compose.yaml compose.rust.yaml prepare.sh prepare-rust.py; do
+for file in compose.yaml compose.rust.yaml prepare.sh prepare-rust.py verify-rust-release.sh; do
   cp "$root/deploy/compose/$file" "$base/"
 done
 export LANEWAY_LAB_FIXTURE_DIR="$work"
@@ -139,8 +139,11 @@ if (( ${#exit_overlay[@]} )); then
   # Publish fixture enrollments to the Go relay before packet assertions.
   sed -i 's/^poll_interval = "30s"$/poll_interval = "1s"/' generated/config/relay.toml
 fi
-python3 prepare-rust.py
-if python3 prepare-rust.py >"$work/second-prepare.out" 2>&1; then
+# The isolated fixture exercises signed-release selection without contacting
+# GHCR. Publishing verifies the same manifests with the real Cosign verifier.
+source "$root/integration/rust-lab/compose-release.sh"
+prepare_candidate_release
+if prepare_verified_release >"$work/second-prepare.out" 2>&1; then
   echo "prepare replaced existing inputs" >&2
   exit 1
 fi
@@ -213,7 +216,9 @@ port=8443
 public=(curl --noproxy '*' --fail --silent --show-error --max-time 5 --cacert generated/pki/public.crt
   --resolve "$name:$port:$relay_address")
 "${public[@]}" "https://$name:$port/.well-known/laneway/bootstrap.json" |
-  jq -e --arg id "$network" '.. | objects | select(.network_id? == $id)' >/dev/null
+  jq -e --arg id "$network" --arg prefix "$candidate_url/" '
+    any(.. | objects; .network_id? == $id)
+    and (.artifacts | length == 4 and all(.[]; .url | startswith($prefix)))' >/dev/null
 "${public[@]}" "https://$name:$port/overview" | grep -Fq '<title>Laneway</title>'
 
 if (( ${#exit_overlay[@]} )); then
