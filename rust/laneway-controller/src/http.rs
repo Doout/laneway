@@ -19,6 +19,7 @@ mod form;
 mod login;
 mod management;
 mod mutations;
+mod node_configuration;
 mod node_proto;
 mod node_routes;
 mod relay_configuration;
@@ -232,6 +233,9 @@ async fn dispatch(
     let path = uri.path();
     if path == "/v1/renew" && state.workload_mtls_enabled {
         return Ok(renew::handle(req, state, id).await);
+    }
+    if path == "/v1/configuration" && state.workload_mtls_enabled {
+        return Ok(node_configuration::handle(req, state, id).await);
     }
     if path == "/v1/relay/configuration" && state.workload_mtls_enabled {
         return Ok(relay_configuration::handle(req, state, id).await);

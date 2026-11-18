@@ -205,6 +205,13 @@ network isolation, rollback on audit failure, and denial for revoked leaves.
 The namespace test uses the Rust API to remove a router capability and revoke
 a gateway certificate, and checks that packets stop in both cases.
 
+With a workload CA configured, existing clients may also poll
+`POST /v1/configuration` over HTTPS. It uses the same snapshot as QUIC and
+returns a bounded lease in the `X-Laneway-Configuration-Valid-Until` header
+when a known epoch is unchanged. An epoch ahead of the controller is rejected
+instead of renewing the lease. Ephemeral exit heartbeats still require an
+authenticated QUIC connection with the exclusive exit claim.
+
 `POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
 invitations. It accepts owner or operator sessions with network access, the
 configured root bearer, or automation with `enrollment.issue` on that network.

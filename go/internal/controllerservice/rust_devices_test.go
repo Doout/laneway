@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
@@ -61,9 +62,17 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 		t.Cleanup(c.CloseIdleConnections)
 		return c
 	}
-	enroll := func(network identity.NetworkID, name string) (identity.NodeID, *v1.CertificateChain, ed25519.PrivateKey, []byte) {
+	enroll := func(network identity.NetworkID, name string, ephemeralExit bool) (identity.NodeID, *v1.CertificateChain, ed25519.PrivateKey, []byte) {
 		t.Helper()
-		token, err := f.store.IssueEnrollmentToken(ctx, network, name, time.Now().Add(time.Hour))
+		options := controller.EnrollmentTokenOptions{Class: controller.EnrollmentClassDurable}
+		class := v1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE
+		if ephemeralExit {
+			options.Class = controller.EnrollmentClassEphemeral
+			options.SessionLifetime = 5 * time.Minute
+			options.EnabledCapabilities = uint64(protocol.CapabilityExitNodeV1)
+			class = v1.EnrollmentClass_ENROLLMENT_CLASS_EPHEMERAL_USER
+		}
+		token, err := f.store.IssueEnrollmentTokenWithOptions(ctx, network, name, time.Now().Add(time.Hour), options)
 		must(err)
 		_, key, err := ed25519.GenerateKey(rand.Reader)
 		must(err)
@@ -71,7 +80,7 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 		must(err)
 		out := labRedeem(t, client, goURL, &v1.EnrollmentRequest{
 			RequestedName: name, EnrollmentToken: token.Secret, Pkcs10CsrDer: csr, ExpectedNetworkId: network[:],
-			ExpectedEnrollmentClass: v1.EnrollmentClass_ENROLLMENT_CLASS_DURABLE_NODE,
+			ExpectedEnrollmentClass: class,
 		}, 201)
 		var id identity.NodeID
 		copy(id[:], out.NodeId)
@@ -92,13 +101,20 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 			_ = proto.Unmarshal(got, &msg)
 			t.Fatalf("%s %s: got %d (%s), want %d", method, path, resp.StatusCode, msg.Detail, want)
 		}
+		if want == http.StatusNotModified {
+			end, err := strconv.ParseInt(resp.Header.Get(SnapshotValidityHeader), 10, 64)
+			must(err)
+			if len(got) != 0 || end <= time.Now().Unix() {
+				t.Fatalf("invalid HTTPS configuration lease: %d, body %x", end, got)
+			}
+		}
 		return got
 	}
-	target, chain, key, csr := enroll(net, "device-target")
+	target, chain, key, csr := enroll(net, "device-target", false)
 	targetClient := asClient(chain, key)
-	_, observerChain, observerKey, _ := enroll(net, "device-observer")
+	_, observerChain, observerKey, _ := enroll(net, "device-observer", false)
 	observer := asClient(observerChain, observerKey)
-	foreign, foreignChain, foreignKey, _ := enroll(other.ID, "device-outsider")
+	foreign, foreignChain, foreignKey, _ := enroll(other.ID, "device-outsider", false)
 	outsider := asClient(foreignChain, foreignKey)
 	serial := hex.EncodeToString(parseLeaf(t, chain).SerialNumber.Bytes())
 	foreignSerial := hex.EncodeToString(parseLeaf(t, foreignChain).SerialNumber.Bytes())
@@ -150,7 +166,51 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 	must(err)
 	exit, err := f.store.AdvertiseRoute(ctx, target, netip.MustParsePrefix("0.0.0.0/0"), controller.RouteKindExit, controller.RouteModeNAT, 60, nil)
 	must(err)
+	const config = "/v1/configuration"
+	configReq := func(epoch, generation uint64) []byte {
+		t.Helper()
+		data, err := proto.Marshal(&v1.ConfigurationRequest{
+			KnownConfigurationEpoch: epoch, EphemeralExitLeaseGeneration: generation,
+		})
+		must(err)
+		return data
+	}
+	loadConfig := func(base string, known uint64) *v1.NodeConfiguration {
+		t.Helper()
+		snapshot := new(v1.NodeConfiguration)
+		must(proto.Unmarshal(doProto(fresh, "POST", base, config, configReq(known, 0), 200), snapshot))
+		return snapshot
+	}
+	hasSubnet := func(snapshot *v1.NodeConfiguration) bool {
+		for _, route := range snapshot.GetRoutes().GetRoutes() {
+			if bytes.Equal(route.GetViaNodeId(), target[:]) &&
+				bytes.Equal(route.GetDestination().GetAddress(), subnet.Prefix.Addr().AsSlice()) &&
+				route.GetDestination().GetPrefixLength() == uint32(subnet.Prefix.Bits()) {
+				return true
+			}
+		}
+		return false
+	}
+	referenceConfig, rustConfig := loadConfig(goURL, 0), loadConfig(rustURL, 0)
+	if !hasSubnet(referenceConfig) || !hasSubnet(rustConfig) ||
+		rustConfig.ConfigurationEpoch != referenceConfig.ConfigurationEpoch ||
+		rustConfig.EnabledCapabilities != referenceConfig.EnabledCapabilities ||
+		!reflect.DeepEqual(rustConfig.OverlayAddresses, referenceConfig.OverlayAddresses) {
+		t.Fatal("Rust HTTPS configuration differs from Go for the live node")
+	}
+	doProto(fresh, "POST", rustURL, config, configReq(rustConfig.ConfigurationEpoch, 0), 304)
+	doProto(client, "POST", rustURL, config, nil, 401)
+	doProto(fresh, "POST", rustURL, config, configReq(rustConfig.ConfigurationEpoch, 1), 400)
+	var stale v1.ProtocolError
+	must(proto.Unmarshal(doProto(fresh, "POST", rustURL, config, configReq(rustConfig.ConfigurationEpoch+1, 0), 409), &stale))
+	if stale.Code != v1.ErrorCode_ERROR_CODE_STALE_EPOCH {
+		t.Fatalf("unexpected stale epoch error: %s", stale.Code)
+	}
 	caps(protocol.CapabilityExitNodeV1, operator, 200)
+	if snapshot := loadConfig(rustURL, rustConfig.ConfigurationEpoch); hasSubnet(snapshot) ||
+		snapshot.ConfigurationEpoch != rustConfig.ConfigurationEpoch+1 {
+		t.Fatal("capability removal did not invalidate the HTTPS snapshot and withdraw the route")
+	}
 	db, err := sql.Open("sqlite", f.dbPath)
 	must(err)
 	defer db.Close()
@@ -174,6 +234,7 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 		t.Fatal("workload revocation record differs from Go")
 	}
 	doProto(targetClient, "GET", rustURL, probe+serial, nil, 403)
+	doProto(targetClient, "POST", rustURL, config, nil, 403)
 	doProto(fresh, "GET", rustURL, probe+freshSerial, nil, 204)
 	doProto(outsider, "GET", rustURL, probe+serial, nil, 404)
 
@@ -198,4 +259,11 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 		t.Fatal("node revocation left active addresses or routes")
 	}
 	compare(list, reader)
+
+	exitID, exitChain, exitKey, _ := enroll(other.ID, "device-ephemeral-exit", true)
+	exitSession, err := f.store.EphemeralExitSession(ctx, exitID)
+	must(err)
+	exitClient := asClient(exitChain, exitKey)
+	doProto(exitClient, "POST", goURL, config, configReq(0, exitSession.Generation), 403)
+	doProto(exitClient, "POST", rustURL, config, configReq(0, exitSession.Generation), 403)
 }

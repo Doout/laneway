@@ -1,7 +1,6 @@
 use super::{
     Reply, State,
-    node_proto::{error, failure, internal, proto, read_body},
-    response,
+    node_proto::{error, failure, internal, not_modified, proto, read_body},
 };
 use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
@@ -69,16 +68,7 @@ pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -
     .await
     {
         Ok(Ok(RelayReply::Snapshot(cfg))) => proto(S::OK, id, cfg),
-        Ok(Ok(RelayReply::Lease(lease))) => {
-            let mut r = response(S::NOT_MODIFIED, id, Vec::new(), true);
-            r.headers_mut().remove(header::CONTENT_TYPE);
-            r.headers_mut().remove(header::CONTENT_LENGTH);
-            r.headers_mut().insert(
-                "x-laneway-configuration-valid-until",
-                header::HeaderValue::from(lease.valid_until_unix_seconds),
-            );
-            r
-        }
+        Ok(Ok(RelayReply::Lease(lease))) => not_modified(id, lease.valid_until_unix_seconds),
         Ok(Err(e))
             if matches!(
                 e.downcast_ref::<ConfigurationError>(),

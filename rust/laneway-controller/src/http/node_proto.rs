@@ -13,6 +13,16 @@ pub(super) fn proto(status: S, id: &str, body: impl Message) -> Reply {
     );
     r
 }
+pub(super) fn not_modified(id: &str, deadline: u64) -> Reply {
+    let mut r = response(S::NOT_MODIFIED, id, Vec::new(), true);
+    r.headers_mut().remove(header::CONTENT_TYPE);
+    r.headers_mut().remove(header::CONTENT_LENGTH);
+    r.headers_mut().insert(
+        "x-laneway-configuration-valid-until",
+        header::HeaderValue::from(deadline),
+    );
+    r
+}
 pub(super) fn error(status: S, code: Code, detail: &str, retryable: bool, id: &str) -> Reply {
     proto(
         status,
