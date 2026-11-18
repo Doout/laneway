@@ -14,8 +14,10 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
+mod service_tls;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON] [--console-dir ABSOLUTE_DIST_DIR]";
+const DEFAULT_RENEW_BEFORE: i64 = 7 * 24 * 60 * 60;
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON] [--console-dir ABSOLUTE_DIST_DIR] [--renew-controller-tls ABSOLUTE_STATE_DIR [--controller-renew-before SECONDS]]";
 
 struct QuicListener {
     config: quinn::ServerConfig,
@@ -47,6 +49,8 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut allow_loopback_callbacks = false;
     let mut bootstrap_profile = None;
     let mut console_dir = None;
+    let mut renewal_dir = None;
+    let mut renew_before = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -83,6 +87,20 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             bootstrap_profile = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--console-dir" && console_dir.is_none() {
             console_dir = Some(PathBuf::from(args.next().context(USAGE)?));
+        } else if flag == "--renew-controller-tls" && renewal_dir.is_none() {
+            renewal_dir = Some(PathBuf::from(args.next().context(USAGE)?));
+        } else if flag == "--controller-renew-before" && renew_before.is_none() {
+            let seconds = args
+                .next()
+                .context(USAGE)?
+                .to_str()
+                .context(USAGE)?
+                .parse()?;
+            ensure!(
+                (1..=DEFAULT_RENEW_BEFORE).contains(&seconds),
+                "controller renewal window must be between 1 second and 7 days"
+            );
+            renew_before = Some(seconds);
         } else if flag == "--quic-listen" && quic_listen.is_none() {
             quic_listen = Some(
                 args.next()
@@ -115,39 +133,13 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         quic_listen.is_none() || node_quic,
         "--quic-listen requires --node-quic"
     );
-    let (config, _) = tls(&cert, &key, client_ca.as_deref(), false)?;
-    let quic = if node_quic {
-        ensure!(client_ca.is_some(), "node QUIC requires --node-client-ca");
-        let (config, id) = tls(&cert, &key, client_ca.as_deref(), true)?;
-        Some(QuicListener {
-            config: crate::quic::config(config)?,
-            network: id.context("missing controller identity")?.network_id,
-            address: quic_listen,
-        })
-    } else {
-        None
-    };
+    ensure!(
+        renew_before.is_none() || renewal_dir.is_some(),
+        "--controller-renew-before requires --renew-controller-tls"
+    );
+    let identity = Arc::new(service_tls::Identity::load(&cert, &key)?);
+    let roots = client_ca.as_deref().map(tls_roots).transpose()?;
     laneway_controller::SessionStore::check_database(&database)?;
-    let discovery = if let Some(profile) = bootstrap_profile {
-        let ca = client_ca
-            .as_ref()
-            .context("--bootstrap-profile requires --node-client-ca")?;
-        let profile = pem(&profile, false)
-            .context("read bootstrap profile")?
-            .into_inner();
-        let chain =
-            rustls_pemfile::certs(&mut pem(&cert, false)?).collect::<std::io::Result<Vec<_>>>()?;
-        Some(Arc::new(
-            laneway_controller::bootstrap_discovery::Discovery::load(
-                &database,
-                &profile,
-                &chain,
-                &mut pem(ca, false)?,
-            )?,
-        ))
-    } else {
-        None
-    };
     let location_database =
         location_database.and_then(
             |path| match laneway_controller::node_location::Database::open(&path) {
@@ -159,7 +151,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             },
         );
     let mut state = super::http::State::new(
-        database,
+        database.clone(),
         root,
         issuer,
         client_ca.is_some(),
@@ -167,7 +159,60 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         location_database,
         allow_loopback_callbacks,
     )?;
-    state.bootstrap_discovery = discovery;
+    let renewal = renewal_dir
+        .as_deref()
+        .map(|directory| {
+            service_tls::Renewal::prepare(
+                directory,
+                [&cert, &key],
+                Arc::clone(&identity),
+                roots
+                    .clone()
+                    .context("--renew-controller-tls requires --node-client-ca")?,
+                state
+                    .issuer
+                    .clone()
+                    .context("--renew-controller-tls requires --node-issuer")?,
+                renew_before.unwrap_or(DEFAULT_RENEW_BEFORE),
+            )
+        })
+        .transpose()?;
+    let active = identity.active();
+    state.bootstrap_discovery = if let Some(profile) = bootstrap_profile {
+        let ca = client_ca
+            .as_ref()
+            .context("--bootstrap-profile requires --node-client-ca")?;
+        let profile = pem(&profile, false)
+            .context("read bootstrap profile")?
+            .into_inner();
+        Some(Arc::new(
+            laneway_controller::bootstrap_discovery::Discovery::load(
+                &database,
+                &profile,
+                &active.cert,
+                &mut pem(ca, false)?,
+            )?,
+        ))
+    } else {
+        None
+    };
+    let quic = if node_quic {
+        ensure!(roots.is_some(), "node QUIC requires --node-client-ca");
+        let id =
+            laneway_protocol::identity_from_certificate_der(active.end_entity_cert()?.as_ref())?;
+        ensure!(
+            id.role == laneway_protocol::Role::Controller,
+            "node QUIC requires a controller service certificate"
+        );
+        Some(QuicListener {
+            config: crate::quic::config(tls(Arc::clone(&identity), roots.as_ref(), true)?)?,
+            network: id.network_id,
+            address: quic_listen,
+        })
+    } else {
+        None
+    };
+    let config = tls(identity, roots.as_ref(), false)?;
     let console_dir =
         console_dir.or_else(|| std::env::var_os("LANEWAY_CONSOLE_DIR").map(PathBuf::from));
     state.console = console_dir
@@ -179,7 +224,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(state, address, config, quic))
+        .block_on(serve(state, address, config, quic, renewal))
 }
 
 fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>> {
@@ -200,29 +245,28 @@ fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>
     Ok(Cursor::new(data))
 }
 
+fn tls_roots(path: &Path) -> Result<rustls::RootCertStore> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut pem(path, false)?) {
+        roots.add(cert?)?;
+    }
+    ensure!(!roots.is_empty(), "node client trust store is empty");
+    Ok(roots)
+}
+
 fn tls(
-    cert: &Path,
-    key: &Path,
-    client_ca: Option<&Path>,
+    identity: Arc<service_tls::Identity>,
+    roots: Option<&rustls::RootCertStore>,
     quic: bool,
-) -> Result<(
-    ServerConfig,
-    Option<laneway_protocol::AuthenticatedIdentity>,
-)> {
-    let chain =
-        rustls_pemfile::certs(&mut pem(cert, false)?).collect::<std::io::Result<Vec<_>>>()?;
-    let key =
-        rustls_pemfile::private_key(&mut pem(key, true)?)?.context("missing TLS private key")?;
+) -> Result<ServerConfig> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?;
-    let builder = if let Some(path) = client_ca {
-        let mut roots = rustls::RootCertStore::empty();
-        for cert in rustls_pemfile::certs(&mut pem(path, false)?) {
-            roots.add(cert?)?;
-        }
-        let verifier =
-            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider);
+    let builder = if let Some(roots) = roots {
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots.clone()),
+            provider,
+        );
         let verifier = if quic {
             verifier
         } else {
@@ -233,26 +277,14 @@ fn tls(
     } else {
         builder.with_no_client_auth()
     };
-    let identity = if quic {
-        let id = laneway_protocol::identity_from_certificate_der(
-            chain.first().context("empty service certificate")?.as_ref(),
-        )?;
-        ensure!(
-            id.role == laneway_protocol::Role::Controller,
-            "node QUIC requires a controller service certificate"
-        );
-        Some(id)
-    } else {
-        None
-    };
-    let mut config = builder.with_single_cert(chain, key)?;
+    let mut config = builder.with_cert_resolver(identity);
     config.send_tls13_tickets = 0;
     config.alpn_protocols = vec![if quic {
         b"laneway-control/1".to_vec()
     } else {
         b"http/1.1".to_vec()
     }];
-    Ok((config, identity))
+    Ok(config)
 }
 
 async fn stop() -> std::io::Result<()> {
@@ -273,6 +305,7 @@ async fn serve(
     address: SocketAddr,
     config: ServerConfig,
     quic: Option<QuicListener>,
+    renewal: Option<service_tls::Renewal>,
 ) -> Result<()> {
     let listener = TcpListener::bind(address).await?;
     // Bind both sockets before announcing readiness. By default UDP shares the
@@ -299,6 +332,7 @@ async fn serve(
     if let Some((ep, _)) = &endpoint {
         println!("listening quic://{}", ep.local_addr()?);
     }
+    let renewal = renewal.map(|worker| tokio::spawn(worker.run()));
     let stop = stop();
     tokio::pin!(stop);
     loop {
@@ -333,6 +367,10 @@ async fn serve(
     // No new sockets. Requests already admitted may finish within their deadline.
     if let Some((ep, _)) = &endpoint {
         ep.close(0u32.into(), b"controller shutdown");
+    }
+    if let Some(worker) = renewal {
+        worker.abort();
+        let _ = worker.await;
     }
     while tasks.join_next().await.is_some() {}
     Ok(())

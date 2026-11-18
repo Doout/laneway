@@ -8,6 +8,7 @@ description = "Laneway controller storage and runtime"
 
 [dependencies]
 anyhow.workspace = true
+arc-swap.workspace = true
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc","zeroize"] }
 base64.workspace = true
 bytes.workspace = true
@@ -41,9 +42,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 x25519-dalek = "2"
+tempfile = "3.26.0"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["fs"] }
-
-[dev-dependencies]
-tempfile = "3.26.0"

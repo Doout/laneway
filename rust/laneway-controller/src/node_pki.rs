@@ -2,16 +2,19 @@
 //! only a public key. The authorized transaction supplies both identity IDs,
 //! the clock, and any lease deadline; requested names and extensions are not grants.
 use anyhow::{Context, Result, ensure};
-use laneway_protocol::Id;
+use laneway_protocol::{AuthenticatedIdentity, Id, Role};
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose, PublicKeyData, SanType, SerialNumber, SubjectPublicKeyInfo,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, SubjectPublicKeyInfoDer};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, SubjectPublicKeyInfoDer,
+};
 use time::OffsetDateTime;
 use x509_parser::prelude::{FromDer, X509Certificate, X509CertificationRequest};
 
 const MAX_DER: usize = 64 * 1024;
+const CONTROLLER_LIFETIME: i64 = 30 * 24 * 60 * 60;
 
 pub struct VerifiedCsr(SubjectPublicKeyInfo);
 
@@ -173,6 +176,67 @@ impl NodeIssuer {
 
     pub fn intermediates(&self) -> &[Vec<u8>] {
         &self.intermediates
+    }
+
+    /// Signs a local controller replacement, retaining the identity and
+    /// names selected by the operator's original trusted service certificate.
+    /// Unlike node enrollment, no network caller can invoke this operation.
+    pub fn issue_controller(
+        &self,
+        identity: AuthenticatedIdentity,
+        names: &[SanType],
+        now: i64,
+        minimum_validity: i64,
+    ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
+        ensure!(
+            identity.role == Role::Controller
+                && !names.is_empty()
+                && names
+                    .iter()
+                    .all(|name| matches!(name, SanType::DnsName(_) | SanType::IpAddress(_))),
+            "invalid controller service names"
+        );
+        ensure!(
+            self.valid_from <= now && now < self.valid_to,
+            "service issuer is not currently valid"
+        );
+        let not_after = now.saturating_add(CONTROLLER_LIFETIME).min(self.valid_to);
+        ensure!(
+            not_after.saturating_sub(now) >= minimum_validity,
+            "service issuer needs operator renewal"
+        );
+        let mut serial = [0; 16];
+        getrandom::fill(&mut serial)?;
+        if serial == [0; 16] {
+            serial[15] = 1;
+        }
+        let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+        let mut params = CertificateParams::default();
+        params.distinguished_name.push(
+            DnType::CommonName,
+            format!("laneway-controller-{}", identity.subject_id),
+        );
+        params.subject_alt_names = names.to_vec();
+        params.subject_alt_names.push(SanType::URI(
+            format!(
+                "spiffe://laneway/network/{}/controller/{}",
+                identity.network_id, identity.subject_id
+            )
+            .try_into()?,
+        ));
+        params.is_ca = IsCa::ExplicitNoCa;
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.use_authority_key_identifier_extension = true;
+        params.not_before =
+            OffsetDateTime::from_unix_timestamp(now.saturating_sub(60).max(self.valid_from))?;
+        params.not_after = OffsetDateTime::from_unix_timestamp(not_after)?;
+        params.serial_number = Some(SerialNumber::from_slice(&serial));
+        let certificate = params.signed_by(&key, &self.signer)?;
+        let chain = std::iter::once(certificate.der().clone())
+            .chain(self.intermediates.iter().cloned().map(CertificateDer::from))
+            .collect();
+        Ok((chain, PrivatePkcs8KeyDer::from(key.serialize_der()).into()))
     }
 
     pub fn issue(

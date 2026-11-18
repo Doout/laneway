@@ -93,8 +93,8 @@ downloads, browser sessions, the node mTLS handshake, and the application
 flow from registration through scoped operations, refresh, and revoke.
 Run `bash integration/rust-lab/acme.sh` to exercise TLS-ALPN validation,
 live renewal, and offline restart using the cached certificate with a local
-[Pebble](https://github.com/letsencrypt/pebble) CA. This does not renew the
-internal controller certificate.
+[Pebble](https://github.com/letsencrypt/pebble) CA. This rotates the relay's
+public certificate, not its Laneway workload certificate.
 
 To run the real Dispatch client in the same lab flow:
 
@@ -105,6 +105,31 @@ bash integration/rust-lab/dispatch.sh /path/to/dispatch REVISION
 The script builds the client from a temporary source snapshot. The browser
 approval is driven by the Laneway fixture; the Dispatch client performs the
 backend calls. This does not run the Dispatch server or test its deployment.
+
+### Internal controller TLS renewal
+
+Add `--renew-controller-tls /var/lib/laneway-controller/tls-renewal` to
+`laneway-controller serve` with `--node-issuer` and `--node-client-ca`.
+Use a persistent state directory owned by the controller UID and accessible
+only to that user. The positional certificate and key keep their existing
+paths; they are never rewritten. The original CA-signed leaf pins the
+controller's network, service ID and DNS/IP names, even after it expires.
+
+The controller checks the expiry and starts renewal seven days early by
+default (`--controller-renew-before` changes the window). It issues a new
+key and certificate under the existing online issuer, verifies the chain
+and identity, then saves them as one private file before switching new HTTPS
+and QUIC handshakes. Established QUIC sessions keep running. On restart,
+the controller reuses the last valid replacement; if the original expired
+and the cache is unusable, it must issue a valid replacement before binding.
+If issuance or persistence fails while running, the active credential stays
+in place and renewal retries. An expiring issuer still needs operator action.
+
+The lab checks this with `TestRustControllerServiceTLS`. Neither this option
+nor the public ACME worker rotates the relay's internal identity or trust
+anchors. The existing Compose timer remains the renewal path for Go deployments.
+Keep a still-valid conventional certificate and key for rollback to a Go
+controller; it does not read the Rust renewal state.
 
 The Rust controller image includes the same `pnpm build:live` console as the
 Go image and enables it from `/usr/share/laneway-console`. For a standalone

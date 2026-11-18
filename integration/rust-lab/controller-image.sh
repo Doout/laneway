@@ -2,7 +2,7 @@
 # Run the Go reference and the binaries copied from the scratch image as its UID.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-image=laneway-rust-controller:migration-lab
+image="${LANEWAY_RUST_CONTROLLER_IMAGE:-laneway-rust-controller:migration-lab}"
 test "$(docker image inspect -f '{{.Config.User}}' "$image")" = 65532:65532
 bin_volume="$(docker volume create --label laneway.test=rust-controller-image)"
 console_volume="$(docker volume create --label laneway.test=rust-controller-image)"
@@ -32,4 +32,4 @@ docker run --rm --network none --read-only --tmpfs /tmp:exec --cap-drop ALL --us
   -e LANEWAY_RUST_CONTROLLER=/packaged/laneway-controller \
   -e LANEWAY_RUST_CONSOLE_ASSETS=/console laneway-rust-lab:local sh -ec '
     /tests/sessions -test.run "^TestRustControllerSessions$"
-    /tests/https -test.run "^TestRustController(Inventory|HTTPS|QUIC|Discovery)$"'
+    /tests/https -test.run "^TestRustController(Inventory|HTTPS|QUIC|Discovery|ServiceTLS)$"'
