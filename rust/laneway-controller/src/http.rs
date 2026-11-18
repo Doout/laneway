@@ -3,8 +3,7 @@
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{HeaderMap, Method, Request, Response, StatusCode, header};
-use laneway_controller::{ListError, SessionError, SessionStore};
-use laneway_protocol::Id;
+use laneway_controller::{ListError, RootCredential, SessionError, SessionStore, bearer_inventory};
 use serde_json::json;
 use std::{
     path::PathBuf,
@@ -23,12 +22,14 @@ type Reply = Response<Full<Bytes>>;
 pub struct State {
     database: Arc<PathBuf>,
     queries: Arc<Semaphore>,
+    root: Option<Arc<RootCredential>>,
 }
 impl State {
-    pub fn new(database: PathBuf) -> Self {
+    pub fn new(database: PathBuf, root: Option<RootCredential>) -> Self {
         Self {
             database: Arc::new(database),
             queries: Arc::new(Semaphore::new(8)),
+            root: root.map(Arc::new),
         }
     }
 }
@@ -83,12 +84,12 @@ fn response(status: StatusCode, id: &str, data: Vec<u8>, head: bool) -> Reply {
         .unwrap()
 }
 
-fn cookie(headers: &HeaderMap) -> Result<&str, Failure> {
-    // Bearer support needs independent root/automation authorization.
-    // In particular a mixed request must never downgrade to its cookie.
-    if headers.contains_key(header::AUTHORIZATION) {
-        return Err(AUTH);
-    }
+enum Credential {
+    Session(String),
+    Bearer(String),
+}
+
+fn credential(headers: &HeaderMap) -> Result<Credential, Failure> {
     let mut token = None;
     for value in headers.get_all(header::COOKIE) {
         for pair in value.to_str().map_err(|_| AUTH)?.split(';') {
@@ -106,13 +107,31 @@ fn cookie(headers: &HeaderMap) -> Result<&str, Failure> {
             }
         }
     }
-    token.ok_or(AUTH)
+    let mut authorization = headers.get_all(header::AUTHORIZATION).iter();
+    if let Some(value) = authorization.next() {
+        if token.is_some()
+            || authorization.next().is_some()
+            || headers.contains_key(header::ORIGIN)
+            || headers
+                .keys()
+                .any(|name| name.as_str().starts_with("sec-fetch-"))
+        {
+            return Err(AUTH);
+        }
+        let raw = value.to_str().map_err(|_| AUTH)?;
+        let (scheme, secret) = raw.split_once(' ').ok_or(AUTH)?;
+        if !scheme.eq_ignore_ascii_case("bearer")
+            || secret.is_empty()
+            || secret.bytes().any(|b| b.is_ascii_whitespace() || b == b',')
+        {
+            return Err(AUTH);
+        }
+        return Ok(Credential::Bearer(raw.to_owned()));
+    }
+    token.map(|s| Credential::Session(s.to_owned())).ok_or(AUTH)
 }
 
-fn query(network: Option<&str>, raw: Option<&str>) -> Result<(Option<Id>, usize), ListError> {
-    let network = network
-        .map(|n| n.parse().map_err(|_| ListError::NetworkId))
-        .transpose()?;
+fn query_limit(raw: Option<&str>) -> Result<usize, ListError> {
     // Go's URL.Query discards individual fields with invalid escapes or raw
     // semicolons. Keep the first valid limit, like url.Values.Get.
     let limit = raw
@@ -138,7 +157,7 @@ fn query(network: Option<&str>, raw: Option<&str>) -> Result<(Option<Id>, usize)
     if !(1..=1000).contains(&limit) {
         return Err(ListError::Limit);
     }
-    Ok((network, limit))
+    Ok(limit)
 }
 
 pub async fn handle<B>(req: Request<B>, state: State) -> Reply {
@@ -173,7 +192,9 @@ async fn dispatch<B>(
         return Err(malformed("administrator path must be canonical"));
     }
     let pieces: Vec<_> = path.split('/').collect();
+    let root_probe = path == "/v1/admin/auth/root";
     let network = match pieces.as_slice() {
+        _ if root_probe => None,
         ["", "v1", "admin", "networks"] => None,
         ["", "v1", "admin", "networks", network, "nodes"] => Some(*network),
         _ => {
@@ -193,8 +214,11 @@ async fn dispatch<B>(
             false,
         ));
     }
-    let token = cookie(req.headers())?.to_owned();
-    let query = query(network, req.uri().query());
+    let credential = credential(req.headers())?;
+    let network = network
+        .map(|n| n.parse().map_err(|_| ListError::NetworkId))
+        .transpose();
+    let limit = query_limit(req.uri().query());
     // Keep this permit in the blocking closure even if the socket disappears.
     let permit = state.queries.try_acquire_owned().map_err(|_| {
         Failure(
@@ -204,9 +228,44 @@ async fn dispatch<B>(
             true,
         )
     })?;
-    let result = tokio::task::spawn_blocking(move || {
+    if root_probe {
+        let (Credential::Bearer(header), Some(root)) = (credential, state.root) else {
+            return Err(AUTH);
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            root.probe(&header, &state.database)
+        })
+        .await
+        .map_err(|_| INTERNAL)?
+        .map_err(|_| AUTH)?;
+        return Ok(Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(REQUEST_ID, id)
+            .body(Full::new(Bytes::new()))
+            .unwrap());
+    }
+    let (list, metadata) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
-        SessionStore::open(&state.database)?.inventory(&token, query)
+        match credential {
+            Credential::Session(token) => {
+                let query = network.and_then(|n| limit.map(|l| (n, l)));
+                let r = SessionStore::open(&state.database)?.inventory(&token, query)?;
+                Ok((r.list, Some((r.id, r.idle, r.absolute))))
+            }
+            Credential::Bearer(header) => Ok((
+                bearer_inventory(
+                    &state.database,
+                    &header,
+                    state.root.as_deref(),
+                    network,
+                    limit,
+                )?,
+                None,
+            )),
+        }
     })
     .await
     .map_err(|_| INTERNAL)?
@@ -237,15 +296,18 @@ async fn dispatch<B>(
     let mut reply = response(
         StatusCode::OK,
         id,
-        serde_json::to_vec(&result.list).map_err(|_| INTERNAL)?,
+        serde_json::to_vec(&list).map_err(|_| INTERNAL)?,
         head,
     );
+    let Some((session, idle, absolute)) = metadata else {
+        return Ok(reply);
+    };
     for (name, value) in [
-        ("x-laneway-session-id", result.id.to_string()),
-        ("x-laneway-session-idle-expires-at", result.idle.to_string()),
+        ("x-laneway-session-id", session.to_string()),
+        ("x-laneway-session-idle-expires-at", idle.to_string()),
         (
             "x-laneway-session-absolute-expires-at",
-            result.absolute.to_string(),
+            absolute.to_string(),
         ),
     ] {
         reply

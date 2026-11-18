@@ -135,7 +135,11 @@ impl SessionStore {
             ensure!(allowed, SessionError::Denied);
         }
         let list = match network {
-            None => InventoryList::Networks(read_networks(&tx, limit, restricted)?),
+            None => InventoryList::Networks(read_networks(
+                &tx,
+                limit,
+                restricted.map(crate::Scope::Browser),
+            )?),
             Some(id) => InventoryList::Nodes(read_nodes(&tx, id, limit)?),
         };
         // Only a successful authorized read can extend the idle deadline.

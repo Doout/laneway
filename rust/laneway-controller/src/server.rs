@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH]";
 
 pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let database = PathBuf::from(args.next().context(USAGE)?);
@@ -31,13 +31,27 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     );
     let cert = PathBuf::from(args.next().context(USAGE)?);
     let key = PathBuf::from(args.next().context(USAGE)?);
+    let root = match args.next() {
+        Some(flag) if flag == "--root-token-file" => {
+            Some(laneway_controller::RootCredential::load(
+                &PathBuf::from(args.next().context(USAGE)?),
+                &database,
+            )?)
+        }
+        None => None,
+        _ => anyhow::bail!(USAGE),
+    };
     ensure!(args.next().is_none(), USAGE);
     let config = tls(&cert, &key)?;
     laneway_controller::SessionStore::check_database(&database)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(database, address, config))
+        .block_on(serve(
+            super::http::State::new(database, root),
+            address,
+            config,
+        ))
 }
 
 fn pem(path: &Path, private: bool) -> Result<Cursor<Vec<u8>>> {
@@ -85,10 +99,9 @@ async fn stop() -> std::io::Result<()> {
     }
 }
 
-async fn serve(database: PathBuf, address: SocketAddr, config: ServerConfig) -> Result<()> {
+async fn serve(state: super::http::State, address: SocketAddr, config: ServerConfig) -> Result<()> {
     let listener = TcpListener::bind(address).await?;
     let acceptor = TlsAcceptor::from(Arc::new(config));
-    let state = super::http::State::new(database);
     let connections = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
     println!("listening https://{}", listener.local_addr()?);

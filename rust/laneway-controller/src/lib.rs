@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail, ensure};
 use laneway_protocol::Id;
 use rusqlite::{Connection, OpenFlags, Transaction};
 use serde::Serialize;
+mod bearer;
+pub use bearer::{RootCredential, bearer_inventory};
 mod nodes;
 mod sessions;
 pub use nodes::Node;
@@ -87,23 +89,35 @@ fn check_snapshot(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum Scope {
+    Browser(Id),
+    Automation(Id),
+}
+
 fn read_networks(
     tx: &Transaction<'_>,
     limit: usize,
-    restricted: Option<Id>,
+    restricted: Option<Scope>,
 ) -> Result<Vec<Network>> {
     const COLUMNS: &str = "SELECT n.id,n.name,n.ipv4_address,n.ipv4_prefix_length,
             n.ipv6_address,n.ipv6_prefix_length,n.configuration_epoch,n.created_at FROM networks n";
-    let scope_join = if restricted.is_some() {
-        " JOIN administrator_principal_networks g ON g.network_id=n.id AND g.principal_id=?2"
-    } else {
-        ""
+    let scope_join = match restricted {
+        Some(Scope::Browser(_)) => {
+            " JOIN administrator_principal_networks g ON g.network_id=n.id AND g.principal_id=?2"
+        }
+        Some(Scope::Automation(_)) => {
+            " JOIN automation_service_principal_networks g ON g.network_id=n.id AND g.principal_id=?2"
+        }
+        None => "",
     };
     let mut stmt = tx.prepare(&format!(
         "{COLUMNS}{scope_join} ORDER BY n.created_at,n.id LIMIT ?1"
     ))?;
     let mut rows = match &restricted {
-        Some(id) => stmt.query((limit as i64, id.as_bytes()))?,
+        Some(Scope::Browser(id) | Scope::Automation(id)) => {
+            stmt.query((limit as i64, id.as_bytes()))?
+        }
         None => stmt.query([limit as i64])?,
     };
     let mut result = Vec::new();

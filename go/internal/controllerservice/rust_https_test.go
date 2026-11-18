@@ -58,7 +58,11 @@ func TestRustControllerHTTPS(t *testing.T) {
 	cert := write("tls.crt", "CERTIFICATE", pair.Certificate[0])
 	key := write("tls.key", "PRIVATE KEY", pk)
 	ca := write("ca.crt", "CERTIFICATE", f.service.ca.Raw)
-	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key)
+	rootFile := filepath.Join(dir, "root.token")
+	if err := os.WriteFile(rootFile, []byte(testRootBearer+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key, "--root-token-file", rootFile)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +104,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 		body   map[string]any
 		header http.Header
 	}
-	request := func(t *testing.T, base, method, path string, cookies []string, bearer bool) result {
+	request := func(t *testing.T, base, method, path string, cookies []string, bearer bool, headers ...http.Header) result {
 		t.Helper()
 		r, err := http.NewRequestWithContext(t.Context(), method, base+path, nil)
 		if err != nil {
@@ -111,6 +115,13 @@ func TestRustControllerHTTPS(t *testing.T) {
 		}
 		if bearer {
 			r.Header.Set("Authorization", "Bearer unrecognized-fixture")
+		}
+		for _, fields := range headers {
+			for k, values := range fields {
+				for _, v := range values {
+					r.Header.Add(k, v)
+				}
+			}
 		}
 		r.Header.Set(AdministratorRequestIDHeader, "untrusted-id")
 		resp, err := client.Do(r)
@@ -126,9 +137,9 @@ func TestRustControllerHTTPS(t *testing.T) {
 			t.Fatal(err)
 		}
 		out := result{status: resp.StatusCode, header: resp.Header}
-		if method == "HEAD" {
+		if method == "HEAD" || resp.StatusCode == http.StatusNoContent {
 			if len(data) != 0 {
-				t.Fatal("HEAD returned a body")
+				t.Fatal("unexpected response body")
 			}
 		} else {
 			dec := json.NewDecoder(bytes.NewReader(data))
@@ -195,6 +206,21 @@ func TestRustControllerHTTPS(t *testing.T) {
 			}
 		})
 	}
+	check := func(label, path string, h http.Header, status int, cookies ...string) map[string]any {
+		t.Helper()
+		a := request(t, goServer.URL, "GET", path, cookies, false, h)
+		b := request(t, rustURL, "GET", path, cookies, false, h)
+		if a.status != status || b.status != status || !reflect.DeepEqual(a.body, b.body) {
+			t.Fatalf("%s: reference=%d %v Rust=%d %v", label, a.status, a.body, b.status, b.body)
+		}
+		for _, hdr := range []string{administratorSessionIDHeader, administratorSessionAbsoluteHeader, administratorSessionIdleHeader} {
+			if b.header.Get(hdr) != "" {
+				t.Fatalf("%s: bearer received session metadata", label)
+			}
+		}
+		return b.body
+	}
+	testRustBearerInventory(t, f, cookie, check)
 	if err := f.store.LogoutAdministratorSession(t.Context(), adminauth.SessionSubject(session.PrincipalID, session.ID)); err != nil {
 		t.Fatal(err)
 	}
