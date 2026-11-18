@@ -21,6 +21,10 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Some("serve") => return server::start(args),
+        #[cfg(unix)]
+        Some("backup") => return database_copy(args, false),
+        #[cfg(unix)]
+        Some("restore") => return database_copy(args, true),
         Some("migrate-fleet") => {
             let path = args
                 .next()
@@ -81,5 +85,30 @@ fn main() -> Result<()> {
         }
     };
     serde_json::to_writer(io::stdout().lock(), &response)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn database_copy(mut args: impl Iterator<Item = std::ffi::OsString>, restore: bool) -> Result<()> {
+    let usage = if restore {
+        "usage: laneway-controller restore BACKUP_DATABASE NEW_DATABASE"
+    } else {
+        "usage: laneway-controller backup DATABASE NEW_BACKUP_DATABASE"
+    };
+    let source = args.next().context(usage)?;
+    let destination = args.next().context(usage)?;
+    ensure!(args.next().is_none(), "{usage}");
+    let source = Path::new(&source);
+    let destination = Path::new(&destination);
+    if restore {
+        laneway_controller::backup::restore(source, destination)?;
+        println!("controller database restored to {}", destination.display());
+    } else {
+        laneway_controller::backup::create(source, destination)?;
+        println!(
+            "controller database backup written to {}",
+            destination.display()
+        );
+    }
     Ok(())
 }

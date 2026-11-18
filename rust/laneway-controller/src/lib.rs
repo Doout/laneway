@@ -15,10 +15,14 @@ pub mod administrators;
 pub mod applications;
 pub mod audit;
 pub mod automation;
+#[cfg(unix)]
+pub mod backup;
 mod bearer;
 pub mod bootstrap_bundles;
 pub mod bootstrap_discovery;
 mod browser;
+#[cfg(unix)]
+pub mod database_lock;
 pub use bearer::{PUBLIC_APPLICATION_SCHEME, RootCredential, bearer_inventory, bearer_network};
 pub use browser::auth_state;
 pub mod endpoint_status;

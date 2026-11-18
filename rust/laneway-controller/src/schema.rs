@@ -70,7 +70,16 @@ pub(crate) fn is_fleet(tx: &Transaction<'_>) -> Result<bool> {
 
 /// Upgrade an existing database explicitly. `serve` never runs migrations.
 pub fn migrate_fleet(path: &Path) -> Result<bool> {
-    let mut db = crate::open_existing(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    #[cfg(unix)]
+    let canonical = crate::database_lock::existing_database(path)?;
+    #[cfg(unix)]
+    let path = canonical.as_path();
+    #[cfg(unix)]
+    let _lifecycle_lock = crate::database_lock::acquire(path)?;
+    let mut db = crate::open_existing(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
     let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let applied = profile(&tx)? == Profile::Public;
     if applied {

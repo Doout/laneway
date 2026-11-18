@@ -979,9 +979,9 @@ mutation. The history API requires network-scoped `acl.read`. Restoring a saved
 revision requires `acl.manage` and the current configuration epoch. It compiles
 the restored policy and commits the ACLs, epoch, history, and audit together.
 The HTTPS fixture verifies permissions, stale epochs, and rollback on a failed
-audit write. These checks do not cover backup/restore in the Rust runtime,
-other fleet workflows, the private console, or the deployed production
-database; do not promote the controller on schema support alone.
+audit write. These checks do not cover all fleet workflows, the private
+console, or the deployed production database; do not promote the controller
+on schema support alone.
 
 `POST /v1/admin/networks/{network_id}/policy-preview` works on both schemas.
 It uses the Rust packet-policy evaluator for current rules and an optional
@@ -991,6 +991,9 @@ packets are sent and no policy, epoch, or audit entries are written by the
 preview. The route requires network-scoped `acl.read` and same-origin CSRF
 proof for browser sessions. The HTTPS fixture checks overlay and subnet
 resolution, managed-access isolation, and unchanged policy state.
+Managed-rule priorities stay compatible with the matching Go schema: the
+public runtime offsets priorities, whereas fleet snapshots re-rank manual
+rules without collapsing their order at the numeric upper bound.
 
 `POST /v1/admin/networks/{network_id}/diagnostics` uses the same evaluator and
 the source node's permission-filtered private DNS catalog. It reports certificate
@@ -1000,6 +1003,32 @@ answers without making any network requests. End-to-end reachability stays
 An expired overlay identity whose address has not been reclaimed does not fall
 through to a default route. Like preview, diagnostics requires network-scoped
 `acl.read` and browser CSRF proof.
+
+### Native controller backup and restore (lab only)
+
+On Unix, take an online backup using SQLite's online copy API. Restore only
+into a new path, with the destination controller stopped. Use a trusted,
+already-created directory owned by the controller operator:
+
+```sh
+laneway-controller backup /path/to/controller.db /path/to/backups/snapshot.db
+laneway-controller restore /path/to/backups/snapshot.db /path/to/restored/controller.db
+```
+
+Both commands validate the canonical schema (18 or 19), SQLite integrity
+and foreign keys, and controller identity and authorization invariants
+before publishing a standalone, private database. Neither command overwrites
+an existing database, symlink, or SQLite sidecar. Restore and migration use
+the same lifecycle lock as the Go service on Linux. For older database
+versions, upgrade a disposable copy using Go before using these commands.
+
+Restore retains durable configuration and app registrations. It discards
+browser sessions and unused administrator recovery grants, revokes automation
+service access tokens, and records a system audit event. On schema 19 it also
+clears topology and updater presence, removes unused node recovery grants,
+and pauses active rollouts. Running update claims remain reserved for operator
+reconciliation. The database does not include CA keys, TLS files, or the
+separately managed root token: back those up and protect them separately.
 
 Traffic rules can be listed, created, updated, and deleted through the same
 Rust HTTPS listener. The controller validates canonical prefixes and port

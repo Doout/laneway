@@ -196,6 +196,7 @@ func TestRustControllerServiceTLS(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0600 {
 		t.Fatal("last-good controller TLS bundle is missing or not private")
 	}
+	stop()
 	aliasCtx, cancelAlias := context.WithTimeout(t.Context(), 5*time.Second)
 	alias := exec.CommandContext(aliasCtx, os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0",
 		cache, cache, "--node-issuer", issuerChain, issuerKey, "86400", "--node-client-ca", trust,
@@ -211,7 +212,6 @@ func TestRustControllerServiceTLS(t *testing.T) {
 			t.Fatal("renewal changed the operator's original TLS files")
 		}
 	}
-	stop()
 	if wait := time.Until(leaf.NotAfter) + 50*time.Millisecond; wait > 0 {
 		time.Sleep(wait)
 	}

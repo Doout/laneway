@@ -232,14 +232,19 @@ func testRustAdministratorRecovery(t *testing.T, client *http.Client, pair tls.C
 	if t.Run("application-registration", func(t *testing.T) {
 		registered = testRustApplicationRegistration(t, f, client, goServer.URL, rustURL, ownerSession, labCredentials{bearer: automation})
 	}) {
+		restart := func() {
+			stop()
+			rustURL, stop = startRustAdministratorLab(t, f.dbPath, cert, key, rootFile)
+		}
+		// Reset the public request limiter without sharing the database between
+		// live Rust controllers.
+		restart()
 		t.Run("network-authorization", func(t *testing.T) {
-			// Keep the public request limiter enabled; give this flow its own listener.
-			authURL, _ := startRustAdministratorLab(t, f.dbPath, cert, key, rootFile)
-			testRustApplicationAuthorization(t, f, client, goServer.URL, authURL, ownerSession, registered)
+			testRustApplicationAuthorization(t, f, client, goServer.URL, rustURL, ownerSession, registered)
 		})
+		restart()
 		t.Run("oauth-tokens", func(t *testing.T) {
-			tokenURL, _ := startRustAdministratorLab(t, f.dbPath, cert, key, rootFile)
-			testRustApplicationTokenLifecycle(t, f, client, goServer.URL, tokenURL, ownerSession, registered)
+			testRustApplicationTokenLifecycle(t, f, client, goServer.URL, rustURL, ownerSession, registered)
 		})
 		t.Run("application-management", func(t *testing.T) {
 			testRustApplicationManagement(t, f, client, goServer.URL, rustURL, ownerSession, registered)

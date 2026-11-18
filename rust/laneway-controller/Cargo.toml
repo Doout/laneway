@@ -38,7 +38,7 @@ subtle = "2"
 zeroize = "1"
 thiserror.workspace = true
 laneway-protocol = { path = "../laneway-protocol" }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["backup", "bundled"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 x25519-dalek = "2"

@@ -39,6 +39,12 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     );
     let cert = PathBuf::from(args.next().context(USAGE)?);
     let key = PathBuf::from(args.next().context(USAGE)?);
+    ensure!(
+        std::fs::symlink_metadata(&database)?.is_file(),
+        "expected a regular controller database file, not a symlink"
+    );
+    #[cfg(unix)]
+    let _lifecycle_lock = laneway_controller::database_lock::acquire(&database)?;
     let mut root = None;
     let mut issuer = None;
     let mut client_ca = None;

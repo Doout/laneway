@@ -195,6 +195,35 @@ fn principal(tx: &Transaction<'_>, id: Id) -> Result<Principal> {
     Ok(principal)
 }
 
+#[cfg(unix)]
+pub(crate) fn validate_backup(tx: &Transaction<'_>) -> Result<()> {
+    let enabled: i64 = tx.query_row(
+        "SELECT count(*) FROM automation_service_principals WHERE enabled=1",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        enabled <= 100,
+        "backup exceeds enabled automation principal limit"
+    );
+    let over_limit: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM automation_service_access_tokens WHERE revoked_at IS NULL
+                       GROUP BY principal_id HAVING count(*)>100)",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(
+        !over_limit,
+        "backup exceeds unrevoked automation token limit"
+    );
+    let mut stmt = tx.prepare("SELECT id FROM automation_service_principals ORDER BY id")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        principal(tx, Id::new(row.get(0)?)?)?;
+    }
+    Ok(())
+}
+
 fn id_column(row: &Row<'_>, index: usize) -> rusqlite::Result<String> {
     let raw = row.get::<_, [u8; 16]>(index)?;
     Id::new(raw).map(|id| id.to_string()).map_err(|e| {
