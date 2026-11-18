@@ -34,9 +34,7 @@ impl SessionStore {
         let now = clock(&tx)?;
         peer.binding(&tx, now)?;
         ensure!(!cancelled(), "configuration cancelled");
-        maintenance::expire_routes(&tx, peer.net, now)?;
-        maintenance::expire(&tx, now)?;
-        maintenance::expire_exits(&tx, now)?;
+        maintain_configuration(&tx, peer.net, now)?;
         tx.commit()?;
 
         let tx = self
@@ -59,18 +57,7 @@ impl SessionStore {
             "ephemeral" => EnrollmentClass::EphemeralUser,
             _ => anyhow::bail!("invalid enrollment class"),
         };
-        let epoch: u64 = tx
-            .query_row(
-                "SELECT configuration_epoch FROM networks WHERE id=?",
-                [peer.net.as_bytes()],
-                |r| r.get::<_, i64>(0),
-            )?
-            .try_into()?;
-        ensure!(epoch > 0, "invalid configuration epoch");
-        ensure!(
-            req.known_configuration_epoch <= epoch,
-            ConfigurationError::StaleEpoch
-        );
+        let epoch = configuration_epoch(&tx, peer.net, req.known_configuration_epoch)?;
         let heartbeat = if is_exit {
             Some(heartbeat(
                 &tx,
@@ -85,19 +72,8 @@ impl SessionStore {
             );
             None
         };
-        // If bounded maintenance left excess work (or a deadline was crossed),
-        // do not renew the old epoch. The next poll will sweep another batch.
-        let next:Option<i64>=tx.query_row("SELECT min(deadline) FROM (
-            SELECT valid_until AS deadline FROM routes WHERE network_id=?1 AND state='approved'
-            UNION ALL SELECT lease_expires_at FROM nodes WHERE network_id=?1 AND revoked_at IS NULL
-            UNION ALL SELECT revoke_at FROM ephemeral_exit_sessions WHERE network_id=?1 AND terminated_at IS NULL
-        )",[peer.net.as_bytes()],|r|r.get(0))?;
-        let health = certificate_health(peer)?;
-        let end = now
-            .checked_add(i64::try_from(validity)?)
-            .context("invalid configuration validity")?
-            .min(next.unwrap_or(i64::MAX))
-            .min(i64::try_from(health.not_after_unix_seconds)?)
+        let health = certificate_health(&peer.der)?;
+        let end = configuration_deadline(&tx, peer.net, now, validity, &health)?
             .min(heartbeat.map_or(i64::MAX, |(suspect, _)| suspect));
         ensure!(end > now, "configuration expired during maintenance");
         let mut lease = ConfigurationLease {
@@ -170,17 +146,59 @@ impl SessionStore {
         Ok(snapshot)
     }
 }
-fn clock(tx: &Transaction<'_>) -> Result<i64> {
+pub(super) fn maintain_configuration(tx: &Transaction<'_>, net: Id, now: i64) -> Result<()> {
+    maintenance::expire_routes(tx, net, now)?;
+    maintenance::expire(tx, now)?;
+    maintenance::expire_exits(tx, now)
+}
+
+pub(super) fn configuration_epoch(tx: &Transaction<'_>, net: Id, known: u64) -> Result<u64> {
+    let epoch: u64 = tx
+        .query_row(
+            "SELECT configuration_epoch FROM networks WHERE id=?",
+            [net.as_bytes()],
+            |r| r.get::<_, i64>(0),
+        )?
+        .try_into()?;
+    ensure!(epoch > 0, "invalid configuration epoch");
+    ensure!(known <= epoch, ConfigurationError::StaleEpoch);
+    Ok(epoch)
+}
+
+pub(super) fn configuration_deadline(
+    tx: &Transaction<'_>,
+    net: Id,
+    now: i64,
+    validity: u64,
+    health: &CertificateHealth,
+) -> Result<i64> {
+    // If bounded maintenance left excess work (or a deadline was crossed),
+    // do not renew the old epoch. The next poll will sweep another batch.
+    let next:Option<i64>=tx.query_row("SELECT min(deadline) FROM (
+        SELECT valid_until AS deadline FROM routes WHERE network_id=?1 AND state='approved'
+        UNION ALL SELECT lease_expires_at FROM nodes WHERE network_id=?1 AND revoked_at IS NULL
+        UNION ALL SELECT revoke_at FROM ephemeral_exit_sessions WHERE network_id=?1 AND terminated_at IS NULL
+    )",[net.as_bytes()],|r|r.get(0))?;
+    let end = now
+        .checked_add(i64::try_from(validity)?)
+        .context("invalid configuration validity")?
+        .min(next.unwrap_or(i64::MAX))
+        .min(i64::try_from(health.not_after_unix_seconds)?);
+    ensure!(end > now, "configuration expired during maintenance");
+    Ok(end)
+}
+
+pub(super) fn clock(tx: &Transaction<'_>) -> Result<i64> {
     Ok(tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?)
 }
-fn certificate_health(peer: &NodeCredential) -> Result<CertificateHealth> {
-    let (_, leaf) = parse_x509_certificate(&peer.der)
-        .map_err(|_| anyhow::anyhow!("invalid verified certificate"))?;
+pub(super) fn certificate_health(der: &[u8]) -> Result<CertificateHealth> {
+    let (_, leaf) =
+        parse_x509_certificate(der).map_err(|_| anyhow::anyhow!("invalid verified certificate"))?;
     let start = leaf.validity().not_before.timestamp();
     let end = leaf.validity().not_after.timestamp();
     ensure!(start > 0 && end > start, "invalid certificate validity");
     Ok(CertificateHealth {
-        presented_serial: peer.serial.clone(),
+        presented_serial: laneway_protocol::certificate_serial_from_der(der)?,
         not_after_unix_seconds: end.try_into()?,
         renew_after_unix_seconds: (start + (end - start) * 2 / 3).try_into()?,
         revoked: false,
@@ -256,66 +274,83 @@ fn peers(tx: &Transaction<'_>, net: Id, now: i64) -> Result<Vec<NodePeer>> {
     }
     Ok(result)
 }
-fn routes(tx: &Transaction<'_>, net: Id, epoch: u64, now: i64) -> Result<RouteSnapshot> {
-    let mut stmt=tx.prepare("SELECT a.id,a.node_id,a.address,a.prefix_length,'overlay','none',0
+const OVERLAY_ROUTES:&str="SELECT a.id,a.node_id,a.address,a.prefix_length,'overlay','none',0
         FROM overlay_addresses a JOIN nodes n ON n.id=a.node_id AND n.network_id=a.network_id
         WHERE a.network_id=?1 AND a.released_at IS NULL AND n.revoked_at IS NULL
-          AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?2) ORDER BY a.prefix_length DESC,a.address,a.id LIMIT 16385")?;
-    let mut advertised=tx.prepare("SELECT r.id,r.node_id,r.prefix_address,r.prefix_length,r.kind,r.mode,r.metric
+          AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?2) ORDER BY a.prefix_length DESC,a.address,a.id LIMIT 16385";
+const APPROVED_ROUTES:&str="SELECT r.id,r.node_id,r.prefix_address,r.prefix_length,r.kind,r.mode,r.metric
         FROM routes r JOIN nodes n ON n.id=r.node_id AND n.network_id=r.network_id WHERE r.network_id=?1 AND r.state='approved'
         AND (r.valid_until IS NULL OR r.valid_until>?2) AND n.revoked_at IS NULL AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?2)
-        ORDER BY r.prefix_length DESC,r.metric,r.id LIMIT 16385")?;
+        ORDER BY r.prefix_length DESC,r.metric,r.id LIMIT 16385";
+
+fn routes(tx: &Transaction<'_>, net: Id, epoch: u64, now: i64) -> Result<RouteSnapshot> {
     let mut result = Vec::new();
-    for stmt in [&mut stmt, &mut advertised] {
-        let mut rows = stmt.query((net.as_bytes(), now))?;
-        while let Some(r) = rows.next()? {
-            ensure!(result.len() < 16384, "too many routes");
-            let id: Vec<u8> = r.get(0)?;
-            let via: Vec<u8> = r.get(1)?;
-            Id::from_slice(&id)?;
-            Id::from_slice(&via)?;
-            let destination = IpPrefix {
-                address: r.get(2)?,
-                prefix_length: r.get(3)?,
-            };
-            prefix_from_wire(destination.clone())?;
-            let (kind, mode) = match (
-                r.get::<_, String>(4)?.as_str(),
-                r.get::<_, String>(5)?.as_str(),
-            ) {
-                ("overlay", "none")
-                    if usize::try_from(destination.prefix_length)?
-                        == destination.address.len() * 8 =>
-                {
-                    (RouteKind::Overlay, RouteAdvertisementMode::Unspecified)
-                }
-                ("subnet", "nat") => (RouteKind::Subnet, RouteAdvertisementMode::Nat),
-                ("subnet", "routed") => (RouteKind::Subnet, RouteAdvertisementMode::Routed),
-                ("exit", "nat") if destination.prefix_length == 0 => {
-                    (RouteKind::Exit, RouteAdvertisementMode::Nat)
-                }
-                ("exit", "routed") if destination.prefix_length == 0 => {
-                    (RouteKind::Exit, RouteAdvertisementMode::Routed)
-                }
-                _ => anyhow::bail!("invalid route kind or forwarding mode"),
-            };
-            result.push(Route {
-                destination: Some(destination),
-                via_node_id: via,
-                kind: kind as i32,
-                metric: r.get(6)?,
-                route_id: id,
-                mode: mode as i32,
-            });
-        }
-    }
+    read_routes(tx, net, now, OVERLAY_ROUTES, &mut result)?;
+    read_routes(tx, net, now, APPROVED_ROUTES, &mut result)?;
     Ok(RouteSnapshot {
         network_id: net.as_bytes().to_vec(),
         configuration_epoch: epoch,
         routes: result,
     })
 }
-fn revocations(tx: &Transaction<'_>, net: Id, now: i64) -> Result<Vec<Vec<u8>>> {
+
+pub(super) fn advertised_routes(tx: &Transaction<'_>, net: Id, now: i64) -> Result<Vec<Route>> {
+    let mut result = Vec::new();
+    read_routes(tx, net, now, APPROVED_ROUTES, &mut result)?;
+    Ok(result)
+}
+
+fn read_routes(
+    tx: &Transaction<'_>,
+    net: Id,
+    now: i64,
+    sql: &str,
+    result: &mut Vec<Route>,
+) -> Result<()> {
+    let mut stmt = tx.prepare(sql)?;
+    let mut rows = stmt.query((net.as_bytes(), now))?;
+    while let Some(r) = rows.next()? {
+        ensure!(result.len() < 16384, "too many routes");
+        let id: Vec<u8> = r.get(0)?;
+        let via: Vec<u8> = r.get(1)?;
+        Id::from_slice(&id)?;
+        Id::from_slice(&via)?;
+        let destination = IpPrefix {
+            address: r.get(2)?,
+            prefix_length: r.get(3)?,
+        };
+        prefix_from_wire(destination.clone())?;
+        let (kind, mode) = match (
+            r.get::<_, String>(4)?.as_str(),
+            r.get::<_, String>(5)?.as_str(),
+        ) {
+            ("overlay", "none")
+                if usize::try_from(destination.prefix_length)? == destination.address.len() * 8 =>
+            {
+                (RouteKind::Overlay, RouteAdvertisementMode::Unspecified)
+            }
+            ("subnet", "nat") => (RouteKind::Subnet, RouteAdvertisementMode::Nat),
+            ("subnet", "routed") => (RouteKind::Subnet, RouteAdvertisementMode::Routed),
+            ("exit", "nat") if destination.prefix_length == 0 => {
+                (RouteKind::Exit, RouteAdvertisementMode::Nat)
+            }
+            ("exit", "routed") if destination.prefix_length == 0 => {
+                (RouteKind::Exit, RouteAdvertisementMode::Routed)
+            }
+            _ => anyhow::bail!("invalid route kind or forwarding mode"),
+        };
+        result.push(Route {
+            destination: Some(destination),
+            via_node_id: via,
+            kind: kind as i32,
+            metric: r.get(6)?,
+            route_id: id,
+            mode: mode as i32,
+        });
+    }
+    Ok(())
+}
+pub(super) fn revocations(tx: &Transaction<'_>, net: Id, now: i64) -> Result<Vec<Vec<u8>>> {
     let mut stmt=tx.prepare("SELECT serial FROM certificates WHERE network_id=? AND revoked_at IS NOT NULL AND not_after>? ORDER BY serial LIMIT 16385")?;
     let serials = stmt
         .query_map((net.as_bytes(), now), |r| r.get::<_, Vec<u8>>(0))?

@@ -343,9 +343,16 @@ impl Client {
         );
         let root = fs::read(&config.tls.ca_file).context("read controller CA")?;
         let url = reqwest::Url::parse(&controller.endpoint).context("parse controller endpoint")?;
+        // Match the Go client's default: use the authenticated HTTPS
+        // authority, not the possibly different UDP dial target, for TLS.
+        let host = url.host_str().context("missing controller endpoint host")?;
+        let server_name = host
+            .strip_prefix('[')
+            .and_then(|ip| ip.strip_suffix(']'))
+            .unwrap_or(host);
         if !controller.server_name.is_empty() {
             ensure!(
-                url.host_str() == Some(controller.server_name.as_str()),
+                server_name == controller.server_name,
                 "Rust relay requires controller.server_name to match endpoint host"
             );
         }
@@ -373,7 +380,7 @@ impl Client {
             .map(|endpoint| {
                 QuicControl::new(
                     endpoint,
-                    controller.server_name.clone(),
+                    server_name.to_owned(),
                     expected_controller,
                     controller.timeout,
                     &config.tls.certificate_file,

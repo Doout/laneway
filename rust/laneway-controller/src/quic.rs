@@ -7,6 +7,7 @@ use laneway_controller::{
     enrollment::{
         EnrollError,
         configuration::ConfigurationError,
+        relay_configuration::{RelayCredential, RelayReply},
         renewal::{NodeCredential, RenewalTransport},
     },
 };
@@ -42,6 +43,11 @@ pub(super) fn config(tls: rustls::ServerConfig) -> Result<quinn::ServerConfig> {
 }
 
 type Exits = Arc<Mutex<HashMap<Id, Connection>>>;
+#[derive(Clone)]
+enum ControlPeer {
+    Node(Arc<NodeCredential>),
+    Relay(Arc<RelayCredential>),
+}
 struct Claim(Exits, Id, usize);
 impl Drop for Claim {
     fn drop(&mut self) {
@@ -101,17 +107,29 @@ async fn connection(conn: &Connection, network: Id, state: State, exits: Exits) 
     let cert = certs.first().context("empty verified chain")?;
     let id = identity_from_certificate_der(cert.as_ref())?;
     ensure!(
-        id.network_id == network && id.role == Role::Node,
-        "not a controller-network node"
+        id.network_id == network,
+        "peer is not in controller network"
     );
-    let peer = Arc::new(NodeCredential::from_verified_peer(cert.as_ref())?);
+    let peer = match id.role {
+        Role::Node => {
+            ControlPeer::Node(Arc::new(NodeCredential::from_verified_peer(cert.as_ref())?))
+        }
+        Role::Relay => ControlPeer::Relay(Arc::new(RelayCredential::from_verified_peer(
+            cert.as_ref(),
+        )?)),
+        _ => anyhow::bail!("client role is not allowed"),
+    };
     let permit = state.queries.clone().try_acquire_owned()?;
     let admitted = {
         let db = state.database.clone();
         let peer = peer.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            SessionStore::open(&db)?.node_control_admission(&peer)
+            let mut store = SessionStore::open(&db)?;
+            match peer {
+                ControlPeer::Node(peer) => store.node_control_admission(&peer),
+                ControlPeer::Relay(peer) => store.check_relay_peer(&peer).map(|_| None),
+            }
         })
         .await??
     };
@@ -131,7 +149,7 @@ async fn request(
     mut send: SendStream,
     mut recv: RecvStream,
     state: &State,
-    peer: Arc<NodeCredential>,
+    peer: ControlPeer,
     conn: &Connection,
     holds_exit_claim: bool,
 ) -> Result<()> {
@@ -156,12 +174,15 @@ async fn request(
     let operation = envelope.body.context("missing control operation")?;
     ensure!(
         matches!(
-            operation,
-            Body::RenewalRequest(_) | Body::ConfigurationRequest(_)
+            (&peer, &operation),
+            (
+                ControlPeer::Node(_),
+                Body::RenewalRequest(_) | Body::ConfigurationRequest(_)
+            ) | (ControlPeer::Relay(_), Body::RelayConfigurationRequest(_))
         ),
         "unsupported control operation"
     );
-    let issuer = state.issuer.clone().context("node issuer unavailable")?;
+    let issuer = state.issuer.clone();
     let validity = state.snapshot_validity;
     let body = if let Ok(permit) = state.queries.clone().try_acquire_owned() {
         let db = state.database.clone();
@@ -171,22 +192,28 @@ async fn request(
             let _permit = permit;
             let mut store = SessionStore::open(&db)?;
             let cancelled = || cancel.is_closed() || conn.close_reason().is_some();
-            match operation {
-                Body::RenewalRequest(req) => {
+            match (peer, operation) {
+                (ControlPeer::Node(peer), Body::RenewalRequest(req)) => {
                     store.node_control_admission(&peer)?;
                     store
                         .renew_certificate(
                             &peer,
                             req,
-                            &issuer,
+                            issuer.as_deref().context("node issuer unavailable")?,
                             RenewalTransport::Quic { holds_exit_claim },
                             cancelled,
                         )
                         .map(Body::RenewalResponse)
                 }
-                Body::ConfigurationRequest(req) => {
+                (ControlPeer::Node(peer), Body::ConfigurationRequest(req)) => {
                     store.node_configuration(&peer, req, holds_exit_claim, validity, cancelled)
                 }
+                (ControlPeer::Relay(peer), Body::RelayConfigurationRequest(req)) => store
+                    .relay_configuration(&peer, req, validity, cancelled)
+                    .map(|r| match r {
+                        RelayReply::Snapshot(cfg) => Body::RelayConfiguration(cfg),
+                        RelayReply::Lease(lease) => Body::ConfigurationLease(lease),
+                    }),
                 _ => anyhow::bail!("unsupported operation"),
             }
         })
@@ -199,10 +226,10 @@ async fn request(
                         (ErrorCode::Unauthenticated, "invalid credential", false)
                     }
                     Some(EnrollError::Malformed(_)) => {
-                        (ErrorCode::Malformed, "malformed node request", false)
+                        (ErrorCode::Malformed, "malformed control request", false)
                     }
                     Some(EnrollError::Denied | EnrollError::Conflict) => {
-                        (ErrorCode::PermissionDenied, "node request denied", false)
+                        (ErrorCode::PermissionDenied, "control request denied", false)
                     }
                     _ if e.is::<ConfigurationError>() => {
                         match e.downcast_ref::<ConfigurationError>().unwrap() {

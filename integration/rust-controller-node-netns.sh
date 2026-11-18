@@ -200,8 +200,9 @@ echo "==> building the real controller service fixture, product binaries, and Ru
 cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-healthcheck
 cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
 if [[ "${node_controller}" == "rust" ]]; then
-  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p laneway-controller
+  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p laneway-controller -p laneway-relay
   cp "${repo_root}/rust/target/debug/laneway-controller" "${work_dir}/rust-controller"
+  cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/rust-relay"
 fi
 
 network_id="21000000000000000000000000000001"
@@ -329,23 +330,20 @@ node_endpoint="${controller_endpoint}"
 node_quic_endpoint="${controller_quic_endpoint}"
 node_server_name="10.254.0.1"
 native_controller_pid=""
+relay_metrics=""
 if [[ "${node_controller}" == "rust" ]]; then
-  node_endpoint="https://127.0.0.1:9443"
-  node_quic_endpoint="127.0.0.1:9443"
-  node_server_name="127.0.0.1"
-  "${work_dir}/laneway" pki controller \
-    -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
-    -network-id "${network_id}" -service-id "${controller_service}" -ip "${node_server_name}" \
-    -out-cert "${work_dir}/pki/native-controller.crt" -out-key "${work_dir}/pki/native-controller.key"
-  # Keep the native HTTPS listener loopback-only. Go owns the admin and relay
-  # requests; only the Rust controller answers configuration/renewal for lane0.
-  start_process "${rust_ns}" "${work_dir}/native-controller.log" \
-    "${work_dir}/rust-controller" serve "${work_dir}/controller.db" "${node_quic_endpoint}" \
-    "${work_dir}/pki/native-controller.crt" "${work_dir}/pki/native-controller.key" \
+  node_endpoint="https://10.254.0.1:9443"
+  node_quic_endpoint="10.254.0.1:9443"
+  relay_metrics='metrics_listen = "127.0.0.1:6060"'
+  # Keep HTTPS loopback-only. Node and relay fetch production-format
+  # control snapshots over QUIC from a separate namespace.
+  start_process "${controller_ns}" "${work_dir}/native-controller.log" \
+    "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
+    "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
     --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
-    --node-quic --snapshot-validity 2
+    --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity 2
   native_controller_pid="${last_pid}"
-  wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening ${node_endpoint}"
+  wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
 fi
 
 cat >"${work_dir}/relay.toml" <<EOF
@@ -358,9 +356,10 @@ private_key = "${work_dir}/pki/relay.key"
 ca = "${work_dir}/pki/ca.crt"
 [relay]
 listen = "10.254.0.2:4433"
+${relay_metrics}
 [controller]
-endpoint = "${controller_endpoint}"
-quic_endpoint = "${controller_quic_endpoint}"
+endpoint = "${node_endpoint}"
+quic_endpoint = "${node_quic_endpoint}"
 network_id = "${network_id}"
 service_id = "${controller_service}"
 poll_interval = "100ms"
@@ -479,8 +478,12 @@ if [[ "$(ip -n "${rust_ns}" -o -4 address show dev lane0 | wc -l)" != "1" ]]; th
   exit 1
 fi
 
-start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/laneway-relay" \
-  -config "${work_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+if [[ "${node_controller}" == "rust" ]]; then
+  start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/rust-relay" --config "${work_dir}/relay.toml"
+else
+  start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/laneway-relay" \
+    -config "${work_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+fi
 relay_pid="${last_pid}"
 wait_log "${relay_pid}" "${work_dir}/relay.log" "listening"
 start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/lanewayd" \
@@ -515,7 +518,21 @@ for _ in $(seq 1 200); do
   sleep 0.05
 done
 ip netns exec "${gateway_ns}" nft list table inet laneway | grep -q '192.168.77.0/24'
+relay_forwarded_packets() {
+  ip netns exec "${relay_ns}" "${work_dir}/netprobe" metric \
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total
+}
+if [[ "${node_controller}" == "rust" ]]; then
+  forwarded_before="$(relay_forwarded_packets)"
+fi
 udp_success 9701 rust-route-allowed
+if [[ "${node_controller}" == "rust" ]]; then
+  forwarded_after="$(relay_forwarded_packets)"
+  if (( forwarded_after < forwarded_before + 2 )); then
+    echo "ERROR: the request and reply did not use the Rust relay" >&2
+    exit 1
+  fi
+fi
 
 echo "==> deleting the only ACL rule leaves the route present but fails traffic closed"
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl delete \
@@ -593,6 +610,10 @@ if ip -n "${rust_ns}" -4 address show dev lane0 2>/dev/null | grep -q "${rust_ad
   exit 1
 fi
 grep -q 'authority expired' "${work_dir}/rust.log"
+if [[ "${node_controller}" == "rust" ]]; then
+  wait_relay_sessions 0
+  kill -0 "${relay_pid}"
+fi
 
 stop_process "${gateway_pid}"
 stop_process "${relay_pid}"

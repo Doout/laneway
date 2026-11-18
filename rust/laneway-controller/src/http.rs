@@ -19,6 +19,7 @@ mod login;
 mod management;
 mod mutations;
 mod node_proto;
+mod relay_configuration;
 mod renew;
 
 const COOKIE: &str = "__Host-laneway_admin_session";
@@ -28,7 +29,7 @@ type Reply = Response<Full<Bytes>>;
 
 #[derive(Clone)]
 pub struct State {
-    renewal_enabled: bool,
+    workload_mtls_enabled: bool,
     pub(crate) database: Arc<PathBuf>,
     pub(crate) queries: Arc<Semaphore>,
     root: Option<Arc<RootCredential>>,
@@ -44,12 +45,12 @@ impl State {
         database: PathBuf,
         root: Option<RootCredential>,
         issuer: Option<laneway_controller::node_pki::NodeIssuer>,
-        renewal_enabled: bool,
+        workload_mtls_enabled: bool,
         snapshot_validity: u64,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             snapshot_validity,
-            renewal_enabled,
+            workload_mtls_enabled,
             database: Arc::new(database),
             issuer: issuer.map(Arc::new),
             enrollments: Default::default(),
@@ -225,8 +226,11 @@ async fn dispatch(
     peer: std::net::IpAddr,
 ) -> Result<Reply, Failure> {
     let path = req.uri().path();
-    if path == "/v1/renew" && state.renewal_enabled {
+    if path == "/v1/renew" && state.workload_mtls_enabled {
         return Ok(renew::handle(req, state, id).await);
+    }
+    if path == "/v1/relay/configuration" && state.workload_mtls_enabled {
+        return Ok(relay_configuration::handle(req, state, id).await);
     }
     if path == "/v1/enroll" && state.issuer.is_some() {
         return Ok(enroll::handle(req, state, id, peer).await);

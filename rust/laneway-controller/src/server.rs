@@ -15,7 +15,13 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic] [--snapshot-validity SECONDS]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS]";
+
+struct QuicListener {
+    config: quinn::ServerConfig,
+    network: laneway_protocol::Id,
+    address: Option<SocketAddr>,
+}
 
 pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let database = PathBuf::from(args.next().context(USAGE)?);
@@ -35,6 +41,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut issuer = None;
     let mut client_ca = None;
     let mut node_quic = false;
+    let mut quic_listen = None;
     let mut snapshot_validity = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
@@ -64,6 +71,14 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             client_ca = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--node-quic" && !node_quic {
             node_quic = true;
+        } else if flag == "--quic-listen" && quic_listen.is_none() {
+            quic_listen = Some(
+                args.next()
+                    .context(USAGE)?
+                    .to_str()
+                    .context(USAGE)?
+                    .parse()?,
+            );
         } else if flag == "--snapshot-validity" && snapshot_validity.is_none() {
             let seconds = args
                 .next()
@@ -84,14 +99,19 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         client_ca.is_none() || issuer.is_some(),
         "node renewal requires --node-issuer"
     );
+    ensure!(
+        quic_listen.is_none() || node_quic,
+        "--quic-listen requires --node-quic"
+    );
     let (config, _) = tls(&cert, &key, client_ca.as_deref(), false)?;
     let quic = if node_quic {
         ensure!(client_ca.is_some(), "node QUIC requires --node-client-ca");
         let (config, id) = tls(&cert, &key, client_ca.as_deref(), true)?;
-        Some((
-            crate::quic::config(config)?,
-            id.context("missing controller identity")?.network_id,
-        ))
+        Some(QuicListener {
+            config: crate::quic::config(config)?,
+            network: id.context("missing controller identity")?.network_id,
+            address: quic_listen,
+        })
     } else {
         None
     };
@@ -203,16 +223,16 @@ async fn serve(
     state: super::http::State,
     address: SocketAddr,
     config: ServerConfig,
-    quic: Option<(quinn::ServerConfig, laneway_protocol::Id)>,
+    quic: Option<QuicListener>,
 ) -> Result<()> {
     let listener = TcpListener::bind(address).await?;
-    // Bind both sockets before announcing readiness. UDP uses the actual TCP
-    // port even when the lab requests an ephemeral port.
+    // Bind both sockets before announcing readiness. By default UDP shares the
+    // actual TCP address even when the lab requests an ephemeral port.
     let endpoint = quic
-        .map(|(cfg, network)| {
+        .map(|cfg| {
             Ok::<_, anyhow::Error>((
-                quinn::Endpoint::server(cfg, listener.local_addr()?)?,
-                network,
+                quinn::Endpoint::server(cfg.config, cfg.address.unwrap_or(listener.local_addr()?))?,
+                cfg.network,
             ))
         })
         .transpose()?;
@@ -227,6 +247,9 @@ async fn serve(
     let connections = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
     println!("listening https://{}", listener.local_addr()?);
+    if let Some((ep, _)) = &endpoint {
+        println!("listening quic://{}", ep.local_addr()?);
+    }
     let stop = stop();
     tokio::pin!(stop);
     loop {

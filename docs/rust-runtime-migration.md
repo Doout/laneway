@@ -223,14 +223,17 @@ before sending its body and checks that no replacement is issued.
 
 ### Renew over the Rust controller's QUIC listener (lab only)
 
-Add `--node-quic` alongside `--node-issuer` and `--node-client-ca`. It binds
-UDP on the same loopback address and port as HTTPS. Use a service certificate
+Add `--node-quic` alongside `--node-issuer` and `--node-client-ca`. By default
+UDP binds the same loopback address and port as HTTPS. To put QUIC on a
+dedicated lab interface, set `--quic-listen IP:PORT`; HTTPS stays loopback-only.
+Use a service certificate
 with the controller's network and service ID and the DNS name or IP the client
 verifies. Omit `--node-quic` to return to HTTPS-only without changing stored state.
 
 The Go node client can now renew at Rust using the existing
 `laneway-control/1` protocol, with no working HTTPS fallback. The listener
-requires mutual TLS and only accepts nodes from its own network. Certificate
+requires mutual TLS and only accepts node and relay identities from its
+own network, each limited to its own operations. Certificate
 revocation takes effect on established connections; an ephemeral exit cannot
 use a second connection to displace a healthy session. Renewal does not extend
 the heartbeat lease.
@@ -244,9 +247,15 @@ An ephemeral exit configuration request must carry its live lease generation
 on the owning connection to refresh its heartbeat. Configure the upper bound
 with `--snapshot-validity SECONDS` (default 300).
 
+Relays fetch peer ownership, policy, and revocations over QUIC or over
+`POST /v1/relay/configuration` on the HTTPS listener. The controller checks
+the relay certificate and enabled registration before every snapshot or lease,
+including on existing connections. The relay keeps its last issued lease
+until it expires; the controller does not renew it after disablement.
+
 Managed user/team and named-resource grants are not yet compiled by Rust;
-user-bound nodes fail closed. Relay configuration and other Go control operations
-also still require Go. Keep Go serving production.
+user-bound nodes fail closed. Other Go control operations are still required.
+Keep Go serving production.
 
 ### Renew a Rust node at a Go or Rust controller (lab only)
 
@@ -269,5 +278,6 @@ its old connections and interface, then bootstraps again using the new leaf.
 `integration/rust-controller-node-netns.sh` exercises this handoff, revokes
 the superseded certificate, and sends real traffic through the renewed node.
 Run it with `LANEWAY_NODE_TEST_CONTROLLER=rust` to test native Rust configuration,
-renewal, route and ACL updates, certificate revocation, and lease expiry. In
-that fixture Go still supplies the admin mutations and the relay's control API.
+renewal, route and ACL updates, certificate revocation, and lease expiry.
+In that mode both the Rust relay and the Rust node use the Rust controller's
+QUIC listener. The fixture still uses Go for admin mutations and the gateway.

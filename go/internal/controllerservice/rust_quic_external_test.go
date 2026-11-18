@@ -105,8 +105,11 @@ func TestRustControllerQUIC(t *testing.T) {
 	clientFor := func(name string, m pki.Material, address string, generation uint64) *controllerclient.Client {
 		t.Helper()
 		cert, key := pair(name, m)
-		// Deliberately unreachable HTTPS: this test only passes over UDP.
-		cl, err := controllerclient.New(controllerclient.Options{Endpoint: "https://127.0.0.1:1", QUICEndpoint: address, CAFile: root, CertificateFile: cert, PrivateKeyFile: key, ExpectedNetworkID: net1.ID, ExpectedServiceID: sid, Timeout: 2 * time.Second, EphemeralExitLeaseGeneration: generation})
+		https, quicAddress := "https://127.0.0.1:1", address
+		if strings.HasPrefix(address, "https://") {
+			https, quicAddress = address, ""
+		}
+		cl, err := controllerclient.New(controllerclient.Options{Endpoint: https, QUICEndpoint: quicAddress, CAFile: root, CertificateFile: cert, PrivateKeyFile: key, ExpectedNetworkID: net1.ID, ExpectedServiceID: sid, Timeout: 2 * time.Second, EphemeralExitLeaseGeneration: generation})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -207,7 +210,12 @@ func TestRustControllerQUIC(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err = store.RegisterRelay(ctx, net1.ID, relayID, nil, "relay", "127.0.0.1:4433"); err != nil {
+		registration, _, err := store.RegisterRelay(ctx, net1.ID, relayID, nil, "relay", "127.0.0.1:4433")
+		if err != nil {
+			t.Fatal(err)
+		}
+		relayMaterial, _, err := pki.IssueService(ca, signer.PrivateKey, pki.ServiceIdentity{NetworkID: net1.ID, ServiceID: relayID, Role: pki.RoleRelay}, nil, nil, now, time.Hour)
+		if err != nil {
 			t.Fatal(err)
 		}
 		goService, err := controllerservice.New(controllerservice.Options{Store: store, CACertificate: ca, CAKey: signer.PrivateKey, LeafValidity: time.Hour})
@@ -242,6 +250,59 @@ func TestRustControllerQUIC(t *testing.T) {
 		oracle.ValidUntilUnixSeconds = rust.ValidUntilUnixSeconds
 		if !proto.Equal(oracle, rust) {
 			t.Fatalf("snapshot mismatch\nGo: %v\nRust: %v", oracle, rust)
+		}
+		relayOracle := clientFor("relay-reference", relayMaterial, goServer.Addr().String(), 0)
+		relayReference, unchanged, err := relayOracle.RelayConfiguration(ctx, 0)
+		if err != nil || unchanged {
+			t.Fatalf("Go relay snapshot: unchanged=%t err=%v", unchanged, err)
+		}
+		relayClients := []*controllerclient.Client{
+			clientFor("relay-quic", relayMaterial, endpoint, 0),
+			clientFor("relay-https", relayMaterial, "https://"+endpoint, 0),
+		}
+		if len(relayReference.Peers) != 2 || len(relayReference.RevokedCertificateSerials) != 1 || len(relayReference.Policy.Rules) != 1 {
+			t.Fatalf("fixture did not exercise relay policy: %v", relayReference)
+		}
+		relayReference.ValidUntilUnixSeconds = uint64(exp.Unix())
+		for i, cl := range relayClients {
+			cfg, unchanged, err := cl.RelayConfiguration(ctx, 0)
+			if err != nil || unchanged || !proto.Equal(cfg, relayReference) {
+				t.Fatalf("relay transport %d snapshot mismatch (%t, %v)\nGo: %v\nRust: %v", i, unchanged, err, relayReference, cfg)
+			}
+			lease, unchanged, err := cl.RelayConfiguration(ctx, cfg.ConfigurationEpoch)
+			if err != nil || !unchanged || lease.GetValidUntilUnixSeconds() != cfg.ValidUntilUnixSeconds {
+				t.Fatalf("relay transport %d conditional snapshot: %v %t %v", i, lease, unchanged, err)
+			}
+			// Registered relay certificates cannot access a node operation.
+			if _, _, err := cl.Configuration(ctx, 0); err == nil {
+				t.Fatalf("relay transport %d accepted as a node", i)
+			}
+			// Re-establish the QUIC connection after the role mismatch, so
+			// disabling the service below tests a live established session.
+			if _, _, err := cl.RelayConfiguration(ctx, cfg.ConfigurationEpoch); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, _, err := renewed.RelayConfiguration(ctx, 0); err == nil {
+			t.Fatal("node accepted as a relay")
+		}
+		httpsNode := clientFor("https-node", m, "https://"+endpoint, 0)
+		if _, _, err := httpsNode.RelayConfiguration(ctx, 0); err == nil {
+			t.Fatal("node certificate authorized for relay configuration over HTTPS")
+		}
+		disabledEpoch, err := store.DisableRelay(ctx, registration.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, cl := range relayClients {
+			if _, _, err := cl.RelayConfiguration(ctx, disabledEpoch); err == nil {
+				t.Fatalf("disabled relay accepted on transport %d", i)
+			}
+		}
+		// Disabling a relay changes the node epoch and removes discovery.
+		rust, unchanged, err = renewed.Configuration(ctx, rust.ConfigurationEpoch)
+		if err != nil || unchanged || len(rust.GetRelays()) != 0 || rust.GetConfigurationEpoch() != disabledEpoch {
+			t.Fatalf("relay disable not reflected in node snapshot: %v %t %v", rust, unchanged, err)
 		}
 		epoch := rust.ConfigurationEpoch
 		lease, unchanged, err := renewed.Configuration(ctx, epoch)
