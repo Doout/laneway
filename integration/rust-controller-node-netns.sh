@@ -195,7 +195,7 @@ echo "==> building the real controller service fixture, product binaries, and Ru
   go build -o "${work_dir}/netprobe" ./integration/netprobe
   go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller
 )
-cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs
+cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-healthcheck
 cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
 
 network_id="21000000000000000000000000000001"
@@ -434,6 +434,7 @@ start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/lanewayd" \
 gateway_pid="${last_pid}"
 wait_log "${gateway_pid}" "${work_dir}/gateway.log" "interface=lane0"
 wait_relay_sessions 2
+"${repo_root}/rust/target/debug/laneway-healthcheck" -unix "${work_dir}/rust.sock"
 
 echo "==> approved route mutation is installed transactionally and carries a real packet"
 if ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q .; then

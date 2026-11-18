@@ -1,0 +1,13 @@
+[package]
+name = "laneway-healthcheck"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Local readiness checks for Laneway runtime images"
+
+[dependencies]
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile = "3.26.0"

@@ -90,6 +90,11 @@ rust-test:
 rust-interop:
 	cd go && go test -count=1 -race -tags=rustinterop ./integration/rustrelay -v
 
+.PHONY: rust-controller-interop
+rust-controller-interop:
+	cargo build --locked --manifest-path rust/Cargo.toml -p laneway-controller
+	cd go && LANEWAY_RUST_CONTROLLER="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/laneway-controller" go test -count=1 -tags=rustinterop ./internal/controllerservice -run '^TestRustControllerInventory$$' -v
+
 rust-node-interop:
 	LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
 

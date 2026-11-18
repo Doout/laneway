@@ -4,9 +4,29 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY rust/ ./rust/
 COPY api/ ./api/
+RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-healthcheck
+
+FROM build AS node-build
+RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs
+
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS node
+RUN apk add --no-cache ca-certificates iproute2-minimal nftables procps-ng setpriv tini \
+    && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway \
+    && apk add --no-cache --virtual .cap-tools libcap-setcap \
+    && setcap cap_net_admin=ep /bin/setpriv && apk del .cap-tools
+COPY --from=node-build /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
+COPY --from=build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+USER 65532:65532
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
+ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/lanewayd-rs"]
+CMD ["--config", "/etc/laneway/node.toml"]
+
+FROM build AS relay-build
 RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-relay
 
-FROM scratch
-COPY --from=build /src/rust/target/release/laneway-relay /usr/local/bin/laneway-relay
+FROM scratch AS relay
+COPY --from=relay-build /src/rust/target/release/laneway-relay /usr/local/bin/laneway-relay
+COPY --from=build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway-relay"]

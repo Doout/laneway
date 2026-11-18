@@ -32,6 +32,7 @@ import (
 )
 
 type fixture struct {
+	dbPath  string
 	store   *controller.Store
 	network controller.Network
 	service *Service
@@ -39,7 +40,8 @@ type fixture struct {
 
 func newFixture(t *testing.T, maxBody int64, nodeAuth NodeAuthorizer) fixture {
 	t.Helper()
-	store, err := controller.Open(context.Background(), filepath.Join(t.TempDir(), "controller.db"))
+	dbPath := filepath.Join(t.TempDir(), "controller.db")
+	store, err := controller.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +73,7 @@ func newFixture(t *testing.T, maxBody int64, nodeAuth NodeAuthorizer) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fixture{store: store, network: network, service: service}
+	return fixture{dbPath: dbPath, store: store, network: network, service: service}
 }
 
 func TestOperationalMetricsClassifySuccessMalformedAndAuthorizationFailure(t *testing.T) {

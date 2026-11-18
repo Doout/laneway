@@ -241,6 +241,8 @@ jobs:
       - name: Go nodes through Rust relay
         working-directory: go
         run: go test -count=1 -race -tags=rustinterop ./integration/rustrelay -v
+      - name: Compare Rust inventory with Go controller HTTP responses
+        run: make rust-controller-interop
       - name: Install Rust node interoperability network tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping
       - name: Rust node executable interoperability
