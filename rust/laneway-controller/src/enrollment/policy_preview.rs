@@ -21,13 +21,29 @@ pub struct Preview {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Flow {
-    source_node_id: String,
-    destination_node_id: Option<String>,
-    destination_ip: Option<String>,
-    protocol: String,
+pub(super) struct Flow {
+    pub(super) source_node_id: String,
+    pub(super) destination_node_id: Option<String>,
+    pub(super) destination_ip: Option<String>,
+    pub(super) protocol: String,
     #[serde(default)]
-    destination_port: u16,
+    pub(super) destination_port: u16,
+}
+
+pub(super) struct CheckedFlow {
+    pub(super) source: Id,
+    pub(super) destination: Option<Id>,
+    pub(super) ip: Option<IpAddr>,
+    protocol: u8,
+    port: u16,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum Unavailable {
+    #[error("{0}")]
+    Inactive(&'static str),
+    #[error("no node or approved route resolves destination IP")]
+    Unresolved,
 }
 
 #[derive(Deserialize)]
@@ -49,97 +65,178 @@ pub(crate) fn preview(
     now: i64,
     req: Result<Preview>,
 ) -> Result<Value> {
+    check_network(tx, net)?;
+    let req = req?;
+    let flow = req.flow.check()?.bind_overlay(tx, net)?;
+    let evaluator = Evaluator::load(tx, net, now, &flow).map_err(preview_error)?;
+    let mut result = json!({
+        "current": evaluator.current()?,
+        "scope": "manual_acl_with_current_managed_access",
+    });
+    if let Some(rules) = req.proposed_rules {
+        result["proposed"] = evaluator.evaluate(proposal(rules, net, evaluator.epoch)?)?;
+    }
+    Ok(result)
+}
+
+pub(super) fn check_network(tx: &Transaction<'_>, net: Id) -> Result<()> {
     let exists: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM networks WHERE id=?)",
         [net.as_bytes()],
         |row| row.get(0),
     )?;
     ensure!(exists, AccessError::Missing);
-    let req = req?;
-    let source = parse_id(&req.flow.source_node_id, "invalid source node ID")?;
-    let protocol = req.flow.protocol()?;
-    let destination = req
-        .flow
-        .destination_node_id
-        .as_deref()
-        .filter(|id| !id.is_empty())
-        .map(|id| parse_id(id, "invalid destination node ID"))
-        .transpose()?;
-    let user = active_node(
-        tx,
-        net,
-        source,
-        now,
-        "source identity is revoked or expired",
-    )?;
-    if let Some(node) = destination {
-        active_node(
+    Ok(())
+}
+
+fn preview_error(err: anyhow::Error) -> anyhow::Error {
+    match err.downcast_ref::<Unavailable>() {
+        Some(Unavailable::Inactive(reason)) => AccessError::Invalid(reason).into(),
+        Some(Unavailable::Unresolved) => {
+            AccessError::Invalid("no node or approved route resolves destination IP").into()
+        }
+        None => err,
+    }
+}
+
+pub(super) struct Evaluator<'tx, 'db> {
+    tx: &'tx Transaction<'db>,
+    net: Id,
+    now: i64,
+    epoch: u64,
+    source: Id,
+    destination: Id,
+    user: Option<Id>,
+    peers: Vec<NodePeer>,
+    routes: RouteSnapshot,
+    packet: Packet,
+}
+
+impl<'tx, 'db> Evaluator<'tx, 'db> {
+    pub(super) fn load(
+        tx: &'tx Transaction<'db>,
+        net: Id,
+        now: i64,
+        flow: &CheckedFlow,
+    ) -> Result<Self> {
+        let user = active_node(
             tx,
             net,
-            node,
+            flow.source,
             now,
-            "destination identity is revoked or expired",
+            "source identity is revoked or expired",
         )?;
-    }
-    let epoch = configuration::configuration_epoch(tx, net, 0)?;
-    let peers = configuration::peers(tx, net, now)?;
-    let routes = configuration::routes(tx, net, epoch, now)?;
-    let to = req.flow.ip()?;
-    let (destination, to) = resolve(&peers, &routes, destination, to)?;
-    let from = addresses(peer(&peers, source)?)
-        .find(|ip| ip.is_ipv4() == to.is_ipv4())
-        .ok_or(AccessError::Invalid(
-            "source has no address in the destination address family",
-        ))?;
-    ensure!(
-        !(protocol == 1 && to.is_ipv6() || protocol == 58 && to.is_ipv4()),
-        AccessError::Invalid("ICMP protocol does not match address family")
-    );
-    let packet = Packet {
-        source: from,
-        destination: to,
-        protocol,
-        destination_port: matches!(protocol, 6 | 17).then_some(req.flow.destination_port),
-    };
-    let evaluate = |mut snapshot: PolicySnapshot| {
-        if let Some(user) = user {
-            managed_policy::apply(tx, (net, source), user, now, &peers, &routes, &mut snapshot)?;
+        if let Some(node) = flow.destination {
+            active_node(
+                tx,
+                net,
+                node,
+                now,
+                "destination identity is revoked or expired",
+            )?;
         }
-        let effective = CompiledPolicy::compile(snapshot, net, epoch)?;
+        let epoch = configuration::configuration_epoch(tx, net, 0)?;
+        let peers = configuration::peers(tx, net, now)?;
+        let routes = configuration::routes(tx, net, epoch, now)?;
+        let (destination, to) = resolve(&peers, &routes, flow.destination, flow.ip)?;
+        let from = addresses(peer(&peers, flow.source)?)
+            .find(|ip| ip.is_ipv4() == to.is_ipv4())
+            .ok_or(AccessError::Invalid(
+                "source has no address in the destination address family",
+            ))?;
+        let protocol = flow.protocol;
+        ensure!(
+            !(protocol == 1 && to.is_ipv6() || protocol == 58 && to.is_ipv4()),
+            AccessError::Invalid("ICMP protocol does not match address family")
+        );
+        Ok(Self {
+            tx,
+            net,
+            now,
+            epoch,
+            source: flow.source,
+            destination,
+            user,
+            peers,
+            routes,
+            packet: Packet {
+                source: from,
+                destination: to,
+                protocol,
+                destination_port: matches!(protocol, 6 | 17).then_some(flow.port),
+            },
+        })
+    }
+
+    pub(super) fn current(&self) -> Result<Value> {
+        self.evaluate(snapshot_policy::compile(self.tx, self.net, self.epoch)?)
+    }
+
+    fn evaluate(&self, mut snapshot: PolicySnapshot) -> Result<Value> {
+        if let Some(user) = self.user {
+            managed_policy::apply(
+                self.tx,
+                (self.net, self.source),
+                user,
+                self.now,
+                &self.peers,
+                &self.routes,
+                &mut snapshot,
+            )?;
+        }
+        let effective = CompiledPolicy::compile(snapshot, self.net, self.epoch)?;
         let mut trace = Vec::new();
-        let (accept, matched) = effective.evaluate(source, destination, packet, |rule, matched| {
-            trace.push(json!({
-                "rule_id": rule.id().to_string(),
-                "priority": rule.priority(),
-                "action": action_name(rule.accepts()),
-                "matched": matched,
-            }));
-        });
+        let (accept, matched) = effective.evaluate(
+            self.source,
+            self.destination,
+            self.packet,
+            |rule, matched| {
+                trace.push(json!({
+                    "rule_id": rule.id().to_string(),
+                    "priority": rule.priority(),
+                    "action": action_name(rule.accepts()),
+                    "matched": matched,
+                }));
+            },
+        );
         let mut result = json!({
-            "configuration_epoch": epoch,
+            "configuration_epoch": self.epoch,
             "action": action_name(accept),
             "default_result": matched.is_none(),
-            "destination_node_id": destination.to_string(),
-            "destination_ip": to,
+            "destination_node_id": self.destination.to_string(),
+            "destination_ip": self.packet.destination,
             "trace": trace,
         });
         if let Some(id) = matched {
             result["matched_rule_id"] = json!(id.to_string());
         }
-        Ok::<_, anyhow::Error>(result)
-    };
-
-    let mut result = json!({
-        "current": evaluate(snapshot_policy::compile(tx, net, epoch)?)?,
-        "scope": "manual_acl_with_current_managed_access",
-    });
-    if let Some(rules) = req.proposed_rules {
-        result["proposed"] = evaluate(proposal(rules, net, epoch)?)?;
+        Ok(result)
     }
-    Ok(result)
 }
 
 impl Flow {
+    pub(super) fn check(&self) -> Result<CheckedFlow> {
+        let source = parse_id(&self.source_node_id, "invalid source node ID")?;
+        let destination = self
+            .destination_node_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map(|id| parse_id(id, "invalid destination node ID"))
+            .transpose()?;
+        let ip = self.ip()?;
+        ensure!(
+            destination.is_some() || ip.is_some(),
+            AccessError::Invalid("destination node ID or IP is required")
+        );
+        Ok(CheckedFlow {
+            source,
+            destination,
+            ip,
+            protocol: self.protocol()?,
+            port: self.destination_port,
+        })
+    }
+
     fn protocol(&self) -> Result<u8> {
         match (
             self.protocol.to_ascii_lowercase().as_str(),
@@ -175,6 +272,27 @@ impl Flow {
     }
 }
 
+impl CheckedFlow {
+    pub(super) fn bind_overlay(mut self, tx: &Transaction<'_>, net: Id) -> Result<Self> {
+        // An allocated overlay address belongs to its node even if maintenance
+        // has not reaped an expired lease yet. Do not try a default route for it.
+        if self.destination.is_none()
+            && let Some(ip) = self.ip
+        {
+            let bytes = match ip {
+                IpAddr::V4(ip) => ip.octets().to_vec(),
+                IpAddr::V6(ip) => ip.octets().to_vec(),
+            };
+            self.destination = tx.query_row(
+                "SELECT node_id FROM overlay_addresses WHERE network_id=? AND address=? AND released_at IS NULL",
+                (net.as_bytes(), bytes),
+                |r| r.get::<_, [u8; 16]>(0),
+            ).optional()?.map(Id::new).transpose()?;
+        }
+        Ok(self)
+    }
+}
+
 fn parse_id(text: &str, message: &'static str) -> Result<Id> {
     text.parse()
         .map_err(|_| AccessError::Invalid(message).into())
@@ -189,14 +307,16 @@ fn active_node(
 ) -> Result<Option<Id>> {
     let (user, active): (Option<[u8; 16]>, bool) = tx
         .query_row(
-            "SELECT user_id, revoked_at IS NULL AND (lease_expires_at IS NULL OR lease_expires_at>?3)
+            "SELECT user_id, revoked_at IS NULL AND
+             CASE WHEN enrollment_class='ephemeral' THEN coalesce(lease_expires_at>?3,0)
+                  ELSE lease_expires_at IS NULL OR lease_expires_at>?3 END
              FROM nodes WHERE network_id=?1 AND id=?2",
             (net.as_bytes(), node.as_bytes(), now),
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
         .ok_or(AccessError::Missing)?;
-    ensure!(active, AccessError::Invalid(inactive));
+    ensure!(active, Unavailable::Inactive(inactive));
     user.map(Id::new).transpose().map_err(Into::into)
 }
 
@@ -258,12 +378,13 @@ fn resolve(
             return Ok((Id::from_slice(&route.via_node_id)?, ip));
         }
     }
-    let detail = if target.is_some() {
-        "destination IP does not belong to the node or its approved routes"
-    } else {
-        "no node or approved route resolves destination IP"
-    };
-    Err(AccessError::Invalid(detail).into())
+    if target.is_some() {
+        return Err(AccessError::Invalid(
+            "destination IP does not belong to the node or its approved routes",
+        )
+        .into());
+    }
+    Err(Unavailable::Unresolved.into())
 }
 
 fn proposal(rules: Vec<ProposedRule>, net: Id, epoch: u64) -> Result<PolicySnapshot> {

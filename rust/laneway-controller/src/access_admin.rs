@@ -8,8 +8,8 @@ mod relays;
 mod routes;
 pub(crate) mod service_ports;
 mod subjects;
-pub use crate::enrollment::policy_preview::Preview;
 pub use crate::enrollment::snapshot_policy::AclSelector;
+pub use crate::enrollment::{diagnostics::Diagnostics, policy_preview::Preview};
 use crate::{
     RootCredential, SessionError, SessionReply, SessionStore,
     management_write::{BrowserWrite, verify_browser_csrf},
@@ -60,6 +60,7 @@ pub enum Request {
     DisableRelay(Id),
     ListAclRules(Id, usize),
     PolicyPreview(Id, Result<Preview>),
+    Diagnostics(Id, Result<Diagnostics>),
     PolicyHistory(Id, usize),
     RestorePolicy(Id, i64, i64),
     CreateAclRule(Id, AclRule),
@@ -127,7 +128,7 @@ pub enum BrowserAccess {
 
 impl Request {
     fn browser_access(&self) -> BrowserAccess {
-        if matches!(self, Self::PolicyPreview(..)) {
+        if matches!(self, Self::PolicyPreview(..) | Self::Diagnostics(..)) {
             BrowserAccess::Query
         } else if self.is_read() {
             BrowserAccess::Read
@@ -145,6 +146,7 @@ impl Request {
                 | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
                 | Self::PolicyPreview(..)
+                | Self::Diagnostics(..)
                 | Self::PolicyHistory(..)
                 | Self::ListRoutes(..)
                 | Self::ListCertificates(..)
@@ -185,6 +187,7 @@ impl Request {
             | Self::RevokeCertificate(net, ..)
             | Self::ListAclRules(net, _)
             | Self::PolicyPreview(net, _)
+            | Self::Diagnostics(net, _)
             | Self::PolicyHistory(net, _)
             | Self::RestorePolicy(net, ..)
             | Self::CreateAclRule(net, _)
@@ -284,6 +287,9 @@ impl Request {
             Self::ListAclRules(_, limit) => editor.list_acl_rules(limit),
             Self::PolicyPreview(_, request) => {
                 crate::enrollment::policy_preview::preview(tx, net, now, request)
+            }
+            Self::Diagnostics(_, request) => {
+                crate::enrollment::diagnostics::diagnose(tx, net, now, request)
             }
             Self::PolicyHistory(_, limit) => editor.policy_history(limit),
             Self::RestorePolicy(_, revision, epoch) => editor.restore_policy(revision, epoch),

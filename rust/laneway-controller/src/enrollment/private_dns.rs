@@ -10,7 +10,7 @@ use laneway_protocol::{
     DEFAULT_MAX_CONTROL_PAYLOAD, Id,
     v1::{NodePeer, PolicyAction, PolicySnapshot, RouteSnapshot},
 };
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -56,50 +56,11 @@ impl SessionStore {
         check_snapshot(&tx)?;
         let now = configuration::clock(&tx)?;
         let binding = peer.binding(&tx, now)?;
-        let peers = configuration::peers(&tx, peer.net, now)?;
-        let user = tx
-            .query_row(
-                "SELECT user_id FROM nodes WHERE network_id=?1 AND id=?2",
-                (peer.net.as_bytes(), peer.node.as_bytes()),
-                |r| r.get::<_, Option<[u8; 16]>>(0),
-            )?
-            .map(Id::new)
-            .transpose()?;
-        let mut visibility = Visibility {
-            nodes: HashSet::from([peer.node]),
-            grants: HashSet::new(),
-        };
-        if let Some(user) = user {
-            let epoch = configuration::configuration_epoch(&tx, peer.net, 0)?;
-            // Directory grants concern overlay peers, not routed prefixes or exits.
-            // Omit route targets so even a matching host prefix cannot disclose a router.
-            let routes = RouteSnapshot {
-                network_id: peer.net.as_bytes().to_vec(),
-                configuration_epoch: epoch,
-                routes: Vec::new(),
-            };
-            let mut policy = PolicySnapshot {
-                network_id: peer.net.as_bytes().to_vec(),
-                configuration_epoch: epoch,
-                default_action: PolicyAction::Deny as i32,
-                rules: Vec::new(),
-            };
-            // Use the packet policy's grant compiler without its unrelated ACLs.
-            managed_policy::apply(
-                &tx,
-                (peer.net, peer.node),
-                user,
-                now,
-                &peers,
-                &routes,
-                &mut policy,
-            )?;
-            visibility.add_policy(&peers, policy)?;
-        }
         let cert_end =
             i64::try_from(configuration::certificate_health(&peer.der)?.not_after_unix_seconds)?;
         let deadline = cert_end.min(binding.lease.unwrap_or(i64::MAX));
-        let catalog = catalog(&tx, peer.net, &peers, Some(&visibility), now, deadline)?;
+        let catalog =
+            source_catalog(&tx, peer.net, peer.node, now, deadline)?.ok_or(EnrollError::Denied)?;
         let bytes = serde_json::to_vec(&catalog)?;
         ensure!(
             bytes.len() <= DEFAULT_MAX_CONTROL_PAYLOAD,
@@ -112,6 +73,89 @@ impl SessionStore {
         tx.commit()?;
         Ok(bytes)
     }
+}
+
+// Read the same permission-filtered view the node receives. The diagnostic
+// caller has already authorized the network and does not impersonate an mTLS node.
+pub(super) fn diagnostic_lookup(
+    tx: &Transaction<'_>,
+    net: Id,
+    node: Id,
+    now: i64,
+    name: &str,
+) -> Result<Option<(Vec<IpAddr>, i64)>> {
+    let Some(catalog) = source_catalog(tx, net, node, now, i64::MAX)? else {
+        return Ok(None);
+    };
+    ensure!(
+        configuration::clock(tx)? < catalog.valid_until_unix_seconds,
+        AccessError::Conflict
+    );
+    let name = name.strip_suffix('.').unwrap_or(name);
+    let addresses = catalog
+        .records
+        .into_iter()
+        .find(|record| record.name.eq_ignore_ascii_case(name))
+        .map_or_else(Vec::new, |record| record.addresses);
+    Ok(Some((addresses, catalog.valid_until_unix_seconds)))
+}
+
+fn source_catalog(
+    tx: &Transaction<'_>,
+    net: Id,
+    node: Id,
+    now: i64,
+    deadline: i64,
+) -> Result<Option<Catalog>> {
+    let subject = tx.query_row(
+        "SELECT user_id,lease_expires_at FROM nodes WHERE network_id=?1 AND id=?2 AND revoked_at IS NULL
+         AND (enrollment_class<>'ephemeral' OR lease_expires_at IS NOT NULL)
+         AND (lease_expires_at IS NULL OR lease_expires_at>?3)",
+        (net.as_bytes(), node.as_bytes(), now),
+        |r| Ok((r.get::<_, Option<[u8; 16]>>(0)?, r.get::<_, Option<i64>>(1)?)),
+    ).optional()?;
+    let Some((user, lease)) = subject else {
+        return Ok(None);
+    };
+    let peers = configuration::peers(tx, net, now)?;
+    let mut visibility = Visibility {
+        nodes: HashSet::from([node]),
+        grants: HashSet::new(),
+    };
+    if let Some(user) = user {
+        let epoch = configuration::configuration_epoch(tx, net, 0)?;
+        // Overlay-only view. Routes and manual ACLs cannot reveal peer names.
+        let routes = RouteSnapshot {
+            network_id: net.as_bytes().to_vec(),
+            configuration_epoch: epoch,
+            routes: Vec::new(),
+        };
+        let mut policy = PolicySnapshot {
+            network_id: net.as_bytes().to_vec(),
+            configuration_epoch: epoch,
+            default_action: PolicyAction::Deny as i32,
+            rules: Vec::new(),
+        };
+        managed_policy::apply(
+            tx,
+            (net, node),
+            Id::new(user)?,
+            now,
+            &peers,
+            &routes,
+            &mut policy,
+        )?;
+        visibility.add_policy(&peers, policy)?;
+    }
+    catalog(
+        tx,
+        net,
+        &peers,
+        Some(&visibility),
+        now,
+        deadline.min(lease.unwrap_or(i64::MAX)),
+    )
+    .map(Some)
 }
 
 impl Visibility {

@@ -992,6 +992,15 @@ preview. The route requires network-scoped `acl.read` and same-origin CSRF
 proof for browser sessions. The HTTPS fixture checks overlay and subnet
 resolution, managed-access isolation, and unchanged policy state.
 
+`POST /v1/admin/networks/{network_id}/diagnostics` uses the same evaluator and
+the source node's permission-filtered private DNS catalog. It reports certificate
+and lease state, endpoint report freshness, route candidates, and configured DNS
+answers without making any network requests. End-to-end reachability stays
+`unknown` even if policy permits traffic and every available check passes.
+An expired overlay identity whose address has not been reclaimed does not fall
+through to a default route. Like preview, diagnostics requires network-scoped
+`acl.read` and browser CSRF proof.
+
 Traffic rules can be listed, created, updated, and deleted through the same
 Rust HTTPS listener. The controller validates canonical prefixes and port
 ranges, and publishes rules in priority and ID order. The Rust network-namespace

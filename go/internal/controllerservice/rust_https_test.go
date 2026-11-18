@@ -314,6 +314,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	t.Run("access-management", func(t *testing.T) { testRustAccessManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("private-dns", func(t *testing.T) { testRustPrivateDNS(t, f, client, rustURL) })
 	t.Run("policy-preview", func(t *testing.T) { testRustPolicyPreview(t, f, client, rustURL, cookie, csrf) })
+	t.Run("connection-diagnostics", func(t *testing.T) { testRustConnectionDiagnostics(t, f, client, rustURL, cookie, csrf) })
 	t.Run("fleet-schema", func(t *testing.T) { testRustFleetPolicyHistory(t, client, cert, key, rootFile) })
 	t.Run("route-management", func(t *testing.T) { testRustRouteManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("device-management", func(t *testing.T) { testRustDeviceManagement(t, f, client, goServer.URL, rustURL) })

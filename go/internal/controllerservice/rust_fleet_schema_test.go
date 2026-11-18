@@ -76,6 +76,11 @@ func testRustFleetPolicyHistory(t *testing.T, client *http.Client, cert, key, ro
 	if v := send(endpoint, "POST", base+"/policy-preview", flow, root, 200)["current"].(map[string]any); v["configuration_epoch"] != float64(before.ConfigurationEpoch) || v["matched_rule_id"] != seed.ID.String() || v["action"] != "deny" {
 		t.Fatalf("preview did not use the migrated policy: %#v", v)
 	}
+	diagnosticFlow := fmt.Sprintf(`{"source_node_id":%q,"destination_node_id":%q,"protocol":"tcp","destination_port":443}`, node.ID.String(), node.ID.String())
+	report := send(endpoint, "POST", base+"/diagnostics", diagnosticFlow, root, 200)
+	if decision := report["policy"].(map[string]any); decision["matched_rule_id"] != seed.ID.String() || report["reachability"] != "unknown" {
+		t.Fatalf("diagnostics did not use the migrated policy: %#v", report)
+	}
 	history := func() []any {
 		t.Helper()
 		v := send(endpoint, "GET", path, "", root, 200)
