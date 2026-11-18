@@ -34,6 +34,9 @@ RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
       -p lanewayd-rs --bin lanewayd-rs
 
+FROM scratch AS node-binary
+COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /lanewayd-rs
+
 FROM scratch AS go-connector
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/laneway /usr/local/bin/laneway
@@ -49,7 +52,7 @@ CMD ["connector", "run"]
 FROM scratch AS rust-connector
 COPY --from=rust-installer /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=rust-installer /out/laneway /usr/local/bin/laneway
-COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
+COPY --from=node-binary /lanewayd-rs /usr/local/bin/lanewayd-rs
 COPY --from=rust-installer --chown=65532:65532 /out/connector-state /var/lib/laneway
 COPY --from=rust-installer --chown=65532:65532 /out/connector-run /run/laneway
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \

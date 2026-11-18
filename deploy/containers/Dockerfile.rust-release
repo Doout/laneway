@@ -1,6 +1,29 @@
 # Build on the target architecture. Static binaries work with the existing
 # package/bootstrap contract and do not depend on the build host's libc.
-FROM docker.io/library/rust:1.91.1-alpine3.22@sha256:8efbfb788786eeb127adc581394349c5fb567712156e0f8c2e499acadbc23756 AS build
+FROM docker.io/library/rust:1.91.1-alpine3.22@sha256:8efbfb788786eeb127adc581394349c5fb567712156e0f8c2e499acadbc23756 AS chef
+WORKDIR /src
+RUN cargo install --locked --version 0.1.73 cargo-chef
+ENV SOURCE_DATE_EPOCH=0 \
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_RELEASE_STRIP=symbols \
+    RUSTFLAGS="-C target-feature=+crt-static --remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo/registry=.cargo-registry"
+
+FROM chef AS recipe
+COPY rust /src/rust
+WORKDIR /src/rust
+RUN cargo chef prepare --recipe-path /recipe.json
+
+# The recipe contains Cargo manifests and the lockfile, not application code or
+# the release version. Cache these compiled dependencies on main for both CPUs.
+FROM chef AS dependencies
+WORKDIR /src/rust
+COPY --from=recipe /recipe.json /recipe.json
+RUN target="$(rustc -vV | sed -n 's/^host: //p')" && \
+    cargo chef cook --locked --release --target "$target" --recipe-path /recipe.json \
+      -p lanewayd-rs -p laneway-controller -p laneway-relay -p laneway-healthcheck && \
+    cargo fetch --locked
+
+FROM dependencies AS build
 WORKDIR /src
 COPY api/proto /src/api/proto
 COPY rust /src/rust
@@ -9,11 +32,6 @@ COPY deploy/compose/generated/config/exit-node.toml.example /src/deploy/compose/
 COPY testvectors/local-api /src/testvectors/local-api
 ARG VERSION=dev
 ARG FLEET_ACTIVATION_FIXTURE=0
-ENV SOURCE_DATE_EPOCH=0 \
-    CARGO_INCREMENTAL=0 \
-    CARGO_PROFILE_RELEASE_STRIP=symbols \
-    RUSTFLAGS="-C target-feature=+crt-static --remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo/registry=.cargo-registry"
-RUN cargo fetch --locked --manifest-path rust/Cargo.toml
 RUN --network=none set -eu; \
     case "$VERSION" in ""|*[!0-9A-Za-z._+-]*) exit 1;; esac; \
     test "${#VERSION}" -le 64; \

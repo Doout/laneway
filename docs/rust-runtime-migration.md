@@ -194,11 +194,29 @@ The release gate also redeems a real one-use invitation through Rust HTTPS disco
 enrollment, rejects a replay, and forwards traffic using the configuration
 and protected credentials produced by the packaged Go enrollment CLI. It
 checks that the archived bootstrap matches the one exercised by the test.
-The unsigned AMD64 CI preview uses the same gate. After signing a tagged
+The unsigned Linux CI previews use the same gate. After signing a tagged
 release, the publish job checks the manifest using the bootstrap's exact
 workflow, tag, and OIDC issuer policy and checks the hashes of the release
 assets. Those are separate gates; neither claims the published bootstrap has
 been installed with a real invitation on the dedicated host.
+
+The release builds Linux Rust executables once on each native CPU and reuses
+them in the matching archive and container images. Main-branch CI primes the
+compiled Linux dependency layers and native macOS Cargo caches. A cache miss
+still builds from the locked sources. Each native image must pass Trivy before
+its candidate digest is pushed; the release signs the combined two-platform
+index and exercises the signed install and recovery before publishing.
+
+Aim for ten minutes with warm caches. Use the wall time of a successful run
+(including waits between jobs), and compare the Linux runtime, Intel macOS
+archive, and signed install jobs when a run exceeds the target. The release
+job timeouts bound execution separately from hosted-runner queue time. To see
+which job took longest after a run:
+
+```sh
+gh run view RUN_ID --repo Doout/laneway --json jobs \
+  --jq '.jobs[] | [.name, .startedAt, .completedAt, .conclusion] | @tsv'
+```
 
 The isolated ARM64 systemd VM passed the archive gate for
 `0.0.0-fleet-rust-lab`. The packaged Rust node exchanged encrypted traffic

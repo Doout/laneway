@@ -15,10 +15,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   web:
     name: Admin console
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -62,6 +67,7 @@ jobs:
   desktop:
     name: Desktop foundation (macOS)
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -70,6 +76,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Enable pinned pnpm
         run: corepack enable
       - name: Install desktop dependencies
@@ -90,6 +100,7 @@ jobs:
   desktop-linux-boundary:
     name: Desktop local-daemon boundary (Linux)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -98,14 +109,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: desktop/src-tauri
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Set the Ubuntu package cache rotation
+        id: apt-cache
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Restore cached Ubuntu package downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tauri-apt/*.deb
+          key: tauri-apt-ubuntu-24.04-v1-${{ runner.arch }}-${{ steps.apt-cache.outputs.week }}
+          restore-keys: tauri-apt-ubuntu-24.04-v1-${{ runner.arch }}-
       - name: Install Tauri Linux build dependencies
+        timeout-minutes: 24
         run: |
+          archives="$RUNNER_TEMP/tauri-apt"
+          mkdir -p "$archives"
           if [[ -f /etc/apt/apt-mirrors.txt ]]; then
             sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
           fi
           sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true -o Acquire::https::Timeout=30 update
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true -o Acquire::https::Timeout=30 install --yes \
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true -o Acquire::https::Timeout=30 \
+            -o Dir::Cache::archives="$archives" install --yes --no-install-recommends \
             build-essential pkg-config libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
             libayatana-appindicator3-dev librsvg2-dev
       - name: Build the endpoint UI
@@ -122,6 +150,7 @@ jobs:
   go:
     name: Go ${{ matrix.go }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -145,6 +174,7 @@ jobs:
   macos-client:
     name: macOS client and privileged-helper protocol
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -160,6 +190,7 @@ jobs:
   protobuf:
     name: Protobuf lint and generated code
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -174,6 +205,7 @@ jobs:
   compose:
     name: Hardened Compose contract
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - name: Validate Compose security, storage, health, and port model
@@ -230,18 +262,16 @@ jobs:
   rust:
     name: Rust workspace and Go interoperability
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          workspaces: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
@@ -266,6 +296,7 @@ jobs:
   rust-macos-endpoint:
     name: Rust macOS endpoint (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -276,58 +307,114 @@ jobs:
         with:
           go-version: "1.26.x"
           cache-dependency-path: go/go.sum
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the pinned macOS Rust compiler
+        run: rustup toolchain install 1.91.1 --profile minimal && rustup default 1.91.1
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: rust
+          shared-key: macos-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --lib
-      - run: cargo build --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+      - run: cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
         env:
           LANEWAY_PRODUCT_VERSION: 0.0.0-ci
       - name: Check the macOS CLI handoff to the Rust binary
         run: |
           cd go
-          LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" go test ./cmd/laneway -run '^Test(RustForeground|MacRustRuntime)' -count=1
+          LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" go test ./cmd/laneway -run '^Test(RustForeground|MacRustRuntime)' -count=1
       - name: Install the default archive and verify real utun traffic and cleanup
         run: |
           set -euo pipefail
           arch=$(go env GOARCH)
-          PACKAGE_RUST_MACOS="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" make package VERSION=0.0.0-ci
+          PACKAGE_RUST_MACOS="$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" make package VERSION=0.0.0-ci
           LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
             sh integration/rust-release-macos.sh \
             "dist/laneway_darwin_$arch.tar.gz" "$arch" 0.0.0-ci
 
   rust-linux-package:
-    name: Static Rust Linux package preview
-    runs-on: ubuntu-24.04
+    name: Static Rust Linux ${{ matrix.arch }} package preview
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 29
+    env:
+      PREVIEW_VERSION: "0.0.1"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26.x"
           cache-dependency-path: go/go.sum
-      - name: Build and smoke test the preview without publishing
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.36.1
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+      - name: Warm the shared dependency cache on main
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/containers/Dockerfile.rust-release
+          target: dependencies
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=cacheonly
+          cache-from: type=gha,scope=rust-release-deps-${{ matrix.arch }},timeout=1m
+          cache-to: type=gha,scope=rust-release-deps-${{ matrix.arch }},mode=max,timeout=2m,ignore-error=true
+      - name: Reuse unchanged preview binaries
+        id: preview-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/laneway-rust
+          key: >-
+            rust-linux-preview-v1-${{ matrix.arch }}-${{ env.PREVIEW_VERSION }}-${{ hashFiles('rust/**', 'api/proto/**',
+            'deploy/containers/Dockerfile.rust-release*', 'deploy/examples/*rust*.toml',
+            'deploy/compose/generated/config/exit-node.toml.example', 'testvectors/local-api/**') }}
+      - name: Build the native preview without publishing
+        if: steps.preview-cache.outputs.cache-hit != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/containers/Dockerfile.rust-release
+          target: artifacts
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ env.PREVIEW_VERSION }}
+            FLEET_ACTIVATION_FIXTURE=1
+          outputs: type=local,dest=${{ runner.temp }}/laneway-rust
+          cache-from: type=gha,scope=rust-release-deps-${{ matrix.arch }},timeout=1m
+      - name: Verify the image uses the shared native daemon
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
         run: |
-          # The fleet updater accepts only a stable numeric release version.
-          version=0.0.1
-          output="$RUNNER_TEMP/laneway-rust"
-          docker buildx build --platform linux/amd64 --build-arg VERSION="$version" \
-            --build-arg FLEET_ACTIVATION_FIXTURE=1 \
-            --file deploy/containers/Dockerfile.rust-release --target artifacts \
-            --output "type=local,dest=$output" .
-          PACKAGE_GOOS=linux PACKAGE_GOARCH=amd64 PACKAGE_RUST_RUNTIME_DIR="$output" make package VERSION="$version"
-      - name: Test the AMD64 preview archive under systemd
+          docker buildx build --platform "linux/$PACKAGE_GOARCH" --load \
+            --file deploy/containers/Dockerfile.rust-relay --target node \
+            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" --tag laneway-node:ci .
+          version=$(docker run --rm --network none --entrypoint /usr/local/bin/lanewayd-rs laneway-node:ci --version)
+          test "$version" = "$PREVIEW_VERSION"
+      - name: Package and test the native preview archive under systemd
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
+          PACKAGE_GOOS=linux PACKAGE_RUST_RUNTIME_DIR="$RUNNER_TEMP/laneway-rust" make package VERSION="$PREVIEW_VERSION"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps
           sudo modprobe tun
           sudo modprobe wireguard
           sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
-          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh dist/laneway_linux_amd64.tar.gz amd64 0.0.1
-          sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh dist/laneway_linux_amd64.tar.gz \
+          archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
+          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "$archive" "$PACKAGE_GOARCH" "$PREVIEW_VERSION"
+          sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "$archive" \
             "$RUNNER_TEMP/laneway-rust/activation-fixture"
 
   cross-build:
     name: Go build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -357,6 +444,7 @@ jobs:
   rust-cross-build:
     name: Rust check ${{ matrix.target }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -368,6 +456,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: rust
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install ARM64 C cross-compiler
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
@@ -382,6 +475,7 @@ jobs:
     name: Privileged Linux network namespaces
     if: github.event_name == 'workflow_dispatch' && inputs.privileged_linux
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     permissions:
       contents: read
     steps:
