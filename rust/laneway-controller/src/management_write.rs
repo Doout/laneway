@@ -21,6 +21,19 @@ pub(crate) fn verify_browser_write(
     csrf: Option<&str>,
     operator_allowed: bool,
 ) -> Result<()> {
+    let role = verify_browser_csrf(tx, session, csrf)?;
+    ensure!(
+        role == "owner" || (role == "operator" && operator_allowed),
+        SessionError::Denied
+    );
+    Ok(())
+}
+
+pub(crate) fn verify_browser_csrf(
+    tx: &Transaction<'_>,
+    session: Id,
+    csrf: Option<&str>,
+) -> Result<String> {
     let proof = csrf
         .and_then(|s| csrf_digest(s).ok())
         .ok_or(SessionError::Denied)?;
@@ -29,11 +42,7 @@ pub(crate) fn verify_browser_write(
         [session.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     ensure!(bool::from(stored.ct_eq(&proof)), SessionError::Denied);
-    ensure!(
-        role == "owner" || (role == "operator" && operator_allowed),
-        SessionError::Denied
-    );
-    Ok(())
+    Ok(role)
 }
 
 impl SessionStore {

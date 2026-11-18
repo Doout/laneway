@@ -8,10 +8,13 @@ mod relays;
 mod routes;
 pub(crate) mod service_ports;
 mod subjects;
+pub use crate::enrollment::policy_preview::Preview;
 pub use crate::enrollment::snapshot_policy::AclSelector;
 use crate::{
-    RootCredential, SessionError, SessionReply, SessionStore, management_write::BrowserWrite,
-    node_location::Location, sessions::check_network,
+    RootCredential, SessionError, SessionReply, SessionStore,
+    management_write::{BrowserWrite, verify_browser_csrf},
+    node_location::Location,
+    sessions::check_network,
 };
 pub use acl::AclRule;
 use anyhow::{Result, ensure};
@@ -56,6 +59,7 @@ pub enum Request {
     UpdateRelay(Id, String, String, bool),
     DisableRelay(Id),
     ListAclRules(Id, usize),
+    PolicyPreview(Id, Result<Preview>),
     PolicyHistory(Id, usize),
     RestorePolicy(Id, i64, i64),
     CreateAclRule(Id, AclRule),
@@ -114,7 +118,24 @@ pub struct AdminReply {
     pub created: Option<bool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BrowserAccess {
+    Read,
+    Query,
+    Write,
+}
+
 impl Request {
+    fn browser_access(&self) -> BrowserAccess {
+        if matches!(self, Self::PolicyPreview(..)) {
+            BrowserAccess::Query
+        } else if self.is_read() {
+            BrowserAccess::Read
+        } else {
+            BrowserAccess::Write
+        }
+    }
+
     pub fn is_read(&self) -> bool {
         matches!(
             self,
@@ -123,6 +144,7 @@ impl Request {
                 | Self::EndpointStatuses(..)
                 | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
+                | Self::PolicyPreview(..)
                 | Self::PolicyHistory(..)
                 | Self::ListRoutes(..)
                 | Self::ListCertificates(..)
@@ -162,6 +184,7 @@ impl Request {
             | Self::RegisterRelay { net, .. }
             | Self::RevokeCertificate(net, ..)
             | Self::ListAclRules(net, _)
+            | Self::PolicyPreview(net, _)
             | Self::PolicyHistory(net, _)
             | Self::RestorePolicy(net, ..)
             | Self::CreateAclRule(net, _)
@@ -259,6 +282,9 @@ impl Request {
                 .set_node_capabilities(id, capabilities)
                 .map(epoch_reply),
             Self::ListAclRules(_, limit) => editor.list_acl_rules(limit),
+            Self::PolicyPreview(_, request) => {
+                crate::enrollment::policy_preview::preview(tx, net, now, request)
+            }
             Self::PolicyHistory(_, limit) => editor.policy_history(limit),
             Self::RestorePolicy(_, revision, epoch) => editor.restore_policy(revision, epoch),
             Self::CreateAclRule(_, rule) => editor.write_acl_rule(None, rule),
@@ -310,13 +336,13 @@ impl SessionStore {
         &mut self,
         token: &str,
         csrf: Option<&str>,
-        read: bool,
+        access: BrowserAccess,
         request: Result<Request>,
     ) -> Result<SessionReply<AdminReply>> {
         let run = |tx: &Transaction<'_>, id: Id, all: bool, now: i64| {
             let req = request?;
             ensure!(
-                read == req.is_read(),
+                access == req.browser_access(),
                 "access request and session mode differ"
             );
             let scope = req.scope(tx)?;
@@ -333,10 +359,17 @@ impl SessionStore {
                 now,
             )
         };
-        if read {
-            self.with_session(token, true, |tx, id, _, all, now| run(tx, id, all, now))
-        } else {
-            self.browser_write(token, csrf, BrowserWrite::ManageAccess, run)
+        match access {
+            BrowserAccess::Read => {
+                self.with_session(token, true, |tx, id, _, all, now| run(tx, id, all, now))
+            }
+            BrowserAccess::Query => self.with_session(token, false, |tx, id, session, all, now| {
+                verify_browser_csrf(tx, session, csrf)?;
+                run(tx, id, all, now)
+            }),
+            BrowserAccess::Write => {
+                self.browser_write(token, csrf, BrowserWrite::ManageAccess, run)
+            }
         }
     }
 

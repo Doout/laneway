@@ -130,6 +130,11 @@ fn selector_from_fields(v: Selector) -> Result<TrafficSelector> {
 }
 
 impl AclSelector {
+    pub(super) fn validated_wire(self) -> Result<TrafficSelector> {
+        Self(self.0.clone()).canonical_management_json()?;
+        Ok(self.0)
+    }
+
     pub(crate) fn canonical_management_json(self) -> Result<Value> {
         let v = self.0;
         let protocol = IpProtocol::try_from(v.ip_protocol)?;

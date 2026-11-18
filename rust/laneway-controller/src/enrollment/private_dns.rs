@@ -85,7 +85,15 @@ impl SessionStore {
                 rules: Vec::new(),
             };
             // Use the packet policy's grant compiler without its unrelated ACLs.
-            managed_policy::apply(&tx, peer, user, now, &peers, &routes, &mut policy)?;
+            managed_policy::apply(
+                &tx,
+                (peer.net, peer.node),
+                user,
+                now,
+                &peers,
+                &routes,
+                &mut policy,
+            )?;
             visibility.add_policy(&peers, policy)?;
         }
         let cert_end =

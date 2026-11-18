@@ -1,7 +1,6 @@
 //! Per-user scope, computed from the same snapshot as the route and peer lists.
 mod named_grants;
 
-use super::renewal::NodeCredential;
 use anyhow::{Result, ensure};
 use laneway_protocol::{
     DEFAULT_MAX_CONTROL_PAYLOAD, Id,
@@ -28,7 +27,7 @@ struct Grants<'a> {
 
 pub(super) fn apply(
     tx: &Transaction<'_>,
-    peer: &NodeCredential,
+    (net, node): (Id, Id),
     user: Id,
     now: i64,
     peers: &[NodePeer],
@@ -37,7 +36,7 @@ pub(super) fn apply(
 ) -> Result<Vec<Vec<u8>>> {
     let enabled: bool = tx.query_row(
         "SELECT enabled FROM access_users WHERE network_id=? AND id=?",
-        (peer.net.as_bytes(), user.as_bytes()),
+        (net.as_bytes(), user.as_bytes()),
         |r| r.get(0),
     )?;
     let sources = {
@@ -46,18 +45,18 @@ pub(super) fn apply(
             AND (lease_expires_at IS NULL OR lease_expires_at>?3) ORDER BY id LIMIT 16385",
         )?;
         let values = stmt
-            .query_map((peer.net.as_bytes(), user.as_bytes(), now), |r| {
+            .query_map((net.as_bytes(), user.as_bytes(), now), |r| {
                 r.get::<_, Vec<u8>>(0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         ensure!(
-            values.len() <= 16384 && values.iter().any(|id| id == peer.node.as_bytes()),
+            values.len() <= 16384 && values.iter().any(|id| id == node.as_bytes()),
             "invalid managed source set"
         );
         values
     };
     let mut grants = Grants {
-        net: peer.net,
+        net,
         user,
         sources,
         peers: peers.iter().map(|p| (p.node_id.as_slice(), p)).collect(),
@@ -92,12 +91,19 @@ pub(super) fn apply(
             .cmp(&b.priority)
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
-    for row in &mut policy.rules {
-        row.priority = row.priority.saturating_add(2);
+    // Re-rank rather than offsetting; adding two would collapse priorities at
+    // the upper bound and let the ID tiebreaker change the configured order.
+    policy.rules.sort_unstable_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.rule_id.cmp(&b.rule_id))
+    });
+    for (index, row) in policy.rules.iter_mut().enumerate() {
+        row.priority = u32::try_from(index)? + 2;
     }
     grants.rules.append(&mut policy.rules);
     policy.rules = grants.rules;
-    CompiledPolicy::compile(policy.clone(), peer.net, policy.configuration_epoch)?;
+    CompiledPolicy::compile(policy.clone(), net, policy.configuration_epoch)?;
     Ok(exits)
 }
 

@@ -111,10 +111,27 @@ impl CompiledPolicy {
         let Some(packet) = Packet::parse(raw) else {
             return false;
         };
-        self.rules
-            .iter()
-            .find(|rule| rule.matches(source, destination, packet))
-            .map_or(self.default_accept, |rule| rule.accept)
+        self.evaluate(source, destination, packet, |_, _| {}).0
+    }
+
+    /// Evaluates an already validated flow using the packet path's first-match
+    /// logic. The observer sees each evaluated rule, including the first match.
+    /// Returns the resulting action and the matched rule, if any.
+    pub fn evaluate(
+        &self,
+        source: Id,
+        destination: Id,
+        packet: Packet,
+        mut observe: impl FnMut(&CompiledRule, bool),
+    ) -> (bool, Option<Id>) {
+        for rule in &self.rules {
+            let matched = rule.matches(source, destination, packet);
+            observe(rule, matched);
+            if matched {
+                return (rule.accept, Some(rule.id));
+            }
+        }
+        (self.default_accept, None)
     }
 
     /// Returns the explicit fallback action carried by the snapshot.
@@ -132,6 +149,11 @@ impl CompiledRule {
     /// Rule identity for audit and native rule labels.
     pub fn id(&self) -> Id {
         self.id
+    }
+
+    /// First-match evaluation order, before the rule ID tiebreaker.
+    pub fn priority(&self) -> u32 {
+        self.priority
     }
 
     /// True for accept, false for deny.
@@ -257,12 +279,17 @@ fn prefixes_from_wire(values: Vec<v1::IpPrefix>) -> Result<Vec<IpNet>, PolicyErr
     Ok(output)
 }
 
+/// The packet fields used by traffic policy, without retaining packet bytes.
 #[derive(Clone, Copy)]
-struct Packet {
-    source: IpAddr,
-    destination: IpAddr,
-    protocol: u8,
-    destination_port: Option<u16>,
+pub struct Packet {
+    /// Packet source address.
+    pub source: IpAddr,
+    /// Packet destination address.
+    pub destination: IpAddr,
+    /// IP protocol number.
+    pub protocol: u8,
+    /// Destination transport port, when present.
+    pub destination_port: Option<u16>,
 }
 
 impl Packet {
@@ -371,6 +398,20 @@ mod tests {
         assert!(!policy.allows(source, destination, &udp(54)));
         assert!(!policy.allows(destination, source, &udp(53)));
         assert!(!policy.allows(source, destination, &[0x45; 19]));
+        let id = Id::new([9; 16]).unwrap();
+        for (port, result) in [(53, Some(id)), (54, None)] {
+            let raw = udp(port);
+            let mut trace = Vec::new();
+            let (accepted, matched) = policy.evaluate(
+                source,
+                destination,
+                Packet::parse(&raw).unwrap(),
+                |rule, matched| trace.push((rule.id(), rule.priority(), matched)),
+            );
+            assert_eq!(accepted, policy.allows(source, destination, &raw));
+            assert_eq!(matched, result);
+            assert_eq!(trace, [(id, 10, result.is_some())]);
+        }
     }
 
     #[test]

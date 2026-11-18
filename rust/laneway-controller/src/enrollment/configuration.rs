@@ -99,7 +99,15 @@ impl SessionStore {
             let routes = routes(&tx, peer.net, epoch, now)?;
             let mut policy = snapshot_policy::compile(&tx, peer.net, epoch)?;
             let exits = if let Some(user) = user {
-                managed_policy::apply(&tx, peer, user, now, &peers, &routes, &mut policy)?
+                managed_policy::apply(
+                    &tx,
+                    (peer.net, peer.node),
+                    user,
+                    now,
+                    &peers,
+                    &routes,
+                    &mut policy,
+                )?
             } else {
                 let mut seen = HashSet::new();
                 routes
@@ -289,7 +297,7 @@ const APPROVED_ROUTES:&str="SELECT r.id,r.node_id,r.prefix_address,r.prefix_leng
         AND (r.valid_until IS NULL OR r.valid_until>?2) AND n.revoked_at IS NULL AND (n.lease_expires_at IS NULL OR n.lease_expires_at>?2)
         ORDER BY r.prefix_length DESC,r.metric,r.id LIMIT 16385";
 
-fn routes(tx: &Transaction<'_>, net: Id, epoch: u64, now: i64) -> Result<RouteSnapshot> {
+pub(super) fn routes(tx: &Transaction<'_>, net: Id, epoch: u64, now: i64) -> Result<RouteSnapshot> {
     let mut result = Vec::new();
     read_routes(tx, net, now, OVERLAY_ROUTES, &mut result)?;
     read_routes(tx, net, now, APPROVED_ROUTES, &mut result)?;

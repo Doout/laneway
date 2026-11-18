@@ -979,9 +979,18 @@ mutation. The history API requires network-scoped `acl.read`. Restoring a saved
 revision requires `acl.manage` and the current configuration epoch. It compiles
 the restored policy and commits the ACLs, epoch, history, and audit together.
 The HTTPS fixture verifies permissions, stale epochs, and rollback on a failed
-audit write. These checks do not cover policy preview, backup/restore in the
-Rust runtime, other fleet workflows, the private console, or the deployed
-production database; do not promote the controller on schema support alone.
+audit write. These checks do not cover backup/restore in the Rust runtime,
+other fleet workflows, the private console, or the deployed production
+database; do not promote the controller on schema support alone.
+
+`POST /v1/admin/networks/{network_id}/policy-preview` works on both schemas.
+It uses the Rust packet-policy evaluator for current rules and an optional
+proposed replacement of the manual rules, with the same managed-access grants
+and configuration epoch for both. The trace stops at the first match; no
+packets are sent and no policy, epoch, or audit entries are written by the
+preview. The route requires network-scoped `acl.read` and same-origin CSRF
+proof for browser sessions. The HTTPS fixture checks overlay and subnet
+resolution, managed-access isolation, and unchanged policy state.
 
 Traffic rules can be listed, created, updated, and deleted through the same
 Rust HTTPS listener. The controller validates canonical prefixes and port

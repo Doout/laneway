@@ -9,8 +9,8 @@ use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
     SessionError, SessionStore,
     access_admin::{
-        AccessError, AclRule, AclSelector, Port, Request as Action, ResourceTarget, RouteMode,
-        RouteSpec, ServiceProtocol, Subject, Target,
+        AccessError, AclRule, AclSelector, BrowserAccess, Port, Preview, Request as Action,
+        ResourceTarget, RouteMode, RouteSpec, ServiceProtocol, Subject, Target,
     },
     node_location::Location,
 };
@@ -36,6 +36,7 @@ pub(super) enum Route<'a> {
     RelayDisable(&'a str),
     AclRules(&'a str),
     AclRule(&'a str),
+    PolicyPreview(&'a str),
     PolicyHistory(&'a str),
     RestorePolicy(&'a str, &'a str),
     UserCreate(&'a str),
@@ -82,6 +83,7 @@ impl<'a> Route<'a> {
             ["", "v1", "admin", "relays", id, "disable"] => RelayDisable(id),
             ["", "v1", "admin", "networks", id, "acl-rules"] => AclRules(id),
             ["", "v1", "admin", "acl-rules", id] => AclRule(id),
+            ["", "v1", "admin", "networks", id, "policy-preview"] => PolicyPreview(id),
             ["", "v1", "admin", "networks", id, "policy-history"] => PolicyHistory(id),
             [
                 "",
@@ -131,6 +133,7 @@ impl<'a> Route<'a> {
             | Self::RevokeCertificate(..)
             | Self::RevokeNode(_)
             | Self::RelayDisable(_)
+            | Self::PolicyPreview(_)
             | Self::RestorePolicy(..)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
@@ -287,7 +290,13 @@ pub(super) async fn handle(
     }
     let auth = credential(req.headers())?;
     let empty = matches!(route, Route::NodeLocation(_));
-    let read = matches!(req.method().clone(), Method::GET | Method::HEAD);
+    let access = if matches!(route, Route::PolicyPreview(_)) {
+        BrowserAccess::Query
+    } else if matches!(*req.method(), Method::GET | Method::HEAD) {
+        BrowserAccess::Read
+    } else {
+        BrowserAccess::Write
+    };
     let creates = req.method() == Method::POST
         && matches!(
             route,
@@ -301,7 +310,7 @@ pub(super) async fn handle(
                 | Route::ResourceGrantCreate(_)
         );
     let put = req.method() == Method::PUT;
-    let proof = (!read)
+    let proof = (access != BrowserAccess::Read)
         .then(|| csrf_proof(req.headers()).filter(|_| crate::origin::same_origin(req.headers())))
         .flatten();
     let provider = state.locations.as_ref().map(|db| db.provider());
@@ -321,7 +330,7 @@ pub(super) async fn handle(
         let mut store = SessionStore::open(&state.database)?;
         Ok(match auth {
             super::Credential::Session(token) => {
-                let reply = store.browser_access(&token, proof.as_deref(), read, action)?;
+                let reply = store.browser_access(&token, proof.as_deref(), access, action)?;
                 (reply.list, Some((reply.id, reply.idle, reply.absolute)))
             }
             super::Credential::Bearer(header) => (
@@ -354,6 +363,12 @@ async fn decode(
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
         Route::PrivateDns(net) => Action::PrivateDns(parse(net)?),
+        // Keep the target even when decoding fails so the route's read
+        // permission and network scope take precedence over body errors.
+        Route::PolicyPreview(net) => Action::PolicyPreview(
+            parse(net)?,
+            required_json_form::<Preview>(req).await.map_err(Into::into),
+        ),
         Route::PolicyHistory(net) => Action::PolicyHistory(
             parse(net)?,
             super::list_limit(req.uri().query(), 50).map_err(|_| malformed("invalid limit"))?,

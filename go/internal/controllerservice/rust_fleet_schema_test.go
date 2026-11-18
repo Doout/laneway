@@ -72,6 +72,10 @@ func testRustFleetPolicyHistory(t *testing.T, client *http.Client, cert, key, ro
 	if v := send(endpoint, "GET", base+"/private-dns", "", root, 200); !strings.Contains(fmt.Sprint(v["records"]), "n-"+node.ID.String()) {
 		t.Fatalf("migrated database private DNS omitted the enrolled node: %#v", v)
 	}
+	flow := fmt.Sprintf(`{"flow":{"source_node_id":%q,"destination_node_id":%q,"protocol":"tcp","destination_port":443}}`, node.ID.String(), node.ID.String())
+	if v := send(endpoint, "POST", base+"/policy-preview", flow, root, 200)["current"].(map[string]any); v["configuration_epoch"] != float64(before.ConfigurationEpoch) || v["matched_rule_id"] != seed.ID.String() || v["action"] != "deny" {
+		t.Fatalf("preview did not use the migrated policy: %#v", v)
+	}
 	history := func() []any {
 		t.Helper()
 		v := send(endpoint, "GET", path, "", root, 200)
