@@ -305,15 +305,15 @@ func TestControllerIdentityBindingIsImmutable(t *testing.T) {
 func initialNetworkFixture() (ControllerInitialNetwork, identity.AuthenticatedIdentity) {
 	networkID := identity.NetworkID{1}
 	return ControllerInitialNetwork{
-			NetworkID: networkID,
-			Name:      "production",
-			IPv4Pool:  netip.MustParsePrefix("100.96.0.0/16"),
-			IPv6Pool:  netip.MustParsePrefix("fd00:96::/64"),
-		}, identity.AuthenticatedIdentity{
-			NetworkID: networkID,
-			Role:      identity.IdentityRoleController,
-			SubjectID: identity.ID{2},
-		}
+		NetworkID: networkID,
+		Name:      "production",
+		IPv4Pool:  netip.MustParsePrefix("100.96.0.0/16"),
+		IPv6Pool:  netip.MustParsePrefix("fd00:96::/64"),
+	}, identity.AuthenticatedIdentity{
+		NetworkID: networkID,
+		Role:      identity.IdentityRoleController,
+		SubjectID: identity.ID{2},
+	}
 }
 
 func assertControllerIdentityState(t *testing.T, store *Store, networkID identity.NetworkID, serviceID identity.ID, createdAt time.Time) {

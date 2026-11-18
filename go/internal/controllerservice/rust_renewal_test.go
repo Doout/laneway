@@ -125,13 +125,18 @@ func testRustRenewal(t *testing.T, f fixture, client *http.Client, rustURL, goUR
 	snapshot := func() (s struct {
 		Certs, Epoch, Rotations, Issues int
 		Key                             string
-	}) { t.Helper(); err := db.QueryRow(`SELECT hex(n.wireguard_public_key),w.configuration_epoch,
+	}) {
+		t.Helper()
+		err := db.QueryRow(`SELECT hex(n.wireguard_public_key),w.configuration_epoch,
             (SELECT count(*) FROM certificates c WHERE c.node_id=n.id),
             (SELECT count(*) FROM audit_events a WHERE a.actor_id=n.id AND a.action='node.wireguard_key.rotate'),
             (SELECT count(*) FROM audit_events a WHERE a.actor_id=n.id AND a.action='certificate.issue')
-            FROM nodes n JOIN networks w ON w.id=n.network_id WHERE n.id=?`, node).Scan(&s.Key, &s.Epoch, &s.Certs, &s.Rotations, &s.Issues); if err != nil {
-		t.Fatal(err)
-	}; return }
+            FROM nodes n JOIN networks w ON w.id=n.network_id WHERE n.id=?`, node).Scan(&s.Key, &s.Epoch, &s.Certs, &s.Rotations, &s.Issues)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	post(client, rustURL, []byte{0xff}, 401) // a header is not a TLS identity
 	relay, _, err := pki.IssueService(f.service.ca, f.service.caKey, pki.ServiceIdentity{NetworkID: net.ID, ServiceID: identity.ID(net.ID), Role: pki.RoleRelay}, nil, nil, time.Now(), time.Hour)
 	if err != nil {
