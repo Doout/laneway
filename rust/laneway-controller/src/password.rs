@@ -42,19 +42,36 @@ impl Hash {
         Ok(parsed)
     }
     fn verify(&self, password: &[u8]) -> Result<bool> {
-        if !(15..=1024).contains(&password.len()) {
+        if !valid_length(password) {
             return Ok(false);
         }
-        // Never use cost parameters supplied by a request or read from SQLite.
-        let mut got = Zeroizing::new([0u8; 32]);
-        let kdf = Argon2::new(
-            Algorithm::Argon2id,
-            Version::V0x13,
-            Params::new(65536, 3, 1, Some(32)).expect("fixed administrator Argon2 parameters"),
-        );
-        kdf.hash_password_into(password, &self.salt, &mut *got)
-            .map_err(|_| anyhow::anyhow!("administrator password verification failed"))?;
+        let got = derive(password, &self.salt)?;
         Ok(bool::from(got.ct_eq(&*self.expected)))
+    }
+}
+
+pub fn valid_length(password: &[u8]) -> bool {
+    (15..=1024).contains(&password.len())
+}
+
+fn derive(password: &[u8], salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>> {
+    // Never use cost parameters supplied by a request or read from SQLite.
+    let mut got = Zeroizing::new([0u8; 32]);
+    Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(65536, 3, 1, Some(32)).expect("fixed administrator Argon2 parameters"),
+    )
+    .hash_password_into(password, salt, &mut *got)
+    .map_err(|_| anyhow::anyhow!("administrator password derivation failed"))?;
+    Ok(got)
+}
+
+pub struct PasswordHash(Zeroizing<String>);
+
+impl PasswordHash {
+    pub(crate) fn encoded(&self) -> &str {
+        &self.0
     }
 }
 
@@ -94,6 +111,29 @@ impl PasswordVerifier {
             dummy: Arc::new(dummy),
         })
     }
+    pub async fn hash(&self, password: Zeroizing<String>) -> Result<PasswordHash> {
+        ensure!(
+            valid_length(password.as_bytes()),
+            "invalid administrator password length"
+        );
+        let permit = Arc::clone(&self.slots)
+            .try_acquire_owned()
+            .map_err(|_| Busy)?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut salt = [0; 16];
+            getrandom::fill(&mut salt)
+                .map_err(|_| anyhow::anyhow!("password salt generation failed"))?;
+            let digest = derive(password.as_bytes(), &salt)?;
+            let mut encoded = Zeroizing::new(String::from(PREFIX));
+            STANDARD_NO_PAD.encode_string(salt, &mut encoded);
+            encoded.push('$');
+            STANDARD_NO_PAD.encode_string(digest.as_slice(), &mut encoded);
+            Ok(PasswordHash(encoded))
+        })
+        .await?
+    }
+
     pub async fn verify(
         &self,
         database: PathBuf,

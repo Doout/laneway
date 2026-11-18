@@ -211,7 +211,7 @@ pub(crate) fn csrf_digest(token: &str) -> Result<[u8; 32], SessionError> {
     secret_digest(b"laneway-admin-csrf-v1\0", token)
 }
 
-fn secret_digest(prefix: &[u8], token: &str) -> Result<[u8; 32], SessionError> {
+pub(crate) fn secret_digest(prefix: &[u8], token: &str) -> Result<[u8; 32], SessionError> {
     let mut decoded = zeroize::Zeroizing::new([0; 32]);
     if token.len() != 43 || URL_SAFE_NO_PAD.decode_slice(token, &mut *decoded) != Ok(decoded.len())
     {

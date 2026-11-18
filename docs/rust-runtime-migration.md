@@ -135,8 +135,8 @@ the serve command. Use a private file (e.g. mode 0600); never pass its
 contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
-contexts or when combined with a session cookie. Bootstrap, recovery, and
-OAuth still require Go.
+contexts or when combined with a session cookie. OAuth and root-token
+rotation audit markers still require Go.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -165,6 +165,16 @@ Both mutations require the CSRF cookie and header as well as same-origin checks.
 The HTTPS fixture signs in on one implementation and restores the session on
 the other, and tests rotation and logout in both directions. It injects audit
 failures to verify that failed mutations do not create or revoke sessions.
+
+Rust also supports first-owner setup and owner recovery. The configured root
+bearer issues a ten-minute grant using `POST /v1/admin/auth/bootstrap-grants`
+or `POST /v1/admin/administrators/{id}/recovery-grants`. Redeem it once using
+the same-origin `POST /v1/admin/auth/bootstrap` or `POST /v1/admin/auth/recover`,
+then sign in normally. The database stores only a digest of the grant.
+Recovery replaces the password, revokes the owner's sessions and outstanding
+grants, and writes audit records in one transaction. The HTTPS fixture
+checks Go/Rust grant and password compatibility and verifies rollback
+when the recovery audit write fails.
 
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly

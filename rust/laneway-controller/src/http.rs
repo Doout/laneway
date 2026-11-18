@@ -24,6 +24,7 @@ mod mutations;
 mod node_configuration;
 mod node_proto;
 mod node_routes;
+mod recovery;
 mod relay_configuration;
 mod renew;
 mod revocation;
@@ -41,6 +42,7 @@ pub struct State {
     root: Option<Arc<RootCredential>>,
     discovery: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     logins: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
+    recoveries: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     passwords: Arc<laneway_controller::password::PasswordVerifier>,
     pub(crate) issuer: Option<Arc<laneway_controller::node_pki::NodeIssuer>>,
     pub(crate) snapshot_validity: u64,
@@ -67,6 +69,9 @@ impl State {
             root: root.map(Arc::new),
             discovery: Default::default(),
             logins: Arc::new(std::sync::Mutex::new(
+                crate::discovery_limit::Limiter::login(),
+            )),
+            recoveries: Arc::new(std::sync::Mutex::new(
                 crate::discovery_limit::Limiter::login(),
             )),
             passwords: Arc::new(laneway_controller::password::PasswordVerifier::new()?),
@@ -300,6 +305,9 @@ async fn dispatch(
     }
     if let Some(route) = audit::Route::parse(&pieces) {
         return audit::handle(req, state, id, route).await;
+    }
+    if let Some(route) = recovery::Route::parse(&pieces) {
+        return recovery::handle(req, state, id, peer, route).await;
     }
     let root_probe = path == "/v1/admin/auth/root";
     let logout = path == "/v1/admin/auth/logout";

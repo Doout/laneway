@@ -12,7 +12,7 @@ struct Form {
     password: Option<String>,
 }
 
-fn limited(id: &str, wait: u64) -> Reply {
+pub(super) fn limited(id: &str, wait: u64) -> Reply {
     let mut r = Failure(
         StatusCode::TOO_MANY_REQUESTS,
         "ERROR_CODE_RESOURCE_EXHAUSTED",

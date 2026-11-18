@@ -27,6 +27,7 @@ pub mod node_pki;
 mod nodes;
 pub use network_create::{CreateNetwork, NetworkError};
 pub mod password;
+pub mod recovery;
 mod session_lifecycle;
 pub use session_lifecycle::IssuedSession;
 mod sessions;

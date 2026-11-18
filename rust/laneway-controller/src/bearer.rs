@@ -142,6 +142,11 @@ pub(crate) fn authenticate(
 }
 
 impl BearerActor {
+    pub(crate) fn require_root(&self) -> Result<()> {
+        ensure!(self.root, SessionError::Denied);
+        Ok(())
+    }
+
     pub(crate) fn authorize(
         &self,
         tx: &Transaction<'_>,

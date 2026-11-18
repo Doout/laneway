@@ -117,6 +117,9 @@ func TestRustControllerHTTPS(t *testing.T) {
 		}
 	}
 	client.Timeout = 5 * time.Second
+	t.Run("administrator-recovery", func(t *testing.T) {
+		testRustAdministratorRecovery(t, client, pair, cert, key, rootFile)
+	})
 	type result struct {
 		status int
 		body   map[string]any
