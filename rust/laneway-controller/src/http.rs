@@ -44,6 +44,7 @@ pub struct State {
     passwords: Arc<laneway_controller::password::PasswordVerifier>,
     pub(crate) issuer: Option<Arc<laneway_controller::node_pki::NodeIssuer>>,
     pub(crate) snapshot_validity: u64,
+    pub(crate) locations: Option<Arc<laneway_controller::node_location::Database>>,
     enrollments: Arc<std::sync::Mutex<enroll::Limiter>>,
 }
 impl State {
@@ -53,9 +54,11 @@ impl State {
         issuer: Option<laneway_controller::node_pki::NodeIssuer>,
         workload_mtls_enabled: bool,
         snapshot_validity: u64,
+        locations: Option<Arc<laneway_controller::node_location::Database>>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             snapshot_validity,
+            locations,
             workload_mtls_enabled,
             database: Arc::new(database),
             issuer: issuer.map(Arc::new),
@@ -121,6 +124,26 @@ fn response(status: StatusCode, id: &str, data: Vec<u8>, head: bool) -> Reply {
             Bytes::from(data)
         }))
         .unwrap()
+}
+
+fn no_content(id: &str) -> Reply {
+    let mut reply = response(StatusCode::NO_CONTENT, id, Vec::new(), true);
+    reply.headers_mut().remove(header::CONTENT_LENGTH);
+    reply.headers_mut().remove(header::CONTENT_TYPE);
+    reply
+}
+
+pub(super) fn record_presence(
+    store: &mut SessionStore,
+    credential: &laneway_controller::enrollment::renewal::NodeCredential,
+    remote: std::net::IpAddr,
+    database: Option<&laneway_controller::node_location::Database>,
+) {
+    if store.observe_node(credential, remote, database).is_err() {
+        // Presence and optional geolocation must not disrupt forwarding or
+        // health reporting. Do not log the remote address or location.
+        eprintln!("could not record node presence");
+    }
 }
 
 enum Credential {
@@ -239,10 +262,10 @@ async fn dispatch(
         return Ok(renew::handle(req, state, id).await);
     }
     if path == "/v1/configuration" && state.workload_mtls_enabled {
-        return Ok(node_configuration::handle(req, state, id).await);
+        return Ok(node_configuration::handle(req, state, id, peer).await);
     }
     if path == "/v1/status" && state.workload_mtls_enabled {
-        return endpoint_status::handle(req, state, id).await;
+        return endpoint_status::handle(req, state, id, peer).await;
     }
     if path == "/v1/relay/configuration" && state.workload_mtls_enabled {
         return Ok(relay_configuration::handle(req, state, id).await);

@@ -3,7 +3,7 @@ use super::{
     form::{json_form, required_json_form},
     malformed,
     mutations::{DENIED, csrf_proof},
-    response, with_session_headers,
+    no_content, response, with_session_headers,
 };
 use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
@@ -12,6 +12,7 @@ use laneway_controller::{
         AccessError, AclRule, AclSelector, Port, Request as Action, ResourceTarget, RouteMode,
         RouteSpec, ServiceProtocol, Subject, Target,
     },
+    node_location::Location,
 };
 use laneway_protocol::Id;
 use serde::Deserialize;
@@ -19,6 +20,8 @@ use serde::Deserialize;
 pub(super) enum Route<'a> {
     Inventory(&'a str),
     EndpointStatuses(&'a str),
+    NodeLocations(&'a str),
+    NodeLocation(&'a str),
     ListRoutes(&'a str),
     AssignSubnet,
     ApproveAdvertisement(&'a str),
@@ -51,6 +54,8 @@ impl<'a> Route<'a> {
         Some(match parts {
             ["", "v1", "admin", "networks", id, "access-subjects"] => Inventory(id),
             ["", "v1", "admin", "networks", id, "endpoint-statuses"] => EndpointStatuses(id),
+            ["", "v1", "admin", "networks", id, "node-locations"] => NodeLocations(id),
+            ["", "v1", "admin", "nodes", id, "location"] => NodeLocation(id),
             ["", "v1", "admin", "networks", id, "routes"] => ListRoutes(id),
             ["", "v1", "admin", "routes", "assign"] => AssignSubnet,
             ["", "v1", "admin", "routes", id, "approve"] => ApproveAdvertisement(id),
@@ -95,7 +100,9 @@ impl<'a> Route<'a> {
             Self::Inventory(_)
             | Self::ListRoutes(_)
             | Self::Certificates(_)
-            | Self::EndpointStatuses(_) => "GET, HEAD",
+            | Self::EndpointStatuses(_)
+            | Self::NodeLocations(_) => "GET, HEAD",
+            Self::NodeLocation(_) => "DELETE, PUT",
             Self::NodeCapabilities(_) | Self::RelayUpdate(_) => "PUT",
             Self::RelayCollection(_) => "GET, HEAD, POST",
             Self::AclRules(_) => "GET, HEAD, POST",
@@ -143,6 +150,13 @@ struct CapabilitiesForm {
 #[serde(deny_unknown_fields)]
 struct RevocationForm {
     reason: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LocationForm {
+    label: String,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,6 +263,7 @@ pub(super) async fn handle(
         return Ok(r);
     }
     let auth = credential(req.headers())?;
+    let empty = matches!(route, Route::NodeLocation(_));
     let read = matches!(req.method().clone(), Method::GET | Method::HEAD);
     let creates = req.method() == Method::POST
         && matches!(
@@ -266,7 +281,10 @@ pub(super) async fn handle(
     let proof = (!read)
         .then(|| csrf_proof(req.headers()).filter(|_| crate::origin::same_origin(req.headers())))
         .flatten();
-    let action = decode(route, req, put).await.map_err(anyhow::Error::from);
+    let provider = state.locations.as_ref().map(|db| db.provider());
+    let action = decode(route, req, put, provider)
+        .await
+        .map_err(anyhow::Error::from);
     let permit = state.queries.try_acquire_owned().map_err(|_| {
         Failure(
             S::SERVICE_UNAVAILABLE,
@@ -292,6 +310,9 @@ pub(super) async fn handle(
     .await
     .map_err(|_| INTERNAL)?
     .map_err(failure)?;
+    if empty {
+        return with_session_headers(no_content(id), meta);
+    }
     let status = if data.created.unwrap_or(creates) {
         S::CREATED
     } else {
@@ -301,7 +322,12 @@ pub(super) async fn handle(
     with_session_headers(response(status, id, data, head), meta)
 }
 
-async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<Action, Failure> {
+async fn decode(
+    route: Route<'_>,
+    req: Request<Incoming>,
+    put: bool,
+    location_provider: Option<&'static str>,
+) -> Result<Action, Failure> {
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
         Route::EndpointStatuses(net) => Action::EndpointStatuses(
@@ -309,6 +335,29 @@ async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<A
             super::query_limit(req.uri().query())
                 .map_err(|_| malformed("limit must be an integer from 1 through 1000"))?,
         ),
+        Route::NodeLocations(net) => Action::NodeLocations(
+            parse(net)?,
+            super::query_limit(req.uri().query())
+                .map_err(|_| malformed("limit must be an integer from 1 through 1000"))?,
+            location_provider,
+        ),
+        Route::NodeLocation(id) if put => {
+            let id = parse(id)?;
+            let form = required_json_form::<LocationForm>(req).await?;
+            let (Some(latitude), Some(longitude)) = (form.latitude, form.longitude) else {
+                return Err(malformed("latitude and longitude are required"));
+            };
+            Action::SetNodeLocation(
+                id,
+                Some(Location {
+                    label: form.label,
+                    latitude,
+                    longitude,
+                    accuracy_km: 0,
+                }),
+            )
+        }
+        Route::NodeLocation(id) => Action::SetNodeLocation(parse(id)?, None),
         Route::ListRoutes(net) => Action::ListRoutes(
             parse(net)?,
             super::query_limit(req.uri().query()).map_err(|_| malformed("invalid limit"))?,

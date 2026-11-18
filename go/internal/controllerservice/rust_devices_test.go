@@ -22,6 +22,7 @@ import (
 	v1 "github.com/Doout/laneway/go/api/laneway/v1"
 	"github.com/Doout/laneway/go/internal/controller"
 	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/nodelocation"
 	"github.com/Doout/laneway/go/internal/protocol"
 	"google.golang.org/protobuf/proto"
 )
@@ -112,7 +113,7 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 	}
 	target, chain, key, csr := enroll(net, "device-target", false)
 	targetClient := asClient(chain, key)
-	_, observerChain, observerKey, _ := enroll(net, "device-observer", false)
+	observerID, observerChain, observerKey, _ := enroll(net, "device-observer", false)
 	observer := asClient(observerChain, observerKey)
 	foreign, foreignChain, foreignKey, _ := enroll(other.ID, "device-outsider", false)
 	outsider := asClient(foreignChain, foreignKey)
@@ -319,6 +320,78 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 		t.Fatal("node revocation left active addresses or routes")
 	}
 	compare(list, reader)
+
+	t.Run("map-locations", func(t *testing.T) {
+		path := "/v1/admin/networks/" + net.String() + "/node-locations"
+		edit := "/v1/admin/nodes/" + observerID.String() + "/location"
+		location := func() map[string]any {
+			t.Helper()
+			a := send(goURL, "GET", path, "", auditor, 200)
+			b := send(rustURL, "GET", path, "", nodeReader, 200)
+			if !reflect.DeepEqual(a, b) || b["automatic_enabled"] != true || b["location_provider"] != "maxmind" {
+				t.Fatalf("map inventory differs: Go=%#v Rust=%#v", a, b)
+			}
+			for _, row := range b["node_locations"].([]any) {
+				r := row.(map[string]any)
+				if r["node_id"] == observerID.String() {
+					return r
+				}
+			}
+			t.Fatal("node missing from map inventory")
+			return nil
+		}
+		if v := location(); v["online"] != false || v["identity_active"] != true || v["source"] != "unknown" {
+			t.Fatalf("unenriched node misclassified: %#v", v)
+		}
+		body := `{"label":"Equator","latitude":0,"longitude":0}`
+		send(rustURL, "PUT", edit, body, auditor, 403)
+		send(rustURL, "PUT", "/v1/admin/nodes/"+foreign.String()+"/location", body, operatorBot, 404)
+		send(rustURL, "PUT", edit, `{"label":"missing","latitude":0}`, operator, 400)
+		send(rustURL, "PUT", edit, `{"label":"invalid","latitude":91,"longitude":0}`, operator, 400)
+		before := epoch()
+		send(rustURL, "PUT", edit, body, operator, 204)
+		must(f.store.RecordNodeLocation(ctx, identity.NodeIdentity{NetworkID: net, NodeID: observerID},
+			&nodelocation.Location{Label: "London, GB", Latitude: 51.5, Longitude: -0.1, AccuracyKM: 20},
+			time.Now().Add(-25*time.Hour), "81.2.69.142"))
+		if v := location(); v["source"] != "manual" || v["stale"] != false ||
+			v["location"].(map[string]any)["latitude"] != float64(0) || v["online"] != false {
+			t.Fatalf("manual location changed presence or lost zero coordinate: %#v", v)
+		}
+		_, err := db.Exec("CREATE TRIGGER fail_location_audit BEFORE INSERT ON audit_events WHEN NEW.action='node.location.clear' BEGIN SELECT RAISE(ABORT,'lab'); END")
+		must(err)
+		send(rustURL, "DELETE", edit, "", operatorBot, 500)
+		_, err = db.Exec("DROP TRIGGER fail_location_audit")
+		must(err)
+		if v := location(); v["source"] != "manual" {
+			t.Fatalf("failed audit still cleared an override: %#v", v)
+		}
+		send(rustURL, "DELETE", edit, "", operatorBot, 204)
+		if v := location(); v["source"] != "ip" || v["stale"] != true ||
+			v["public_ip"] != "81.2.69.142" || v["location"].(map[string]any)["accuracy_km"] != float64(20) {
+			t.Fatalf("clear did not reveal the last automatic observation: %#v", v)
+		}
+		send(goURL, "PUT", edit, body, operator, 204)
+		request, err := http.NewRequestWithContext(ctx, "PUT", rustURL+"/v1/status",
+			bytes.NewBufferString(report(before, "presence")))
+		must(err)
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Forwarded-For", "81.2.69.142")
+		request.Header.Set("X-Real-IP", "81.2.69.142")
+		request.Header.Set("Forwarded", "for=81.2.69.142")
+		response, err := observer.Do(request)
+		must(err)
+		response.Body.Close()
+		if response.StatusCode != 204 {
+			t.Fatalf("authenticated status response=%d", response.StatusCode)
+		}
+		if v := location(); v["source"] != "manual" || v["online"] != true || v["public_ip"] != nil {
+			t.Fatalf("private TLS peer trusted a header or lost manual location: %#v", v)
+		}
+		send(rustURL, "DELETE", edit, "", operatorBot, 204)
+		if v := location(); v["source"] != "unknown" || v["online"] != true || v["location"] != nil || epoch() != before {
+			t.Fatalf("presence changed from an override or inferred a location for a private peer: %#v", v)
+		}
+	})
 
 	exitID, exitChain, exitKey, _ := enroll(other.ID, "device-ephemeral-exit", true)
 	exitSession, err := f.store.EphemeralExitSession(ctx, exitID)

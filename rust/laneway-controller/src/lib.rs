@@ -21,6 +21,7 @@ pub mod enrollment;
 mod enrollment_tokens;
 mod management_write;
 mod network_create;
+pub mod node_location;
 pub use enrollment_tokens::{IssueEnrollmentToken, IssuedEnrollmentToken};
 pub mod node_pki;
 mod nodes;
@@ -40,6 +41,7 @@ pub enum InventoryList {
 }
 
 const SCHEMA_VERSION: i64 = 18;
+const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Inventory {
     db: Connection,
@@ -85,7 +87,7 @@ fn open_existing(path: &Path, flags: OpenFlags) -> Result<Connection> {
         "expected an existing controller database file"
     );
     let db = Connection::open_with_flags(path, flags).context("open controller database")?;
-    db.busy_timeout(Duration::from_secs(5))?;
+    db.busy_timeout(DB_BUSY_TIMEOUT)?;
     db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON")?;
     Ok(db)
 }

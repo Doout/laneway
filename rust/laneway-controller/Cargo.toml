@@ -17,6 +17,7 @@ hex.workspace = true
 http-body-util = "0.1"
 httpdate = "1"
 ipnet.workspace = true
+maxminddb = "0.33"
 mime = "0.3"
 prost.workspace = true
 quinn.workspace = true

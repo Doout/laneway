@@ -1,7 +1,8 @@
 //! Device authority edits share the same transaction as route withdrawal and
 //! the snapshot epoch. Certificate-only revocation leaves the node enrolled.
-use super::{AccessError, row_id, subjects::Editor};
+use super::{AccessError, audit, row_id, subjects::Editor};
 use crate::enrollment_tokens::{EXIT, ROUTER};
+use crate::node_location::Location;
 use anyhow::{Result, ensure};
 use laneway_protocol::Id;
 use rusqlite::{OptionalExtension, params};
@@ -24,6 +25,38 @@ struct Certificate {
 }
 
 impl Editor<'_, '_> {
+    pub(super) fn set_node_location(
+        &self,
+        id: Id,
+        mut location: Option<Location>,
+    ) -> Result<Value> {
+        if let Some(value) = &mut location {
+            value.validate()?;
+            value.accuracy_km = 0;
+        }
+        let encoded = location.as_ref().map(serde_json::to_string).transpose()?;
+        self.tx.execute(
+            "INSERT INTO node_locations(node_id,manual_json,manual_updated_at,observed_at) VALUES(?,?,?,0)
+             ON CONFLICT(node_id) DO UPDATE SET manual_json=excluded.manual_json,
+               manual_updated_at=excluded.manual_updated_at",
+            params![id.as_bytes(), encoded, self.now],
+        )?;
+        let action = if location.is_some() {
+            "node.location.set"
+        } else {
+            "node.location.clear"
+        };
+        audit(
+            self.tx,
+            self.net,
+            &self.actor,
+            self.now,
+            action,
+            ("node", id),
+            json!({}),
+        )?;
+        Ok(json!({}))
+    }
     pub(super) fn certificates(&self, limit: usize) -> Result<Value> {
         ensure!(
             (1..=1000).contains(&limit),

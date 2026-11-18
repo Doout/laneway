@@ -77,6 +77,8 @@ func endpointHealth(args []string) error {
 	fs := flag.NewFlagSet("endpoint-health", flag.ContinueOnError)
 	path := fs.String("database", "", "temporary controller database")
 	node := fs.String("node-id", "", "reporting node identity")
+	ip := fs.String("public-ip", "", "expected node transport address")
+	location := fs.String("location", "", "expected automatic location label")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -91,9 +93,13 @@ func endpointHealth(args []string) error {
 	}
 	defer db.Close()
 	var carrier string
-	if err := db.QueryRow(`SELECT carrier_state FROM endpoint_status_latest
-		WHERE node_id=? AND platform='linux' AND configuration_state='current'
-		  AND route_state='ready' AND expires_at>unixepoch()`, id[:]).Scan(&carrier); err != nil {
+	if err := db.QueryRow(`SELECT s.carrier_state FROM endpoint_status_latest s
+		JOIN node_locations l ON l.node_id=s.node_id
+		WHERE s.node_id=? AND s.platform='linux' AND s.configuration_state='current'
+		  AND s.route_state='ready' AND s.expires_at>unixepoch() AND l.observed_at>unixepoch()-30
+		  AND (?='' OR l.public_ip=?)
+		  AND (?='' OR json_extract(l.automatic_json,'$.label')=?)`,
+		id[:], *ip, *ip, *location, *location).Scan(&carrier); err != nil {
 		return err
 	}
 	fmt.Println(carrier)

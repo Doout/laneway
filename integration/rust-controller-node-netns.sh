@@ -214,9 +214,14 @@ admin_token="laneway-rust-controller-integration-admin-token-00000001"
 printf '%s\n' "${admin_token}" >"${work_dir}/admin.token"
 chmod 600 "${work_dir}/admin.token"
 "${work_dir}/laneway" pki init -out-dir "${work_dir}/pki" >/dev/null
+# These public-looking addresses exist only on the disconnected lab bridge.
+# The existing MaxMind test fixture resolves the node address to London.
+location_controller_ip="81.2.69.141"
+location_node_ip="81.2.69.142"
+location_fixture="${repo_root}/go/internal/nodelocation/testdata/GeoIP2-City-Test.mmdb"
 "${work_dir}/laneway" pki controller \
   -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
-  -network-id "${network_id}" -service-id "${controller_service}" -ip 10.254.0.1,127.0.0.1 \
+  -network-id "${network_id}" -service-id "${controller_service}" -ip "10.254.0.1,127.0.0.1,${location_controller_ip}" \
   -out-cert "${work_dir}/pki/controller.crt" -out-key "${work_dir}/pki/controller.key"
 "${work_dir}/laneway" pki relay \
   -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
@@ -317,9 +322,15 @@ relay_metrics=""
 management_connection=("${admin_connection[@]}")
 advertiser_namespace="${gateway_ns}"
 advertiser_endpoint="${controller_endpoint}"
+health_location=()
 if [[ "${node_controller}" == "rust" ]]; then
-  node_endpoint="https://10.254.0.1:9443"
-  node_quic_endpoint="10.254.0.1:9443"
+  ip -n "${controller_ns}" address add "${location_controller_ip}/28" dev eth0
+  ip -n "${rust_ns}" address add "${location_node_ip}/28" dev eth0
+  ip -n "${relay_ns}" address add 81.2.69.140/28 dev eth0
+  node_endpoint="https://${location_controller_ip}:9443"
+  node_quic_endpoint="${location_controller_ip}:9443"
+  node_server_name="${location_controller_ip}"
+  health_location=(-public-ip "${location_node_ip}" -location "London, GB")
   relay_metrics='metrics_listen = "127.0.0.1:6060"'
   # Keep HTTPS loopback-only. Allow just the lab node's HTTPS connection to
   # reach that listener through TCP DNAT, without terminating its mTLS.
@@ -329,13 +340,14 @@ if [[ "${node_controller}" == "rust" ]]; then
   ip netns exec "${controller_ns}" nft add chain ip lab_health prerouting \
     '{ type nat hook prerouting priority dstnat; policy accept; }'
   ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
-    iifname eth0 ip saddr 10.254.0.3 ip daddr 10.254.0.1 tcp dport 9443 dnat to 127.0.0.1:9443
+    iifname eth0 ip saddr "${location_node_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
   start_process "${controller_ns}" "${work_dir}/native-controller.log" \
     "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
     "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
     --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
     --root-token-file "${work_dir}/admin.token" \
-    --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity 2
+    --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity 2 \
+    --location-database "${location_fixture}"
   native_controller_pid="${last_pid}"
   wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
   advertiser_namespace="${controller_ns}"
@@ -561,10 +573,11 @@ if [[ "${node_controller}" == "rust" ]]; then
   fi
 fi
 
-echo "==> live Rust node reports its authenticated carrier and routes"
+echo "==> live Rust node reports its authenticated carrier and routes; the controller observes its source"
 reported_carrier=""
 for _ in $(seq 1 150); do
-  reported_carrier="$("${work_dir}/netprobe" endpoint-health -database "${work_dir}/controller.db" -node-id "${rust_id}" 2>/dev/null || true)"
+  reported_carrier="$("${work_dir}/netprobe" endpoint-health -database "${work_dir}/controller.db" \
+    -node-id "${rust_id}" "${health_location[@]}" 2>/dev/null || true)"
   if [[ "${reported_carrier}" == "relay_quic" ]]; then
     break
   fi

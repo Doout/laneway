@@ -10,7 +10,7 @@ mod subjects;
 pub use crate::enrollment::snapshot_policy::AclSelector;
 use crate::{
     RootCredential, SessionError, SessionReply, SessionStore, management_write::BrowserWrite,
-    sessions::check_network,
+    node_location::Location, sessions::check_network,
 };
 pub use acl::AclRule;
 use anyhow::{Result, ensure};
@@ -33,6 +33,8 @@ pub enum AccessError {
 pub enum Request {
     Inventory(Id),
     EndpointStatuses(Id, usize),
+    NodeLocations(Id, usize, Option<&'static str>),
+    SetNodeLocation(Id, Option<Location>),
     ListRoutes(Id, usize),
     AssignRoute(Id, Id, RouteSpec),
     ApproveRoute(Id),
@@ -114,6 +116,7 @@ impl Request {
             self,
             Self::Inventory(_)
                 | Self::EndpointStatuses(..)
+                | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
                 | Self::ListRoutes(..)
                 | Self::ListCertificates(..)
@@ -123,14 +126,16 @@ impl Request {
     fn permission(&self) -> &'static str {
         match self {
             Self::ListRoutes(..) => "route.read",
-            Self::EndpointStatuses(..) => "node.read",
+            Self::EndpointStatuses(..) | Self::NodeLocations(..) => "node.read",
             Self::ListCertificates(..) => "certificate.read",
             Self::ListRelays(..) => "relay.read",
             Self::RegisterRelay { .. } | Self::UpdateRelay(..) | Self::DisableRelay(_) => {
                 "relay.manage"
             }
             Self::RevokeCertificate(..) => "certificate.revoke",
-            Self::RevokeNode(..) | Self::SetNodeCapabilities(..) => "node.manage",
+            Self::RevokeNode(..) | Self::SetNodeCapabilities(..) | Self::SetNodeLocation(..) => {
+                "node.manage"
+            }
             Self::AssignRoute(..) | Self::ApproveRoute(_) | Self::WithdrawRoute(_) => {
                 "route.manage"
             }
@@ -142,6 +147,7 @@ impl Request {
         let object = match self {
             Self::Inventory(net)
             | Self::EndpointStatuses(net, _)
+            | Self::NodeLocations(net, ..)
             | Self::ListRoutes(net, _)
             | Self::AssignRoute(net, ..)
             | Self::ListCertificates(net, _)
@@ -164,9 +170,9 @@ impl Request {
             Self::SetUserEnabled(id, _) => ("SELECT network_id FROM access_users WHERE id=?", id),
             Self::SetMember(id, _, _) => ("SELECT network_id FROM access_teams WHERE id=?", id),
             Self::DeleteGrant(id) => ("SELECT network_id FROM access_grants WHERE id=?", id),
-            Self::RevokeNode(id, _) | Self::SetNodeCapabilities(id, _) => {
-                ("SELECT network_id FROM nodes WHERE id=?", id)
-            }
+            Self::RevokeNode(id, _)
+            | Self::SetNodeCapabilities(id, _)
+            | Self::SetNodeLocation(id, _) => ("SELECT network_id FROM nodes WHERE id=?", id),
             Self::UpdateRelay(id, ..) | Self::DisableRelay(id) => {
                 ("SELECT network_id FROM relays WHERE id=?", id)
             }
@@ -208,6 +214,10 @@ impl Request {
             Self::EndpointStatuses(_, limit) => {
                 crate::endpoint_status::inventory(tx, net, limit, now)
             }
+            Self::NodeLocations(_, limit, provider) => {
+                crate::node_location::inventory(tx, net, now, limit, provider)
+            }
+            Self::SetNodeLocation(id, location) => editor.set_node_location(id, location),
             Self::ListRoutes(_, limit) => editor.list_routes(limit),
             Self::AssignRoute(_, node, spec) => {
                 let (data, created) = editor.assign_route(node, spec)?;

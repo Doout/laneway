@@ -242,6 +242,14 @@ timestamps. The namespace gate waits for real Linux agent reports with active
 relay QUIC and applied routes. The HTTPS gate verifies Go/Rust interchange,
 expiry, revoked identity rejection and network scope.
 
+Rust serves the existing node locations API and updates presence from
+authenticated HTTPS polls, QUIC polls, and status reports. Enable automatic
+city lookup with `--location-database /lab/City.mmdb`; the file stays local,
+and a private or reserved peer address remains unlocated. Manual overrides
+are audited without changing routing epochs. The namespace gate uses an
+offline City fixture and a lab-only transport address to verify actual
+automatic location inference.
+
 `POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
 invitations. It accepts owner or operator sessions with network access, the
 configured root bearer, or automation with `enrollment.issue` on that network.

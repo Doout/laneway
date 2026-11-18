@@ -1,5 +1,6 @@
 use super::{
-    AUTH, Failure, INTERNAL, Reply, State, form::required_json_form, mutations::DENIED, response,
+    AUTH, Failure, INTERNAL, Reply, State, form::required_json_form, mutations::DENIED, no_content,
+    record_presence,
 };
 use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
@@ -8,11 +9,13 @@ use laneway_controller::{
 };
 use laneway_protocol::endpoint_status::Report;
 use rustls::pki_types::CertificateDer;
+use std::net::IpAddr;
 
 pub(super) async fn handle(
     mut req: Request<Incoming>,
     state: State,
     id: &str,
+    remote: IpAddr,
 ) -> Result<Reply, Failure> {
     if req.method() != Method::PUT {
         let mut r = Failure(
@@ -30,6 +33,7 @@ pub(super) async fn handle(
         .extensions_mut()
         .remove::<CertificateDer<'static>>()
         .ok_or(AUTH)?;
+    let locations = state.locations.clone();
     let permit = state.queries.try_acquire_owned().map_err(|_| {
         Failure(
             S::SERVICE_UNAVAILABLE,
@@ -50,15 +54,14 @@ pub(super) async fn handle(
     let report = required_json_form::<Report>(req).await?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        store.record_endpoint_status(&peer, report)
+        store.record_endpoint_status(&peer, report)?;
+        record_presence(&mut store, &peer, remote, locations.as_deref());
+        Ok(())
     })
     .await
     .map_err(|_| INTERNAL)?
     .map_err(failure)?;
-    let mut reply = response(S::NO_CONTENT, id, Vec::new(), true);
-    reply.headers_mut().remove(header::CONTENT_LENGTH);
-    reply.headers_mut().remove(header::CONTENT_TYPE);
-    Ok(reply)
+    Ok(no_content(id))
 }
 
 fn failure(err: anyhow::Error) -> Failure {

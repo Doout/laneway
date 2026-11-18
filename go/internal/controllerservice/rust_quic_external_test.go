@@ -324,6 +324,16 @@ func TestRustControllerQUIC(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer raw.Close()
+		presenceNode, err := identity.IdentityFromCertificate(oldLeaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var observed int64
+		var publicIP string
+		if err := raw.QueryRow("SELECT observed_at,public_ip FROM node_locations WHERE node_id=?", presenceNode.NodeID[:]).
+			Scan(&observed, &publicIP); err != nil || observed <= 0 || publicIP != "" {
+			t.Fatalf("authenticated local QUIC did not record private presence: observed=%d public=%q error=%v", observed, publicIP, err)
+		}
 		time.Sleep(time.Until(exp) + 100*time.Millisecond)
 		after, unchanged, err := renewed.Configuration(ctx, noRule.ConfigurationEpoch)
 		if err != nil || unchanged || after.ConfigurationEpoch != noRule.ConfigurationEpoch+1 || len(after.GetRoutes().GetRoutes()) != 4 {
@@ -337,6 +347,11 @@ func TestRustControllerQUIC(t *testing.T) {
 		fresh, unchanged, err := renewed.Configuration(ctx, after.ConfigurationEpoch)
 		if err != nil || !unchanged || fresh.GetConfigurationEpoch() != after.ConfigurationEpoch || fresh.GetValidUntilUnixSeconds() <= after.GetValidUntilUnixSeconds() {
 			t.Fatalf("lease did not advance without an epoch change: %v %t %v", fresh, unchanged, err)
+		}
+		var refreshed int64
+		if err := raw.QueryRow("SELECT observed_at FROM node_locations WHERE node_id=?", presenceNode.NodeID[:]).
+			Scan(&refreshed); err != nil || refreshed <= observed {
+			t.Fatalf("unchanged QUIC lease did not refresh presence: observed=%d refreshed=%d error=%v", observed, refreshed, err)
 		}
 		t.Run("managed access", func(t *testing.T) {
 			provision := func(name string) (identity.NodeID, pki.Material) {

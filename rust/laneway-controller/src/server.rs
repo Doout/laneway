@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB]";
 
 struct QuicListener {
     config: quinn::ServerConfig,
@@ -43,6 +43,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut node_quic = false;
     let mut quic_listen = None;
     let mut snapshot_validity = None;
+    let mut location_database = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -71,6 +72,8 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             client_ca = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--node-quic" && !node_quic {
             node_quic = true;
+        } else if flag == "--location-database" && location_database.is_none() {
+            location_database = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--quic-listen" && quic_listen.is_none() {
             quic_listen = Some(
                 args.next()
@@ -116,6 +119,16 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         None
     };
     laneway_controller::SessionStore::check_database(&database)?;
+    let location_database =
+        location_database.and_then(
+            |path| match laneway_controller::node_location::Database::open(&path) {
+                Ok(db) => Some(Arc::new(db)),
+                Err(_) => {
+                    eprintln!("Node location lookup disabled: could not open local City database");
+                    None
+                }
+            },
+        );
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -126,6 +139,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
                 issuer,
                 client_ca.is_some(),
                 snapshot_validity.unwrap_or(300),
+                location_database,
             )?,
             address,
             config,

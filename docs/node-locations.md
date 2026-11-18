@@ -7,13 +7,17 @@ in the list; they are never assigned an invented coordinate.
 
 ## Enable automatic lookup
 
-Provision a DB-IP City Lite, GeoLite2 City or GeoIP2 City `.mmdb` database on the controller
-and set the following in its TOML configuration:
+Provision a DB-IP City Lite, GeoLite2 City or GeoIP2 City `.mmdb` database
+on the controller. For Go, set this in its TOML configuration:
 
 ```toml
 [controller]
 location_database = "/etc/laneway/GeoLite2-City.mmdb"
 ```
+
+For the Rust lab controller, append
+`--location-database /etc/laneway/GeoLite2-City.mmdb` to the `serve` command.
+Both implementations use the same map API and SQLite records.
 
 For containers, mount the file read-only at that path. Obtain and update it through
 [MaxMind's database distribution](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)

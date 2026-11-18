@@ -24,6 +24,7 @@ import (
 
 	"github.com/Doout/laneway/go/internal/adminauth"
 	"github.com/Doout/laneway/go/internal/identity"
+	"github.com/Doout/laneway/go/internal/nodelocation"
 	"github.com/Doout/laneway/go/internal/pki"
 )
 
@@ -31,6 +32,16 @@ import (
 // The production cookie middleware remains in the Go reference path.
 func TestRustControllerHTTPS(t *testing.T) {
 	f := newFixture(t, 0, nil)
+	locationPath, err := filepath.Abs("../nodelocation/testdata/GeoIP2-City-Test.mmdb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	locationDB, err := nodelocation.Open(locationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locationDB.Close()
+	f.service.locationResolver = locationDB
 	material, _, err := pki.IssueService(f.service.ca, f.service.caKey, pki.ServiceIdentity{
 		NetworkID: f.network.ID, ServiceID: identity.ID(f.network.ID), Role: pki.RoleController,
 	}, nil, []net.IP{net.ParseIP("127.0.0.1")}, time.Now(), time.Hour)
@@ -69,7 +80,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 		t.Fatal(err)
 	}
 	caKey := write("issuer.key", "PRIVATE KEY", caPK)
-	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key, "--root-token-file", rootFile, "--node-issuer", ca, caKey, "86400", "--node-client-ca", ca)
+	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key, "--root-token-file", rootFile, "--node-issuer", ca, caKey, "86400", "--node-client-ca", ca, "--location-database", locationPath)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

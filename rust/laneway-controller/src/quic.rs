@@ -183,6 +183,7 @@ async fn request(
         "unsupported control operation"
     );
     let issuer = state.issuer.clone();
+    let locations = state.locations.clone();
     let validity = state.snapshot_validity;
     let body = if let Ok(permit) = state.queries.clone().try_acquire_owned() {
         let db = state.database.clone();
@@ -206,7 +207,22 @@ async fn request(
                         .map(Body::RenewalResponse)
                 }
                 (ControlPeer::Node(peer), Body::ConfigurationRequest(req)) => {
-                    store.node_configuration(&peer, req, holds_exit_claim, validity, cancelled)
+                    let snapshot = store.node_configuration(
+                        &peer,
+                        req,
+                        holds_exit_claim,
+                        validity,
+                        cancelled,
+                    )?;
+                    if !cancelled() {
+                        crate::http::record_presence(
+                            &mut store,
+                            &peer,
+                            conn.remote_address().ip(),
+                            locations.as_deref(),
+                        );
+                    }
+                    Ok(snapshot)
                 }
                 (ControlPeer::Relay(peer), Body::RelayConfigurationRequest(req)) => store
                     .relay_configuration(&peer, req, validity, cancelled)

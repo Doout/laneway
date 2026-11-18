@@ -1,6 +1,7 @@
 use super::{
     Reply, State,
     node_proto::{error, failure, internal, not_modified, proto, read_body},
+    record_presence,
 };
 use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
@@ -10,8 +11,14 @@ use laneway_controller::{
 use laneway_protocol::v1::{ConfigurationRequest, ErrorCode as Code, controller_envelope::Body};
 use prost::Message;
 use rustls::pki_types::CertificateDer;
+use std::net::IpAddr;
 
-pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -> Reply {
+pub(super) async fn handle(
+    mut req: Request<Incoming>,
+    state: State,
+    id: &str,
+    remote: IpAddr,
+) -> Reply {
     if req.method() != Method::POST {
         let mut r = error(
             S::METHOD_NOT_ALLOWED,
@@ -27,6 +34,7 @@ pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -
     let Some(cert) = req.extensions_mut().remove::<CertificateDer<'static>>() else {
         return failure(EnrollError::Invalid.into(), id);
     };
+    let locations = state.locations.clone();
     let Ok(permit) = state.queries.try_acquire_owned() else {
         return error(
             S::SERVICE_UNAVAILABLE,
@@ -55,13 +63,18 @@ pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -
         Err(reply) => return reply,
     };
     let (cancel, _alive) = tokio::sync::oneshot::channel::<()>();
-    match tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || -> anyhow::Result<Body> {
         let _permit = permit;
         let req = ConfigurationRequest::decode(data.as_slice())
             .map_err(|_| EnrollError::Malformed("malformed protobuf request"))?;
         // HTTPS never holds the exclusive ephemeral Exit control claim.
         // Both transports build and lease the same transaction-bound snapshot.
-        store.node_configuration(&peer, req, false, validity, || cancel.is_closed())
+        let snapshot =
+            store.node_configuration(&peer, req, false, validity, || cancel.is_closed())?;
+        if !cancel.is_closed() {
+            record_presence(&mut store, &peer, remote, locations.as_deref());
+        }
+        Ok(snapshot)
     })
     .await
     {
