@@ -22,6 +22,8 @@ maxminddb = "0.33"
 mime = "0.3"
 prost.workspace = true
 quinn.workspace = true
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
+ring = "0.17"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rustls.workspace = true

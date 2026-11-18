@@ -8,6 +8,7 @@ mod http;
 mod origin;
 mod quic;
 mod server;
+mod webhook_alerts;
 
 fn main() -> Result<()> {
     let mut args = env::args_os().skip(1);

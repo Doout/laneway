@@ -17,7 +17,7 @@ use tokio_rustls::TlsAcceptor;
 mod service_tls;
 
 const DEFAULT_RENEW_BEFORE: i64 = 7 * 24 * 60 * 60;
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON] [--console-dir ABSOLUTE_DIST_DIR] [--renew-controller-tls ABSOLUTE_STATE_DIR [--controller-renew-before SECONDS]]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON] [--console-dir ABSOLUTE_DIST_DIR] [--renew-controller-tls ABSOLUTE_STATE_DIR [--controller-renew-before SECONDS]] [--alert-webhook-url-file PATH --alert-webhook-secret-file PATH]";
 
 struct QuicListener {
     config: quinn::ServerConfig,
@@ -57,6 +57,8 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut console_dir = None;
     let mut renewal_dir = None;
     let mut renew_before = None;
+    let mut webhook_url = None;
+    let mut webhook_secret = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -87,6 +89,10 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             node_quic = true;
         } else if flag == "--location-database" && location_database.is_none() {
             location_database = Some(PathBuf::from(args.next().context(USAGE)?));
+        } else if flag == "--alert-webhook-url-file" && webhook_url.is_none() {
+            webhook_url = Some(PathBuf::from(args.next().context(USAGE)?));
+        } else if flag == "--alert-webhook-secret-file" && webhook_secret.is_none() {
+            webhook_secret = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--allow-insecure-application-callbacks" && !allow_loopback_callbacks {
             allow_loopback_callbacks = true;
         } else if flag == "--bootstrap-profile" && bootstrap_profile.is_none() {
@@ -146,6 +152,16 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let identity = Arc::new(service_tls::Identity::load(&cert, &key)?);
     let roots = client_ca.as_deref().map(tls_roots).transpose()?;
     laneway_controller::SessionStore::check_database(&database)?;
+    let alerts =
+        laneway_controller::SessionStore::open(&database)?.operational_alerts_available()?;
+    let webhook = match (webhook_url, webhook_secret) {
+        (None, None) => None,
+        (Some(url), Some(secret)) => {
+            ensure!(alerts, "alert webhook requires fleet schema 19");
+            Some(crate::webhook_alerts::Webhook::load(&url, &secret)?)
+        }
+        _ => anyhow::bail!("alert webhook requires both the private URL and signing secret files"),
+    };
     let location_database =
         location_database.and_then(
             |path| match laneway_controller::node_location::Database::open(&path) {
@@ -230,7 +246,14 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(state, address, config, quic, renewal))
+        .block_on(serve(
+            state,
+            address,
+            config,
+            quic,
+            renewal,
+            alerts.then_some(webhook),
+        ))
 }
 
 fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>> {
@@ -312,6 +335,7 @@ async fn serve(
     config: ServerConfig,
     quic: Option<QuicListener>,
     renewal: Option<service_tls::Renewal>,
+    alerts: Option<Option<crate::webhook_alerts::Webhook>>,
 ) -> Result<()> {
     let listener = TcpListener::bind(address).await?;
     // Bind both sockets before announcing readiness. By default UDP shares the
@@ -341,12 +365,20 @@ async fn serve(
     let renewal = renewal.map(|worker| tokio::spawn(worker.run()));
     let topology_expiry = prune_topology(state.clone());
     tokio::pin!(topology_expiry);
+    let alerts = async {
+        match alerts {
+            Some(webhook) => crate::webhook_alerts::run(state.clone(), webhook).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(alerts);
     let stop = stop();
     tokio::pin!(stop);
     loop {
         tokio::select! {
             result=&mut control => return result,
             _=&mut topology_expiry => unreachable!("topology expiry loop never returns"),
+            _=&mut alerts => unreachable!("alert worker never returns"),
             result=&mut stop => { result?; break; }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             socket=listener.accept() => {

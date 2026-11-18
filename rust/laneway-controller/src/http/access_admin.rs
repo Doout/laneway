@@ -24,6 +24,8 @@ pub(super) enum Route<'a> {
     EndpointStatuses(&'a str),
     Topology(&'a str),
     FleetUpdates(&'a str),
+    OperationalAlerts(&'a str),
+    AcknowledgeAlert(&'a str, &'a str),
     AdvanceFleetUpdate(&'a str, &'a str, bool),
     NodeLocations(&'a str),
     NodeLocation(&'a str),
@@ -67,6 +69,17 @@ impl<'a> Route<'a> {
             ["", "v1", "admin", "networks", id, "endpoint-statuses"] => EndpointStatuses(id),
             ["", "v1", "admin", "networks", id, "topology"] => Topology(id),
             ["", "v1", "admin", "networks", id, "fleet-updates"] => FleetUpdates(id),
+            ["", "v1", "admin", "networks", id, "alerts"] => OperationalAlerts(id),
+            [
+                "",
+                "v1",
+                "admin",
+                "networks",
+                net,
+                "alerts",
+                id,
+                "acknowledge",
+            ] => AcknowledgeAlert(net, id),
             [
                 "",
                 "v1",
@@ -151,6 +164,7 @@ impl<'a> Route<'a> {
             | Self::Certificates(_)
             | Self::EndpointStatuses(_)
             | Self::Topology(_)
+            | Self::OperationalAlerts(_)
             | Self::NodeLocations(_) => "GET, HEAD",
             Self::NodeLocation(_) => "DELETE, PUT",
             Self::NodeCapabilities(_) | Self::RelayUpdate(_) => "PUT",
@@ -168,6 +182,7 @@ impl<'a> Route<'a> {
             | Self::PolicyPreview(_)
             | Self::Diagnostics(_)
             | Self::AdvanceFleetUpdate(..)
+            | Self::AcknowledgeAlert(..)
             | Self::RestorePolicy(..)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
@@ -331,7 +346,7 @@ pub(super) async fn handle(
     let auth = credential(req.headers())?;
     let empty = matches!(
         route,
-        Route::NodeLocation(_) | Route::AdvanceFleetUpdate(..)
+        Route::NodeLocation(_) | Route::AdvanceFleetUpdate(..) | Route::AcknowledgeAlert(..)
     );
     let access = if matches!(route, Route::PolicyPreview(_) | Route::Diagnostics(_)) {
         BrowserAccess::Query
@@ -408,6 +423,8 @@ async fn decode(
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
         Route::PrivateDns(net) => Action::PrivateDns(parse(net)?),
+        Route::OperationalAlerts(net) => Action::OperationalAlerts(parse(net)?),
+        Route::AcknowledgeAlert(net, id) => Action::AcknowledgeAlert(parse(net)?, parse(id)?),
         Route::FleetUpdates(net) => {
             let net = parse(net)?;
             if req.method() == Method::POST {

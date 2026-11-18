@@ -41,6 +41,8 @@ pub enum Request {
     EndpointStatuses(Id, usize),
     Topology(Id, usize),
     FleetUpdates(Id, usize),
+    OperationalAlerts(Id),
+    AcknowledgeAlert(Id, Id),
     CreateFleetUpdate(Id, Result<FleetPlan>),
     AdvanceFleetUpdate(Id, Id, bool),
     NodeLocations(Id, usize, Option<&'static str>),
@@ -156,6 +158,7 @@ impl Request {
                 | Self::EndpointStatuses(..)
                 | Self::Topology(..)
                 | Self::FleetUpdates(..)
+                | Self::OperationalAlerts(_)
                 | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
                 | Self::PolicyPreview(..)
@@ -172,6 +175,7 @@ impl Request {
             Self::EndpointStatuses(..)
             | Self::Topology(..)
             | Self::FleetUpdates(..)
+            | Self::OperationalAlerts(_)
             | Self::NodeLocations(..) => "node.read",
             Self::ListCertificates(..) => "certificate.read",
             Self::ListRelays(..) => "relay.read",
@@ -181,6 +185,7 @@ impl Request {
             Self::RevokeCertificate(..) => "certificate.revoke",
             Self::RevokeNode(..)
             | Self::IssueNodeRecovery(..)
+            | Self::AcknowledgeAlert(..)
             | Self::CreateFleetUpdate(..)
             | Self::AdvanceFleetUpdate(..)
             | Self::SetNodeCapabilities(..)
@@ -199,6 +204,8 @@ impl Request {
             | Self::EndpointStatuses(net, _)
             | Self::Topology(net, _)
             | Self::FleetUpdates(net, _)
+            | Self::OperationalAlerts(net)
+            | Self::AcknowledgeAlert(net, _)
             | Self::CreateFleetUpdate(net, _)
             | Self::AdvanceFleetUpdate(net, ..)
             | Self::NodeLocations(net, ..)
@@ -276,6 +283,11 @@ impl Request {
             }
             Self::Topology(_, limit) => crate::topology::inventory(tx, net, limit, now),
             Self::FleetUpdates(_, limit) => crate::fleet_updates::inventory(tx, net, limit),
+            Self::OperationalAlerts(_) => crate::operational_alerts::inventory(tx, net),
+            Self::AcknowledgeAlert(_, id) => {
+                crate::operational_alerts::acknowledge(tx, net, &editor.actor, now, id)?;
+                Ok(Value::Null)
+            }
             Self::CreateFleetUpdate(_, plan) => {
                 crate::fleet_updates::create(tx, net, &editor.actor, now, plan?)
             }

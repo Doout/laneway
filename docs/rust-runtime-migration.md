@@ -1059,6 +1059,48 @@ gate uses the existing Go CLI against the Rust ACL API to prove that removing
 the allow rule blocks a real routed packet and adding it back restores traffic.
 The fixture still uses Go for route administration.
 
+### Operational alerts (lab only)
+
+Fleet schema 19 reconciles node status, certificate expiry, exit availability,
+and terminal update outcomes every minute. A node that has never reported is
+not offline. An expired report opens an offline incident after a two-minute
+grace period; stale or unknown exit status cannot clear an exit incident.
+Certificates expiring within seven days and failed or rolled-back updates are
+tracked separately. Acknowledgment does not change forwarding or suppress a
+later recurrence.
+
+The existing console endpoints are `GET /v1/admin/networks/{network_id}/alerts`
+(`node.read`) and
+`POST /v1/admin/networks/{network_id}/alerts/{alert_id}/acknowledge`
+(`node.manage` plus CSRF for browser sessions). Each open, acknowledgment,
+or resolution records one durable event in the same transaction.
+
+Webhook delivery is off by default. To enable it, pass
+`--alert-webhook-url-file PATH --alert-webhook-secret-file PATH` to the Rust
+controller. Both Unix files should be private regular files, mode 0600 or
+0400, readable by the service. The first contains one HTTPS URL on port 443
+without credentials or a fragment. The second contains a signing secret of
+at least 32 bytes, with the file bounded to 4096 bytes. Keeping the URL in a
+file also keeps notification tokens out of process arguments.
+
+The client rejects proxies, redirects, and private or special-use destinations.
+Every DNS answer must pass the public-address check, and the actual connection
+uses only those addresses with TLS still verifying the original hostname.
+The address filter is conservative about the [IANA IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry)
+and [IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry)
+special-purpose ranges.
+
+The webhook signs `timestamp + "." + eventID + "." + rawRequestBody` using
+HMAC-SHA256, with the Go-compatible `X-Laneway-Event-ID`,
+`X-Laneway-Timestamp`, and `X-Laneway-Signature: v1=<hex>` headers. Retries
+use the original event ID and payload. A send has an eight-second deadline
+and at most five attempts. Receivers should deduplicate by event ID: a crash
+after acceptance can lead to a repeat. Events processed while delivery is
+disabled are not replayed if it is later enabled.
+
+`bash integration/rust-lab/alert-webhook.sh` exercises the actual signed TLS
+request and rejects a redirect inside a Docker namespace with no egress.
+
 ### Managed fleet updates (lab only)
 
 Schema 19 supports the existing Fleet Updates console API. Listing requires

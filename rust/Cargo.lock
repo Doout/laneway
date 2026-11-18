@@ -1282,6 +1282,8 @@ dependencies = [
  "prost",
  "quinn",
  "rcgen 0.14.8",
+ "reqwest",
+ "ring",
  "rusqlite",
  "rustix",
  "rustls",

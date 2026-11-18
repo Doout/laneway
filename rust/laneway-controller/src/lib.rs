@@ -35,6 +35,7 @@ pub mod node_location;
 pub use enrollment_tokens::{InstallerKind, IssueEnrollmentToken, IssuedEnrollmentToken};
 pub mod node_pki;
 mod nodes;
+pub mod operational_alerts;
 pub use network_create::{CreateNetwork, NetworkError};
 pub mod password;
 pub mod recovery;
