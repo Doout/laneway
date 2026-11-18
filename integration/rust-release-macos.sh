@@ -15,9 +15,14 @@ case "$(uname -sm):$arch" in
 esac
 install_probe=${LANEWAY_MACOS_ARCHIVE_INSTALL:-0}
 utun_probe=${LANEWAY_MACOS_UTUN_TEST:-0}
+desktop_probe=${LANEWAY_MACOS_DESKTOP_TEST:-0}
 case "$install_probe:$utun_probe" in
   0:0|1:0|1:1) ;;
   *) echo "the utun test requires LANEWAY_MACOS_ARCHIVE_INSTALL=1; use 0 or 1 for both settings" >&2; exit 2 ;;
+esac
+case "$desktop_probe" in
+  0|1) ;;
+  *) echo "use 0 or 1 for LANEWAY_MACOS_DESKTOP_TEST" >&2; exit 2 ;;
 esac
 if [ "$install_probe" = 1 ]; then
   if [ "$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
@@ -70,6 +75,19 @@ sh "$root/scripts/verify-rust-macos-runtime.sh" "$package/bin/lanewayd-rs" "$arc
 [ "$("$package/bin/lanewayd-rs" --version)" = "$version" ]
 LANEWAY_MACOS_TEST_ARCHIVE="$archive" LANEWAY_MACOS_TEST_VERSION="$version" \
   go -C "$root/go" test ./cmd/laneway -run '^TestMacRustRuntimeArchiveMatchesUpdater$' -count=1
+
+if [ "$desktop_probe" = 1 ]; then
+  desktop_case=packaged_daemon_serves_the_desktop_socket
+  if ! LANEWAY_MACOS_PACKAGE_DAEMON="$package/bin/lanewayd-rs" LANEWAY_MACOS_PACKAGE_VERSION="$version" \
+    cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs --test desktop_local_api_lab \
+      -- --ignored --exact "$desktop_case" >"$probe_dir/desktop.log" 2>&1; then
+    cat "$probe_dir/desktop.log" >&2
+    exit 1
+  fi
+  cat "$probe_dir/desktop.log"
+  grep -Fxq "test $desktop_case ... ok" "$probe_dir/desktop.log" || \
+    { echo 'the packaged desktop socket probe did not run' >&2; exit 1; }
+fi
 
 if [ "$install_probe" = 1 ]; then
   for path in "$client" "$alias_path" "$helper" "$runtime_dir"; do

@@ -584,8 +584,14 @@ arch=$(go env GOARCH)
 LANEWAY_PRODUCT_VERSION="$version" cargo build --locked --release \
   --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
 PACKAGE_RUST_MACOS="$PWD/rust/target/release/lanewayd-rs" make package VERSION="$version"
-sh integration/rust-release-macos.sh "dist/laneway_darwin_$arch.tar.gz" "$arch" "$version"
+LANEWAY_MACOS_DESKTOP_TEST=1 \
+  sh integration/rust-release-macos.sh "dist/laneway_darwin_$arch.tar.gz" "$arch" "$version"
 ```
+
+The desktop check uses the real app socket client and the daemon extracted from
+the archive. It verifies a coherent status, peers, and routes snapshot in
+unprivileged userspace mode. It does not replace the native `utun` packet and
+cleanup test.
 
 Run `laneway connect DOMAIN` as your normal user. Add `--ephemeral`
 for a one-time login, or repeat `--route PREFIX` for an exact controller

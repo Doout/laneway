@@ -160,7 +160,7 @@ impl LocalDaemon {
     }
 
     #[cfg(test)]
-    fn new(socket_path: PathBuf) -> Self {
+    pub(super) fn new(socket_path: PathBuf) -> Self {
         Self { socket_path }
     }
 

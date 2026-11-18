@@ -290,7 +290,8 @@ jobs:
           set -euo pipefail
           arch=$(go env GOARCH)
           PACKAGE_RUST_MACOS="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" make package VERSION=0.0.0-ci
-          LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 sh integration/rust-release-macos.sh \
+          LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
+            sh integration/rust-release-macos.sh \
             "dist/laneway_darwin_$arch.tar.gz" "$arch" 0.0.0-ci
 
   rust-linux-package:

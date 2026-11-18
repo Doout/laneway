@@ -1422,6 +1422,7 @@ dependencies = [
  "smoltcp",
  "tar",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-rustls",
  "tokio-tun",

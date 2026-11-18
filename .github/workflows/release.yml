@@ -98,7 +98,7 @@ jobs:
         env:
           PACKAGE_GOARCH: ${{ matrix.arch }}
         run: |
-          RUSTUP_TOOLCHAIN=1.91.1 LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 \
+          RUSTUP_TOOLCHAIN=1.91.1 LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
             sh integration/rust-release-macos.sh \
             "dist/laneway_darwin_$PACKAGE_GOARCH.tar.gz" "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
       - name: Test the Linux release archive under systemd
