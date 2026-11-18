@@ -241,6 +241,9 @@ func testRustAdministratorRecovery(t *testing.T, client *http.Client, pair tls.C
 			tokenURL, _ := startRustAdministratorLab(t, f.dbPath, cert, key, rootFile)
 			testRustApplicationTokenLifecycle(t, f, client, goServer.URL, tokenURL, ownerSession, registered)
 		})
+		t.Run("application-management", func(t *testing.T) {
+			testRustApplicationManagement(t, f, client, goServer.URL, rustURL, ownerSession, registered)
+		})
 	}
 	t.Run("root-rotation", func(t *testing.T) {
 		testRustRootRotation(t, f, client, goServer.URL, rustURL, stop, cert, key, ownerSession, labCredentials{bearer: automation})

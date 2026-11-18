@@ -15,6 +15,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 pub mod authorization;
+pub mod lifecycle;
 mod secrets;
 pub mod tokens;
 use secrets::{Purpose, challenge_valid, id, matches_pkce, new_secret, parse_secret};

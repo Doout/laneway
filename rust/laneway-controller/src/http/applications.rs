@@ -19,6 +19,7 @@ use std::{collections::HashMap, net::IpAddr, time::Instant};
 use zeroize::Zeroizing;
 
 pub(super) mod authorization;
+mod lifecycle;
 mod tokens;
 
 pub(super) enum Route<'a> {
@@ -28,6 +29,8 @@ pub(super) enum Route<'a> {
     RevokeToken,
     Apps,
     App(&'a str),
+    Disable(&'a str),
+    RotateSecret(&'a str),
     Review(&'a str),
     Consent(&'a str, Consent),
 }
@@ -41,6 +44,8 @@ impl<'a> Route<'a> {
             ["", "oauth", "revoke"] => Self::RevokeToken,
             ["", "v1", "admin", "applications"] => Self::Apps,
             ["", "v1", "admin", "applications", id] => Self::App(id),
+            ["", "v1", "admin", "applications", id, "disable"] => Self::Disable(id),
+            ["", "v1", "admin", "applications", id, "client-secrets"] => Self::RotateSecret(id),
             ["", "v1", "admin", "application-registration-requests", id] => Self::Review(id),
             [
                 "",
@@ -77,10 +82,26 @@ pub(super) async fn handle(
     peer: IpAddr,
     route: Route<'_>,
 ) -> Result<Reply, Failure> {
+    use laneway_controller::applications::lifecycle::Action;
+    let change = match (&route, req.method()) {
+        (Route::App(app), &Method::DELETE) => Some((*app, Action::Delete)),
+        (Route::Disable(app), &Method::POST) => Some((*app, Action::Disable)),
+        (Route::RotateSecret(app), &Method::POST) => Some((*app, Action::RotateSecret)),
+        _ => None,
+    };
+    if let Some((app, action)) = change {
+        return lifecycle::handle(req, state, id, app, action).await;
+    }
     let head = req.method() == Method::HEAD;
     let post = matches!(
         route,
-        Route::Start | Route::Exchange | Route::Consent(..) | Route::Token | Route::RevokeToken
+        Route::Start
+            | Route::Exchange
+            | Route::Consent(..)
+            | Route::Token
+            | Route::RevokeToken
+            | Route::Disable(_)
+            | Route::RotateSecret(_)
     );
     if if post {
         req.method() != Method::POST
@@ -94,10 +115,16 @@ pub(super) async fn handle(
             false,
         )
         .reply(id, head);
-        reply.headers_mut().insert(
-            header::ALLOW,
-            header::HeaderValue::from_static(if post { "POST" } else { "GET, HEAD" }),
-        );
+        let allow = if post {
+            "POST"
+        } else if matches!(route, Route::App(_)) {
+            "GET, HEAD, DELETE"
+        } else {
+            "GET, HEAD"
+        };
+        reply
+            .headers_mut()
+            .insert(header::ALLOW, header::HeaderValue::from_static(allow));
         return Ok(reply);
     }
     if matches!(

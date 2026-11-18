@@ -226,6 +226,15 @@ reuse or explicit client revocation retires the whole family. The lab
 exchanges and refreshes credentials across Go and Rust and checks both
 implementations' access decisions after revocation.
 
+Owners and the configured root bearer can rotate client secrets, disable
+registered applications, and delete disabled applications. Secret rotation
+replaces the client credential without invalidating existing access tokens.
+Disable revokes the application's client credentials, installations, access
+tokens, and refresh families together. Deletion removes the app and its
+dependent records while retaining audit history and disabled service
+identities. The HTTPS lab verifies both the Go and Rust views, including
+rollback when an audit write fails.
+
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly
 granted `network.create`. The Rust transaction creates the IPv4 or dual-stack
