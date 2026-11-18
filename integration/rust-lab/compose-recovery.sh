@@ -47,6 +47,9 @@ check_compose_recovery() {
     LANEWAY_COMMAND="$work/bin/laneway-native" "$base/laneway-control" --rust status > "$work/maintenance-status"
   grep -Fx 'controller=healthy' "$work/maintenance-status"
   grep -Fx 'relay=healthy' "$work/maintenance-status"
+  if (( ${#exit_overlay[@]} )); then
+    grep -Fx 'exit-node=healthy' "$work/maintenance-status"
+  fi
   if env COMPOSE_PROJECT_NAME="$project" "$base/laneway-control" --rust upgrade ignored.env > "$work/unsupported" 2>&1; then
     echo "Rust mode allowed the legacy upgrade path" >&2
     return 1
@@ -59,7 +62,10 @@ check_compose_recovery() {
     echo "Rust backup accepted a different running image" >&2
     return 1
   fi
-  grep -F 'running controller image does not match' "$work/mismatched-image"
+  if ! grep -F 'running controller image does not match' "$work/mismatched-image"; then
+    cat "$work/mismatched-image" >&2
+    return 1
+  fi
   test ! -e "$base/generated/recovery/mismatched.age"
   printf 'services: {}\n' > compose.rust.yaml
   env COMPOSE_PROJECT_NAME="$project" "$base/laneway-control" --rust backup "$bundle_name"
@@ -89,6 +95,12 @@ check_compose_recovery() {
   test ! -e "$restored/.env"
   env COMPOSE_PROJECT_NAME="$restored_project" "$restored/laneway-control" --rust restore \
     "$compose_bundle" --identity "$work/identity"
+  if (( ${#exit_overlay[@]} )); then
+    for entry in generated/config/exit-node.toml generated/pki/exit-node.{crt,key}; do
+      cmp "$base/$entry" "$restored/$entry"
+    done
+    test "$(stat -c '%a:%u:%g' "$restored/generated/pki/exit-node.key")" = 400:65532:65532
+  fi
   # The offline fixture's public HTTPS key is not a standard recovery input.
   # Start only the restored controller to prove that its state is bootable.
   (
@@ -99,6 +111,11 @@ check_compose_recovery() {
       jq -e --arg original "$network" --arg changed "$added" \
         'any(.networks[]; .network_id == $original and .name == "baseline")
          and any(.networks[]; .network_id == $changed and .name == "added-in-rust")' >/dev/null
+    if (( ${#exit_overlay[@]} )); then
+      docker compose -p "$restored_project" --profile tools run --rm --no-deps --pull never -T \
+        admin controller node list --network-id "$network" "${auth[@]}" |
+        jq -e --arg id "$gateway" 'any(.nodes[]; .node_id == $id)' >/dev/null
+    fi
   )
   assert_network "$added" added-in-rust
   mv go-base.yaml compose.yaml

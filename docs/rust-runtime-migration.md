@@ -179,6 +179,10 @@ keeps the exit's identity, credentials, configuration, and volume constant
 across Go, Rust, and rollback. It does not route to the Internet or test DNS.
 On ARM64 the client received a UDP reply with the expected NAT source in all
 three stages, without re-enrolling or changing its selected exit.
+With both optional gates enabled, the Rust exit remained healthy during the
+encrypted backup. A fresh Rust controller restored the exit registration,
+certificate, key, and configuration before the original stack rolled back to
+Go and forwarded traffic again.
 
 ## First Linux lab run
 
@@ -413,6 +417,19 @@ The native CI matrix runs the unprivileged stream-framing and credential
 handoff tests on Apple Silicon and Intel. On disposable runners it removes
 the compatibility Go helper before exercising the Rust helper with a real
 `utun`, benchmark-only IPv4 routes, a conflicting route, traffic, and cleanup.
+On a disposable native Mac outside hosted CI, point the test at the local
+archive and its companion Go executable. Mark **only that disposable host**
+and run as an administrator account with noninteractive sudo:
+
+```sh
+sudo install -m 0600 -o root -g wheel /dev/null /var/run/.laneway-isolated-macos-lab
+LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 \
+  sh integration/rust-release-macos.sh "dist/laneway_darwin_$(go env GOARCH).tar.gz" \
+  "$(go env GOARCH)" 0.0.0-lab
+```
+
+Use the version built into the archive. The gate refuses existing installation
+paths, installs the preview for the test, then removes the fixture files.
 The local Apple Silicon archive and twelve unprivileged tests passed for
 `0.0.0-fleet-rust-lab`; the installed-helper test was not run on that host.
 The release package gate checks both binaries, preserves the standalone Go

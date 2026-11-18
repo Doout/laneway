@@ -13,6 +13,21 @@ case "$(uname -sm):$arch" in
   'Darwin x86_64:amd64'|'Darwin arm64:arm64') ;;
   *) echo "the macOS package probe requires the matching native architecture" >&2; exit 2 ;;
 esac
+install_probe=${LANEWAY_MACOS_ARCHIVE_INSTALL:-0}
+utun_probe=${LANEWAY_MACOS_UTUN_TEST:-0}
+case "$install_probe:$utun_probe" in
+  0:0|1:0|1:1) ;;
+  *) echo "the utun test requires LANEWAY_MACOS_ARCHIVE_INSTALL=1; use 0 or 1 for both settings" >&2; exit 2 ;;
+esac
+if [ "$install_probe" = 1 ]; then
+  marker=/var/run/.laneway-isolated-macos-lab
+  if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(stat -f '%u:%Lp' "$marker")" = 0:600 ] || {
+      echo "the install probe requires a disposable hosted runner or root-owned 0600 $marker" >&2
+      exit 2
+    }
+  fi
+fi
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 standalone=$(dirname -- "$archive")/laneway_darwin_$arch
 probe_dir=$(mktemp -d)
@@ -49,10 +64,7 @@ sh "$root/scripts/verify-rust-macos-runtime.sh" "$package/bin/lanewayd-rs" "$arc
 [ "$("$package/bin/laneway" version)" = "$version" ]
 [ "$("$package/bin/lanewayd-rs" --version)" = "$version" ]
 
-if [ "${LANEWAY_MACOS_ARCHIVE_INSTALL:-0}" = 1 ]; then
-  [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || {
-    echo "the install probe is limited to disposable hosted CI runners" >&2; exit 2;
-  }
+if [ "$install_probe" = 1 ]; then
   for path in "$client" "$alias_path" "$helper" "$runtime_dir"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || { echo "refusing to overwrite $path" >&2; exit 1; }
   done
@@ -61,7 +73,7 @@ if [ "${LANEWAY_MACOS_ARCHIVE_INSTALL:-0}" = 1 ]; then
   "$package/bin/laneway" configure --check --with-rust
   [ "$(readlink "$alias_path")" = laneway ]
   cmp -s "$package/bin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
-  if [ "${LANEWAY_MACOS_UTUN_TEST:-0}" = 1 ]; then
+  if [ "$utun_probe" = 1 ]; then
     # The default Go client retains its own helper. The Rust gate must run
     # without that compatibility helper after verifying the package install.
     sudo -n rm -f "$helper"

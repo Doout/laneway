@@ -62,7 +62,8 @@ enroll_compose_exit() {
   joined=$(compose_exit_join exit-node "$base/generated/pki/exit-node")
   gateway=$(sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p' <<<"$joined")
   [[ $gateway =~ ^[0-9a-f]{32}$ ]]
-  chown 65532:65532 generated/pki/exit-node.{crt,key}
+  chmod 0444 "$config" generated/pki/exit-node.crt
+  chown 65532:65532 generated/pki/exit-node.key
   chmod 0400 generated/pki/exit-node.key
   admin node capabilities --node-id "$gateway" --exit-node >/dev/null
   route=$(base_compose run --rm --no-deps --pull never -T --entrypoint /usr/local/bin/laneway \

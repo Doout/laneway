@@ -218,7 +218,6 @@ public=(curl --noproxy '*' --fail --silent --show-error --max-time 5 --cacert ge
 
 if (( ${#exit_overlay[@]} )); then
   test_compose_exit rust_compose rust-cutover 27702
-  rust_compose --profile exit-node stop exit-node >/dev/null
 fi
 
 if [[ ${LANEWAY_TEST_RUST_RECOVERY:-0} == 1 ]]; then
@@ -227,6 +226,7 @@ if [[ ${LANEWAY_TEST_RUST_RECOVERY:-0} == 1 ]]; then
 fi
 
 echo '==> roll back to Go without a second database writer'
+if (( ${#exit_overlay[@]} )); then rust_compose --profile exit-node stop exit-node >/dev/null; fi
 rust_compose stop relay controller >/dev/null
 base_compose up --pull never -d controller relay --wait --wait-timeout 40
 test "$(base_compose exec -T controller /usr/local/bin/laneway -version)" = 0.0.9100
