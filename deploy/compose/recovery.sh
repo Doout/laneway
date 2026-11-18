@@ -101,6 +101,11 @@ validate_rust_settings() {
   done
 }
 
+validate_deployment() {
+  if [ "$runtime" = rust ]; then set -- --rust; fi
+  "$base_dir/validate.sh" "$@"
+}
+
 snapshot_service_tls() {
   role=$1; replacement=$2
   cert=$work/generated/pki/$role.crt
@@ -153,7 +158,7 @@ case "${1:-}" in
     if [ -e "$recovery_dir/$name" ] || [ -L "$recovery_dir/$name" ]; then
       die "recovery bundle already exists: $name"
     fi
-    "$base_dir/validate.sh"
+    validate_deployment
     install -d -m 0700 "$backup_dir"
     chown 65532:65532 "$backup_dir"
     if [ -e "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
@@ -355,7 +360,7 @@ generated/pki/exit-node.key"
     if [ "$runtime" = rust ]; then validate_rust_settings; fi
     running_controller=$(compose ps --status running -q controller) || die "could not determine controller state"
     [ -z "$running_controller" ] || die "restore requires a stopped controller"
-    "$base_dir/validate.sh"
+    validate_deployment
     restore_db=$backup_dir/.lane-restore-$PPID-$$.db
     install -m 0600 "$work/extracted/database/controller.db" "$restore_db"
     chown 65532:65532 "$restore_db"

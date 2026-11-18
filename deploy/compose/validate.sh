@@ -2,6 +2,9 @@
 set -eu
 
 base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+runtime=go
+[ "${1:-}" != --rust ] || { runtime=rust; shift; }
+[ "$#" -eq 0 ] || { echo "usage: validate.sh [--rust]" >&2; exit 1; }
 if [ -n "${LANEWAY_VERSION:-}" ]; then
   version=$LANEWAY_VERSION
 else
@@ -17,7 +20,15 @@ if ! printf '%s\n' "$version" | grep -E '^(dev|[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-
 fi
 
 digest_keys="LANEWAY_CONTROLLER_IMAGE_DIGEST LANEWAY_RELAY_IMAGE_DIGEST LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_EXIT_NODE_IMAGE_DIGEST"
-if grep -F 'image: ghcr.io/doout/laneway-exit-node:' "$base_dir/compose.yaml" >/dev/null; then
+if [ "$runtime" = rust ]; then
+  digest_keys="LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST LANEWAY_RUST_RELAY_IMAGE_DIGEST LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST"
+  rust_version=$(sed -n 's/^LANEWAY_RUST_VERSION=//p' "$base_dir/.env")
+  if ! printf '%s\n' "$rust_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+    [ "$(printf '%s\n' "$rust_version" | wc -l)" -ne 1 ]; then
+    echo "Rust deployment requires one pinned Rust version" >&2
+    exit 1
+  fi
+elif grep -F 'image: ghcr.io/doout/laneway-exit-node:' "$base_dir/compose.yaml" >/dev/null; then
   digest_keys="$digest_keys LANEWAY_CONNECTOR_IMAGE_DIGEST"
 fi
 for key in $digest_keys
@@ -30,7 +41,8 @@ do
     echo "$key must be an immutable sha256 image manifest digest" >&2
     exit 1
   fi
-  if [ "$version" != dev ] && [ "$digest" = sha256:0000000000000000000000000000000000000000000000000000000000000000 ]; then
+  if { [ "$version" != dev ] || [ "$runtime" = rust ]; } &&
+    [ "$digest" = sha256:0000000000000000000000000000000000000000000000000000000000000000 ]; then
     echo "$key must use the release digest, not the development placeholder" >&2
     exit 1
   fi
@@ -196,11 +208,14 @@ if [ -e "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
   done
 fi
 
-docker compose --project-directory "$base_dir" \
-  --env-file "$base_dir/.env" \
-  -f "$base_dir/compose.yaml" config --quiet
+compose() {
+  if [ "$runtime" = rust ]; then
+    set -- -f "$base_dir/compose.rust.yaml" "$@"
+  fi
+  docker compose --project-directory "$base_dir" --env-file "$base_dir/.env" -f "$base_dir/compose.yaml" "$@"
+}
+compose config --quiet
 if [ "$exit_configured" = true ]; then
-  docker compose --project-directory "$base_dir" --profile exit-node \
-    --env-file "$base_dir/.env" -f "$base_dir/compose.yaml" config --quiet
+  compose --profile exit-node config --quiet
 fi
 echo "Laneway Compose inputs are valid"

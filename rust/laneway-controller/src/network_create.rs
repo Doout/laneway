@@ -117,7 +117,7 @@ impl CreateNetwork {
         self,
         tx: &Transaction<'_>,
         kind: &str,
-        actor: Id,
+        actor: Option<Id>,
         now: i64,
         pools: (IpNet, Option<IpNet>),
     ) -> Result<Network> {
@@ -156,7 +156,7 @@ impl CreateNetwork {
             return Err(e.into());
         }
         tx.execute("INSERT INTO audit_events(id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
-            VALUES(randomblob(16),?1,?2,?3,'network.create','network',?1,'{}',?4)",(id.as_bytes(),kind,actor.as_bytes(),now))?;
+            VALUES(randomblob(16),?1,?2,?3,'network.create','network',?1,'{}',?4)",(id.as_bytes(),kind,actor.as_ref().map(Id::as_bytes),now))?;
         Ok(Network {
             network_id: id.to_string(),
             name,
@@ -166,6 +166,24 @@ impl CreateNetwork {
             created_at_unix_seconds: now,
         })
     }
+}
+
+pub(crate) fn initialize_network(
+    tx: &Transaction<'_>,
+    id: Id,
+    name: &str,
+    ipv4_pool: &str,
+    now: i64,
+) -> Result<()> {
+    let form = CreateNetwork {
+        network_id: Some(id.to_string()),
+        name: Some(name.into()),
+        ipv4_pool: Some(ipv4_pool.into()),
+        ipv6_pool: None,
+    };
+    let pools = form.pools()?;
+    form.insert(tx, "system", None, now, pools)?;
+    Ok(())
 }
 
 impl SessionStore {
@@ -182,7 +200,7 @@ impl SessionStore {
             |tx, actor, _, now| {
                 let form = form?;
                 let pools = form.pools()?;
-                form.insert(tx, "administrator", actor, now, pools)
+                form.insert(tx, "administrator", Some(actor), now, pools)
             },
         )
     }
@@ -196,7 +214,7 @@ impl SessionStore {
             let form = form?;
             let pools = form.pools()?;
             actor.authorize(tx, "network.create", None)?;
-            form.insert(tx, "service_principal", actor.id, now, pools)
+            form.insert(tx, "service_principal", Some(actor.id), now, pools)
         })
     }
 }

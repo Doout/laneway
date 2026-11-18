@@ -60,11 +60,36 @@ pub(crate) fn check_network(tx: &Transaction<'_>, principal: Id, network: Id) ->
 }
 
 impl SessionStore {
-    pub fn check_database(path: &Path) -> Result<()> {
+    pub fn prepare_database(path: &Path, certificate: &[u8]) -> Result<()> {
+        use laneway_protocol::{Role, identity_from_certificate_der};
+        use rusqlite::OptionalExtension;
+
         let mut store = Self::open(path)?;
         let tx = store.db.transaction()?;
         check_snapshot(&tx)?;
+        let binding: Option<([u8; 16], [u8; 16])> = tx
+            .query_row(
+                "SELECT network_id,controller_service_id FROM controller_identity_state WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((network, service)) = binding {
+            let leaf = identity_from_certificate_der(certificate)?;
+            ensure!(
+                leaf.role == Role::Controller
+                    && leaf.network_id.as_bytes() == &network
+                    && leaf.subject_id.as_bytes() == &service,
+                "controller certificate does not match the database identity"
+            );
+        }
         tx.commit()?;
+        // Init publishes a standalone file. Serving needs concurrent readers
+        // and writers, so enable WAL only after checking the stored identity.
+        let mode: String = store
+            .db
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        ensure!(mode == "wal", "controller database must support WAL");
         Ok(())
     }
     pub fn open(path: &Path) -> Result<Self> {

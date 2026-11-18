@@ -25,6 +25,33 @@ struct QuicListener {
     address: Option<SocketAddr>,
 }
 
+#[cfg(unix)]
+pub fn initialize(mut args: impl Iterator<Item = OsString>) -> Result<()> {
+    const INIT: &str = "usage: laneway-controller init DATABASE CERT_PEM NETWORK_NAME IPV4_POOL";
+    let database = PathBuf::from(args.next().context(INIT)?);
+    let cert = PathBuf::from(args.next().context(INIT)?);
+    let name = args.next().context(INIT)?;
+    let pool = args.next().context(INIT)?;
+    ensure!(args.next().is_none(), "{INIT}");
+    let leaf = rustls_pemfile::certs(&mut pem(&cert, false)?)
+        .next()
+        .context("missing controller certificate")??;
+    let identity = laneway_protocol::identity_from_certificate_der(leaf.as_ref())?;
+    ensure!(
+        identity.role == laneway_protocol::Role::Controller,
+        "initialization requires a controller service certificate"
+    );
+    laneway_controller::backup::initialize(
+        &database,
+        identity.network_id,
+        identity.subject_id,
+        name.to_str().context(INIT)?,
+        pool.to_str().context(INIT)?,
+    )?;
+    println!("controller database initialized");
+    Ok(())
+}
+
 pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let database = PathBuf::from(args.next().context(USAGE)?);
     let address: SocketAddr = args
@@ -161,7 +188,11 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     );
     let identity = Arc::new(service_tls::Identity::load(&cert, &key)?);
     let roots = client_ca.as_deref().map(tls_roots).transpose()?;
-    laneway_controller::SessionStore::check_database(&database)?;
+    let seed = identity.active();
+    laneway_controller::SessionStore::prepare_database(
+        &database,
+        seed.end_entity_cert()?.as_ref(),
+    )?;
     let alerts =
         laneway_controller::SessionStore::open(&database)?.operational_alerts_available()?;
     let webhook = match (webhook_url, webhook_secret) {

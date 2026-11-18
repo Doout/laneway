@@ -23,6 +23,8 @@ fn main() -> Result<()> {
         }
         Some("serve") => return server::start(args),
         #[cfg(unix)]
+        Some("init") => return server::initialize(args),
+        #[cfg(unix)]
         Some("backup") => return database_copy(args, false),
         #[cfg(unix)]
         Some("restore") => return database_copy(args, true),

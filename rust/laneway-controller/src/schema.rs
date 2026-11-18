@@ -6,6 +6,31 @@ use std::path::Path;
 pub(crate) const PUBLIC_VERSION: i64 = 18;
 const FLEET_VERSION: i64 = 19;
 const FLEET_DDL: &str = include_str!("../schema/fleet-v19.sql");
+#[cfg(unix)]
+const BASE_DDL: &str = include_str!("../schema/base-v18.sql");
+
+#[cfg(unix)]
+pub(crate) fn initialize(tx: &Transaction<'_>, now: i64) -> Result<()> {
+    use laneway_protocol::Id;
+
+    tx.execute_batch(BASE_DDL)
+        .context("create controller schema")?;
+    tx.execute_batch(FLEET_DDL).context("create fleet schema")?;
+    tx.execute(
+        "WITH RECURSIVE versions(version) AS (
+           VALUES(1) UNION ALL SELECT version+1 FROM versions WHERE version<?1
+         )
+         INSERT INTO schema_versions(version,applied_at) SELECT version,?2 FROM versions",
+        (FLEET_VERSION, now),
+    )?;
+    let mut root = [0; 16];
+    getrandom::fill(&mut root).context("generate root principal ID")?;
+    tx.execute(
+        "INSERT INTO administrator_auth_state(singleton,root_service_principal_id) VALUES(1,?1)",
+        [Id::new(root)?.as_bytes()],
+    )?;
+    Ok(())
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Profile {

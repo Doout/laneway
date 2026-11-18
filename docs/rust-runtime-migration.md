@@ -1,37 +1,33 @@
 # Rust runtime migration
 
 Public source baseline: `acac2047329dd4331e60d7f1f21de6fa67247df3`.
-The September deployment also included private fleet features. Before a production
-canary, capture the installed image digests, matching source, service configuration
-and database schema, and rehearse restoring a backup on the isolated lab host.
-Keep one controller writing to each database.
+Target a fresh installation that runs Rust services from the start. Upgrading
+or rolling back to the old Go runtime is not a release requirement. The Go
+operator CLI and lab tools can still be used without running a Go server.
 
 ## Release handoff
 
-The Rust runtime is opt-in. Keep Go as the production default until these
-checks pass on the candidate you intend to deploy:
+The current tagged installer does not select Rust by default. Before shipping
+a Rust-first installer, verify the following on the candidate:
 
 1. Run the native release matrix on the release commit, including the Linux
    systemd packet tests and the installed macOS helper on Intel and Apple
-   Silicon. Verify the published archive checksums and image signatures,
-   then install and roll back the signed candidate on the lab host. The
-   unsigned lab builds do not establish this.
-2. Record the actual production image digests, schema and configuration.
-   Restore an encrypted backup into a separate lab volume and rehearse the
-   cutover with those inputs. Verify HTTPS, Dispatch authorization, node
-   connectivity, routes, certificate renewal, and the Go rollback before
-   scheduling a canary.
-3. Canary one isolated workload first. Do not enable fleet updates or replace
-   the production controller until the canary can be rolled back using the
-   verified Go images and a compatible backup.
+   Silicon. Verify the published archive checksums and image signatures, then
+   install the signed candidate from empty state on the lab host.
+2. On the fresh deployment, verify HTTPS, Dispatch authorization, client
+   enrollment and connectivity, routes, certificate renewal and fleet
+   operations. Back up the Rust deployment and restore it to a separate empty
+   lab volume. Keep one controller writing to each database.
+3. Test one isolated workload before promoting. Verify the recovery procedure
+   with the same Rust images that will serve the deployment.
 
 | Component | Starting point | Acceptance before switching the default |
 | --- | --- | --- |
 | Relay | Rust QUIC and TLS/TCP data relay, controller snapshots, TCP readiness probe | Mixed Go/Rust peers exchange packets, enforce revocation, and reconnect after restart. Exercise public HTTPS, ACME renewal, bootstrap discovery, console, and Dispatch OAuth on the shared port. |
 | Node, connector, exit | Rust Linux TUN daemon, routing, DNS configuration, local socket and relay fallback | Enroll and renew each role. Test allowed and denied traffic, health and topology reports, loss of route authority, exit NAT and DNS recovery after restart and uninstall. |
 | Controller | Go owns SQLite, PKI and management APIs | Start with read-only network inventory. Compare outputs on the same fixture DB, then cover auth, grants, policy snapshots, enrollment, OAuth, backups and migrations. Verify the web console and both generations of node. |
-| Private fleet features | Fleet worktree includes private DNS, updates, recovery, policy history, diagnostics, alerts and topology | Compare against the identified deployed source and exercise each feature through its UI/API and node consumer. |
-| Packaging and platforms | Go also provides the Docker plugin, platform-specific CLI/daemon entry points and readiness helpers | Verify signed install, update, rollback, desktop local API and active service processes per platform. The one-shot operator CLI and compatibility harness can stay in Go. |
+| Fleet features | Private DNS, updates, recovery, policy history, diagnostics, alerts and topology | Exercise each feature on a fresh Rust deployment through its UI/API and node consumer. |
+| Packaging and platforms | Go also provides the Docker plugin, platform-specific CLI/daemon entry points and readiness helpers | Verify signed install, Rust recovery, desktop local API and active service processes per platform. The one-shot operator CLI and test harnesses can stay in Go. |
 
 The tagged release workflow builds Rust images alongside the legacy images:
 `ghcr.io/doout/laneway-controller-rust`, `ghcr.io/doout/laneway-relay-rust`,
@@ -154,7 +150,29 @@ archive matched its signed checksum, and asking for the `v0.2.71` identity
 rejected that signature. The published archive contains Go runtimes only;
 it is not a Rust updater test.
 
-### Compose cutover rehearsal
+### Fresh Rust Compose bootstrap
+
+The prepared Compose files can initialize an empty controller volume without
+starting a Go server. Stage the generated issuer, service certificates and
+bootstrap configuration with `prepare.sh`, then stage the verified Rust
+metadata with `prepare-rust.py --release-metadata DIRECTORY`. Use the same
+version for `LANEWAY_VERSION` and `LANEWAY_RUST_VERSION`, with the signed admin
+tool image digest and the three signed Rust service image digests.
+
+Run `sudo ./bootstrap.sh --rust` in the prepared Compose directory. The Rust
+controller creates the database and first network, the admin tool registers
+the relay through the API, and Compose starts the Rust relay. The command
+refuses an existing deployment or database. For an interrupted startup after
+the database was created, keep the volume and inspect service status and logs;
+do not delete the database just to rerun bootstrap.
+
+On the isolated ARM64 Docker VM, `integration/rust-lab/compose-fresh.sh`
+started a fresh Rust controller and relay, served the console and discovery
+through HTTPS, rejected a second bootstrap, and restored the encrypted backup
+into a separate volume. This used local unsigned images and a lab certificate,
+not a signed install or public ACME validation.
+
+### Historical Compose cutover rehearsal
 
 The packaged `deploy/compose/compose.rust.yaml` is an opt-in overlay for an
 **existing** standard Compose stack. It preserves the service names, ports,
@@ -375,6 +393,22 @@ timer remains the renewal path for Go deployments.
 Keep a still-valid conventional certificate and key for rollback to a Go
 controller; it does not read the Rust renewal state.
 
+### Initialize a fresh Rust controller
+
+With no database at the destination, run:
+
+```sh
+laneway-controller init /var/lib/laneway-controller/controller.db \
+  /run/laneway-secrets/controller.crt production 100.96.0.0/16
+```
+
+Run the command as the same user that will run the controller. The database
+parent must already exist and be writable by that user. The command creates
+the fleet schema and first network, binds their identity to the controller
+certificate, and publishes the owner-only database only after validation. It
+does not replace an existing database or require a Go controller. Normally
+start `serve` with the same certificate and complete administrator setup.
+
 ### Internal relay TLS renewal
 
 To opt in, add `renewal_dir = "/var/lib/laneway-relay/tls-renewal"` under
@@ -531,10 +565,9 @@ refuses readiness; restore the snapshot and restart the plugin.
 
 The Linux backend uses the same bridge and veth aliases as Go. It installs
 the nftables policy as one transaction and removes exact recorded routes and
-rules rather than flushing tables or deleting rules by priority. The Rust
-managed-plugin rootfs is opt-in with `LANEWAY_DOCKER_PLUGIN_RUNTIME=rust`;
-CI tests both runtimes against Docker Engine. Tagged plugin releases still
-default to Go.
+rules rather than flushing tables or deleting rules by priority. The managed
+plugin build and tagged workflow select Rust. CI exercises a fresh Rust install
+against native AMD64 and ARM64 Docker Engine.
 
 The isolated Linux ARM64 lab verified in-place adoption of a Go-created
 network, preservation of unrelated routes and rules, and authorized packets
@@ -577,9 +610,8 @@ sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=go \
   LANEWAY_DOCKER_PLUGIN_UPGRADE=1 ./integration/docker-plugin.sh
 ```
 
-The workflow schedules this test on native AMD64 and ARM64. The lab run used
-an unexpired controller grant throughout; rolling back to Go also rolls back
-Rust's kernel-enforced grant expiry.
+This migration check is historical and not a release gate. Rolling back to
+Go also rolls back Rust's kernel-enforced grant expiry.
 
 ## Linux node image
 

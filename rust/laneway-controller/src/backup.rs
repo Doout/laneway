@@ -2,11 +2,13 @@
 use crate::{
     check_snapshot,
     database_lock::{acquire, existing_database, sidecar},
+    network_create::initialize_network,
     open_existing,
     recovery::AuditActor,
     schema,
 };
 use anyhow::{Context, Result, ensure};
+use laneway_protocol::Id;
 use rusqlite::{
     Connection, OpenFlags, Transaction, TransactionBehavior,
     backup::{Backup, StepResult},
@@ -23,6 +25,43 @@ use std::{
 
 mod verify;
 
+/// Provision a new fleet database. Existing databases are never opened for writing.
+pub fn initialize(
+    destination: &Path,
+    network: Id,
+    controller: Id,
+    name: &str,
+    ipv4_pool: &str,
+) -> Result<()> {
+    ensure!(
+        network != controller,
+        "network and controller IDs must differ"
+    );
+    check_new(destination)?;
+    let _lock = acquire(destination).context("initialize a stopped controller")?;
+    publish_new(destination, |output| {
+        let tx = output.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now: i64 = tx.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+        ensure!(now > 0, "invalid controller clock");
+        schema::initialize(&tx, now)?;
+        initialize_network(&tx, network, name, ipv4_pool, now)?;
+        tx.execute(
+            "INSERT INTO controller_identity_state(singleton,network_id,controller_service_id,created_at)
+             VALUES(1,?1,?2,?3)",
+            (network.as_bytes(), controller.as_bytes(), now),
+        )?;
+        tx.execute(
+            "INSERT INTO audit_events(id,network_id,actor_kind,action,target_type,target_id,details_json,created_at)
+             VALUES(randomblob(16),?1,'system','controller.identity.bind','controller_service',?2,'{}',?3)",
+            (network.as_bytes(), controller.as_bytes(), now),
+        )?;
+        check_snapshot(&tx)?;
+        verify::database(&tx, true).context("validate initialized controller database")?;
+        tx.commit()?;
+        Ok(())
+    })
+}
+
 /// Copy committed state from an existing controller while it remains online.
 pub fn create(source: &Path, destination: &Path) -> Result<()> {
     copy(source, destination, false)
@@ -37,7 +76,7 @@ pub fn restore(source: &Path, destination: &Path) -> Result<()> {
 }
 
 fn copy(source: &Path, destination: &Path, restore: bool) -> Result<()> {
-    let parent = check_new(destination)?;
+    check_new(destination)?;
     let source_path = existing_database(source)?;
     let source = open_existing(
         &source_path,
@@ -45,27 +84,11 @@ fn copy(source: &Path, destination: &Path, restore: bool) -> Result<()> {
     )?;
     source.execute_batch("PRAGMA query_only=ON")?;
 
-    // Private directory contains the scratch DB and any SQLite journal files.
-    // Publication uses a hard link so a concurrent target is never replaced.
-    let scratch = tempfile::Builder::new()
-        .prefix(".laneway-database-")
-        .permissions(Permissions::from_mode(0o700))
-        .tempdir_in(parent)
-        .context("create private backup staging directory")?;
-    let candidate = scratch.path().join("database");
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&candidate)
-        .context("create private database copy")?;
-    let mut output = open_existing(&candidate, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    copy_pages(&source, &mut output)?;
-    drop(source);
-    let mode: String = output.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
-    ensure!(mode == "delete", "database copy is not self-contained");
-
-    {
+    publish_new(destination, move |output| {
+        copy_pages(&source, output)?;
+        drop(source);
+        let mode: String = output.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
+        ensure!(mode == "delete", "database copy is not self-contained");
         let tx = output.transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_snapshot(&tx)?;
         let fleet = schema::is_fleet(&tx)?;
@@ -75,14 +98,38 @@ fn copy(source: &Path, destination: &Path, restore: bool) -> Result<()> {
             verify::sqlite(&tx).context("validate restored SQLite state")?;
         }
         tx.commit()?;
-    }
+        Ok(())
+    })
+}
+
+fn publish_new(
+    destination: &Path,
+    write: impl FnOnce(&mut Connection) -> Result<()>,
+) -> Result<()> {
+    let parent = check_new(destination)?;
+    // Private directory contains the scratch DB and any SQLite journal files.
+    // Publication uses a hard link so a concurrent target is never replaced.
+    let scratch = tempfile::Builder::new()
+        .prefix(".laneway-database-")
+        .permissions(Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .context("create private database staging directory")?;
+    let candidate = scratch.path().join("database");
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&candidate)
+        .context("create private database")?;
+    let mut output = open_existing(&candidate, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    write(&mut output)?;
     output
         .close()
         .map_err(|(_, err)| err)
-        .context("close copied database")?;
-    file.sync_all().context("sync copied database")?;
+        .context("close staged database")?;
+    file.sync_all().context("sync staged database")?;
     check_new(destination)?;
-    fs::hard_link(&candidate, destination).context("publish database copy without overwriting")?;
+    fs::hard_link(&candidate, destination).context("publish database without overwriting")?;
     File::open(parent)?
         .sync_all()
         .context("database copy published but destination directory could not be synced")?;
