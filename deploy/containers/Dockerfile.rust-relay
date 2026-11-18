@@ -52,9 +52,11 @@ RUN install -d -m 0700 -o 65532 -g 65532 /out/relay-public
 FROM build AS controller-build
 RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p laneway-controller
+RUN install -d -m 0700 -o 65532 -g 65532 /out/controller-state
 
 FROM scratch AS controller
 COPY --from=controller-build /src/rust/target/release/laneway-controller /usr/local/bin/laneway-controller
+COPY --from=controller-build --chown=65532:65532 /out/controller-state /var/lib/laneway-controller
 COPY --from=build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --from=console-build /src/web/dist /usr/share/laneway-console
 ENV LANEWAY_CONSOLE_DIR=/usr/share/laneway-console

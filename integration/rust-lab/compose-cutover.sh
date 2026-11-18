@@ -99,6 +99,11 @@ rust_compose() {
 }
 cleanup() {
   result=$?
+  if [[ -n ${recovery_project_dir:-} ]]; then
+    docker compose --project-directory "$recovery_project_dir" --project-name "$recovery_project_name" \
+      --env-file "$base/.env" -f "$recovery_project_dir/compose.yaml" \
+      down --volumes --remove-orphans >/dev/null 2>&1 || true
+  fi
   if (( result != 0 )); then
     rust_compose logs --no-color --tail=30 controller relay >&2 || true
   fi
@@ -193,6 +198,11 @@ public=(curl --noproxy '*' --fail --silent --show-error --max-time 5 --cacert ge
 "${public[@]}" "https://$name:$port/.well-known/laneway/bootstrap.json" |
   jq -e --arg id "$network" '.. | objects | select(.network_id? == $id)' >/dev/null
 "${public[@]}" "https://$name:$port/overview" | grep -Fq '<title>Laneway</title>'
+
+if [[ ${LANEWAY_TEST_RUST_RECOVERY:-0} == 1 ]]; then
+  source "$root/integration/rust-lab/compose-recovery.sh"
+  check_compose_recovery
+fi
 
 echo '==> roll back to Go without a second database writer'
 rust_compose stop relay controller >/dev/null

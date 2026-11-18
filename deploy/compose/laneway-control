@@ -31,10 +31,13 @@ root_token_rotation_cleanup_prefix=$state_dir/.administrator-root-token-rotation
 root_token_rotation_id=
 root_token_rotation_phase=
 root_token_rotation_reaped_phase=
+runtime=go
 
 usage() {
   cat >&2 <<'EOF'
-usage: laneway-control <init|user-token|invite|route|status|administrator|update|production-check|backup|restore|upgrade|rollback> [options]
+usage: laneway-control [--rust] <init|user-token|invite|route|status|administrator|update|production-check|backup|restore|upgrade|rollback> [options]
+
+  --rust is supported with status, backup and restore.
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
@@ -100,6 +103,9 @@ acquire_lock() {
 }
 
 compose() {
+  if [ "$runtime" = rust ]; then
+    set -- -f "$base_dir/compose.rust.yaml" "$@"
+  fi
   docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
 }
 compose_with_env() {
@@ -216,8 +222,10 @@ backup_recovery() {
   if [ ! -f "$recovery_script" ] || [ -L "$recovery_script" ]; then
     die "recovery helper must be a regular, non-symlink file"
   fi
+  set -- backup "$backup_name"
+  if [ "$runtime" = rust ]; then set -- --rust "$@"; fi
   env LANEWAY_DEPLOY_DIR="$base_dir" LANEWAY_RECOVERY_COMPOSE_ENV_FILE="$backup_env" \
-    "$recovery_script" backup "$backup_name"
+    "$recovery_script" "$@"
 }
 
 remove_database_artifacts() {
@@ -380,7 +388,9 @@ restore_release_database_snapshot() {
 
   rollback_restore_path=$(mktemp "$rollback_backup_dir/.lane-release-restore.XXXXXX") || return 1
   rollback_database_staging=$rollback_restore_path
-  if ! install -m 0600 -o 65532 -g 65532 "$rollback_restore_source" "$rollback_restore_path"; then
+  # Container UID/GID 65532 need not exist in the host's account database.
+  if ! install -m 0600 "$rollback_restore_source" "$rollback_restore_path" || \
+    ! chown 65532:65532 "$rollback_restore_path"; then
     cleanup_release_database_staging || true
     return 1
   fi
@@ -934,7 +944,8 @@ publish_root_token_copy() {
   require_root_token_value_file "$source" || return 1
   secrets_dir=$base_dir/generated/secrets
   temporary=$(mktemp "$secrets_dir/.admin.token.rotate.XXXXXX") || return 1
-  if ! install -m 0400 -o 65532 -g 65532 "$source" "$temporary" || \
+  if ! install -m 0400 "$source" "$temporary" || \
+    ! chown 65532:65532 "$temporary" || \
     ! sync -f "$temporary" || ! mv "$temporary" "$secrets_dir/admin.token" || \
     ! sync -f "$secrets_dir"; then
     find "$temporary" -maxdepth 0 -delete 2>/dev/null || true
@@ -1184,6 +1195,9 @@ run_status() {
   service_health controller true || { controller_healthy=false; failed=true; }
   service_health relay true || failed=true
   relay_config=$base_dir/generated/config/relay.toml
+  if [ "$runtime" = rust ]; then
+    relay_config=$base_dir/generated/config/relay.rust.toml
+  fi
   if [ -f "$relay_config" ] && [ ! -L "$relay_config" ]; then
     rate=$(sed -n 's/^packet_rate_bits_per_second[[:space:]]*=[[:space:]]*//p' "$relay_config")
     burst=$(sed -n 's/^packet_burst_bytes[[:space:]]*=[[:space:]]*//p' "$relay_config")
@@ -1872,7 +1886,17 @@ run_init() {
   "$base_dir/bootstrap.sh"
 }
 
+if [ "${1:-}" = --rust ]; then
+  runtime=rust
+  shift
+fi
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
+if [ "$runtime" = rust ]; then
+  case "$command" in
+    status|backup|restore|help|-h|--help) ;;
+    *) die "--rust supports status, backup and restore; refusing the Go lifecycle workflow" ;;
+  esac
+fi
 case "$command" in
   init) acquire_lock; run_init "$@" ;;
   user-token|api-token) acquire_lock; run_user_token "$@" ;;
@@ -1892,7 +1916,9 @@ case "$command" in
     if [ "$#" -ne 3 ] || [ "$2" != --identity ]; then
       die "restore requires BUNDLE.age --identity AGE_IDENTITY_FILE"
     fi
-    "$base_dir/recovery.sh" restore "$1" "$3"
+    set -- restore "$1" "$3"
+    if [ "$runtime" = rust ]; then set -- --rust "$@"; fi
+    "$base_dir/recovery.sh" "$@"
     ;;
   upgrade)
     [ "$(id -u)" -eq 0 ] || die "upgrade must run as root"

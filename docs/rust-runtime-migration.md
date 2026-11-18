@@ -115,17 +115,34 @@ If a schema upgrade was applied, restore the prior backup before restarting
 a Go controller that cannot read that schema. Confirm the Go seeds are
 still valid and restore its renewal timer.
 
-The overlay is not selected by the existing Go installer or lifecycle wrapper.
-Those maintenance commands are not yet a supported way to manage the Rust
-stack. Use the [Rust controller backup procedure](#native-controller-backup-and-restore-lab-only)
-in the rehearsal. The isolated gate is
-`integration/rust-lab/compose-cutover.sh`; it uses local lab images, not a
-published signed release.
+The existing Go installer does not select this overlay. For an active Rust
+stack, use `laneway-control --rust status` and `sudo laneway-control --rust
+backup NAME.age`. A Rust backup takes an online copy using the running
+controller, includes the Rust Compose inputs, and puts validated current
+controller and relay certificates into the encrypted bundle as restore seeds
+without changing the originals. The public ACME cache is not archived.
+The wrapper refuses the Go lifecycle commands in Rust mode; do not use the Go
+upgrade, rollback or token-rotation commands on this stack.
+
+On an empty, stopped deployment with the verified Rust images already
+installed, use `sudo laneway-control --rust restore BUNDLE.age --identity
+AGE_IDENTITY_FILE`. The restore requires a new database target and checks
+that every archived file has a checksum. Version 2 is Rust-only; legacy
+version 1 bundles still use the Go restore command. Reissue service
+credentials before startup if the restored seeds have expired.
+
+The isolated gate is `integration/rust-lab/compose-cutover.sh`; set
+`LANEWAY_TEST_RUST_RECOVERY=1` with `age` and `age-keygen` available to include
+authenticated status, online backup and fresh-volume restore. It uses local
+lab images, not a published signed release.
 The ARM64 run used the actual Compose files and the same SQLite volume. It
 replaced Go with Rust, used the Go admin CLI to write another network,
 checked the console and bootstrap discovery over HTTPS, and then confirmed
 that Go could read both networks after rollback. It did not start the
 optional exit service or change the database schema.
+With recovery enabled on ARM64, the gate verified authenticated status,
+rejected an image mismatch, and restored both networks and the refreshed TLS
+seeds into a new project. The original volume was still usable for Go rollback.
 
 ## First Linux lab run
 
