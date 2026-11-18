@@ -14,8 +14,30 @@ import (
 	"github.com/Doout/laneway/go/internal/bootstrap"
 	"github.com/Doout/laneway/go/internal/identity"
 	"github.com/Doout/laneway/go/internal/pki"
+	"github.com/Doout/laneway/go/internal/releaseupdate"
 	"github.com/pelletier/go-toml/v2"
 )
+
+func TestMacRustRuntimeArchiveMatchesUpdater(t *testing.T) {
+	archive := os.Getenv("LANEWAY_MACOS_TEST_ARCHIVE")
+	if archive == "" {
+		t.Skip("requires the macOS release archive")
+	}
+	version := os.Getenv("LANEWAY_MACOS_TEST_VERSION")
+	client, daemon, err := releaseupdate.ExtractMacClient(archive, t.TempDir(), version, macBinaryLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, executable := range []struct{ path, flag string }{{client, "version"}, {daemon, "--version"}} {
+		if err := inspectMacRustCandidate(executable.path, runtime.GOARCH); err != nil {
+			t.Fatal(err)
+		}
+		output, err := exec.Command(executable.path, executable.flag).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(output)) != version {
+			t.Fatalf("updater extracted %s with unexpected version %q: %v", executable.path, output, err)
+		}
+	}
+}
 
 func rustForegroundFixture(t *testing.T) (bootstrap.Metadata, identity.NodeIdentity) {
 	t.Helper()

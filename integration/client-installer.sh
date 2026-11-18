@@ -22,13 +22,18 @@ EOF
 chmod 0755 "$work_dir/fixture/linux/laneway/install.sh"
 printf '%s\n' '{"test":"signed fixture"}' > "$work_dir/fixture/checksums.sigstore.json"
 
-tar -C "$work_dir/fixture/darwin" -czf "$work_dir/fixture/laneway_darwin_arm64.tar.gz" laneway
+tar -C "$work_dir/fixture/darwin" -czf "$work_dir/fixture/legacy/laneway_darwin_arm64.tar.gz" laneway
 tar -C "$work_dir/fixture/linux" -czf "$work_dir/fixture/legacy/laneway_linux_arm64.tar.gz" laneway
 (
   cd "$work_dir/fixture/legacy"
-  sha256sum laneway_linux_arm64.tar.gz > checksums.txt
+  sha256sum laneway_linux_arm64.tar.gz laneway_darwin_arm64.tar.gz > checksums.txt
   cp ../checksums.sigstore.json .
 )
+printf '%s\n' rust-v1 > "$work_dir/fixture/darwin/laneway/macos-runtime"
+printf '9.8.7\n' > "$work_dir/fixture/darwin/laneway/VERSION"
+printf '#!/bin/sh\nexit 0\n' > "$work_dir/fixture/darwin/laneway/bin/lanewayd-rs"
+chmod 0755 "$work_dir/fixture/darwin/laneway/bin/lanewayd-rs"
+tar -C "$work_dir/fixture/darwin" -czf "$work_dir/fixture/laneway_darwin_arm64.tar.gz" laneway
 printf '9.8.7\n' > "$work_dir/fixture/linux/laneway/VERSION"
 printf '#!/bin/sh\nexit 0\n' > "$work_dir/fixture/linux/laneway/sbin/lanewayd-rs"
 chmod 0755 "$work_dir/fixture/linux/laneway/sbin/lanewayd-rs"
@@ -118,8 +123,8 @@ darwin_output=$(env \
   LANEWAY_INSTALLER_TEST_RECORD="$darwin_record" \
   sh "$repo_dir/install.sh")
 
-grep -Fx 'configure --yes' "$darwin_record" >/dev/null
-grep -Fx 'configure --check' "$darwin_record" >/dev/null
+expected=$(printf '%s\n' signature-verified 'configure --yes' 'configure --check')
+[ "$(cat "$darwin_record")" = "$expected" ]
 grep -F 'Laneway v9.8.7 is ready.' <<EOF >/dev/null
 $darwin_output
 EOF
@@ -127,21 +132,14 @@ grep -F 'laneway login lane.example.test' <<EOF >/dev/null
 $darwin_output
 EOF
 
-preview_record=$work_dir/preview-record
-preview_output=$(env PATH="$work_dir/bin:$PATH" LANEWAY_DOMAIN=lane.example.test \
-  LANEWAY_INSTALLER_TEST_OS=Darwin LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture" \
-  LANEWAY_INSTALLER_TEST_RECORD="$preview_record" \
-  sh "$repo_dir/install.sh" --rust-preview)
-expected=$(printf '%s\n' signature-verified 'configure --yes --with-rust' 'configure --check --with-rust')
-[ "$(cat "$preview_record")" = "$expected" ]
-printf '%s\n' "$preview_output" | grep -F 'laneway connect lane.example.test --rust' >/dev/null
+printf '%s\n' "$darwin_output" | grep -Fx '  laneway connect lane.example.test' >/dev/null
 
 failed_record=$work_dir/failed-signature-record
 if env PATH="$work_dir/bin:$PATH" LANEWAY_INSTALLER_TEST_OS=Darwin \
   LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture" LANEWAY_INSTALLER_TEST_BAD_SIGNATURE=1 \
   LANEWAY_INSTALLER_TEST_RECORD="$failed_record" \
-  sh "$repo_dir/install.sh" --rust-preview > "$work_dir/failed-output" 2>&1; then
-  echo "the preview installer accepted a bad signature" >&2
+  sh "$repo_dir/install.sh" > "$work_dir/failed-output" 2>&1; then
+  echo "the macOS installer accepted a bad signature" >&2
   exit 1
 fi
 test ! -e "$failed_record"
@@ -151,11 +149,21 @@ corrupt_record=$work_dir/corrupt-archive-record
 if env PATH="$work_dir/bin:$PATH" LANEWAY_INSTALLER_TEST_OS=Darwin \
   LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture" LANEWAY_INSTALLER_TEST_CORRUPT_ARCHIVE=1 \
   LANEWAY_INSTALLER_TEST_RECORD="$corrupt_record" \
-  sh "$repo_dir/install.sh" --rust-preview > "$work_dir/corrupt-output" 2>&1; then
-  echo "the preview installer accepted an archive with the wrong checksum" >&2
+  sh "$repo_dir/install.sh" > "$work_dir/corrupt-output" 2>&1; then
+  echo "the macOS installer accepted an archive with the wrong checksum" >&2
   exit 1
 fi
 [ "$(cat "$corrupt_record")" = signature-verified ]
+
+legacy_record=$work_dir/darwin-legacy-record
+if env PATH="$work_dir/bin:$PATH" LANEWAY_INSTALLER_TEST_OS=Darwin \
+  LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture/legacy" LANEWAY_INSTALLER_TEST_RECORD="$legacy_record" \
+  sh "$repo_dir/install.sh" > "$work_dir/darwin-legacy-output" 2>&1; then
+  echo 'the macOS installer accepted a Go-only package' >&2
+  exit 1
+fi
+[ "$(cat "$legacy_record")" = signature-verified ]
+grep -F 'does not provide the macOS Rust package' "$work_dir/darwin-legacy-output" >/dev/null
 
 linux_record=$work_dir/linux-record
 env \

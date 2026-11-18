@@ -3,10 +3,23 @@
 package main
 
 import (
+	"flag"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestMacOSConnectRequiresRust(t *testing.T) {
+	var options connectPlatformOptions
+	flags := flag.NewFlagSet("connect", flag.ContinueOnError)
+	addPlatformConnectFlags(flags, &options)
+	if err := flags.Parse(nil); err != nil || !options.rust {
+		t.Fatalf("default macOS connect must select Rust: %+v %v", options, err)
+	}
+	if err := flags.Parse([]string{"--rust=false"}); err == nil || !options.rust {
+		t.Fatalf("macOS connect must not fall back to Go: %+v %v", options, err)
+	}
+}
 
 func TestMacOSCLIContainsOnlyUserClientCommands(t *testing.T) {
 	root := newRootCommand()

@@ -38,6 +38,9 @@ fi
 if [ -n "$package_rust_macos" ]; then
   [ "$package_goos" = darwin ] || { echo "PACKAGE_RUST_MACOS is macOS-only" >&2; exit 1; }
   sh "$script_dir/verify-rust-macos-runtime.sh" "$package_rust_macos" "$package_goarch"
+elif [ "$package_goos" = darwin ]; then
+  echo 'macOS packages require PACKAGE_RUST_MACOS (native lanewayd-rs)' >&2
+  exit 1
 fi
 case "$version" in
   *[!0-9A-Za-z._+-]*)
@@ -71,6 +74,7 @@ if [ "$package_goos" = linux ]; then
 	fi
 elif [ -n "$package_rust_macos" ]; then
 	install -m 0755 "$package_rust_macos" "$package_dir/bin/lanewayd-rs"
+	printf '%s\n' rust-v1 > "$package_dir/macos-runtime"
 	cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 fi
 

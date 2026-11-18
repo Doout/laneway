@@ -7,8 +7,9 @@ operator CLI and lab tools can still be used without running a Go server.
 
 ## Release handoff
 
-Fresh control-plane and managed Linux node installs select Rust. Before
-publishing or deploying them, verify the following on the signed candidate:
+Fresh control planes, managed Linux nodes, and foreground Linux/macOS sessions
+select Rust. Before publishing or deploying, verify the following on the
+signed candidate:
 
 1. Run the native release matrix on the release commit, including the Linux
    systemd packet tests and the installed macOS helper on Intel and Apple
@@ -56,7 +57,7 @@ AMD64 and ARM64 runners and includes them in the signed archives as
 Rust executables and systemd units. `lanewayd` points to the Rust daemon;
 `laneway` remains the one-shot operator CLI. Installing the package does not
 enable or start services or the updater. Go-only and mixed-version archives
-are rejected. The macOS helper still uses its separate preview procedure.
+are rejected. macOS uses its own native package and network helper.
 
 On an isolated Linux host, pin the release tag with `LANEWAY_VERSION` when
 using the signed download installer. With an already verified archive, run
@@ -503,7 +504,7 @@ disposable database and blocks external browser requests. It does not install a
 runtime release, measure live packet reachability, or certify which assets ship
 in the public image.
 
-## macOS endpoint preview
+## macOS endpoint
 
 `lanewayd-rs` runs the ordinary macOS tunnel and its privileged helper as
 separate processes from the same installed Rust binary. The helper creates
@@ -514,17 +515,19 @@ Closing either process ends the tunnel: the helper withdraws routes when the
 client closes its socket, and the client stops if the privileged child exits.
 The release workflow builds the native binary for
 Apple Silicon and Intel and includes `bin/lanewayd-rs` in each macOS archive
-covered by the release's signed checksums. The standalone Go download and
-default runtime stay the same.
+covered by the release's signed checksums. The standalone Go CLI remains an
+operator tool; installing an endpoint requires the full archive. No separate
+Go helper is installed.
 
-On an isolated Mac, run the release's `install.sh --rust-preview` with Cosign
-on `PATH`. The installer verifies the tag's release signature and archive
-checksum before running the bundled CLI. For an archive you verified yourself,
-run `sudo sh install.sh --rust-preview` inside its extracted `laneway` directory.
-The optional binary is installed at `/Library/Application Support/Laneway/lanewayd-rs`.
-Repeat the preview installation after a version upgrade; `laneway update`
-continues to update the standalone Go client and helper only. `--rust` refuses
-a mismatched version before using any credentials.
+On an isolated Mac, run the release's `install.sh` as a normal user. The
+installer verifies the tag's signed manifest and archive checksum before
+running the bundled CLI. For an archive you verified yourself, run
+`sudo sh install.sh` inside its extracted `laneway` directory. The Rust
+binary installs at `/Library/Application Support/Laneway/lanewayd-rs`.
+`laneway update` verifies and installs the complete signed package. Both
+`laneway configure --check` and `laneway connect` reject an installed runtime
+that does not match the CLI version. Missing Cosign is handled with a
+checksum-pinned temporary verifier.
 
 To build and check an unsigned local archive on native macOS without installing it:
 
@@ -537,7 +540,7 @@ PACKAGE_RUST_MACOS="$PWD/rust/target/release/lanewayd-rs" make package VERSION="
 sh integration/rust-release-macos.sh "dist/laneway_darwin_$arch.tar.gz" "$arch" "$version"
 ```
 
-Run `laneway connect DOMAIN --rust` as your normal user. Add `--ephemeral`
+Run `laneway connect DOMAIN` as your normal user. Add `--ephemeral`
 for a one-time login, or repeat `--route PREFIX` for an exact controller
 advertisement. Remembered logins use policy-derived private routes by
 default; ephemeral logins default to overlay-only. Both preserve the packet
@@ -545,17 +548,18 @@ policy from the controller, and loss of a requested route withdraws the
 session's route authority. The wrapper waits for tunnel cleanup before it
 rotates a remembered credential and reconnects.
 
-On an isolated Mac with the Rust preview installed, use a native node
+On an isolated Mac with the package installed, use a native node
 configuration with `[tun]` set to `name = "utun"` and `configure = true`.
 Set `socket_path` to a path in a private user-owned directory. Run the Rust
-binary as a regular user. The preview is split-tunnel only; it does not
+binary as a regular user. The macOS runtime is split-tunnel only; it does not
 configure an exit or change host DNS. A changed overlay address requires
 reconnecting, and losing controller authority withdraws the ordinary routes.
 
 The native CI matrix runs the unprivileged stream-framing and credential
-handoff tests on Apple Silicon and Intel. On disposable runners it removes
-the compatibility Go helper before exercising the Rust helper with a real
-`utun`, benchmark-only IPv4 routes, a conflicting route, traffic, and cleanup.
+handoff tests on Apple Silicon and Intel. On disposable runners, the default
+archive install must leave the old helper path absent. The probe exercises
+the Rust helper with a real `utun`, isolated IPv4 routes, a conflicting
+route, traffic, and cleanup.
 On a disposable native Mac outside hosted CI, point the test at the local
 archive and its companion Go executable. Mark **only that disposable host**
 and run as an administrator account with noninteractive sudo:
@@ -568,7 +572,7 @@ LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 \
 ```
 
 Use the version built into the archive. The gate refuses existing installation
-paths, installs the preview for the test, then removes the fixture files.
+paths, installs the default package for the test, then removes the fixture files.
 For `0.0.9103`, eleven unprivileged Rust helper tests and three Go handoff
 tests passed on Apple Silicon and for the x86-64 binaries under Rosetta.
 Both archives contained and ran the expected thin Go and Rust executables.
@@ -578,6 +582,10 @@ network validation.
 The release package gate checks both binaries, preserves the standalone Go
 artifact, and verifies the installed runtime on disposable native runners. Release checksum
 signing is separate from Apple Developer ID signing or notarization.
+The `0.0.9104` unsigned archives passed package and updater-extraction
+checks on Apple Silicon and for the Intel build under Rosetta. Both builds
+also passed the CLI-to-Rust credential handoff check. The privileged `utun`
+gate was not exercised in that local run.
 
 ## Managed Docker network plugin
 

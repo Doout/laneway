@@ -35,20 +35,33 @@ func connectPlatformPreflight() error {
 }
 
 func addPlatformConnectFlags(fs *flag.FlagSet, options *connectPlatformOptions) {
-	fs.BoolVar(&options.rust, "rust", false, "use the Rust split-tunnel runtime preview")
+	options.rust = true
+	fs.BoolFunc("rust", "use the Rust runtime (already the default)", func(value string) error {
+		if value == "true" {
+			return nil
+		}
+		return errors.New("macOS requires the Rust runtime")
+	})
 }
 
 func platformConnectRustRuntime() (string, error) {
 	if err := trustedMacRuntimePath(macRustRuntimePath, false); err != nil {
-		return "", fmt.Errorf("Rust runtime preview is unavailable: %w", err)
+		return "", fmt.Errorf("Rust runtime is unavailable: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, macRustRuntimePath, "--version").Output()
-	if err != nil || strings.TrimSpace(string(output)) != buildinfo.Version {
-		return "", fmt.Errorf("the Rust runtime must match Laneway %s; reinstall the matching macOS preview archive", buildinfo.Version)
+	if err := checkMacRustVersion(macRustRuntimePath); err != nil {
+		return "", err
 	}
 	return macRustRuntimePath, nil
+}
+
+func checkMacRustVersion(executable string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, executable, "--version").Output()
+	if err != nil || strings.TrimSpace(string(output)) != buildinfo.Version {
+		return fmt.Errorf("the Rust runtime must match Laneway %s; reinstall the signed macOS package", buildinfo.Version)
+	}
+	return nil
 }
 
 func trustedMacRuntimePath(first string, directory bool) error {
@@ -73,9 +86,7 @@ func trustedMacRuntimePath(first string, directory bool) error {
 func validatePlatformArtifact(bootstrap.Metadata) error { return nil }
 
 func connectUsage() error {
-	return errors.New("usage: laneway connect [DOMAIN] [--route PREFIX] [--ephemeral [--token-file PATH]] [--rust]")
+	return errors.New("usage: laneway connect [DOMAIN] [--route PREFIX] [--ephemeral [--token-file PATH]]")
 }
 
-func platformNetworkHelperOptions() nethelper.StartOptions {
-	return nethelper.StartOptions{Executable: "/Library/PrivilegedHelperTools/laneway-network-helper"}
-}
+func platformNetworkHelperOptions() nethelper.StartOptions { return nethelper.StartOptions{} }

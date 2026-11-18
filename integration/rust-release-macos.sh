@@ -6,7 +6,7 @@ if [ "$#" -ne 3 ]; then
   echo "usage: sh integration/rust-release-macos.sh ARCHIVE amd64|arm64 RELEASE_VERSION" >&2
   exit 2
 fi
-archive=$1
+archive=$(CDPATH='' cd -- "$(dirname -- "$1")" && pwd)/$(basename -- "$1")
 arch=$2
 version=$3
 case "$(uname -sm):$arch" in
@@ -42,7 +42,7 @@ helper=/Library/PrivilegedHelperTools/laneway-network-helper
 runtime_dir='/Library/Application Support/Laneway'
 cleanup() {
   if [ "$installed" = true ]; then
-    sudo -n rm -f "$client" "$alias_path" "$helper" "$runtime_dir/lanewayd-rs"
+    sudo -n rm -f "$client" "$alias_path" "$runtime_dir/lanewayd-rs"
     if [ -d "$runtime_dir" ]; then sudo -n rmdir "$runtime_dir"; fi
   fi
   find "$probe_dir" -depth -delete
@@ -51,7 +51,7 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 listing=$(tar -tzf "$archive")
-set -- laneway/bin/laneway laneway/bin/lanewayd-rs laneway/bin/lane laneway/install.sh laneway/VERSION
+set -- laneway/bin/laneway laneway/bin/lanewayd-rs laneway/bin/lane laneway/install.sh laneway/VERSION laneway/macos-runtime
 for member in "$@"; do
   count=$(printf '%s\n' "$listing" | grep -Fxc "$member" || true)
   [ "$count" -eq 1 ] || { echo "expected exactly one $member in $archive" >&2; exit 1; }
@@ -62,25 +62,27 @@ for file in "$package/bin/laneway" "$package/bin/lanewayd-rs" "$package/install.
   [ -f "$file" ] && [ ! -L "$file" ] && [ -x "$file" ] || { echo "not a package executable: $file" >&2; exit 1; }
 done
 [ "$(readlink "$package/bin/lane")" = laneway ]
+[ "$(cat "$package/macos-runtime")" = rust-v1 ]
 cmp -s "$package/bin/laneway" "$standalone"
 sh "$root/scripts/verify-rust-macos-runtime.sh" "$package/bin/lanewayd-rs" "$arch"
 [ "$(cat "$package/VERSION")" = "$version" ]
 [ "$("$package/bin/laneway" version)" = "$version" ]
 [ "$("$package/bin/lanewayd-rs" --version)" = "$version" ]
+LANEWAY_MACOS_TEST_ARCHIVE="$archive" LANEWAY_MACOS_TEST_VERSION="$version" \
+  go -C "$root/go" test ./cmd/laneway -run '^TestMacRustRuntimeArchiveMatchesUpdater$' -count=1
 
 if [ "$install_probe" = 1 ]; then
   for path in "$client" "$alias_path" "$helper" "$runtime_dir"; do
     [ ! -e "$path" ] && [ ! -L "$path" ] || { echo "refusing to overwrite $path" >&2; exit 1; }
   done
   installed=true
-  sudo -n sh "$package/install.sh" --rust-preview
-  "$package/bin/laneway" configure --check --with-rust
+  sudo -n sh "$package/install.sh"
+  "$package/bin/laneway" configure --check
+  "$client" configure --check
+  [ ! -e "$helper" ] && [ ! -L "$helper" ]
   [ "$(readlink "$alias_path")" = laneway ]
   cmp -s "$package/bin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
   if [ "$utun_probe" = 1 ]; then
-    # The default Go client retains its own helper. The Rust gate must run
-    # without that compatibility helper after verifying the package install.
-    sudo -n rm -f "$helper"
     cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs --lib \
       darwin_installed_helper_routes_and_restores_real_utun -- --ignored
   fi

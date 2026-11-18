@@ -292,7 +292,7 @@ jobs:
         run: |
           cd go
           LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" go test ./cmd/laneway -run '^Test(RustForeground|MacRustRuntime)' -count=1
-      - name: Install the preview archive and verify real utun traffic and cleanup
+      - name: Install the default archive and verify real utun traffic and cleanup
         run: |
           set -euo pipefail
           arch=$(go env GOARCH)
