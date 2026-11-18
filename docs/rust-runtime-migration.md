@@ -42,13 +42,16 @@ release signing and registry infrastructure.
 | Fleet features | Private DNS, updates, recovery, policy history, diagnostics, alerts and topology | Exercise each feature on a fresh Rust deployment through its UI/API and node consumer. |
 | Packaging and platforms | Go also provides the Docker plugin, platform-specific CLI/daemon entry points and readiness helpers | Verify signed install, Rust recovery, desktop local API and active service processes per platform. The one-shot operator CLI and test harnesses can stay in Go. |
 
-The tagged release workflow builds Rust images alongside the legacy images:
+The tagged release workflow builds only the Rust runtime images:
 `ghcr.io/doout/laneway-controller-rust`, `ghcr.io/doout/laneway-relay-rust`,
 `ghcr.io/doout/laneway-node-rust`, `ghcr.io/doout/laneway-exit-node-rust`,
 and `ghcr.io/doout/lane-edge-rust`. Each release job targets AMD64 and ARM64,
 scans its build, signs its immutable digest, and adds it to the signed image
-manifest. Existing installations are not changed by this workflow. A local
-build is not a signed release.
+manifest. The Go administrator image remains a one-shot operator tool. New
+releases do not publish the old Go images or archive their daemons and systemd
+units. Mixed-language packet tests build Go peers from source. Existing
+installations are not changed by this workflow. A local build is not a signed
+release.
 The local ARM64 lab built all four new image targets and verified that
 their non-root Rust binaries reported the pinned build version. The tagged
 AMD64 build, signing, and publication were not exercised locally.
@@ -133,6 +136,12 @@ All five packaged Rust binaries ran and reported that version. Staged
 installation later passed with
 the same Rust binaries on AMD64 and with the ARM64 `0.0.0-fleet-rust-lab`
 build, including refusal of an incomplete package.
+
+The unsigned ARM64 `0.0.9104` archive passed the full systemd gate after
+removing the Go daemons and units. It ran the packaged Rust relay and nodes,
+redeemed a shared-host Exit invitation, and exercised the managed and
+foreground Linux clients. The mixed-language phases used a source-built Go
+relay fixture, not an archived Go service.
 
 The release builds run `integration/rust-release-systemd.sh` on native AMD64
 and ARM64 runners. It extracts the actual archive binaries and runs the

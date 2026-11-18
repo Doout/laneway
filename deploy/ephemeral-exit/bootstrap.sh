@@ -11,12 +11,7 @@ verify_exit_release_signature() {
 }
 
 stage_exit_entrypoint() {
-	local runtime_dir=$1 runtime=$2 command
-	case "$runtime" in
-		go) command="$runtime_dir/laneway node run -config \"\$CREDENTIALS_DIRECTORY/config\"" ;;
-		rust) command="$runtime_dir/lanewayd-rs --shared-host-exit" ;;
-		*) return 2 ;;
-	esac
+	local runtime_dir=$1
 	cat > "$runtime_dir/entrypoint" <<EOF
 #!/bin/sh
 set -eu
@@ -26,17 +21,13 @@ while [ ! -e $runtime_dir/network.ready ]; do
   [ \$attempt -le 600 ] || exit 1
   sleep 0.05
 done
-exec $command
+exec $runtime_dir/lanewayd-rs --shared-host-exit
 EOF
 	chmod 0555 "$runtime_dir/entrypoint"
 }
 
 start_transient_exit() {
-	local unit=$1 runtime_dir=$2 credentials=$3 runtime=$4 max_runtime=$5
-	local -a device_allow=()
-	if [[ $runtime == go ]]; then
-		device_allow=(--property=DeviceAllow='/dev/net/tun rw')
-	fi
+	local unit=$1 runtime_dir=$2 credentials=$3 max_runtime=$4
 	systemd-run --unit="$unit" --collect --quiet \
 		--property=Type=exec --property=DynamicUser=yes --property=PrivateNetwork=yes \
 		--property=RuntimeDirectory="${unit%.service}" --property=RuntimeDirectoryMode=0700 \
@@ -52,7 +43,7 @@ start_transient_exit() {
 		--property=RestrictSUIDSGID=yes --property=RestrictRealtime=yes --property=RemoveIPC=yes \
 		--property=CapabilityBoundingSet='CAP_NET_ADMIN CAP_IPC_LOCK' \
 		--property=AmbientCapabilities='CAP_NET_ADMIN CAP_IPC_LOCK' \
-		--property=DevicePolicy=closed "${device_allow[@]}" \
+		--property=DevicePolicy=closed \
 		--property=RestrictAddressFamilies='AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
 		--property=LimitCORE=0 --property=LimitMEMLOCK=infinity --property=MemoryMax=512M --property=TasksMax=128 --property=UMask=0077 \
 		--property=StandardOutput=null --property=StandardError=null --property=RuntimeMaxSec="$max_runtime" \
@@ -168,14 +159,13 @@ version=
 authority=
 name=
 max_runtime=8h
-runtime=go
 while (($#)); do
 	case "$1" in
 		--version) (($# >= 2)) || die '--version requires a value'; version=$2; shift 2 ;;
 		--authority) (($# >= 2)) || die '--authority requires a value'; authority=$2; shift 2 ;;
 		--name) (($# >= 2)) || die '--name requires a value'; name=$2; shift 2 ;;
 		--max-runtime) (($# >= 2)) || die '--max-runtime requires a value'; max_runtime=$2; shift 2 ;;
-		--runtime) (($# >= 2)) || die '--runtime requires a value'; runtime=$2; shift 2 ;;
+		--runtime) (($# >= 2)) && [[ $2 == rust ]] || die 'only the Rust Exit runtime is supported'; shift 2 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
@@ -185,7 +175,6 @@ done
 [[ $authority =~ ^[A-Za-z0-9.-]+(:[0-9]{1,5})?$ ]] || die 'invalid controller authority'
 [[ $name =~ ^[A-Za-z0-9._-]{1,253}$ ]] || die 'invalid Exit name'
 [[ $max_runtime =~ ^([1-9][0-9]*(ms|s|m|min|h|d|w))+$ ]] || die 'invalid maximum runtime'
-[[ $runtime == go || $runtime == rust ]] || die 'runtime must be go or rust'
 [[ -d /run && ! -L /run ]] || die '/run must be a real directory'
 [[ $(stat -f -c %T /run) == tmpfs ]] || die '/run is not RAM-backed tmpfs'
 [[ $(stat -c '%u:%g:%a' /run) == 0:0:755 ]] || die '/run has unsafe ownership or mode'
@@ -199,9 +188,6 @@ for command in awk curl find findmnt grep install ip mount nft nsenter od readli
 done
 systemd_state=$(systemctl is-system-running 2>/dev/null || true)
 [[ $systemd_state == running || $systemd_state == degraded ]] || die 'systemd is not the active service manager'
-if [[ $runtime == go ]]; then
-	[[ -c /dev/net/tun ]] || die '/dev/net/tun is unavailable'
-fi
 [[ $(sysctl -n net.ipv4.ip_forward 2>/dev/null) == 1 ]] || die 'host IPv4 forwarding must already be enabled'
 
 architecture=$(uname -m)
@@ -288,14 +274,12 @@ entries=$(tar -tzf "$work/$archive")
 [[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/bin/laneway') == 1 ]] || die 'release archive has no unique laneway executable'
 tar -xzf "$work/$archive" -C "$work" laneway/bin/laneway
 install -m 0555 "$work/laneway/bin/laneway" "$runtime_dir/laneway"
-runtime_binary=laneway
-if [[ $runtime == rust ]]; then
-	[[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/sbin/lanewayd-rs') == 1 ]] ||
-		die 'verified release does not contain the Rust Exit runtime'
-	tar -xzf "$work/$archive" -C "$work" laneway/sbin/lanewayd-rs
-	install -m 0555 "$work/laneway/sbin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
-	runtime_binary=lanewayd-rs
-fi
+[[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/sbin/lanewayd-rs') == 1 ]] ||
+	die 'verified release does not contain the Rust Exit runtime'
+tar -xzf "$work/$archive" -C "$work" laneway/sbin/lanewayd-rs
+install -m 0555 "$work/laneway/sbin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
+[[ $("$runtime_dir/lanewayd-rs" --version) == "${version#v}" ]] ||
+	die 'verified Rust Exit runtime reports a different release version'
 
 printf 'One-use Exit invitation: ' >&2
 stty -echo </dev/tty
@@ -327,8 +311,8 @@ awk '$1 == "nameserver" && $2 !~ /^(127\.|0\.0\.0\.0$)/ && $2 ~ /^[0-9.]+$/ { pr
 [[ -s $runtime_dir/resolv.conf ]] || die 'no non-loopback DNS resolver is available to the private namespace'
 chmod 0444 "$runtime_dir/resolv.conf"
 
-stage_exit_entrypoint "$runtime_dir" "$runtime"
-start_transient_exit "$unit" "$runtime_dir" "$work/credentials" "$runtime" "$max_runtime"
+stage_exit_entrypoint "$runtime_dir"
+start_transient_exit "$unit" "$runtime_dir" "$work/credentials" "$max_runtime"
 unit_started=true
 
 pid=
@@ -343,7 +327,7 @@ touch "$runtime_dir/network.ready"
 
 executed=false
 for _ in $(seq 1 200); do
-	if [[ $(readlink "/proc/$pid/exe" 2>/dev/null || true) == "$runtime_dir/$runtime_binary" ]]; then
+	if [[ $(readlink "/proc/$pid/exe" 2>/dev/null || true) == "$runtime_dir/lanewayd-rs" ]]; then
 		executed=true
 		break
 	fi

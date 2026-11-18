@@ -70,8 +70,8 @@ start_staged_systemd_exit() {
   install -m 0555 "${work_dir}/rust-node" "${systemd_runtime}/lanewayd-rs"
   printf 'nameserver 10.254.0.1\n' >"${systemd_runtime}/resolv.conf"
   chmod 0444 "${systemd_runtime}/resolv.conf"
-  stage_exit_entrypoint "${systemd_runtime}" rust
-  start_transient_exit "${systemd_unit}" "${systemd_runtime}" "${systemd_sources}" rust 5min ||
+  stage_exit_entrypoint "${systemd_runtime}"
+  start_transient_exit "${systemd_unit}" "${systemd_runtime}" "${systemd_sources}" 5min ||
     { systemd_failure 'could not start the transient Exit'; return 1; }
   pid="$(systemctl show -p MainPID --value "${systemd_unit}")"
   [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || { systemd_failure 'transient Exit is not running'; return 1; }

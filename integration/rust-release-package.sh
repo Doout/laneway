@@ -40,6 +40,14 @@ if ! tar -tvzf "$archive" laneway/sbin/lanewayd |
   echo "the Linux archive must select the Rust daemon" >&2
   exit 1
 fi
+for member in sbin/laneway-controller sbin/laneway-relay \
+  systemd/lanewayd.service systemd/laneway-controller.service systemd/laneway-relay.service \
+  deploy/systemd/lanewayd.service deploy/systemd/laneway-controller.service deploy/systemd/laneway-relay.service; do
+  if printf '%s\n' "$listing" | grep -Fxq "laneway/$member"; then
+    echo "the Linux archive unexpectedly ships a legacy runtime: $member" >&2
+    exit 1
+  fi
+done
 for member in examples/managed-updates-rust.toml systemd/laneway-rust-updater.service systemd/laneway-rust-updater.timer \
   systemd/lanewayd-rs.service systemd/laneway-relay-rs.service \
   deploy/compose/verify-rust-release.sh; do

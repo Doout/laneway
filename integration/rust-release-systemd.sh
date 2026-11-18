@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test the exact Linux archive to be released, including the legacy peer.
+# Test the exact Rust Linux archive against Rust and source-built Go peers.
 set -euo pipefail
 
 if [[ $# != 3 ]]; then
@@ -23,8 +23,8 @@ trap 'find "$probe_dir" -depth -delete' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir "$probe_dir/go" "$probe_dir/rust"
-# Take both peers and both release servers from the archive. Extract to plain
-# files rather than installing over any of the host's binaries.
+# Keep the Go CLI for enrollment. Build the legacy relay and test tools as
+# fixtures so wire interoperability does not require shipping them.
 listing=$(tar -tzf "$archive")
 bootstrap=laneway/deploy/ephemeral-exit/bootstrap.sh
 if [[ $(grep -Fxc "$bootstrap" <<<"$listing") != 1 ]] ||
@@ -32,22 +32,22 @@ if [[ $(grep -Fxc "$bootstrap" <<<"$listing") != 1 ]] ||
   echo 'The archived bootstrap must match the installer exercised by the packet gate.' >&2
   exit 1
 fi
-for member in laneway/bin/laneway laneway/sbin/laneway-relay; do
-  if [[ $(grep -Fxc "$member" <<<"$listing") != 1 ]]; then
-    printf 'Expected one %s in the Linux archive.\n' "$member" >&2
-    exit 1
-  fi
-  tar -xzOf "$archive" "$member" > "$probe_dir/go/${member##*/}"
-done
+member=laneway/bin/laneway
+if [[ $(grep -Fxc "$member" <<<"$listing") != 1 ]]; then
+  printf 'Expected one %s in the Linux archive.\n' "$member" >&2
+  exit 1
+fi
+tar -xzOf "$archive" "$member" > "$probe_dir/go/laneway"
 cp "$probe_dir/go/laneway" "$probe_dir/go/lanewayd"
 for name in laneway-controller-rs laneway-relay-rs lanewayd-rs; do
   tar -xzOf "$archive" "laneway/sbin/$name" > "$probe_dir/rust/$name"
 done
-for fixture in netprobe rustnodecontroller; do
+for fixture in laneway-relay netprobe rustnodecontroller; do
   if [[ -n ${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-} ]]; then
     install -m 0755 "$LANEWAY_NODE_TEST_GO_FIXTURE_DIR/$fixture" "$probe_dir/go/$fixture"
   else
-    (cd "$root/go" && CGO_ENABLED=0 go build -o "$probe_dir/go/$fixture" "./integration/$fixture")
+    case "$fixture" in laneway-relay) pkg="./cmd/$fixture" ;; *) pkg="./integration/$fixture" ;; esac
+    (cd "$root/go" && CGO_ENABLED=0 go build -o "$probe_dir/go/$fixture" "$pkg")
   fi
 done
 chmod 0755 "$probe_dir/go/"* "$probe_dir/rust/"*

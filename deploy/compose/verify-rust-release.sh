@@ -7,8 +7,9 @@ mode=settings
 case "${1:-}" in
   --prepare) mode=prepare; shift ;;
   --install) mode=install; shift ;;
+  --publish) mode=publish; shift ;;
 esac
-[ "$#" -eq 2 ] || die "usage: sh verify-rust-release.sh [--prepare | --install] vVERSION RELEASE_METADATA_DIRECTORY"
+[ "$#" -eq 2 ] || die "usage: sh verify-rust-release.sh [--prepare | --install | --publish] vVERSION RELEASE_METADATA_DIRECTORY"
 tag=$1
 directory=$2
 case "$tag" in *[!v0-9.]*) die "expected a stable release tag";; esac
@@ -86,13 +87,22 @@ verified_digest() {
 controller=$(verified_digest ghcr.io/doout/laneway-controller-rust) || exit 1
 relay=$(verified_digest ghcr.io/doout/laneway-relay-rust) || exit 1
 exit_node=$(verified_digest ghcr.io/doout/laneway-exit-node-rust) || exit 1
-if [ "$mode" = install ]; then
+case "$mode" in install|publish)
   admin=$(verified_digest ghcr.io/doout/laneway-admin) || exit 1
   connector=$(verified_digest ghcr.io/doout/lane-edge-rust) || exit 1
+  ;;
+esac
+if [ "$mode" = publish ]; then
+  verified_digest ghcr.io/doout/laneway-node-rust >/dev/null || exit 1
+  # Each entry above must exist exactly once. No other runtime or duplicate
+  # reference may be included in a newly published release.
+  [ "$(awk 'END { print NR }' "$work/image-digests.txt")" -eq 6 ] ||
+    die "expected exactly five Rust runtimes and the operator image"
 fi
 printf 'LANEWAY_RUST_VERSION=%s\nLANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=%s\nLANEWAY_RUST_RELAY_IMAGE_DIGEST=%s\nLANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=%s\n' \
   "${tag#v}" "$controller" "$relay" "$exit_node"
-if [ "$mode" = install ]; then
+case "$mode" in install|publish)
   printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\nLANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=%s\n' "$admin" "$connector"
-fi
+  ;;
+esac
 if [ "$mode" = prepare ]; then cat "$work/bootstrap-artifacts.toml"; fi

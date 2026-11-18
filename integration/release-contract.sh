@@ -87,18 +87,23 @@ if sed -n 's/^[[:space:]]*- uses: \([^ #]*\).*/\1/p' "$workflow" |
   exit 1
 fi
 
-for image in \
-  ghcr.io/doout/laneway-controller \
-  ghcr.io/doout/laneway-relay \
-  ghcr.io/doout/laneway-admin \
-  ghcr.io/doout/lane-edge \
-  ghcr.io/doout/laneway-exit-node
-do
-  require "image: $image" "$workflow"
-done
-require_release_target ghcr.io/doout/laneway-controller controller
-require_release_target ghcr.io/doout/laneway-relay relay
+expected_images='ghcr.io/doout/lane-edge-rust
+ghcr.io/doout/laneway-admin
+ghcr.io/doout/laneway-controller-rust
+ghcr.io/doout/laneway-exit-node-rust
+ghcr.io/doout/laneway-node-rust
+ghcr.io/doout/laneway-relay-rust'
+actual_images=$(awk '$1 == "image:" && $2 ~ /^ghcr\.io\/doout\// { print $2 }' "$workflow" | LC_ALL=C sort)
+if [ "$actual_images" != "$expected_images" ]; then
+  echo "tagged releases must publish exactly the Rust runtime images and the operator image" >&2
+  exit 1
+fi
 require_release_target ghcr.io/doout/laneway-admin admin
+require_release_target ghcr.io/doout/laneway-controller-rust controller
+require_release_target ghcr.io/doout/laneway-relay-rust relay
+require_release_target ghcr.io/doout/laneway-node-rust node
+require_release_target ghcr.io/doout/laneway-exit-node-rust rust-exit
+require_release_target ghcr.io/doout/lane-edge-rust rust-connector
 if grep -F 'BINARY=' "$workflow" >/dev/null || grep -F 'matrix.binary' "$workflow" >/dev/null; then
   echo "release images must use fixed Docker targets instead of a free-form binary argument" >&2
   exit 1
@@ -153,7 +158,7 @@ require 'ephemeral-exit-bootstrap.sh' "$workflow"
 require 'ephemeral-exit' "$package_workflow"
 require 'verify-rust-release-runtime.sh' "$package_workflow"
 require 'verify-rust-release.sh' "$package_workflow"
-require 'sh deploy/compose/verify-rust-release.sh --install "$GITHUB_REF_NAME" dist' "$workflow"
+require 'sh deploy/compose/verify-rust-release.sh --publish "$GITHUB_REF_NAME" dist' "$workflow"
 require 'set -- --control-tools' "$client_installer"
 require 'sh integration/rust-compose-release.sh' "$ci_workflow"
 require 'verified release does not contain the Rust Exit runtime' "$ephemeral_exit_bootstrap"

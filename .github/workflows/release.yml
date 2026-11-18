@@ -145,21 +145,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: controller
-            image: ghcr.io/doout/laneway-controller
-            dockerfile: deploy/containers/Dockerfile
-            target: controller
-          - name: relay
-            image: ghcr.io/doout/laneway-relay
-            dockerfile: deploy/containers/Dockerfile
-            target: relay
           - name: admin
             image: ghcr.io/doout/laneway-admin
             dockerfile: deploy/containers/Dockerfile
             target: admin
-          - name: connector
-            image: ghcr.io/doout/lane-edge
-            dockerfile: deploy/containers/Dockerfile.connector
           - name: rust-connector
             image: ghcr.io/doout/lane-edge-rust
             dockerfile: deploy/containers/Dockerfile.connector
@@ -180,9 +169,6 @@ jobs:
             image: ghcr.io/doout/laneway-exit-node-rust
             dockerfile: deploy/containers/Dockerfile.exit-node
             target: rust-exit
-          - name: exit-node
-            image: ghcr.io/doout/laneway-exit-node
-            dockerfile: deploy/containers/Dockerfile.exit-node
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -345,8 +331,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Verify with the Rust Compose trust policy before publishing
-        run: sh deploy/compose/verify-rust-release.sh --install "$GITHUB_REF_NAME" dist >/dev/null
+      - name: Verify the complete Rust release image set before publishing
+        run: sh deploy/compose/verify-rust-release.sh --publish "$GITHUB_REF_NAME" dist >/dev/null
       - name: Attest release artifact provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:

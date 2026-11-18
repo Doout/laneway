@@ -6,7 +6,6 @@ project_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 version=${VERSION-dev}
 package_goos=${PACKAGE_GOOS:-$(cd "$project_dir/go" && go env GOOS)}
 package_goarch=${PACKAGE_GOARCH:-$(cd "$project_dir/go" && go env GOARCH)}
-package_rust_node=${PACKAGE_RUST_NODE:-}
 package_rust_runtime_dir=${PACKAGE_RUST_RUNTIME_DIR:-}
 package_rust_macos=${PACKAGE_RUST_MACOS:-}
 
@@ -19,29 +18,18 @@ case "$package_goarch" in
     ;;
 esac
 [ -n "$version" ] || { echo "version is empty" >&2; exit 1; }
-if [ -n "$package_rust_runtime_dir" ]; then
-  [ "$package_goos" = linux ] && [ -z "$package_rust_node" ] ||
-    { echo "PACKAGE_RUST_RUNTIME_DIR is Linux-only and cannot be combined with PACKAGE_RUST_NODE" >&2; exit 1; }
-  sh "$script_dir/verify-rust-release-runtime.sh" "$package_rust_runtime_dir" "$package_goarch"
-fi
-if [ -n "$package_rust_node" ]; then
-  [ "$package_goos" = linux ] && [ -f "$package_rust_node" ] && [ ! -L "$package_rust_node" ] && [ -x "$package_rust_node" ] ||
-    { echo "PACKAGE_RUST_NODE must be an executable Linux runtime file" >&2; exit 1; }
-  case "$package_goarch" in
-    amd64) rust_machine='Advanced Micro Devices X86-64' ;;
-    arm64) rust_machine='AArch64' ;;
-  esac
-  LC_ALL=C readelf -h "$package_rust_node" |
-    awk -F: -v expected="$rust_machine" '$1 ~ /^[[:space:]]*Machine$/ {gsub(/^[[:space:]]+/, "", $2); if ($2 == expected) valid=1} END {exit !valid}' ||
-    { echo "PACKAGE_RUST_NODE architecture does not match the package" >&2; exit 1; }
-fi
-if [ -n "$package_rust_macos" ]; then
-  [ "$package_goos" = darwin ] || { echo "PACKAGE_RUST_MACOS is macOS-only" >&2; exit 1; }
-  sh "$script_dir/verify-rust-macos-runtime.sh" "$package_rust_macos" "$package_goarch"
-elif [ "$package_goos" = darwin ]; then
-  echo 'macOS packages require PACKAGE_RUST_MACOS (native lanewayd-rs)' >&2
-  exit 1
-fi
+case "$package_goos" in
+  linux)
+    [ -n "$package_rust_runtime_dir" ] && [ -z "$package_rust_macos" ] ||
+      { echo "Linux packages require PACKAGE_RUST_RUNTIME_DIR (the five static Rust runtimes)" >&2; exit 1; }
+    sh "$script_dir/verify-rust-release-runtime.sh" "$package_rust_runtime_dir" "$package_goarch"
+    ;;
+  darwin)
+    [ -n "$package_rust_macos" ] && [ -z "$package_rust_runtime_dir" ] ||
+      { echo "macOS packages require PACKAGE_RUST_MACOS (native lanewayd-rs)" >&2; exit 1; }
+    sh "$script_dir/verify-rust-macos-runtime.sh" "$package_rust_macos" "$package_goarch"
+    ;;
+esac
 case "$version" in
   *[!0-9A-Za-z._+-]*)
     echo "version contains unsupported characters" >&2
@@ -58,21 +46,19 @@ mkdir -p "$package_dir/bin" "$package_dir/docs" "$project_dir/dist"
 if [ "$package_goos" = linux ]; then
 	mkdir -p "$package_dir/sbin" "$package_dir/examples" "$package_dir/systemd" \
 		"$package_dir/nftables" "$package_dir/spec" "$package_dir/deploy" "$package_dir/integration"
-	if [ -n "$package_rust_node" ]; then
-		install -m 0755 "$package_rust_node" "$package_dir/sbin/lanewayd-rs"
-	elif [ -n "$package_rust_runtime_dir" ]; then
-		for runtime in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs; do
-			install -m 0755 "$package_rust_runtime_dir/$runtime" "$package_dir/sbin/$runtime"
-		done
-		cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
-		cp "$project_dir"/deploy/systemd/laneway-rust-updater.* "$package_dir/systemd/"
-		cp "$project_dir/deploy/systemd/lanewayd-rs.service" \
-		  "$project_dir/deploy/systemd/laneway-relay-rs.service" "$package_dir/systemd/"
-		cp "$project_dir/deploy/examples/managed-updates-rust.toml" \
-		  "$project_dir/deploy/examples/node-rust.toml" "$project_dir/deploy/examples/node-rust-controller.toml" \
-		  "$project_dir/deploy/examples/relay-rust.toml" "$package_dir/examples/"
-	fi
-elif [ -n "$package_rust_macos" ]; then
+	for runtime in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs; do
+		install -m 0755 "$package_rust_runtime_dir/$runtime" "$package_dir/sbin/$runtime"
+	done
+	ln -s lanewayd-rs "$package_dir/sbin/lanewayd"
+	cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
+	cp "$project_dir/deploy/systemd/laneway-rust-updater.service" \
+		"$project_dir/deploy/systemd/laneway-rust-updater.timer" \
+		"$project_dir/deploy/systemd/lanewayd-rs.service" \
+		"$project_dir/deploy/systemd/laneway-relay-rs.service" "$package_dir/systemd/"
+	cp "$project_dir/deploy/examples/managed-updates-rust.toml" \
+	  "$project_dir/deploy/examples/node-rust.toml" "$project_dir/deploy/examples/node-rust-controller.toml" \
+	  "$project_dir/deploy/examples/relay-rust.toml" "$package_dir/examples/"
+else
 	install -m 0755 "$package_rust_macos" "$package_dir/bin/lanewayd-rs"
 	printf '%s\n' rust-v1 > "$package_dir/macos-runtime"
 	cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
@@ -84,17 +70,6 @@ ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$versio
   CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
     go build -trimpath -ldflags "$ldflags" -o "$package_dir/bin/laneway" ./cmd/laneway
 	ln -s laneway "$package_dir/bin/lane"
-	if [ "$package_goos" = linux ]; then
-		for command in laneway-relay laneway-controller; do
-			CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
-				go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/$command" "./cmd/$command"
-		done
-		if [ -n "$package_rust_runtime_dir" ] || [ -n "$package_rust_node" ]; then
-			ln -s lanewayd-rs "$package_dir/sbin/lanewayd"
-		else
-			ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
-		fi
-	fi
 )
 
 cp "$project_dir/README.md" "$package_dir/README.md"
@@ -108,10 +83,6 @@ cp "$project_dir/deploy/examples/controller.toml" \
   "$project_dir/deploy/examples/relay-controller.toml" \
 	"$project_dir/deploy/examples/relay.toml" \
 	"$package_dir/examples/"
-cp "$project_dir/deploy/systemd/lanewayd.service" \
-  "$project_dir/deploy/systemd/laneway-relay.service" \
-  "$project_dir/deploy/systemd/laneway-controller.service" \
-  "$package_dir/systemd/"
 cp "$project_dir"/deploy/nftables/* "$package_dir/nftables/"
 cp "$project_dir/deploy/README.md" "$package_dir/docs/deployment.md"
 cp "$project_dir/docs/benchmarks.md" "$package_dir/docs/benchmarks.md"
@@ -123,9 +94,10 @@ cp "$project_dir"/spec/*.md "$package_dir/spec/"
 # Copy only reviewed deployment sources. Never traverse the ignored Compose
 # runtime tree: a package build on an operator host must not read or archive
 # .env, generated credentials, databases, or recovery bundles.
-for directory in containers ephemeral-exit examples nftables systemd; do
+for directory in containers ephemeral-exit examples nftables; do
 	cp -R "$project_dir/deploy/$directory" "$package_dir/deploy/$directory"
 done
+cp -R "$package_dir/systemd" "$package_dir/deploy/systemd"
 install -m 0644 "$project_dir/deploy/README.md" "$package_dir/deploy/README.md"
 install -d -m 0755 "$package_dir/deploy/compose/generated/config"
 for name in .env.example README.md compose.dev.yaml compose.rust.yaml compose.yaml laneway-certificate-renewal.service laneway-certificate-renewal.timer; do

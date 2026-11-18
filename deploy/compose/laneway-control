@@ -113,23 +113,23 @@ acquire_lock() {
 # active instances of the shared services before touching their state.
 require_go_runtime() (
   case "$1" in /*) ;; *) die "expected an absolute deployment directory" ;; esac
-  base_dir=$1
-  env_file=$base_dir/.env
-  if [ ! -e "$env_file" ] && [ ! -L "$env_file" ]; then
+  guard_base=$1
+  guard_env=$guard_base/.env
+  if [ ! -e "$guard_env" ] && [ ! -L "$guard_env" ]; then
     # A fresh restore target may have the overlay, but no deployment yet.
-    [ ! -e "$base_dir/generated/config/bootstrap.rust.json" ] ||
+    [ ! -e "$guard_base/generated/config/bootstrap.rust.json" ] ||
       die "cannot determine the runtime of the prepared Rust deployment without .env"
     return 0
   fi
-  if [ ! -e "$base_dir/compose.rust.yaml" ] && [ ! -L "$base_dir/compose.rust.yaml" ]; then
-    [ -f "$env_file" ] &&
-      grep -Eq '^[[:space:]]*(export[[:space:]]+)?LANEWAY_RUST_VERSION[[:space:]]*=' "$env_file" || return 0
+  if [ ! -e "$guard_base/compose.rust.yaml" ] && [ ! -L "$guard_base/compose.rust.yaml" ]; then
+    [ -f "$guard_env" ] &&
+      grep -Eq '^[[:space:]]*(export[[:space:]]+)?LANEWAY_RUST_VERSION[[:space:]]*=' "$guard_env" || return 0
   fi
-  for input in "$base_dir/compose.yaml" "$env_file"; do
+  for input in "$guard_base/compose.yaml" "$guard_env"; do
     [ -f "$input" ] && [ ! -L "$input" ] || die "cannot verify the running control-plane runtime: missing or unsafe input"
   done
-  runtime=go
-  ids=$(compose --profile exit-node ps --status running -q controller relay exit-node) ||
+  ids=$(docker compose --project-directory "$guard_base" --env-file "$guard_env" -f "$guard_base/compose.yaml" \
+    --profile exit-node ps --status running -q controller relay exit-node) ||
     die "cannot verify the running control-plane runtime; legacy maintenance refused"
   for id in $ids; do
     case "$id" in ''|*[!0-9a-f]*) die "invalid container ID during runtime verification" ;; esac
@@ -1617,7 +1617,8 @@ run_route() {
 }
 
 rust_candidate_compose() {
-  (env_file=$rust_update_work/candidate.env; compose --profile exit-node --profile tools "$@")
+  docker compose --project-directory "$base_dir" --env-file "$rust_update_work/candidate.env" \
+    -f "$base_dir/compose.yaml" -f "$base_dir/compose.rust.yaml" --profile exit-node --profile tools "$@"
 }
 
 rust_volume_path() (
