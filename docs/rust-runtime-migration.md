@@ -96,7 +96,18 @@ inventory, not a substitute for authenticated administrator endpoints.
 `make rust-controller-interop` compares Rust output with actual Go HTTP
 handler responses while Go still owns the database. The fixture covers IPv4
 and dual-stack networks, limits, configuration epochs, empty networks,
-durable and ephemeral enrollment, and a revoked node. The next controller
-gate is authenticated visibility: a restricted principal must see only its
-networks before the list limit is applied, and revoked sessions must lose
-access immediately.
+durable and ephemeral enrollment, and a revoked node.
+
+The separate `session-inventory` command exercises the native browser-session
+store. Use it only on a disposable lab database; a successful read touches
+the session, and expiry or credential invalidation records a revocation and
+an audit event. Never point this mode at a running production controller.
+Use the same arguments as `inventory` and supply the session token on stdin
+from a protected source, never as a command-line argument. It does not issue
+credentials or listen on a network socket.
+
+The Go/Rust gate also checks scoped and all-network visibility, live changes
+to grants, disabled principals, revoked credentials, logout, idle and absolute
+expiry, and clock regression. An audit write failure must roll back expiry.
+The next service gate is an authenticated HTTP transport, including cookie and
+bearer selection and compatibility of error envelopes.

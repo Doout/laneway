@@ -777,11 +777,14 @@ name = "laneway-controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "laneway-protocol",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "thiserror",
  "x25519-dalek",
 ]
 

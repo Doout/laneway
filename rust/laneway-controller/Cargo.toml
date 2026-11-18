@@ -8,6 +8,9 @@ description = "Laneway controller storage and runtime"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 laneway-protocol = { path = "../laneway-protocol" }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde.workspace = true

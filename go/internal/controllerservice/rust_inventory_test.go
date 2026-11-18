@@ -12,10 +12,12 @@ import (
 	"os/exec"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	lanewayv1 "github.com/Doout/laneway/go/api/laneway/v1"
+	"github.com/Doout/laneway/go/internal/adminauth"
 	"github.com/Doout/laneway/go/internal/controller"
 	"github.com/Doout/laneway/go/internal/identity"
 )
@@ -28,15 +30,24 @@ func TestRustControllerInventory(t *testing.T) {
 		t.Fatal("set LANEWAY_RUST_CONTROLLER to the built controller binary")
 	}
 	f := newFixture(t, 0, nil)
+	var sessionToken string
 	compare := func(path string, limit int, args ...string) {
 		t.Helper()
 		n := strconv.Itoa(limit)
 		response := httptest.NewRecorder()
-		f.service.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path+"?limit="+n, nil))
+		req := httptest.NewRequest(http.MethodGet, "https://controller.example"+path+"?limit="+n, nil)
+		mode := "inventory"
+		if sessionToken != "" {
+			mode = "session-inventory"
+			req.AddCookie(&http.Cookie{Name: adminauth.SessionCookieName, Value: sessionToken})
+		}
+		f.service.Handler().ServeHTTP(response, req)
 		if response.Code != http.StatusOK {
 			t.Fatalf("Go list: status %d: %s", response.Code, response.Body)
 		}
-		output, err := exec.CommandContext(t.Context(), bin, append(append([]string{"inventory"}, args...), n)...).CombinedOutput()
+		cmd := exec.CommandContext(t.Context(), bin, append(append([]string{mode}, args...), n)...)
+		cmd.Stdin = strings.NewReader(sessionToken)
+		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("Rust inventory: %v: %s", err, output)
 		}
@@ -96,5 +107,9 @@ func TestRustControllerInventory(t *testing.T) {
 	}
 	nodes(100)
 	f.network = empty
+	nodes(100)
+	_, sessionToken, _, _ = bootstrapAdministratorSessionForHTTPTest(t, f, "inventory-owner", "local fixture password for parity")
+	networks(100)
+	f.network = dual
 	nodes(100)
 }

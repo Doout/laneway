@@ -34,6 +34,13 @@ func administratorRootDecision(t *testing.T, store *Store, policy adminauth.Rout
 func administratorSessionSubject(t *testing.T, store *Store, username string, role adminauth.Role,
 	allNetworks bool, networks ...identity.NetworkID) adminauth.Subject {
 	t.Helper()
+	subject, _ := administratorSessionFixture(t, store, username, role, allNetworks, networks...)
+	return subject
+}
+
+func administratorSessionFixture(t *testing.T, store *Store, username string, role adminauth.Role,
+	allNetworks bool, networks ...identity.NetworkID) (adminauth.Subject, string) {
+	t.Helper()
 	ctx := context.Background()
 	principalID, err := newID()
 	if err != nil {
@@ -69,12 +76,12 @@ func administratorSessionSubject(t *testing.T, store *Store, username string, ro
 			t.Fatal(err)
 		}
 	}
-	session, _, _, err := store.CreateAdministratorSession(ctx, principalID, credentialID,
+	session, token, _, err := store.CreateAdministratorSession(ctx, principalID, credentialID,
 		AdministratorSessionOptions{IdleTimeout: time.Hour, AbsoluteTimeout: 2 * time.Hour, MaxActive: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return adminauth.SessionSubject(principalID, session.ID)
+	return adminauth.SessionSubject(principalID, session.ID), token
 }
 
 func administratorDecisionForSubject(t *testing.T, subject adminauth.Subject, policy adminauth.RoutePolicy,

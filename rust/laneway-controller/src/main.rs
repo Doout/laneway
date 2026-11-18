@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
-use laneway_controller::{Inventory, Network, Node};
+use laneway_controller::{Inventory, Network, Node, SessionStore};
 use serde::Serialize;
+use std::io::{IsTerminal, Read};
 use std::{env, io, path::Path};
 
 #[derive(Serialize)]
@@ -12,8 +13,12 @@ enum Response {
 
 fn main() -> Result<()> {
     let mut args = env::args_os().skip(1);
-    const USAGE: &str = "usage: laneway-controller inventory {networks DATABASE | nodes DATABASE NETWORK_ID} [LIMIT]";
-    ensure!(args.next().as_deref() == Some("inventory".as_ref()), USAGE);
+    const USAGE: &str = "usage: laneway-controller {inventory|session-inventory} {networks DATABASE | nodes DATABASE NETWORK_ID} [LIMIT]";
+    let scoped = match args.next().as_deref().and_then(|a| a.to_str()) {
+        Some("inventory") => false,
+        Some("session-inventory") => true,
+        _ => anyhow::bail!(USAGE),
+    };
     let kind = args.next().context(USAGE)?;
     let path = args.next().context(USAGE)?;
     let network = match kind.to_str() {
@@ -33,10 +38,25 @@ fn main() -> Result<()> {
         .transpose()?
         .unwrap_or(100);
     ensure!(args.next().is_none(), USAGE);
-    let mut store = Inventory::open(Path::new(&path))?;
-    let response = match network {
-        None => Response::Networks(store.networks(limit)?),
-        Some(network) => Response::Nodes(store.nodes(network, limit)?),
+    let response = if scoped {
+        ensure!(!io::stdin().is_terminal(), "pass session token via stdin");
+        let mut input = String::new();
+        io::stdin().lock().take(46).read_to_string(&mut input)?;
+        let token = input
+            .strip_suffix("\r\n")
+            .or_else(|| input.strip_suffix('\n'))
+            .unwrap_or(&input);
+        let mut store = SessionStore::open(Path::new(&path))?;
+        match network {
+            None => Response::Networks(store.networks(token, limit)?),
+            Some(network) => Response::Nodes(store.nodes(token, network, limit)?),
+        }
+    } else {
+        let mut store = Inventory::open(Path::new(&path))?;
+        match network {
+            None => Response::Networks(store.networks(limit)?),
+            Some(network) => Response::Nodes(store.nodes(network, limit)?),
+        }
     };
     serde_json::to_writer(io::stdout().lock(), &response)?;
     Ok(())
