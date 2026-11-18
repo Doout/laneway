@@ -14,6 +14,7 @@ use std::{
 };
 use tokio::sync::Semaphore;
 mod access_admin;
+mod audit;
 mod enroll;
 mod form;
 mod login;
@@ -172,22 +173,24 @@ fn credential(headers: &HeaderMap) -> Result<Credential, Failure> {
     token.map(|s| Credential::Session(s.to_owned())).ok_or(AUTH)
 }
 
+fn valid_query_field(field: &str) -> bool {
+    !field.contains(';')
+        && field.bytes().enumerate().all(|(i, b)| {
+            b != b'%'
+                || field
+                    .as_bytes()
+                    .get(i + 1..i + 3)
+                    .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit))
+        })
+}
+
 fn query_limit(raw: Option<&str>) -> Result<usize, ListError> {
     // Go's URL.Query discards individual fields with invalid escapes or raw
     // semicolons. Keep the first valid limit, like url.Values.Get.
     let limit = raw
         .unwrap_or_default()
         .split('&')
-        .filter(|field| {
-            !field.contains(';')
-                && field.bytes().enumerate().all(|(i, b)| {
-                    b != b'%'
-                        || field
-                            .as_bytes()
-                            .get(i + 1..i + 3)
-                            .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit))
-                })
-        })
+        .filter(|field| valid_query_field(field))
         .flat_map(|field| form_urlencoded::parse(field.as_bytes()))
         .find(|(k, _)| k == "limit")
         .map(|(_, v)| v.into_owned())
@@ -267,6 +270,9 @@ async fn dispatch(
     }
     if let Some(route) = access_admin::Route::parse(&pieces) {
         return access_admin::handle(req, state, id, route).await;
+    }
+    if let Some(route) = audit::Route::parse(&pieces) {
+        return audit::handle(req, state, id, route).await;
     }
     let root_probe = path == "/v1/admin/auth/root";
     let logout = path == "/v1/admin/auth/logout";

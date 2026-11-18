@@ -220,6 +220,14 @@ discovery and cannot renew their forwarding authority. The namespace gate
 registers a live relay through the Rust API, disables it to stop forwarding,
 then re-enables it and verifies traffic recovers without restarting it.
 
+The Rust audit APIs serve both legacy lists and resumable pages. Scoped
+reads require `audit.read` and the requested network; the global stream
+requires an owner session, root bearer, or `audit.read_global`. Go and Rust
+accept each other's cursor format. A cursor pins the scope and the last
+event's timestamp and ID, so new events do not shift an in-progress page.
+The HTTPS compatibility gate traverses both implementations and checks
+that a cursor cannot be reused across scopes.
+
 `POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
 invitations. It accepts owner or operator sessions with network access, the
 configured root bearer, or automation with `enrollment.issue` on that network.

@@ -11,6 +11,7 @@ use laneway_protocol::Id;
 use rusqlite::{Connection, OpenFlags, Row, Transaction};
 use serde::Serialize;
 pub mod access_admin;
+pub mod audit;
 mod bearer;
 mod browser;
 pub use bearer::{RootCredential, bearer_inventory, bearer_network};
