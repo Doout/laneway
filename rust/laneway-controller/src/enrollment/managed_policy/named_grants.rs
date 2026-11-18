@@ -1,11 +1,12 @@
 use super::{Grants, overlay_prefixes, read_id};
+use crate::access_admin::service_ports::{self, ServiceProtocol};
 use anyhow::{Result, ensure};
 use laneway_protocol::{
     Id,
     policy::prefix_from_wire,
-    v1::{IpPrefix, IpProtocol, PortRange, RouteKind},
+    v1::{IpPrefix, PortRange, RouteKind},
 };
-use rusqlite::{Row, Statement, Transaction};
+use rusqlite::{Row, Transaction};
 use std::collections::HashMap;
 
 impl Grants<'_> {
@@ -19,10 +20,7 @@ impl Grants<'_> {
             ((rg.subject_kind='user' AND rg.user_id=?2) OR (rg.subject_kind='team' AND rg.team_id IN
               (SELECT team_id FROM access_team_members WHERE network_id=?1 AND user_id=?2)))
             ORDER BY rg.id")?;
-        let mut port_query = tx.prepare(
-            "SELECT first_port,last_port FROM access_service_ports WHERE service_id=?
-            ORDER BY first_port,last_port LIMIT 257",
-        )?;
+        let mut port_query = service_ports::prepare(tx)?;
         let routes: HashMap<_, _> = self
             .routes
             .iter()
@@ -32,16 +30,9 @@ impl Grants<'_> {
         while let Some(row) = rows.next()? {
             let id = read_id(row, 0)?;
             let service = read_id(row, 9)?;
-            let protocol = match row.get::<_, String>(10)?.as_str() {
-                "any" => IpProtocol::Any,
-                "tcp" => IpProtocol::Tcp,
-                "udp" => IpProtocol::Udp,
-                "icmp" => IpProtocol::Icmp,
-                "icmpv6" => IpProtocol::Icmpv6,
-                _ => anyhow::bail!("invalid named service protocol"),
-            };
+            let protocol = ServiceProtocol::from_stored(&row.get::<_, String>(10)?)?;
             ensure!(row.get::<_, i64>(11)? == 1, "unsealed named service");
-            let ports = service_ports(&mut port_query, service, protocol)?;
+            let ports = service_ports::read(&mut port_query, service, protocol)?;
             let node: Option<Vec<u8>> = row.get(2)?;
             let route: Option<Vec<u8>> = row.get(3)?;
             let connector: Option<Vec<u8>> = row.get(4)?;
@@ -94,8 +85,14 @@ impl Grants<'_> {
                 }
                 _ => anyhow::bail!("invalid named access grant target"),
             };
-            let mut selector = self.selector(protocol, vec![node], prefixes);
-            selector.destination_ports = ports;
+            let mut selector = self.selector(protocol.wire(), vec![node], prefixes);
+            selector.destination_ports = ports
+                .into_iter()
+                .map(|p| PortRange {
+                    first: u32::from(p.first),
+                    last: u32::from(p.last),
+                })
+                .collect();
             self.allow(id, selector, "Managed named resource access grant")?;
         }
         Ok(())
@@ -114,33 +111,4 @@ fn read_prefix(row: &Row<'_>, index: usize) -> Result<Option<IpPrefix>> {
         })),
         _ => anyhow::bail!("incomplete stored resource prefix"),
     }
-}
-
-fn service_ports(
-    stmt: &mut Statement<'_>,
-    service: Id,
-    proto: IpProtocol,
-) -> Result<Vec<PortRange>> {
-    let mut rows = stmt.query([service.as_bytes()])?;
-    let mut ports = Vec::new();
-    let mut prev: Option<u32> = None;
-    while let Some(row) = rows.next()? {
-        let first: u32 = row.get(0)?;
-        let last: u32 = row.get(1)?;
-        ensure!(
-            ports.len() < 256
-                && first > 0
-                && first <= last
-                && last <= 65535
-                && prev.is_none_or(|end| end + 1 < first),
-            "noncanonical named service port ranges"
-        );
-        ports.push(PortRange { first, last });
-        prev = Some(last);
-    }
-    ensure!(
-        matches!(proto, IpProtocol::Tcp | IpProtocol::Udp) != ports.is_empty(),
-        "incorrect port set for named service protocol"
-    );
-    Ok(ports)
 }

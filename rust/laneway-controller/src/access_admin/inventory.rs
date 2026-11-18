@@ -1,8 +1,14 @@
-use super::row_id;
+use super::{
+    AccessError, row_id,
+    service_ports::{self, ServiceProtocol},
+};
 use anyhow::{Result, ensure};
 use laneway_protocol::{Id, policy::prefix_from_wire, v1::IpPrefix};
-use rusqlite::{Row, Transaction};
+use rusqlite::{Row, Statement, Transaction};
 use serde_json::{Value, json};
+
+const RESOURCE_COLUMNS: &str = "id,name,target_kind,node_id,route_id,route_node_id,route_prefix_address,route_prefix_length,prefix_address,prefix_length,enabled,created_at,updated_at";
+const SERVICE_COLUMNS: &str = "id,name,protocol,ports_sealed,enabled,created_at,updated_at";
 
 pub(super) fn read(tx: &Transaction<'_>, net: Id) -> Result<Value> {
     let mut remaining = (4 << 20) - 256;
@@ -61,50 +67,24 @@ pub(super) fn read(tx: &Transaction<'_>, net: Id) -> Result<Value> {
             Ok(result)
         },
     )?;
-    let resources=rows(tx,net,&mut remaining,"SELECT id,name,target_kind,node_id,route_id,route_node_id,route_prefix_address,
-        route_prefix_length,prefix_address,prefix_length,enabled,created_at,updated_at FROM access_resources WHERE network_id=? ORDER BY name,id",
-        |r|resource(r,net))?;
-    let mut ports=tx.prepare("SELECT first_port,last_port FROM access_service_ports WHERE service_id=? ORDER BY first_port,last_port LIMIT 257")?;
+    let resources = rows(
+        tx,
+        net,
+        &mut remaining,
+        &format!(
+            "SELECT {RESOURCE_COLUMNS} FROM access_resources WHERE network_id=? ORDER BY name,id"
+        ),
+        |r| resource(r, net),
+    )?;
+    let mut ports = service_ports::prepare(tx)?;
     let services = rows(
         tx,
         net,
         &mut remaining,
-        "SELECT id,name,protocol,ports_sealed,enabled,created_at,updated_at FROM access_services WHERE network_id=? ORDER BY name,id",
-        |r| {
-            let service = row_id(r, 0)?;
-            let protocol: String = r.get(2)?;
-            ensure!(
-                matches!(protocol.as_str(), "tcp" | "udp" | "any" | "icmp" | "icmpv6")
-                    && r.get::<_, bool>(3)?,
-                "invalid service"
-            );
-            let mut values = Vec::new();
-            let mut rs = ports.query([service.as_bytes()])?;
-            let mut end = 0u32;
-            while let Some(port) = rs.next()? {
-                let first = port.get::<_, u32>(0)?;
-                let last = port.get::<_, u32>(1)?;
-                ensure!(
-                    values.len() < 256
-                        && first > 0
-                        && first <= last
-                        && last <= 65535
-                        && (end == 0 || end + 1 < first),
-                    "invalid service ports"
-                );
-                values.push(json!({"first":first,"last":last}));
-                end = last;
-            }
-            ensure!(
-                matches!(protocol.as_str(), "tcp" | "udp") != values.is_empty(),
-                "invalid service port protocol"
-            );
-            Ok(
-                json!({"service_id":service.to_string(),"network_id":net.to_string(),"name":r.get::<_,String>(1)?,
-                "protocol":protocol,"ports":values,"enabled":r.get::<_,bool>(4)?,
-                "created_at_unix_seconds":r.get::<_,i64>(5)?,"updated_at_unix_seconds":r.get::<_,i64>(6)?}),
-            )
-        },
+        &format!(
+            "SELECT {SERVICE_COLUMNS} FROM access_services WHERE network_id=? ORDER BY name,id"
+        ),
+        |r| service(r, net, &mut ports),
     )?;
     let resource_grants = rows(
         tx,
@@ -123,6 +103,35 @@ pub(super) fn read(tx: &Transaction<'_>, net: Id) -> Result<Value> {
     Ok(
         json!({"users":users,"teams":teams,"memberships":memberships,"grants":grants,"resources":resources,
         "services":services,"resource_grants":resource_grants}),
+    )
+}
+
+pub(super) fn named(tx: &Transaction<'_>, net: Id, id: Id, is_service: bool) -> Result<Value> {
+    let (columns, table) = if is_service {
+        (SERVICE_COLUMNS, "access_services")
+    } else {
+        (RESOURCE_COLUMNS, "access_resources")
+    };
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {columns} FROM {table} WHERE id=? AND network_id=?"
+    ))?;
+    let mut rows = stmt.query((id.as_bytes(), net.as_bytes()))?;
+    let row = rows.next()?.ok_or(AccessError::Missing)?;
+    if is_service {
+        service(row, net, &mut service_ports::prepare(tx)?)
+    } else {
+        resource(row, net)
+    }
+}
+
+fn service(r: &Row<'_>, net: Id, ports: &mut Statement<'_>) -> Result<Value> {
+    let id = row_id(r, 0)?;
+    let proto = ServiceProtocol::from_stored(&r.get::<_, String>(2)?)?;
+    ensure!(r.get::<_, bool>(3)?, "unsealed service");
+    Ok(
+        json!({"service_id":id.to_string(),"network_id":net.to_string(),"name":r.get::<_,String>(1)?,
+        "protocol":proto.name(),"ports":service_ports::read(ports,id,proto)?,"enabled":r.get::<_,bool>(4)?,
+        "created_at_unix_seconds":r.get::<_,i64>(5)?,"updated_at_unix_seconds":r.get::<_,i64>(6)?}),
     )
 }
 

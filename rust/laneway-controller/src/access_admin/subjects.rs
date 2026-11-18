@@ -1,5 +1,6 @@
 use super::{
     AccessError, Actor, Subject, Target, change, conflict, epoch_reply, inventory, next_id,
+    validate_name,
 };
 use anyhow::{Result, ensure};
 use laneway_protocol::Id;
@@ -12,12 +13,15 @@ pub(super) struct Editor<'a, 'c> {
     pub(super) actor: Actor,
     pub(super) now: i64,
 }
+pub(super) struct ResolvedSubject {
+    pub id: Id,
+    pub kind: &'static str,
+    pub user: Option<Id>,
+    pub team: Option<Id>,
+}
 impl Editor<'_, '_> {
     pub(super) fn create_subject(&self, name: &str, team: bool) -> Result<Value> {
-        ensure!(
-            !name.is_empty() && name.len() <= 253 && name.trim() == name && !name.contains('\0'),
-            AccessError::Invalid("invalid access subject name")
-        );
+        validate_name(name)?;
         let id = next_id()?;
         let (stmt, kind, action, key) = if team {
             (
@@ -111,25 +115,19 @@ impl Editor<'_, '_> {
     }
 
     pub(super) fn grant(&self, subject: Subject, target: Target) -> Result<Value> {
-        let (subject_id, kind, user, team) = match subject {
-            Subject::User(id) => {
-                self.check_subject("SELECT 1 FROM access_users WHERE id=? AND network_id=?", id)?;
-                (id, "user", Some(id), None)
-            }
-            Subject::Team(id) => {
-                self.check_subject("SELECT 1 FROM access_teams WHERE id=? AND network_id=?", id)?;
-                (id, "team", None, Some(id))
-            }
-        };
+        let ResolvedSubject {
+            id: subject_id,
+            kind,
+            user,
+            team,
+        } = self.resolve_subject(subject)?;
         let (target_kind, node) = match target {
             Target::Network => ("network", None),
             Target::Node(id) => ("node", Some(id)),
             Target::Exit(id) => ("exit", Some(id)),
         };
         if let Some(node) = node {
-            let live:bool=self.tx.query_row("SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND network_id=? AND revoked_at IS NULL
-                AND (lease_expires_at IS NULL OR lease_expires_at>?))",(node.as_bytes(),self.net.as_bytes(),self.now),|r|r.get(0))?;
-            ensure!(live, AccessError::Missing);
+            self.live_node(node)?;
             if matches!(target, Target::Exit(_)) {
                 let live:bool=self.tx.query_row("SELECT EXISTS(SELECT 1 FROM routes WHERE node_id=? AND network_id=? AND state='approved' AND kind='exit'
                     AND (valid_until IS NULL OR valid_until>?))",(node.as_bytes(),self.net.as_bytes(),self.now),|r|r.get(0))?;
@@ -168,14 +166,46 @@ impl Editor<'_, '_> {
         )?))
     }
 
-    fn check_subject(&self, sql: &str, id: Id) -> Result<()> {
+    pub(super) fn live_node(&self, node: Id) -> Result<()> {
+        let live: bool = self.tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND network_id=? AND revoked_at IS NULL
+            AND (lease_expires_at IS NULL OR lease_expires_at>?))",
+            (node.as_bytes(), self.net.as_bytes(), self.now),
+            |r| r.get(0),
+        )?;
+        ensure!(live, AccessError::Missing);
+        Ok(())
+    }
+    pub(super) fn resolve_subject(&self, subject: Subject) -> Result<ResolvedSubject> {
+        Ok(match subject {
+            Subject::User(id) => {
+                self.require("SELECT 1 FROM access_users WHERE id=? AND network_id=?", id)?;
+                ResolvedSubject {
+                    id,
+                    kind: "user",
+                    user: Some(id),
+                    team: None,
+                }
+            }
+            Subject::Team(id) => {
+                self.require("SELECT 1 FROM access_teams WHERE id=? AND network_id=?", id)?;
+                ResolvedSubject {
+                    id,
+                    kind: "team",
+                    user: None,
+                    team: Some(id),
+                }
+            }
+        })
+    }
+    pub(super) fn require(&self, sql: &str, id: Id) -> Result<()> {
         self.tx
             .query_row(sql, (id.as_bytes(), self.net.as_bytes()), |_| Ok(()))
             .optional()?
             .ok_or(AccessError::Missing)?;
         Ok(())
     }
-    fn record(&self, action: &str, kind: &str, id: Id, details: Value) -> Result<i64> {
+    pub(super) fn record(&self, action: &str, kind: &str, id: Id, details: Value) -> Result<i64> {
         change(
             self.tx,
             self.net,

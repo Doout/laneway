@@ -1,5 +1,7 @@
 //! Managed-access administration against the existing controller database.
 mod inventory;
+mod named;
+pub(crate) mod service_ports;
 mod subjects;
 use crate::{
     RootCredential, SessionError, SessionReply, SessionStore, management_write::BrowserWrite,
@@ -9,6 +11,7 @@ use anyhow::{Result, ensure};
 use laneway_protocol::Id;
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{Value, json};
+pub use service_ports::{Port, ServiceProtocol};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
@@ -32,6 +35,17 @@ pub enum Request {
         target: Target,
     },
     DeleteGrant(Id),
+    CreateResource(Id, String, ResourceTarget),
+    SetResourceEnabled(Id, bool),
+    CreateService(Id, String, ServiceProtocol, Vec<Port>),
+    SetServiceEnabled(Id, bool),
+    CreateResourceGrant {
+        net: Id,
+        subject: Subject,
+        resource: Id,
+        service: Id,
+    },
+    DeleteResourceGrant(Id),
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +58,10 @@ pub enum Target {
     Network,
     Node(Id),
     Exit(Id),
+}
+pub enum ResourceTarget {
+    Node(Id),
+    Prefix { route: Id, prefix: ipnet::IpNet },
 }
 
 struct Scope {
@@ -71,6 +89,9 @@ impl Request {
             Self::Inventory(net)
             | Self::CreateUser(net, _)
             | Self::CreateTeam(net, _)
+            | Self::CreateResource(net, ..)
+            | Self::CreateService(net, ..)
+            | Self::CreateResourceGrant { net, .. }
             | Self::CreateGrant { net, .. } => {
                 return Ok(Scope {
                     network: *net,
@@ -80,6 +101,16 @@ impl Request {
             Self::SetUserEnabled(id, _) => ("SELECT network_id FROM access_users WHERE id=?", id),
             Self::SetMember(id, _, _) => ("SELECT network_id FROM access_teams WHERE id=?", id),
             Self::DeleteGrant(id) => ("SELECT network_id FROM access_grants WHERE id=?", id),
+            Self::SetResourceEnabled(id, _) => {
+                ("SELECT network_id FROM access_resources WHERE id=?", id)
+            }
+            Self::SetServiceEnabled(id, _) => {
+                ("SELECT network_id FROM access_services WHERE id=?", id)
+            }
+            Self::DeleteResourceGrant(id) => (
+                "SELECT network_id FROM access_resource_grants WHERE id=?",
+                id,
+            ),
         };
         let network = tx
             .query_row(object.0, [object.1.as_bytes()], |r| r.get::<_, [u8; 16]>(0))
@@ -107,6 +138,19 @@ impl Request {
                 subject, target, ..
             } => editor.grant(subject, target),
             Self::DeleteGrant(id) => editor.delete_grant(id),
+            Self::CreateResource(_, name, target) => editor.create_resource(&name, target),
+            Self::SetResourceEnabled(id, on) => editor.toggle_named(id, on, false),
+            Self::CreateService(_, name, proto, ports) => {
+                editor.create_service(&name, proto, ports)
+            }
+            Self::SetServiceEnabled(id, on) => editor.toggle_named(id, on, true),
+            Self::CreateResourceGrant {
+                subject,
+                resource,
+                service,
+                ..
+            } => editor.resource_grant(subject, resource, service),
+            Self::DeleteResourceGrant(id) => editor.delete_resource_grant(id),
         }
     }
 }
@@ -230,4 +274,12 @@ fn conflict<T>(value: rusqlite::Result<T>) -> Result<T> {
 }
 fn row_id(row: &rusqlite::Row<'_>, col: usize) -> Result<Id> {
     Ok(Id::new(row.get::<_, [u8; 16]>(col)?)?)
+}
+
+fn validate_name(name: &str) -> Result<()> {
+    ensure!(
+        !name.is_empty() && name.len() <= 253 && name.trim() == name && !name.contains('\0'),
+        AccessError::Invalid("name must be 1..253 trimmed bytes")
+    );
+    Ok(())
 }
