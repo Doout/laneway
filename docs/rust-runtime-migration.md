@@ -136,6 +136,13 @@ not accept a session or automation token. Bearers are rejected in browser
 contexts or when combined with a session cookie. Sign-in and management
 writes remain on Go. Do not route production traffic here.
 
+The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
+or `sign_in`. The lab listener limits that public lookup to 30 requests per
+source and 300 total attempts per minute and does not trust relay-forwarded
+client IPs. `GET /v1/admin/auth/session` requires both the session and CSRF
+cookies. It returns the user's role, ordered permissions, network scope and
+renewed deadline. A bad CSRF cookie does not extend the session.
+
 The optional non-root image can be built with
 `docker build --target controller -f deploy/containers/Dockerfile.rust-relay -t laneway-rust-controller:migration-lab .`.
 It does not replace a release image or change Compose. The interop gate
@@ -144,5 +151,7 @@ deadlines and request IDs; it also tests hostname verification in the probe.
 After warming the lab toolchain and Go module cache, run
 `bash integration/rust-lab/controller-image.sh` to repeat the gate using the
 scratch image's binaries as UID 65532 with external networking disabled.
-Next: browser session discovery and sign-in, then management writes with
-CSRF, audit and rollback coverage.
+The Rust password verifier accepts the Go Argon2id format at its fixed
+parameters and bounds concurrent memory-hard checks. It is not an HTTP
+login endpoint. Next: same-origin sign-in, session issuance and logout,
+including durable audit, throttling and rollback tests.

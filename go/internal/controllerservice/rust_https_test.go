@@ -31,7 +31,6 @@ import (
 // The production cookie middleware remains in the Go reference path.
 func TestRustControllerHTTPS(t *testing.T) {
 	f := newFixture(t, 0, nil)
-	session, cookie, _, _ := bootstrapAdministratorSessionForHTTPTest(t, f, "web-owner", "local browser fixture password")
 	material, _, err := pki.IssueService(f.service.ca, f.service.caKey, pki.ServiceIdentity{
 		NetworkID: f.network.ID, ServiceID: identity.ID(f.network.ID), Role: pki.RoleController,
 	}, nil, []net.IP{net.ParseIP("127.0.0.1")}, time.Now(), time.Hour)
@@ -161,6 +160,70 @@ func TestRustControllerHTTPS(t *testing.T) {
 		return out
 	}
 	const networks = "/v1/admin/networks"
+	pairRequest := func(path string, cookies []string, fields http.Header, status int) (result, result) {
+		t.Helper()
+		a := request(t, goServer.URL, "GET", path, cookies, false, fields)
+		b := request(t, rustURL, "GET", path, cookies, false, fields)
+		if a.status != status || b.status != status {
+			t.Fatalf("%s: Go %d, Rust %d, want %d", path, a.status, b.status, status)
+		}
+		if status >= 400 && !reflect.DeepEqual(a.body, b.body) {
+			t.Fatalf("%s: error envelopes differ", path)
+		}
+		return a, b
+	}
+	const statePath = "/v1/admin/auth/state"
+	a, b := pairRequest(statePath, nil, nil, 200)
+	if a.body["state"] != "bootstrap_required" || !reflect.DeepEqual(a.body, b.body) {
+		t.Fatal("bootstrap state mismatch")
+	}
+	session, cookie, csrf, _ := bootstrapAdministratorSessionForHTTPTest(t, f, "web-owner", "local browser fixture password")
+	a, b = pairRequest(statePath, nil, nil, 200)
+	if a.body["state"] != "sign_in" || !reflect.DeepEqual(a.body, b.body) {
+		t.Fatal("initialized state mismatch")
+	}
+	pairRequest(statePath, nil, http.Header{adminauth.PublicClientAddressHeader: {"192.0.2.8"}}, 401)
+	for i := 2; i < 30; i++ {
+		pairRequest(statePath, nil, nil, 200)
+	}
+	a, b = pairRequest(statePath, nil, nil, 429)
+	for _, h := range []http.Header{a.header, b.header} {
+		n, err := strconv.Atoi(h.Get("Retry-After"))
+		if err != nil || n < 1 || n > 60 {
+			t.Fatal("invalid discovery retry deadline")
+		}
+	}
+
+	const sessionPath = "/v1/admin/auth/session"
+	testSession := func(token, csrf, role string) {
+		t.Helper()
+		a, b := pairRequest(sessionPath, []string{token}, http.Header{"Cookie": {adminauth.CSRFCookieName + "=" + csrf}}, 200)
+		for _, resp := range []result{a, b} {
+			if resp.body["role"] != role || resp.body["csrf_token"] != csrf || resp.body["session_id"] != resp.header.Get(administratorSessionIDHeader) || resp.body["idle_expires_at_unix_seconds"] != json.Number(resp.header.Get(administratorSessionIdleHeader)) || resp.body["absolute_expires_at_unix_seconds"] != json.Number(resp.header.Get(administratorSessionAbsoluteHeader)) {
+				t.Fatal("invalid browser session metadata")
+			}
+			delete(resp.body, "idle_expires_at_unix_seconds") // Two successful reads can straddle a second.
+		}
+		if !reflect.DeepEqual(a.body, b.body) {
+			t.Fatalf("%s session properties or ordered permissions differ", role)
+		}
+	}
+	testSession(cookie, csrf, "owner")
+	testRustSessionRejection(t, f, func(token, csrf string) {
+		r := request(t, rustURL, "GET", sessionPath, []string{token}, false, http.Header{"Cookie": {adminauth.CSRFCookieName + "=" + csrf}})
+		if r.status != 401 || r.header.Get(administratorSessionIDHeader) != "" {
+			t.Fatal("rejected session returned privileged metadata")
+		}
+	})
+	for _, role := range []string{"operator", "auditor"} {
+		token, c := rustScopedBrowserFixture(t, f, role)
+		testSession(token, c, role)
+	}
+	pairRequest(sessionPath, nil, nil, 401)
+	pairRequest(sessionPath, []string{cookie}, nil, 401)
+	pairRequest(sessionPath, []string{cookie}, http.Header{"Cookie": {adminauth.CSRFCookieName + "=" + cookie}}, 401)
+	pairRequest(sessionPath, []string{cookie}, http.Header{"Cookie": {adminauth.CSRFCookieName + "=" + csrf, adminauth.CSRFCookieName + "=" + csrf}}, 401)
+	pairRequest(sessionPath, nil, http.Header{"Authorization": {"Bearer " + testRootBearer}}, 401)
 	for _, tc := range []struct {
 		name, method, path string
 		cookies            []string
@@ -227,4 +290,5 @@ func TestRustControllerHTTPS(t *testing.T) {
 	if r := request(t, rustURL, "GET", networks, []string{cookie}, false); r.status != 401 {
 		t.Fatal("logged-out session still had access")
 	}
+	pairRequest(sessionPath, []string{cookie}, http.Header{"Cookie": {adminauth.CSRFCookieName + "=" + csrf}}, 401)
 }

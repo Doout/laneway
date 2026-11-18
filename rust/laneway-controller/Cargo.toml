@@ -8,6 +8,7 @@ description = "Laneway controller storage and runtime"
 
 [dependencies]
 anyhow.workspace = true
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc","zeroize"] }
 base64.workspace = true
 bytes.workspace = true
 form_urlencoded = "1"

@@ -3,6 +3,7 @@ use laneway_controller::{Inventory, InventoryList as Response, SessionStore};
 use std::io::{IsTerminal, Read};
 use std::{env, io, path::Path};
 
+mod discovery_limit;
 mod http;
 mod server;
 

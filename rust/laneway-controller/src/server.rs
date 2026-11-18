@@ -112,7 +112,7 @@ async fn serve(state: super::http::State, address: SocketAddr, config: ServerCon
             result=&mut stop => { result?; break; }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             socket=listener.accept() => {
-                let (socket, _)=socket?;
+                let (socket, peer)=socket?;
                 let Ok(permit)=Arc::clone(&connections).try_acquire_owned() else {continue};
                 let state=state.clone();
                 let acceptor=acceptor.clone();
@@ -121,7 +121,7 @@ async fn serve(state: super::http::State, address: SocketAddr, config: ServerCon
                     let Ok(Ok(tls))=timeout(Duration::from_secs(5),acceptor.accept(socket)).await else {return};
                     let handler=service_fn(move |req| {
                         let state=state.clone();
-                        async move {Ok::<_,Infallible>(super::http::handle(req,state).await)}
+                        async move {Ok::<_,Infallible>(super::http::handle(req,state,peer.ip()).await)}
                     });
                     let mut builder=http1::Builder::new();
                     builder.timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(5))

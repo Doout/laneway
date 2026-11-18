@@ -23,6 +23,7 @@ pub struct State {
     database: Arc<PathBuf>,
     queries: Arc<Semaphore>,
     root: Option<Arc<RootCredential>>,
+    discovery: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
 }
 impl State {
     pub fn new(database: PathBuf, root: Option<RootCredential>) -> Self {
@@ -30,6 +31,7 @@ impl State {
             database: Arc::new(database),
             queries: Arc::new(Semaphore::new(8)),
             root: root.map(Arc::new),
+            discovery: Default::default(),
         }
     }
 }
@@ -89,14 +91,14 @@ enum Credential {
     Bearer(String),
 }
 
-fn credential(headers: &HeaderMap) -> Result<Credential, Failure> {
+fn cookie<'a>(headers: &'a HeaderMap, wanted: &str) -> Result<Option<&'a str>, Failure> {
     let mut token = None;
     for value in headers.get_all(header::COOKIE) {
         for pair in value.to_str().map_err(|_| AUTH)?.split(';') {
             let Some((name, value)) = pair.trim().split_once('=') else {
                 continue;
             };
-            if name == COOKIE {
+            if name == wanted {
                 let raw = value
                     .strip_prefix('"')
                     .and_then(|s| s.strip_suffix('"'))
@@ -107,6 +109,10 @@ fn credential(headers: &HeaderMap) -> Result<Credential, Failure> {
             }
         }
     }
+    Ok(token)
+}
+fn credential(headers: &HeaderMap) -> Result<Credential, Failure> {
+    let token = cookie(headers, COOKIE)?;
     let mut authorization = headers.get_all(header::AUTHORIZATION).iter();
     if let Some(value) = authorization.next() {
         if token.is_some()
@@ -160,7 +166,7 @@ fn query_limit(raw: Option<&str>) -> Result<usize, ListError> {
     Ok(limit)
 }
 
-pub async fn handle<B>(req: Request<B>, state: State) -> Reply {
+pub async fn handle<B>(req: Request<B>, state: State, peer: std::net::IpAddr) -> Reply {
     let head = req.method() == Method::HEAD;
     let mut random = [0; 16];
     if getrandom::fill(&mut random).is_err() {
@@ -171,7 +177,7 @@ pub async fn handle<B>(req: Request<B>, state: State) -> Reply {
         );
     }
     let id = hex::encode(random);
-    match dispatch(req, state, &id, head).await {
+    match dispatch(req, state, &id, head, peer).await {
         Ok(resp) => resp,
         Err(err) => err.reply(&id, head),
     }
@@ -182,6 +188,7 @@ async fn dispatch<B>(
     state: State,
     id: &str,
     head: bool,
+    peer: std::net::IpAddr,
 ) -> Result<Reply, Failure> {
     let path = req.uri().path();
     if path.contains('%')
@@ -193,8 +200,10 @@ async fn dispatch<B>(
     }
     let pieces: Vec<_> = path.split('/').collect();
     let root_probe = path == "/v1/admin/auth/root";
+    let discovery = path == "/v1/admin/auth/state";
+    let session_view = path == "/v1/admin/auth/session";
     let network = match pieces.as_slice() {
-        _ if root_probe => None,
+        _ if root_probe || discovery || session_view => None,
         ["", "v1", "admin", "networks"] => None,
         ["", "v1", "admin", "networks", network, "nodes"] => Some(*network),
         _ => {
@@ -214,7 +223,29 @@ async fn dispatch<B>(
             false,
         ));
     }
-    let credential = credential(req.headers())?;
+    if discovery {
+        // This loopback listener does not authenticate relay client certificates.
+        // Never trust a forwarded address on this transport.
+        if req.headers().contains_key("x-laneway-public-client-ip") {
+            return Err(AUTH);
+        }
+        let allowed = state
+            .discovery
+            .lock()
+            .map_err(|_| INTERNAL)?
+            .check(peer, std::time::Instant::now());
+        if let Err(wait) = allowed {
+            let mut r = Failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                "ERROR_CODE_RESOURCE_EXHAUSTED",
+                "authentication temporarily unavailable",
+                true,
+            )
+            .reply(id, head);
+            r.headers_mut().insert(header::RETRY_AFTER, wait.into());
+            return Ok(r);
+        }
+    }
     let network = network
         .map(|n| n.parse().map_err(|_| ListError::NetworkId))
         .transpose();
@@ -228,6 +259,33 @@ async fn dispatch<B>(
             true,
         )
     })?;
+    if discovery {
+        let v = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            laneway_controller::auth_state(&state.database)
+        })
+        .await
+        .map_err(|_| INTERNAL)?
+        .map_err(|_| INTERNAL)?;
+        return Ok(response(
+            StatusCode::OK,
+            id,
+            json!({"state":v}).to_string().into_bytes(),
+            head,
+        ));
+    }
+    let credential = credential(req.headers())?;
+    let csrf = if session_view {
+        cookie(req.headers(), "__Host-laneway_admin_csrf")
+            .ok()
+            .flatten()
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    if session_view && !matches!(credential, Credential::Session(_)) {
+        return Err(AUTH);
+    }
     if root_probe {
         let (Credential::Bearer(header), Some(root)) = (credential, state.root) else {
             return Err(AUTH);
@@ -250,19 +308,31 @@ async fn dispatch<B>(
     let (list, metadata) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
         match credential {
+            Credential::Session(token) if session_view => {
+                let mut r = SessionStore::open(&state.database)?.view(&token, csrf.as_deref())?;
+                r.list["idle_expires_at_unix_seconds"] = json!(r.idle);
+                r.list["absolute_expires_at_unix_seconds"] = json!(r.absolute);
+                Ok((
+                    serde_json::to_vec(&r.list)?,
+                    Some((r.id, r.idle, r.absolute)),
+                ))
+            }
             Credential::Session(token) => {
                 let query = network.and_then(|n| limit.map(|l| (n, l)));
                 let r = SessionStore::open(&state.database)?.inventory(&token, query)?;
-                Ok((r.list, Some((r.id, r.idle, r.absolute))))
+                Ok((
+                    serde_json::to_vec(&r.list)?,
+                    Some((r.id, r.idle, r.absolute)),
+                ))
             }
             Credential::Bearer(header) => Ok((
-                bearer_inventory(
+                serde_json::to_vec(&bearer_inventory(
                     &state.database,
                     &header,
                     state.root.as_deref(),
                     network,
                     limit,
-                )?,
+                )?)?,
                 None,
             )),
         }
@@ -293,12 +363,7 @@ async fn dispatch<B>(
             None => INTERNAL,
         }
     })?;
-    let mut reply = response(
-        StatusCode::OK,
-        id,
-        serde_json::to_vec(&list).map_err(|_| INTERNAL)?,
-        head,
-    );
+    let mut reply = response(StatusCode::OK, id, list, head);
     let Some((session, idle, absolute)) = metadata else {
         return Ok(reply);
     };

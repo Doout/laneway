@@ -29,8 +29,8 @@ pub enum ListError {
     Missing,
 }
 
-pub struct SessionReply {
-    pub list: InventoryList,
+pub struct SessionReply<T = InventoryList> {
+    pub list: T,
     pub id: Id,
     pub idle: i64,
     pub absolute: i64,
@@ -70,6 +70,47 @@ impl SessionStore {
         token: &str,
         query: Result<(Option<Id>, usize), ListError>,
     ) -> Result<SessionReply> {
+        self.with_session(token, |tx, principal, _, all| {
+            // Match Go management middleware: authenticate before reporting a
+            // malformed resource identifier or list limit, without touching it.
+            let (network, limit) = query?;
+            ensure!((1..=1000).contains(&limit), ListError::Limit);
+            let restricted = (!all).then_some(principal);
+            if let (Some(principal), Some(network)) = (restricted, network) {
+                let allowed: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM administrator_principal_networks
+                WHERE principal_id=?1 AND network_id=?2)",
+                    (principal.as_bytes(), network.as_bytes()),
+                    |r| r.get(0),
+                )?;
+                ensure!(allowed, SessionError::Denied);
+            }
+            Ok(match network {
+                None => InventoryList::Networks(read_networks(
+                    tx,
+                    limit,
+                    restricted.map(crate::Scope::Browser),
+                )?),
+                Some(id) => InventoryList::Nodes(read_nodes(tx, id, limit)?),
+            })
+        })
+    }
+
+    pub fn view(
+        &mut self,
+        token: &str,
+        csrf: Option<&str>,
+    ) -> Result<SessionReply<serde_json::Value>> {
+        self.with_session(token, |tx, principal, session, all| {
+            crate::browser::session_view(tx, principal, session, all, csrf)
+        })
+    }
+
+    fn with_session<T>(
+        &mut self,
+        token: &str,
+        read: impl FnOnce(&Transaction<'_>, Id, Id, bool) -> Result<T>,
+    ) -> Result<SessionReply<T>> {
         let digest = session_digest(token)?;
         // Acquire the write lock before reading the clock or permissions. A
         // revocation and a read have an unambiguous order, including in WAL.
@@ -120,28 +161,7 @@ impl SessionStore {
             tx.commit()?;
             return Err(SessionError::Invalid.into());
         };
-        // Match Go management middleware: authenticate before reporting a
-        // malformed resource identifier or list limit, without touching it.
-        let (network, limit) = query?;
-        ensure!((1..=1000).contains(&limit), ListError::Limit);
-        let restricted = (!all).then_some(principal);
-        if let (Some(principal), Some(network)) = (restricted, network) {
-            let allowed: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM administrator_principal_networks
-                WHERE principal_id=?1 AND network_id=?2)",
-                (principal.as_bytes(), network.as_bytes()),
-                |r| r.get(0),
-            )?;
-            ensure!(allowed, SessionError::Denied);
-        }
-        let list = match network {
-            None => InventoryList::Networks(read_networks(
-                &tx,
-                limit,
-                restricted.map(crate::Scope::Browser),
-            )?),
-            Some(id) => InventoryList::Nodes(read_nodes(&tx, id, limit)?),
-        };
+        let list = read(&tx, principal, session_id, all)?;
         // Only a successful authorized read can extend the idle deadline.
         let idle = tx
             .query_row(
