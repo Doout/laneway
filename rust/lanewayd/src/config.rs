@@ -207,6 +207,9 @@ pub struct ControllerConfig {
     /// Do not publish the bounded node-health report to the controller.
     #[serde(default)]
     pub disable_status_reporting: bool,
+    /// Optional numeric loopback UDP socket for the controller's private directory.
+    #[serde(default, deserialize_with = "private_dns_listen")]
+    pub private_dns_listen: Option<SocketAddr>,
     /// HTTPS origin of the controller, without an API path.
     pub endpoint: String,
     /// Required reliable mTLS QUIC controller endpoint in host:port form.
@@ -223,6 +226,29 @@ pub struct ControllerConfig {
     /// Complete HTTPS request deadline.
     #[serde(default = "default_controller_timeout", with = "humantime_serde")]
     pub timeout: Duration,
+}
+
+pub(crate) fn private_dns_listen<'de, D>(d: D) -> std::result::Result<Option<SocketAddr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(d)?;
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let address: SocketAddr = value.parse().map_err(serde::de::Error::custom)?;
+    if value.contains('%') || !private_dns_loopback(address) {
+        return Err(serde::de::Error::custom(
+            "private DNS requires a numeric loopback address and a nonzero port",
+        ));
+    }
+    Ok(Some(address))
+}
+
+pub(crate) fn private_dns_loopback(address: SocketAddr) -> bool {
+    address.ip().is_loopback()
+        && address.port() != 0
+        && !matches!(address, SocketAddr::V6(v6) if v6.scope_id() != 0)
 }
 
 fn default_direct_listen() -> SocketAddr {
@@ -671,6 +697,12 @@ impl Config {
             "tun.addresses must not be empty without controller authority"
         );
         if let Some(controller) = &self.controller {
+            ensure!(
+                controller
+                    .private_dns_listen
+                    .is_none_or(private_dns_loopback),
+                "controller.private_dns_listen must be a numeric loopback address and a nonzero port"
+            );
             ensure!(
                 self.tun.addresses.is_empty()
                     && self.routes.is_empty()
@@ -1199,6 +1231,38 @@ via_node = "202122232425262728292a2b2c2d2e2f"
         let mut mixed = config.clone();
         mixed.tun.addresses.push("100.96.0.1/32".parse().unwrap());
         assert!(mixed.validate().is_err());
+    }
+
+    #[test]
+    fn private_dns_listen_is_explicit_and_numeric() {
+        let source = "endpoint = 'https://controller.test'\nserver_name = 'controller.test'\nservice_id = '404142434445464748494a4b4c4d4e4f'\n";
+        let parse = |address| {
+            toml::from_str::<ControllerConfig>(&format!(
+                "{source}private_dns_listen = '{address}'\n"
+            ))
+        };
+        assert!(
+            toml::from_str::<ControllerConfig>(source)
+                .unwrap()
+                .private_dns_listen
+                .is_none()
+        );
+        assert!(parse("").unwrap().private_dns_listen.is_none());
+        for address in ["127.0.0.1:5354", "[::1]:5354"] {
+            assert_eq!(
+                parse(address).unwrap().private_dns_listen,
+                Some(address.parse().unwrap())
+            );
+        }
+        for address in [
+            "0.0.0.0:5354",
+            "[::]:5354",
+            "[::1%0]:5354",
+            "localhost:5354",
+            "127.0.0.1:0",
+        ] {
+            assert!(parse(address).is_err(), "accepted {address}");
+        }
     }
 
     #[test]

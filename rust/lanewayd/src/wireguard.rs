@@ -156,6 +156,12 @@ impl WireGuardRelay {
             .as_ref()
             .context("missing WireGuard controller")?;
         let cert = tls::local_certificate_health(&self.config.tls)?;
+        let dns_cert_end = cert.not_after;
+        let private_dns = if let Some(address) = control.private_dns_listen {
+            Some(crate::private_dns::Server::bind(address, network).await?)
+        } else {
+            None
+        };
         let cert_deadline = SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_secs(cert.not_after))
             .context("invalid WireGuard certificate deadline")?;
@@ -234,6 +240,12 @@ impl WireGuardRelay {
         )
         .require_wireguard(self.local_key, to_device);
         let pool = PacketPool::prewarmed(self.config.relay.queue_depth, MAX_WIREGUARD_DATAGRAM + 5);
+        let dns = async {
+            match private_dns {
+                Some(server) => server.run(&client, dns_cert_end).await,
+                None => std::future::pending().await,
+            }
+        };
         let pump = async {
             while let Some(datagram) = from_device.recv().await {
                 let (packet, miss) = OutboundPacket::wireguard(datagram, &pool);
@@ -253,6 +265,7 @@ impl WireGuardRelay {
                 Err(anyhow::anyhow!("WireGuard node certificate expired")),
             result = runner.run() => result,
             result = carrier.run(from_kernel) => result,
+            result = dns => result,
             result = pump => result,
         };
         state.fail_close();

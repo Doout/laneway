@@ -64,6 +64,8 @@ struct StoredController {
     server_name: String,
     network_id: String,
     service_id: String,
+    #[serde(default, deserialize_with = "private_dns_listen")]
+    private_dns_listen: Option<SocketAddr>,
     #[serde(default = "legacy_poll", deserialize_with = "StoredDuration::required")]
     poll_interval: Duration,
 }
@@ -434,6 +436,7 @@ impl Stored {
             controller: Some(ControllerConfig {
                 auto_renew_certificate: false, // Keep identity bytes intact for a reversible image swap.
                 disable_status_reporting: shared_host,
+                private_dns_listen: self.controller.private_dns_listen,
                 endpoint: self.controller.endpoint,
                 quic_endpoint: Some(quic_endpoint),
                 server_name: controller_name,
@@ -659,6 +662,25 @@ listen = ":0"
         fs::set_permissions(&wrong_key, fs::Permissions::from_mode(0o400))?;
         fs::rename(wrong_key, fixture.path().join("node.key"))?;
         assert!(Config::load_connector_state(fixture.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn installed_connector_preserves_explicit_private_dns() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let mut source = write_fixture(fixture.path())?.replace(
+            "[controller]",
+            "[controller]\nprivate_dns_listen = \"127.0.0.1:5354\"",
+        );
+        source.push_str("[connector]\nuserspace = true\n");
+        let path = fixture.path().join("connector.toml");
+        fs::write(&path, &source)?;
+        let config = Config::load_connector_state(fixture.path())?;
+        assert_eq!(
+            config.controller.unwrap().private_dns_listen,
+            Some("127.0.0.1:5354".parse()?)
+        );
+        assert_eq!(fs::read_to_string(&path)?, source);
         Ok(())
     }
 

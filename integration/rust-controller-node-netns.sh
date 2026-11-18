@@ -36,6 +36,8 @@ declare -A active_processes=()
 last_pid=""
 link_index=0
 node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
+test_dns="${LANEWAY_NODE_TEST_PRIVATE_DNS:-0}"
+private_dns_listen=""
 test_durable_exit="${LANEWAY_NODE_TEST_DURABLE_EXIT:-0}"
 test_wireguard="${LANEWAY_NODE_TEST_WIREGUARD:-0}"
 wireguard_native="${LANEWAY_NODE_WIREGUARD_NATIVE:-1}"
@@ -43,6 +45,11 @@ test_drain="${LANEWAY_NODE_WIREGUARD_DRAIN:-0}"
 test_credentials="${LANEWAY_NODE_WIREGUARD_CREDENTIALS:-0}"
 test_systemd="${LANEWAY_NODE_WIREGUARD_SYSTEMD:-0}"
 test_invitation="${LANEWAY_NODE_WIREGUARD_INVITATION:-0}"
+if [[ "${test_dns}" == "1" ]]; then
+  [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
+    { echo "Private DNS gate requires the default node profile and Rust controller" >&2; exit 1; }
+  private_dns_listen="127.0.0.1:5354"
+fi
 credential_dir=""
 snapshot_seconds=2
 if [[ "${test_drain}" == "1" ]]; then
@@ -573,6 +580,7 @@ private_key = "${work_dir}/pki/rust.key"
 ca = "${work_dir}/pki/ca.crt"
 [controller]
 auto_renew_certificate = true
+private_dns_listen = "${private_dns_listen}"
 endpoint = "${node_endpoint}"
 quic_endpoint = "${node_quic_endpoint}"
 server_name = "${node_server_name}"
@@ -988,6 +996,40 @@ if [[ "$(ip -n "${rust_ns}" -o -4 address show dev lane0 | wc -l)" != "1" ]]; th
   echo "ERROR: Rust node applied an address outside its controller assignment" >&2
   ip -n "${rust_ns}" address show dev lane0 >&2
   exit 1
+fi
+
+if [[ "${test_dns}" == "1" ]]; then
+  echo "==> the Rust node serves only its scoped private catalog over UDP"
+  dns_probe() {
+    ip netns exec "${rust_ns}" "${work_dir}/netprobe" dns -address "${private_dns_listen}" "$@"
+  }
+  dns_name="n-${rust_id}.${network_id}.laneway.internal"
+  dns_probe -name "${dns_name}" -answer "${rust_address}"
+  dns_probe -name "rust-controller-node.${network_id}.laneway.internal" -answer "${rust_address}"
+  dns_probe -name "${dns_name}" -type AAAA
+  dns_probe -name "n-${gateway_id}.${network_id}.laneway.internal" -rcode 3
+  dns_probe -name outside.invalid -rcode 5
+
+  wait_dns() {
+    for _ in {1..30}; do
+      if dns_probe "$@" >"${work_dir}/private-dns.log" 2>&1; then return 0; fi
+      sleep 0.25
+    done
+    cat "${work_dir}/private-dns.log" >&2
+    return 1
+  }
+  # Remove only the node's HTTPS transport, leaving controller QUIC and the
+  # running endpoint intact. No lab firewall rules on the host are changed.
+  ip netns exec "${rust_ns}" nft add table inet private_dns_lab
+  ip netns exec "${rust_ns}" nft add chain inet private_dns_lab output \
+    '{ type filter hook output priority 0; policy accept; }'
+  ip netns exec "${rust_ns}" nft add rule inet private_dns_lab output \
+    ip daddr "${location_controller_ip}" tcp dport 9443 reject with tcp reset
+  wait_dns -name "${dns_name}" -rcode 2
+  ip netns exec "${rust_ns}" nft delete table inet private_dns_lab
+  wait_dns -name "${dns_name}" -answer "${rust_address}"
+  kill -0 "${rust_pid}"
+  echo "PASS: Private DNS fails closed and recovers after HTTPS transport loss"
 fi
 
 if [[ "${node_controller}" == "rust" ]]; then

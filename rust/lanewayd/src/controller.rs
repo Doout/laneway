@@ -222,6 +222,46 @@ impl Client {
         Ok(())
     }
 
+    pub(crate) async fn private_dns(&self) -> Result<crate::private_dns::Catalog> {
+        let response = self
+            .http
+            .get(self.http_origin.join("/v1/node/private-dns")?)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .context("request private DNS catalog")?;
+        self.check_response_identity(&response)?;
+        ensure!(
+            response.status() == StatusCode::OK,
+            "private DNS controller returned {}",
+            response.status()
+        );
+        ensure!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(';').next())
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json")),
+            "private DNS controller did not return JSON"
+        );
+        crate::private_dns::Catalog::decode(&read_response(response).await?, self.options.network)
+    }
+
+    fn check_response_identity(&self, response: &reqwest::Response) -> Result<()> {
+        let peer = response
+            .extensions()
+            .get::<reqwest::tls::TlsInfo>()
+            .and_then(reqwest::tls::TlsInfo::peer_certificate)
+            .context("controller TLS peer certificate is unavailable")?;
+        ensure!(
+            identity_from_certificate_der(peer).context("controller SPIFFE identity")?
+                == self.expected_controller,
+            "controller SPIFFE identity differs from configured network/service ID"
+        );
+        Ok(())
+    }
+
     pub(crate) async fn with_certificate(&self, path: PathBuf) -> Result<Self> {
         let mut options = self.options.clone();
         options.certificate = path;
@@ -267,7 +307,7 @@ impl Client {
             ephemeral_exit_lease_generation: 0,
         }
         .encode_to_vec();
-        let mut response = self
+        let response = self
             .http
             .post(self.http_origin.join("/v1/configuration")?)
             .header("content-type", "application/x-protobuf")
@@ -275,16 +315,7 @@ impl Client {
             .send()
             .await
             .context("request node configuration")?;
-        let peer = response
-            .extensions()
-            .get::<reqwest::tls::TlsInfo>()
-            .and_then(reqwest::tls::TlsInfo::peer_certificate)
-            .context("controller TLS peer certificate is unavailable")?;
-        ensure!(
-            identity_from_certificate_der(peer).context("controller SPIFFE identity")?
-                == self.expected_controller,
-            "controller SPIFFE identity differs from configured network/service ID"
-        );
+        self.check_response_identity(&response)?;
         if response.status() == StatusCode::NOT_MODIFIED {
             let valid_until = response
                 .headers()
@@ -302,37 +333,33 @@ impl Client {
             "controller returned {}",
             response.status()
         );
-        if let Some(length) = response.content_length() {
-            ensure!(
-                length <= MAX_RESPONSE as u64,
-                "controller response exceeds limit"
-            );
-        }
-        let mut body = Vec::with_capacity(
-            response
-                .content_length()
-                .unwrap_or(0)
-                .min(MAX_RESPONSE as u64) as usize,
-        );
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .context("read node configuration chunk")?
-        {
-            ensure!(
-                body.len() <= MAX_RESPONSE.saturating_sub(chunk.len()),
-                "controller response exceeds limit"
-            );
-            body.extend_from_slice(&chunk);
-        }
-        ensure!(
-            !body.is_empty(),
-            "controller returned an empty configuration"
-        );
+        let body = read_response(response).await?;
         Ok(PollResult::Modified(Box::new(
             NodeConfiguration::decode(body.as_slice()).context("decode node configuration")?,
         )))
     }
+}
+
+async fn read_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    let capacity = response.content_length().unwrap_or(0);
+    ensure!(
+        capacity <= MAX_RESPONSE as u64,
+        "controller response exceeds limit"
+    );
+    let mut body = Vec::with_capacity(capacity as usize);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("read controller response chunk")?
+    {
+        ensure!(
+            chunk.len() <= MAX_RESPONSE - body.len(),
+            "controller response exceeds limit"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    ensure!(!body.is_empty(), "controller returned an empty response");
+    Ok(body)
 }
 
 pub(crate) fn controller_origins(

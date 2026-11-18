@@ -138,6 +138,15 @@ impl Agent {
             false
         };
         let bootstrap = self.controller_bootstrap().await?;
+        let private_dns = if let Some(address) = authority_base
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.private_dns_listen)
+        {
+            Some(crate::private_dns::Server::bind(address, self.network).await?)
+        } else {
+            None
+        };
         if let Some((client, snapshot, _, _)) = &bootstrap {
             if snapshot
                 .overlays
@@ -351,6 +360,11 @@ impl Agent {
                 ]);
             };
             let client = Arc::new(client);
+            if let Some(server) = private_dns {
+                let client = Arc::clone(&client);
+                let not_after = local_certificate.not_after;
+                tasks.spawn(async move { server.run(&client, not_after).await });
+            }
             if !settings.disable_status_reporting {
                 let reporter = crate::status_report::Reporter {
                     client: Arc::clone(&client),

@@ -938,11 +938,28 @@ friendly aliases, and granted services in the private fleet JSON format. The
 catalog is not cacheable by HTTP, and its lifetime is at most 30 seconds and
 no longer than the visible node leases or the requesting certificate.
 
-The controller API does not enable a local DNS listener in Rust endpoints.
+The Rust node can opt into a loopback-only UDP resolver with the same setting
+as Go. Leave it omitted or empty to disable it:
+
+```toml
+[controller]
+private_dns_listen = "127.0.0.1:5354"
+```
+
+The resolver uses the node's pinned mTLS HTTPS client even when the node
+uses QUIC for control. It accepts A and AAAA questions in its own network
+zone, does not recurse or modify OS DNS settings, and returns SERVFAIL when
+its bounded cache expires and the catalog cannot be renewed. Answers last
+no more than five seconds and never beyond the catalog or leaf certificate.
+Existing installed node-role configurations keep their explicit setting.
+The isolated Linux gate (`LANEWAY_NODE_TEST_PRIVATE_DNS=1` with the Rust
+controller) queries the running daemon over UDP after certificate renewal,
+blocks its HTTPS path while QUIC remains available, then checks SERVFAIL and
+recovery without restarting the node. It does not configure OS split DNS.
+
 The local fleet source adds a migration after public schema 18; Rust still
-rejects unsupported schema histories. The Rust UDP resolver, private fleet
-console integration, and validation against the deployed fleet database are
-separate promotion gates.
+rejects unsupported schema histories. Private fleet console integration and
+validation against the deployed fleet database are separate promotion gates.
 
 Traffic rules can be listed, created, updated, and deleted through the same
 Rust HTTPS listener. The controller validates canonical prefixes and port

@@ -21,6 +21,7 @@ mod local_api;
 mod metrics;
 mod nft_state;
 mod packet_pool;
+mod private_dns;
 mod probe;
 mod relay;
 mod renewal;
