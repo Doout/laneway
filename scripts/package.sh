@@ -116,10 +116,10 @@ for directory in containers ephemeral-exit examples nftables systemd; do
 done
 install -m 0644 "$project_dir/deploy/README.md" "$package_dir/deploy/README.md"
 install -d -m 0755 "$package_dir/deploy/compose/generated/config"
-for name in .env.example README.md compose.dev.yaml compose.yaml laneway-certificate-renewal.service laneway-certificate-renewal.timer; do
+for name in .env.example README.md compose.dev.yaml compose.rust.yaml compose.yaml laneway-certificate-renewal.service laneway-certificate-renewal.timer; do
 	install -m 0644 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
 done
-for name in bootstrap.sh install-control-plane.sh prepare-control-plane.sh upgrade-control-plane.sh preflight.sh prepare.sh recovery.sh validate.sh laneway-control renew-service-certificates.py; do
+for name in bootstrap.sh install-control-plane.sh prepare-control-plane.sh upgrade-control-plane.sh preflight.sh prepare.sh prepare-rust.py recovery.sh validate.sh laneway-control renew-service-certificates.py; do
 	install -m 0755 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"
 done
 install -m 0644 "$project_dir"/deploy/compose/generated/config/*.example \

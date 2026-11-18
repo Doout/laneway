@@ -17,7 +17,7 @@ use tokio_rustls::TlsAcceptor;
 mod service_tls;
 
 const DEFAULT_RENEW_BEFORE: i64 = 7 * 24 * 60 * 60;
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON] [--console-dir ABSOLUTE_DIST_DIR] [--renew-controller-tls ABSOLUTE_STATE_DIR [--controller-renew-before SECONDS]] [--alert-webhook-url-file PATH --alert-webhook-secret-file PATH]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE IP:PORT CERT_PEM KEY_PEM [--listen-on-network] [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON] [--console-dir ABSOLUTE_DIST_DIR] [--renew-controller-tls ABSOLUTE_STATE_DIR [--controller-renew-before SECONDS]] [--alert-webhook-url-file PATH --alert-webhook-secret-file PATH]";
 
 struct QuicListener {
     config: quinn::ServerConfig,
@@ -33,10 +33,6 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         .to_str()
         .context(USAGE)?
         .parse()?;
-    ensure!(
-        address.ip().is_loopback(),
-        "controller inventory listener requires a loopback address"
-    );
     let cert = PathBuf::from(args.next().context(USAGE)?);
     let key = PathBuf::from(args.next().context(USAGE)?);
     ensure!(
@@ -49,6 +45,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut issuer = None;
     let mut client_ca = None;
     let mut node_quic = false;
+    let mut listen_on_network = false;
     let mut quic_listen = None;
     let mut snapshot_validity = None;
     let mut location_database = None;
@@ -87,6 +84,8 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             client_ca = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--node-quic" && !node_quic {
             node_quic = true;
+        } else if flag == "--listen-on-network" && !listen_on_network {
+            listen_on_network = true;
         } else if flag == "--location-database" && location_database.is_none() {
             location_database = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--alert-webhook-url-file" && webhook_url.is_none() {
@@ -137,6 +136,17 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             anyhow::bail!(USAGE)
         }
     }
+    let non_loopback = !address.ip().is_loopback()
+        || quic_listen.is_some_and(|addr: SocketAddr| !addr.ip().is_loopback());
+    ensure!(
+        !non_loopback || listen_on_network,
+        "non-loopback listeners require --listen-on-network"
+    );
+    ensure!(
+        !listen_on_network
+            || (issuer.is_some() && client_ca.is_some() && !allow_loopback_callbacks),
+        "--listen-on-network requires a node issuer and client CA, and forbids insecure callbacks"
+    );
     ensure!(
         client_ca.is_none() || issuer.is_some(),
         "node renewal requires --node-issuer"

@@ -84,6 +84,49 @@ archive matched its signed checksum, and asking for the `v0.2.71` identity
 rejected that signature. The published archive contains Go runtimes only;
 it is not a Rust updater test.
 
+### Compose cutover rehearsal
+
+The packaged `deploy/compose/compose.rust.yaml` is an opt-in overlay for an
+**existing** standard Compose stack. It preserves the service names, ports,
+existing controller database and ACME volume. The Go operator CLI remains
+available. The Rust controller requires `--listen-on-network` for non-loopback
+TCP or UDP and requires the node issuer and client CA there. It cannot start
+in that mode with insecure application callbacks enabled.
+
+Rehearse on an isolated, restored copy first. Verify the signed release and
+image digests. Keep the Go `LANEWAY_VERSION` and digests unchanged; set
+`LANEWAY_RUST_VERSION`, `LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST`,
+`LANEWAY_RUST_RELAY_IMAGE_DIGEST`, and `LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST`
+from the verified Rust release. From the Compose directory, run
+`sudo python3 prepare-rust.py` (Python 3.11+). It reads only the existing
+prepared TOML files, stages the Rust discovery and relay inputs without
+overwriting the originals, and keeps a private relay renewal directory.
+The relay uses a Compose alias matching the existing controller certificate
+name. Custom controller settings are rejected rather than silently dropped.
+
+Check the assembled services with `docker compose -f compose.yaml -f compose.rust.yaml config`.
+Take a database backup while Go is still serving and verify a restore.
+Disable the Go service-certificate renewal timer for the rehearsal; the
+overlay uses native renewal and leaves the seed files available for rollback.
+Stop the relay and controller with the base Compose file before starting
+them with the overlay. Keep only one controller writer. To roll back,
+stop the Rust services, then start with the base file. Do not remove volumes.
+If a schema upgrade was applied, restore the prior backup before restarting
+a Go controller that cannot read that schema. Confirm the Go seeds are
+still valid and restore its renewal timer.
+
+The overlay is not selected by the existing Go installer or lifecycle wrapper.
+Those maintenance commands are not yet a supported way to manage the Rust
+stack. Use the [Rust controller backup procedure](#native-controller-backup-and-restore-lab-only)
+in the rehearsal. The isolated gate is
+`integration/rust-lab/compose-cutover.sh`; it uses local lab images, not a
+published signed release.
+The ARM64 run used the actual Compose files and the same SQLite volume. It
+replaced Go with Rust, used the Go admin CLI to write another network,
+checked the console and bootstrap discovery over HTTPS, and then confirmed
+that Go could read both networks after rollback. It did not start the
+optional exit service or change the database schema.
+
 ## First Linux lab run
 
 Use a separate CA and network on a disposable Linux host. Install Rust 1.91
