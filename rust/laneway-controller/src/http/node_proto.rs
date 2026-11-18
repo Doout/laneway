@@ -59,10 +59,15 @@ pub(super) fn internal(id: &str) -> Reply {
     )
 }
 
-pub(super) async fn read_body(
-    req: Request<Incoming>,
-    id: &str,
-) -> Result<Zeroizing<Vec<u8>>, Reply> {
+pub(super) struct BodyError(S, Code, &'static str);
+
+impl BodyError {
+    pub(super) fn reply(self, id: &str) -> Reply {
+        error(self.0, self.1, self.2, false, id)
+    }
+}
+
+pub(super) async fn read_body(req: Request<Incoming>) -> Result<Zeroizing<Vec<u8>>, BodyError> {
     let media = req
         .headers()
         .get(header::CONTENT_TYPE)
@@ -74,34 +79,28 @@ pub(super) async fn read_body(
             "application/protobuf" | "application/x-protobuf"
         )
     }) {
-        return Err(error(
+        return Err(BodyError(
             S::UNSUPPORTED_MEDIA_TYPE,
             Code::Malformed,
             "Content-Type must be application/x-protobuf",
-            false,
-            id,
         ));
     }
     let mut data = Zeroizing::new(Vec::new());
     let mut body = req.into_body();
     while let Some(frame) = body.frame().await {
         let Ok(frame) = frame else {
-            return Err(error(
+            return Err(BodyError(
                 S::BAD_REQUEST,
                 Code::Malformed,
                 "could not read request body",
-                false,
-                id,
             ));
         };
         if let Ok(bytes) = frame.into_data() {
             if bytes.len() > 131072 - data.len() {
-                return Err(error(
+                return Err(BodyError(
                     S::PAYLOAD_TOO_LARGE,
                     Code::ResourceExhausted,
                     "request body exceeds limit",
-                    false,
-                    id,
                 ));
             }
             data.extend_from_slice(&bytes);

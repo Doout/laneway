@@ -53,9 +53,9 @@ pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -
             Ok(Err(e)) => return failure(e, id),
             Err(_) => return internal(id),
         };
-    let body = match read_body(req, id).await {
+    let body = match read_body(req).await {
         Ok(b) => b,
-        Err(r) => return r,
+        Err(error) => return error.reply(id),
     };
     let (cancel, _alive) = tokio::sync::oneshot::channel::<()>();
     let validity = state.snapshot_validity;

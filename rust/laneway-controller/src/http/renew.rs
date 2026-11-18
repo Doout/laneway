@@ -52,9 +52,9 @@ pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -
             Ok(Err(e)) => return failure(e, id),
             Err(_) => return internal(id),
         };
-    let data = match read_body(req, id).await {
+    let data = match read_body(req).await {
         Ok(data) => data,
-        Err(r) => return r,
+        Err(error) => return error.reply(id),
     };
     let (cancel, _alive) = tokio::sync::oneshot::channel::<()>();
     match tokio::task::spawn_blocking(move || {
@@ -124,9 +124,9 @@ pub(super) async fn relay(mut req: Request<Incoming>, state: State, id: &str) ->
             id,
         );
     };
-    let data = match read_body(req, id).await {
+    let data = match read_body(req).await {
         Ok(value) => value,
-        Err(reply) => return reply,
+        Err(error) => return error.reply(id),
     };
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;

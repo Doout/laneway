@@ -58,9 +58,9 @@ pub(super) async fn handle(
             Ok(Err(err)) => return failure(err, id),
             Err(_) => return internal(id),
         };
-    let data = match read_body(req, id).await {
+    let data = match read_body(req).await {
         Ok(value) => value,
-        Err(reply) => return reply,
+        Err(error) => return error.reply(id),
     };
     let (cancel, _alive) = tokio::sync::oneshot::channel::<()>();
     match tokio::task::spawn_blocking(move || -> anyhow::Result<Body> {

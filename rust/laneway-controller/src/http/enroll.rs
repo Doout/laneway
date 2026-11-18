@@ -62,9 +62,9 @@ pub(super) async fn handle(req: Request<Incoming>, state: State, id: &str, ip: I
         reply.headers_mut().insert(header::RETRY_AFTER, 1.into());
         return reply;
     }
-    let data = match read_body(req, id).await {
+    let data = match read_body(req).await {
         Ok(v) => v,
-        Err(reply) => return reply,
+        Err(error) => return error.reply(id),
     };
     let Ok(permit) = state.queries.try_acquire_owned() else {
         return error(
