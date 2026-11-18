@@ -30,6 +30,7 @@ mod node_configuration;
 mod node_installer;
 mod node_proto;
 mod node_routes;
+mod public_relay;
 mod recovery;
 mod relay_configuration;
 mod renew;
@@ -253,7 +254,7 @@ fn list_limit(raw: Option<&str>, default: usize) -> Result<usize, ListError> {
 }
 
 pub async fn handle(
-    req: Request<hyper::body::Incoming>,
+    mut req: Request<hyper::body::Incoming>,
     state: State,
     peer: std::net::IpAddr,
 ) -> Reply {
@@ -267,6 +268,10 @@ pub async fn handle(
         );
     }
     let id = hex::encode(random);
+    let peer = match public_relay::client_address(&mut req, &state, peer).await {
+        Ok(peer) => peer,
+        Err(err) => return err.reply(&id, head),
+    };
     match dispatch(req, state, &id, head, peer).await {
         Ok(resp) => resp,
         Err(err) => err.reply(&id, head),
@@ -456,11 +461,6 @@ async fn dispatch(
         .await;
     }
     if discovery {
-        // Node renewal's TLS verifier does not delegate proxy authority.
-        // Never trust a forwarded client address on this listener.
-        if req.headers().contains_key("x-laneway-public-client-ip") {
-            return Err(AUTH);
-        }
         let allowed = state
             .discovery
             .lock()

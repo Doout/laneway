@@ -193,7 +193,6 @@ async fn redeem(
     if !crate::origin::same_origin(headers) {
         return Err(DENIED);
     }
-    let forwarded = headers.contains_key("x-laneway-public-client-ip");
     let (username, grant, password, bucket) = match purpose {
         Purpose::Bootstrap => {
             let form: BootstrapForm = required_json_form(req).await?;
@@ -209,9 +208,6 @@ async fn redeem(
             (String::new(), form.grant, form.password, "recovery")
         }
     };
-    if forwarded {
-        return Err(AUTH);
-    }
     let attempt =
         state
             .recoveries

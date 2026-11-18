@@ -13,6 +13,9 @@ bytes.workspace = true
 crossbeam-queue.workspace = true
 getrandom.workspace = true
 humantime-serde.workspace = true
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 ipnet.workspace = true
 laneway-protocol = { path = "../laneway-protocol" }
 prost.workspace = true

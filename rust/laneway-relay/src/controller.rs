@@ -17,7 +17,7 @@ use laneway_protocol::{
 };
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
-use reqwest::{Certificate, Identity, StatusCode};
+use reqwest::StatusCode;
 use rustls::{
     RootCertStore,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -308,10 +308,9 @@ impl State {
 }
 
 pub(crate) struct Client {
-    endpoint: String,
+    origin: reqwest::Url,
     poll_interval: Duration,
     http: reqwest::Client,
-    expected_controller: AuthenticatedIdentity,
     quic: Option<QuicControl>,
 }
 
@@ -336,13 +335,16 @@ impl Client {
                 == network,
             "controller.network_id differs from relay certificate network"
         );
-        let mut identity_pem = fs::read(&config.tls.certificate_file)
-            .context("read relay certificate for controller")?;
-        identity_pem.extend_from_slice(
-            &fs::read(&config.tls.private_key_file).context("read relay key for controller")?,
-        );
-        let root = fs::read(&config.tls.ca_file).context("read controller CA")?;
         let url = reqwest::Url::parse(&controller.endpoint).context("parse controller endpoint")?;
+        ensure!(
+            url.scheme() == "https"
+                && url.path() == "/"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "controller.endpoint must be a clean HTTPS origin"
+        );
         // Match the Go client's default: use the authenticated HTTPS
         // authority, not the possibly different UDP dial target, for TLS.
         let host = url.host_str().context("missing controller endpoint host")?;
@@ -356,16 +358,6 @@ impl Client {
                 "Rust relay requires controller.server_name to match endpoint host"
             );
         }
-        let http = reqwest::Client::builder()
-            .https_only(true)
-            .identity(Identity::from_pem(&identity_pem).context("load relay controller identity")?)
-            .add_root_certificate(Certificate::from_pem(&root).context("load controller CA")?)
-            .min_tls_version(reqwest::tls::Version::TLS_1_3)
-            .max_tls_version(reqwest::tls::Version::TLS_1_3)
-            .timeout(Duration::from_secs(15))
-            .tls_info(true)
-            .build()
-            .context("build controller HTTP client")?;
         let expected_controller = AuthenticatedIdentity {
             network_id: network,
             role: Role::Controller,
@@ -374,6 +366,19 @@ impl Client {
                 .parse()
                 .context("controller.service_id")?,
         };
+        let http = reqwest::Client::builder()
+            .https_only(true)
+            .http1_only()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .use_preconfigured_tls(crate::tls::controller_http_tls(
+                config,
+                expected_controller,
+            )?)
+            .timeout(controller.timeout)
+            .build()
+            .context("build pinned controller HTTP client")?;
         let quic = controller
             .quic_endpoint
             .as_deref()
@@ -390,15 +395,23 @@ impl Client {
             })
             .transpose()?;
         Ok(Self {
-            endpoint: format!(
-                "{}/v1/relay/configuration",
-                controller.endpoint.trim_end_matches('/')
-            ),
+            origin: url,
             poll_interval: controller.poll_interval,
             http,
-            expected_controller,
             quic,
         })
+    }
+
+    pub(crate) fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let mut url = self.origin.clone();
+        url.set_path(path);
+        url.set_query(query);
+        self.http.request(method, url)
     }
 
     pub(crate) async fn run(&self, state: Arc<State>) -> Result<()> {
@@ -430,23 +443,12 @@ impl Client {
         }
         .encode_to_vec();
         let mut response = self
-            .http
-            .post(&self.endpoint)
+            .request(reqwest::Method::POST, "/v1/relay/configuration", None)
             .header("content-type", "application/x-protobuf")
             .body(body)
             .send()
             .await
             .context("request relay configuration")?;
-        let peer = response
-            .extensions()
-            .get::<reqwest::tls::TlsInfo>()
-            .and_then(reqwest::tls::TlsInfo::peer_certificate)
-            .context("controller TLS peer certificate is unavailable")?;
-        ensure!(
-            identity_from_certificate_der(peer).context("controller SPIFFE identity")?
-                == self.expected_controller,
-            "controller SPIFFE identity differs from configured network/service ID"
-        );
         if response.status() == StatusCode::NOT_MODIFIED {
             let deadline = response
                 .headers()

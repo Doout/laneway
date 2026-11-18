@@ -64,6 +64,8 @@ pub struct Config {
     #[serde(default)]
     pub tcp_fallback: Option<TcpFallbackConfig>,
     #[serde(default)]
+    pub(crate) public_https: Option<PublicHttpsConfig>,
+    #[serde(default)]
     pub(crate) controller: Option<ControllerConfig>,
     /// Statically authorized node identities and owned prefixes.
     #[serde(default)]
@@ -180,6 +182,38 @@ pub(crate) struct ControllerConfig {
     pub(crate) poll_interval: Duration,
     #[serde(default = "default_controller_timeout", with = "humantime_serde")]
     pub(crate) timeout: Duration,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublicHttpsConfig {
+    pub(crate) server_name: String,
+    pub(crate) certificate: PathBuf,
+    pub(crate) private_key: PathBuf,
+}
+
+impl PublicHttpsConfig {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.server_name.len() <= 253
+                && self.server_name.parse::<IpAddr>().is_err()
+                && self.server_name.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                }),
+            "public_https.server_name must be a canonical DNS name"
+        );
+        ensure!(
+            self.certificate.is_absolute() && self.private_key.is_absolute(),
+            "public_https certificate and private key paths must be absolute"
+        );
+        Ok(())
+    }
 }
 
 fn default_controller_poll() -> Duration {
@@ -382,7 +416,19 @@ impl Config {
                 );
             }
         }
-        self.tcp_fallback_addr()?;
+        let tcp_address = self.tcp_fallback_addr()?;
+        if let Some(public) = &self.public_https {
+            public.validate()?;
+            ensure!(
+                tcp_address.is_some() && controller_enabled,
+                "public_https requires tcp_fallback.listen and controller.endpoint"
+            );
+            ensure!(
+                public.certificate != self.tls.certificate_file
+                    && public.private_key != self.tls.private_key_file,
+                "public_https requires separate credentials from the authenticated relay"
+            );
+        }
         if let Some(tcp) = &self.tcp_fallback {
             ensure!(
                 !tcp.handshake_timeout.is_zero()

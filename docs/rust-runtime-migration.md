@@ -46,6 +46,35 @@ to the lab's TCP fallback listener. A successful probe establishes that the
 listener accepts TCP. The interop and namespace gates separately exercise
 authentication, packet forwarding and route cleanup.
 
+### Public HTTPS on the Rust relay
+
+With a controller-backed relay and `tcp_fallback.listen` enabled, add a
+separate certificate and key for the public DNS name. Neither file is a
+Laneway workload credential:
+
+```toml
+[public_https]
+server_name = "relay.example.test"
+certificate = "/etc/laneway/public/fullchain.pem"
+private_key = "/etc/laneway/public/privkey.pem"
+```
+
+The same TCP port accepts browser HTTPS and Laneway mTLS, selecting the
+certificate and client-authentication policy from the TLS ClientHello.
+The HTTPS handler forwards discovery, one-use bootstrap downloads, console
+requests and OAuth to the configured controller. The relay verifies the
+controller's hostname, CA and Laneway service identity before sending HTTP.
+It blocks public access to node APIs and administrator bearer credentials.
+The Rust controller accepts the forwarded client IP only from a currently
+authorized relay presenting its mTLS credential.
+
+Run `make rust-controller-interop` for shared-port discovery, browser sessions,
+one-use downloads, OAuth Basic forwarding, and the separate mTLS handshake.
+This configuration requires a provisioned certificate and a relay restart to
+pick up replacements. The Go ACME cache format, in-process TLS-ALPN renewal,
+serving the console's built assets from the Rust controller, and a complete
+Dispatch exchange through the shared port are not covered by this gate.
+
 ## Linux node image
 
 Build the opt-in `node` target and check the packaged entry point after the
@@ -243,8 +272,8 @@ redeems a Rust-issued connector token at the Go controller.
 The private bootstrap endpoints stage encrypted wrapper payloads in memory,
 publish after the issuance audit commits, and let an enabled relay fetch each
 bundle once over mTLS. The payload is never written to SQLite; expiry or a
-controller restart discards it. Serving the public bootstrap path and
-console through the Rust relay is a separate migration step.
+controller restart discards it. The Rust relay exposes only the public
+one-use URL and fetches the wrapper via its authenticated controller connection.
 
 The controller serves `GET /v1/health` with the Go readiness response.
 To enable `GET /.well-known/laneway/bootstrap.json` on the same listener,
@@ -265,8 +294,7 @@ digest, and size:
 Startup verifies the controller certificate against the advertised name and
 CA. The network and service IDs come from that certificate. Each response
 includes only enabled relays on the pinned network and expires in five
-minutes. The endpoint returns 503 when there are no usable relays, and the
-Rust relay's public HTTPS forwarding remains separate.
+minutes. The endpoint returns 503 when there are no usable relays.
 
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly

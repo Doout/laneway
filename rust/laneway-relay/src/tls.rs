@@ -6,8 +6,12 @@ use laneway_protocol::{
 };
 use quinn::{ServerConfig, TransportConfig, VarInt, crypto::rustls::QuicServerConfig};
 use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    DigitallySignedStruct, RootCertStore, SignatureScheme,
+    client::{
+        WebPkiServerVerifier,
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    },
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
     server::WebPkiClientVerifier,
 };
 
@@ -17,6 +21,80 @@ pub(crate) const ALPN: &[u8] = b"laneway-relay/1";
 pub(crate) const TCP_FALLBACK_ALPN: &[u8] = b"laneway-fallback/1";
 const MAX_CREDENTIAL_BYTES: usize = 1 << 20;
 const MAX_DATAGRAM_FRAME: usize = 5 + 2048;
+
+#[derive(Debug)]
+struct ControllerVerifier {
+    web: Arc<WebPkiServerVerifier>,
+    expected: AuthenticatedIdentity,
+}
+
+impl ServerCertVerifier for ControllerVerifier {
+    fn verify_server_cert(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        let valid = self
+            .web
+            .verify_server_cert(leaf, intermediates, name, ocsp, now)?;
+        if identity_from_certificate_der(leaf.as_ref()).ok() != Some(self.expected) {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(valid)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signed: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.web.verify_tls12_signature(message, cert, signed)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signed: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.web.verify_tls13_signature(message, cert, signed)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.web.supported_verify_schemes()
+    }
+}
+
+pub(crate) fn controller_http_tls(
+    config: &Config,
+    expected: AuthenticatedIdentity,
+) -> Result<rustls::ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    let (accepted, rejected) =
+        roots.add_parsable_certificates(load_certificates(&config.tls.ca_file)?);
+    ensure!(
+        accepted > 0 && rejected == 0,
+        "invalid controller CA bundle"
+    );
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+        .build()?;
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(ControllerVerifier { web, expected }))
+        .with_client_auth_cert(
+            load_certificates(&config.tls.certificate_file)?,
+            load_private_key(&config.tls.private_key_file)?,
+        )
+        .context("load relay controller identity")
+}
 
 pub(crate) fn server_config(config: &Config) -> Result<ServerConfig> {
     let certificates = load_certificates(&config.tls.certificate_file)?;
@@ -183,7 +261,7 @@ pub(crate) fn validate_negotiation(connection: &quinn::Connection) -> Result<()>
     Ok(())
 }
 
-fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
+pub(crate) fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
     let contents = bounded_read(path, "certificate")?;
     let mut reader = Cursor::new(contents);
     let certificates: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
@@ -195,7 +273,7 @@ fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'stati
     Ok(certificates)
 }
 
-fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
+pub(crate) fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
     let contents = bounded_read(path, "private key")?;
     let mut reader = Cursor::new(contents);
     rustls_pemfile::private_key(&mut reader)

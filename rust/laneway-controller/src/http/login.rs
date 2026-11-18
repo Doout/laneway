@@ -45,12 +45,8 @@ pub(super) async fn handle(
     if !crate::origin::same_origin(h) {
         return Err(mutations::DENIED);
     }
-    let forwarded = h.contains_key("x-laneway-public-client-ip");
     let form = json_form::<Form>(req).await?;
     let password = Zeroizing::new(form.password.unwrap_or_default().into_bytes());
-    if forwarded {
-        return Err(AUTH);
-    }
     let username = form.username.unwrap_or_default();
     authenticate(state, id, peer, previous, username, password).await
 }
