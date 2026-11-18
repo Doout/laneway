@@ -212,6 +212,14 @@ when a known epoch is unchanged. An epoch ahead of the controller is rejected
 instead of renewing the lease. Ephemeral exit heartbeats still require an
 authenticated QUIC connection with the exclusive exit claim.
 
+Relay inventory uses `relay.read`; registration, update and disable use
+`relay.manage`. Rust normalizes the advertised endpoint, enforces the shared
+32-enabled-relay limit per network, and commits the change with the audit
+event and configuration epoch. Disabled relays no longer appear in node
+discovery and cannot renew their forwarding authority. The namespace gate
+registers a live relay through the Rust API, disables it to stop forwarding,
+then re-enables it and verifies traffic recovers without restarting it.
+
 `POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
 invitations. It accepts owner or operator sessions with network access, the
 configured root bearer, or automation with `enrollment.issue` on that network.

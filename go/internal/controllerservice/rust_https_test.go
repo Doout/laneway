@@ -300,6 +300,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	t.Run("access-management", func(t *testing.T) { testRustAccessManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("route-management", func(t *testing.T) { testRustRouteManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("device-management", func(t *testing.T) { testRustDeviceManagement(t, f, client, goServer.URL, rustURL) })
+	t.Run("relay-management", func(t *testing.T) { testRustRelayManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("enrollment-issuance", func(t *testing.T) { testRustEnrollmentIssuance(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("enrollment-redemption", func(t *testing.T) { testRustRedemption(t, f, client, rustURL, goServer.URL) })
 	t.Run("node-renewal", func(t *testing.T) { testRustRenewal(t, f, client, rustURL, goServer.URL) })

@@ -273,11 +273,6 @@ admin_connection=(
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller network create \
   --network-id "${network_id}" --name rust-node-live --ipv4-pool 100.115.0.0/24 \
   "${admin_connection[@]}" >"${work_dir}/network.json"
-ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay register \
-  --network-id "${network_id}" --service-id "${relay_service}" \
-  --name rust-live-relay --endpoint 10.254.0.2:4433 \
-  "${admin_connection[@]}" >"${work_dir}/relay-registration.json"
-
 rust_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
   --network-id "${network_id}" --label rust-node --expires-in 10m "${admin_connection[@]}")"
 gateway_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
@@ -343,6 +338,15 @@ if [[ "${node_controller}" == "rust" ]]; then
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
     --admin-token-file "${work_dir}/admin.token"
   )
+fi
+
+relay_registration="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay register \
+  --network-id "${network_id}" --service-id "${relay_service}" \
+  --name rust-live-relay --endpoint 10.254.0.2:4433 "${management_connection[@]}")"
+relay_id="$(printf '%s\n' "${relay_registration}" | json_string_field relay_id)"
+if [[ ! "${relay_id}" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "ERROR: failed to parse registered relay ID" >&2
+  exit 1
 fi
 
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
@@ -548,6 +552,20 @@ if [[ "${node_controller}" == "rust" ]]; then
     echo "ERROR: the request and reply did not use the Rust relay" >&2
     exit 1
   fi
+
+  echo "==> disabling the relay closes live sessions and stops forwarding"
+  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay disable \
+    --relay-id "${relay_id}" "${management_connection[@]}" >"${work_dir}/relay-disable.json"
+  wait_relay_sessions 0
+  udp_denied 9709 rust-relay-disabled
+
+  echo "==> updating the relay to enabled restores sessions and traffic without a restart"
+  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay update \
+    --relay-id "${relay_id}" --name rust-live-relay-restored --endpoint 10.254.0.2:4433 \
+    --enabled "${management_connection[@]}" >"${work_dir}/relay-update.json"
+  wait_relay_sessions 2
+  wait_route "${rust_ns}" 192.168.77.0/24 1
+  udp_success 9710 rust-relay-restored
 fi
 
 echo "==> deleting the only ACL rule leaves the route present but fails traffic closed"

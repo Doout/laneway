@@ -3,6 +3,7 @@ mod acl;
 mod devices;
 mod inventory;
 mod named;
+mod relays;
 mod routes;
 pub(crate) mod service_ports;
 mod subjects;
@@ -39,6 +40,16 @@ pub enum Request {
     RevokeCertificate(Id, Vec<u8>, String),
     RevokeNode(Id, String),
     SetNodeCapabilities(Id, u64),
+    ListRelays(Id, usize),
+    RegisterRelay {
+        net: Id,
+        service: Id,
+        node: Option<Id>,
+        name: String,
+        endpoint: String,
+    },
+    UpdateRelay(Id, String, String, bool),
+    DisableRelay(Id),
     ListAclRules(Id, usize),
     CreateAclRule(Id, AclRule),
     UpdateAclRule(Id, AclRule),
@@ -104,12 +115,17 @@ impl Request {
                 | Self::ListAclRules(..)
                 | Self::ListRoutes(..)
                 | Self::ListCertificates(..)
+                | Self::ListRelays(..)
         )
     }
     fn permission(&self) -> &'static str {
         match self {
             Self::ListRoutes(..) => "route.read",
             Self::ListCertificates(..) => "certificate.read",
+            Self::ListRelays(..) => "relay.read",
+            Self::RegisterRelay { .. } | Self::UpdateRelay(..) | Self::DisableRelay(_) => {
+                "relay.manage"
+            }
             Self::RevokeCertificate(..) => "certificate.revoke",
             Self::RevokeNode(..) | Self::SetNodeCapabilities(..) => "node.manage",
             Self::AssignRoute(..) | Self::ApproveRoute(_) | Self::WithdrawRoute(_) => {
@@ -125,6 +141,8 @@ impl Request {
             | Self::ListRoutes(net, _)
             | Self::AssignRoute(net, ..)
             | Self::ListCertificates(net, _)
+            | Self::ListRelays(net, _)
+            | Self::RegisterRelay { net, .. }
             | Self::RevokeCertificate(net, ..)
             | Self::ListAclRules(net, _)
             | Self::CreateAclRule(net, _)
@@ -144,6 +162,9 @@ impl Request {
             Self::DeleteGrant(id) => ("SELECT network_id FROM access_grants WHERE id=?", id),
             Self::RevokeNode(id, _) | Self::SetNodeCapabilities(id, _) => {
                 ("SELECT network_id FROM nodes WHERE id=?", id)
+            }
+            Self::UpdateRelay(id, ..) | Self::DisableRelay(id) => {
+                ("SELECT network_id FROM relays WHERE id=?", id)
             }
             Self::ApproveRoute(id) | Self::WithdrawRoute(id) => {
                 ("SELECT network_id FROM routes WHERE id=?", id)
@@ -191,6 +212,18 @@ impl Request {
             Self::ApproveRoute(id) => editor.approve_route(id).map(epoch_reply),
             Self::WithdrawRoute(id) => editor.withdraw_route(id, None).map(epoch_reply),
             Self::ListCertificates(_, limit) => editor.certificates(limit),
+            Self::ListRelays(_, limit) => editor.list_relays(limit),
+            Self::RegisterRelay {
+                service,
+                node,
+                name,
+                endpoint,
+                ..
+            } => editor.register_relay(service, node, &name, &endpoint),
+            Self::UpdateRelay(id, name, endpoint, enabled) => {
+                editor.update_relay(id, &name, &endpoint, enabled)
+            }
+            Self::DisableRelay(id) => editor.disable_relay(id).map(epoch_reply),
             Self::RevokeCertificate(_, serial, reason) => {
                 editor.revoke_certificate(&serial, &reason).map(epoch_reply)
             }

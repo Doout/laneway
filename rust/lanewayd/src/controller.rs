@@ -15,6 +15,7 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use laneway_protocol::{
     AuthenticatedIdentity, Id, Role, identity_from_certificate_der,
     policy::{CompiledPolicy, prefix_from_wire},
+    relay_endpoint::{MAX_RELAY_ENDPOINTS, canonical_host_port},
     v1::{
         Capability, ConfigurationRequest, EnrollmentClass, NodeConfiguration,
         RouteAdvertisementMode, RouteKind,
@@ -35,7 +36,6 @@ const MAX_RESPONSE: usize = 1 << 20;
 const VALID_UNTIL_HEADER: &str = "X-Laneway-Configuration-Valid-Until";
 const MAX_PEERS: usize = 65_536;
 const MAX_ROUTES: usize = 65_536;
-const MAX_RELAYS: usize = 32;
 const MAX_RELAY_ADDRESSES: usize = 16;
 const MAX_RESOLVED_RELAY_TARGETS: usize = 128;
 const RELAY_DNS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -665,7 +665,7 @@ impl Snapshot {
             "controller peer snapshot exceeds limit"
         );
         ensure!(
-            !configuration.relays.is_empty() && configuration.relays.len() <= MAX_RELAYS,
+            !configuration.relays.is_empty() && configuration.relays.len() <= MAX_RELAY_ENDPOINTS,
             "controller relay snapshot is outside bounds"
         );
         let mut relays = HashMap::with_capacity(configuration.relays.len());
@@ -1017,29 +1017,9 @@ impl Snapshot {
 }
 
 fn parse_relay_endpoint(value: &str) -> Result<(String, Vec<SocketAddr>)> {
-    ensure!(
-        !value.is_empty() && value.trim() == value,
-        "relay endpoint is empty or padded"
-    );
-    if let Ok(address) = value.parse::<SocketAddr>() {
-        ensure!(
-            canonical_relay_socket(address).is_some_and(|canonical| canonical == address),
-            "relay endpoint address class or port is invalid"
-        );
-        return Ok((address.to_string(), vec![address]));
-    }
-    let (host, port) = value
-        .rsplit_once(':')
-        .context("relay endpoint must be host:port")?;
-    ensure!(
-        !host.is_empty() && !host.contains(':'),
-        "relay DNS host is invalid"
-    );
-    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
-    ensure!(valid_dns_name(&host), "relay DNS host is invalid");
-    let port = port.parse::<u16>().context("relay endpoint port")?;
-    ensure!(port != 0, "relay endpoint port is zero");
-    Ok((format!("{host}:{port}"), Vec::new()))
+    let canonical = canonical_host_port(value).context("invalid relay endpoint")?;
+    let addresses = canonical.parse::<SocketAddr>().into_iter().collect();
+    Ok((canonical, addresses))
 }
 
 fn canonical_relay_socket(address: SocketAddr) -> Option<SocketAddr> {
@@ -1064,20 +1044,6 @@ fn canonical_relay_socket(address: SocketAddr) -> Option<SocketAddr> {
         }
     };
     Some(SocketAddr::new(ip, address.port()))
-}
-
-fn valid_dns_name(host: &str) -> bool {
-    !host.is_empty()
-        && host.len() <= 253
-        && host.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
 }
 
 fn merge_relay_resolutions(

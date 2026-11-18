@@ -26,6 +26,9 @@ pub(super) enum Route<'a> {
     RevokeCertificate(&'a str, &'a str),
     RevokeNode(&'a str),
     NodeCapabilities(&'a str),
+    RelayCollection(&'a str),
+    RelayUpdate(&'a str),
+    RelayDisable(&'a str),
     AclRules(&'a str),
     AclRule(&'a str),
     UserCreate(&'a str),
@@ -63,6 +66,9 @@ impl<'a> Route<'a> {
             ] => RevokeCertificate(id, serial),
             ["", "v1", "admin", "nodes", id, "revoke"] => RevokeNode(id),
             ["", "v1", "admin", "nodes", id, "capabilities"] => NodeCapabilities(id),
+            ["", "v1", "admin", "networks", id, "relays"] => RelayCollection(id),
+            ["", "v1", "admin", "relays", id] => RelayUpdate(id),
+            ["", "v1", "admin", "relays", id, "disable"] => RelayDisable(id),
             ["", "v1", "admin", "networks", id, "acl-rules"] => AclRules(id),
             ["", "v1", "admin", "acl-rules", id] => AclRule(id),
             ["", "v1", "admin", "networks", id, "users"] => UserCreate(id),
@@ -85,7 +91,8 @@ impl<'a> Route<'a> {
     fn allow(&self) -> &'static str {
         match self {
             Self::Inventory(_) | Self::ListRoutes(_) | Self::Certificates(_) => "GET, HEAD",
-            Self::NodeCapabilities(_) => "PUT",
+            Self::NodeCapabilities(_) | Self::RelayUpdate(_) => "PUT",
+            Self::RelayCollection(_) => "GET, HEAD, POST",
             Self::AclRules(_) => "GET, HEAD, POST",
             Self::AclRule(_) => "DELETE, PUT",
             Self::UserCreate(_)
@@ -94,6 +101,7 @@ impl<'a> Route<'a> {
             | Self::WithdrawAdvertisement(_)
             | Self::RevokeCertificate(..)
             | Self::RevokeNode(_)
+            | Self::RelayDisable(_)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
             | Self::ResourceCreate(_)
@@ -130,6 +138,22 @@ struct CapabilitiesForm {
 #[serde(deny_unknown_fields)]
 struct RevocationForm {
     reason: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayRegisterForm {
+    service_id: String,
+    node_id: Option<String>,
+    name: String,
+    endpoint: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayUpdateForm {
+    name: String,
+    endpoint: String,
+    #[serde(default)]
+    enabled: bool,
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -225,6 +249,7 @@ pub(super) async fn handle(
         && matches!(
             route,
             Route::AclRules(_)
+                | Route::RelayCollection(_)
                 | Route::UserCreate(_)
                 | Route::TeamCreate(_)
                 | Route::GrantCreate(_)
@@ -313,6 +338,32 @@ async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<A
                 .await?
                 .enabled_capabilities,
         ),
+        Route::RelayCollection(net) if req.method() == Method::POST => {
+            let net = parse(net)?;
+            let form = required_json_form::<RelayRegisterForm>(req).await?;
+            Action::RegisterRelay {
+                net,
+                service: parse(&form.service_id)?,
+                node: form
+                    .node_id
+                    .as_deref()
+                    .filter(|id| !id.is_empty())
+                    .map(parse)
+                    .transpose()?,
+                name: form.name,
+                endpoint: form.endpoint,
+            }
+        }
+        Route::RelayCollection(net) => Action::ListRelays(
+            parse(net)?,
+            super::query_limit(req.uri().query()).map_err(|_| malformed("invalid limit"))?,
+        ),
+        Route::RelayUpdate(id) => {
+            let id = parse(id)?;
+            let form = required_json_form::<RelayUpdateForm>(req).await?;
+            Action::UpdateRelay(id, form.name, form.endpoint, form.enabled)
+        }
+        Route::RelayDisable(id) => Action::DisableRelay(parse(id)?),
         Route::AclRules(net) if req.method() == Method::POST => {
             let id = parse(net)?;
             let f = json_form::<AclCreateForm>(req).await?;

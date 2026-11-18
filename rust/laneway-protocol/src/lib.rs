@@ -10,6 +10,7 @@ use thiserror::Error;
 use x509_parser::{extensions::GeneralName, prelude::*};
 
 pub mod policy;
+pub mod relay_endpoint;
 
 /// Generated `laneway.v1` Protobuf messages.
 #[allow(missing_docs)]

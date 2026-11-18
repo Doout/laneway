@@ -4,7 +4,10 @@ use super::{
 };
 use crate::{SessionStore, check_snapshot, enrollment_tokens::EXIT};
 use anyhow::{Context, Result, ensure};
-use laneway_protocol::{DEFAULT_MAX_CONTROL_PAYLOAD, Id, policy::prefix_from_wire, v1::*};
+use laneway_protocol::{
+    DEFAULT_MAX_CONTROL_PAYLOAD, Id, policy::prefix_from_wire, relay_endpoint::MAX_RELAY_ENDPOINTS,
+    v1::*,
+};
 use prost::Message;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::json;
@@ -368,17 +371,20 @@ pub(super) fn revocations(tx: &Transaction<'_>, net: Id, now: i64) -> Result<Vec
     Ok(serials)
 }
 fn relays(tx: &Transaction<'_>, net: Id) -> Result<Vec<RelayEndpoint>> {
-    let mut stmt=tx.prepare("SELECT service_id,name,endpoint FROM relays WHERE network_id=? AND enabled=1 AND service_id IS NOT NULL ORDER BY id LIMIT 33")?;
+    let mut stmt=tx.prepare("SELECT service_id,name,endpoint FROM relays WHERE network_id=? AND enabled=1 AND service_id IS NOT NULL ORDER BY id LIMIT ?")?;
     let values = stmt
-        .query_map([net.as_bytes()], |r| {
-            Ok(RelayEndpoint {
-                service_id: r.get(0)?,
-                name: r.get(1)?,
-                endpoint: r.get(2)?,
-            })
-        })?
+        .query_map(
+            params![net.as_bytes(), MAX_RELAY_ENDPOINTS as i64 + 1],
+            |r| {
+                Ok(RelayEndpoint {
+                    service_id: r.get(0)?,
+                    name: r.get(1)?,
+                    endpoint: r.get(2)?,
+                })
+            },
+        )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(values.len() <= 32, "too many relays");
+    ensure!(values.len() <= MAX_RELAY_ENDPOINTS, "too many relays");
     for r in &values {
         Id::from_slice(&r.service_id)?;
     }
