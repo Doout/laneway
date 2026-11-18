@@ -242,7 +242,7 @@ fn heartbeat(
     }
     Ok((now + 20, now + 60))
 }
-fn peers(tx: &Transaction<'_>, net: Id, now: i64) -> Result<Vec<NodePeer>> {
+pub(super) fn peers(tx: &Transaction<'_>, net: Id, now: i64) -> Result<Vec<NodePeer>> {
     let mut stmt=tx.prepare("SELECT n.id,n.name,n.wireguard_public_key,
          (SELECT address FROM overlay_addresses a WHERE a.node_id=n.id AND a.network_id=n.network_id AND length(address)=4 AND released_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 1),
          (SELECT address FROM overlay_addresses a WHERE a.node_id=n.id AND a.network_id=n.network_id AND length(address)=16 AND released_at IS NULL ORDER BY created_at DESC,id DESC LIMIT 1)

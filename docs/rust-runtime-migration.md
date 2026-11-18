@@ -924,7 +924,25 @@ teams, memberships, direct grants, named resources, services, and named
 grants. TCP/UDP port ranges are merged and sealed on creation. Browser
 writes require same-origin CSRF proof; scoped automation uses `acl.read`
 or `acl.manage`. Each policy change, epoch advance, and audit entry commits
-together. Other controller APIs are still pending; keep Go serving production.
+together. The private fleet API and its node consumers are not yet at parity;
+keep Go serving production.
+
+The Rust controller preview serves the private directory through
+`GET /v1/admin/networks/{network_id}/private-dns` and
+`GET /v1/node/private-dns`. The administrator path requires network-scoped
+`acl.read`; the node path derives the network from its verified client
+certificate and rechecks certificate and identity state for every request.
+It uses the managed grant compiler and never treats a manual traffic allow
+rule as permission to enumerate names. It publishes permanent names, unique
+friendly aliases, and granted services in the private fleet JSON format. The
+catalog is not cacheable by HTTP, and its lifetime is at most 30 seconds and
+no longer than the visible node leases or the requesting certificate.
+
+The controller API does not enable a local DNS listener in Rust endpoints.
+The local fleet source adds a migration after public schema 18; Rust still
+rejects unsupported schema histories. The Rust UDP resolver, private fleet
+console integration, and validation against the deployed fleet database are
+separate promotion gates.
 
 Traffic rules can be listed, created, updated, and deleted through the same
 Rust HTTPS listener. The controller validates canonical prefixes and port

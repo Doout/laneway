@@ -4,6 +4,7 @@ pub mod configuration;
 mod exit;
 mod maintenance;
 mod managed_policy;
+pub(crate) mod private_dns;
 pub mod relay_configuration;
 pub mod renewal;
 pub mod revocation;

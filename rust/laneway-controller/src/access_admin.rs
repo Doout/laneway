@@ -32,6 +32,7 @@ pub enum AccessError {
 
 pub enum Request {
     Inventory(Id),
+    PrivateDns(Id),
     EndpointStatuses(Id, usize),
     NodeLocations(Id, usize, Option<&'static str>),
     SetNodeLocation(Id, Option<Location>),
@@ -115,6 +116,7 @@ impl Request {
         matches!(
             self,
             Self::Inventory(_)
+                | Self::PrivateDns(_)
                 | Self::EndpointStatuses(..)
                 | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
@@ -146,6 +148,7 @@ impl Request {
     fn scope(&self, tx: &Transaction<'_>) -> Result<Scope> {
         let object = match self {
             Self::Inventory(net)
+            | Self::PrivateDns(net)
             | Self::EndpointStatuses(net, _)
             | Self::NodeLocations(net, ..)
             | Self::ListRoutes(net, _)
@@ -211,6 +214,7 @@ impl Request {
         };
         let data = match self {
             Self::Inventory(_) => inventory::read(tx, net),
+            Self::PrivateDns(_) => crate::enrollment::private_dns::admin_catalog(tx, net, now),
             Self::EndpointStatuses(_, limit) => {
                 crate::endpoint_status::inventory(tx, net, limit, now)
             }

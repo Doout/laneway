@@ -19,6 +19,7 @@ use serde::Deserialize;
 
 pub(super) enum Route<'a> {
     Inventory(&'a str),
+    PrivateDns(&'a str),
     EndpointStatuses(&'a str),
     NodeLocations(&'a str),
     NodeLocation(&'a str),
@@ -53,6 +54,7 @@ impl<'a> Route<'a> {
         use Route::*;
         Some(match parts {
             ["", "v1", "admin", "networks", id, "access-subjects"] => Inventory(id),
+            ["", "v1", "admin", "networks", id, "private-dns"] => PrivateDns(id),
             ["", "v1", "admin", "networks", id, "endpoint-statuses"] => EndpointStatuses(id),
             ["", "v1", "admin", "networks", id, "node-locations"] => NodeLocations(id),
             ["", "v1", "admin", "nodes", id, "location"] => NodeLocation(id),
@@ -98,6 +100,7 @@ impl<'a> Route<'a> {
     fn allow(&self) -> &'static str {
         match self {
             Self::Inventory(_)
+            | Self::PrivateDns(_)
             | Self::ListRoutes(_)
             | Self::Certificates(_)
             | Self::EndpointStatuses(_)
@@ -330,6 +333,7 @@ async fn decode(
 ) -> Result<Action, Failure> {
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
+        Route::PrivateDns(net) => Action::PrivateDns(parse(net)?),
         Route::EndpointStatuses(net) => Action::EndpointStatuses(
             parse(net)?,
             super::query_limit(req.uri().query())

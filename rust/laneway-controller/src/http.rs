@@ -29,6 +29,7 @@ mod management;
 mod mutations;
 mod node_configuration;
 mod node_installer;
+mod node_private_dns;
 mod node_proto;
 mod node_routes;
 mod public_relay;
@@ -326,6 +327,9 @@ async fn dispatch(
     }
     if path == "/v1/status" && state.workload_mtls_enabled {
         return endpoint_status::handle(req, state, id, peer).await;
+    }
+    if path == "/v1/node/private-dns" && state.workload_mtls_enabled {
+        return node_private_dns::handle(req, state, id).await;
     }
     if path == "/v1/relay/configuration" && state.workload_mtls_enabled {
         return Ok(relay_configuration::handle(req, state, id).await);
