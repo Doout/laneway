@@ -13,6 +13,7 @@ use laneway_protocol::{
 };
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use tokio::{
+    io::AsyncWriteExt,
     net::TcpListener,
     sync::{OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
@@ -31,6 +32,7 @@ use crate::{
     diagnostics,
     packet_pool::PacketPool,
     public_https::PublicHttps,
+    public_tls::Renewal,
     registry::{Registry, Session, SessionCapabilities, SessionChannels},
     tcp, tls,
 };
@@ -72,6 +74,7 @@ pub struct Server {
     metrics_interval: Duration,
     controller: Option<Arc<ControllerClient>>,
     diagnostics: Option<diagnostics::Server>,
+    renewal: Option<Renewal>,
 }
 
 impl Server {
@@ -135,7 +138,7 @@ impl Server {
         let tcp_packet_pool = tcp_config
             .as_ref()
             .map(|tcp| PacketPool::prewarmed(tcp.queue_depth, MAX_PACKET_PAYLOAD as usize + 5));
-        let public_https = config
+        let (public_https, renewal) = config
             .public_https
             .as_ref()
             .map(|public| {
@@ -147,9 +150,10 @@ impl Server {
                             .context("public HTTPS requires a controller")?,
                     ),
                 )
-                .map(Arc::new)
+                .map(|(https, renewal)| (Some(Arc::new(https)), renewal))
             })
-            .transpose()?;
+            .transpose()?
+            .unwrap_or_default();
         let diagnostics = config
             .metrics_listen_addr()?
             .map(|address| diagnostics::Server::bind(address, Arc::clone(&metrics)))
@@ -183,6 +187,7 @@ impl Server {
             metrics_interval: config.relay.metrics_interval,
             controller,
             diagnostics,
+            renewal,
         })
     }
 
@@ -230,6 +235,7 @@ impl Server {
         if let Some(controller) = self.controller.as_ref() {
             controller.initialize(&self.inner.authorizations).await?;
         }
+        let renewal_task = self.renewal.map(|renewal| tokio::spawn(renewal.run()));
         let mut controller_task = self.controller.map(|controller| {
             let state = Arc::clone(&self.inner.authorizations);
             tokio::spawn(async move { controller.run(state).await })
@@ -346,6 +352,10 @@ impl Server {
             task.abort();
             let _ = task.await;
         }
+        if let Some(task) = renewal_task {
+            task.abort();
+            let _ = task.await;
+        }
         Ok(())
     }
 }
@@ -446,12 +456,16 @@ async fn serve_shared_tcp(
         result
     } else {
         let _slot = public.admit()?;
-        let tls = public.config_for_hello(hello.client_hello())?;
+        let selected = public.tls.select(hello.client_hello())?;
         tokio::select! {
             result = async {
-                let stream = tokio::time::timeout_at(deadline, hello.into_stream(tls))
+                let mut stream = tokio::time::timeout_at(deadline, hello.into_stream(selected.tls))
                     .await.context("public TLS handshake timed out")??;
                 drop(admission);
+                if selected.challenge {
+                    let _ = tokio::time::timeout_at(deadline, stream.shutdown()).await;
+                    return Ok(());
+                }
                 public.serve(stream, peer).await
             } => result,
             _ = wait_shutdown(&mut shutdown) => Ok(()),

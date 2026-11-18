@@ -48,16 +48,32 @@ authentication, packet forwarding and route cleanup.
 
 ### Public HTTPS on the Rust relay
 
-With a controller-backed relay and `tcp_fallback.listen` enabled, add a
-separate certificate and key for the public DNS name. Neither file is a
-Laneway workload credential:
+With a controller-backed relay and `tcp_fallback.listen` enabled, retain
+the Go relay's public hostname and cache directory:
 
 ```toml
 [public_https]
 server_name = "relay.example.test"
-certificate = "/etc/laneway/public/fullchain.pem"
-private_key = "/etc/laneway/public/privkey.pem"
+cache_dir = "/var/lib/laneway-public"
 ```
+
+The Rust relay obtains and renews public certificates without restarting.
+The configured DNS name must reach its TCP listener on public port 443
+for [ACME TLS-ALPN-01](https://letsencrypt.org/docs/challenge-types/#tls-alpn-01).
+The bind port inside a container may differ. Rust writes owner-only files
+into the `rust-v1` subdirectory. Run one ACME writer per cache. On first
+startup with the default Let's Encrypt directory, Rust can read a still-valid
+Go cached certificate while obtaining its own; it never overwrites the Go
+certificates or account. If no usable certificate is cached, browser HTTPS
+becomes available after the first successful order; node transport does not wait.
+
+An explicit `acme_directory` can select a test CA. If required, point
+`acme_ca` at that directory's TLS trust root; this does not change the
+Laneway workload roots or what browsers trust. For an externally managed
+certificate, omit `cache_dir` and set `certificate` and `private_key` to
+absolute PEM paths. Restart to read replacements in this static mode. If
+combined with `cache_dir`, a currently valid PEM pair can seed HTTPS until
+ACME obtains a certificate.
 
 The same TCP port accepts browser HTTPS and Laneway mTLS, selecting the
 certificate and client-authentication policy from the TLS ClientHello.
@@ -70,10 +86,11 @@ authorized relay presenting its mTLS credential.
 
 Run `make rust-controller-interop` for shared-port discovery, browser sessions,
 one-use downloads, OAuth Basic forwarding, and the separate mTLS handshake.
-This configuration requires a provisioned certificate and a relay restart to
-pick up replacements. The Go ACME cache format, in-process TLS-ALPN renewal,
-and a complete Dispatch exchange through the shared port are not covered by
-this gate.
+Run `bash integration/rust-lab/acme.sh` to exercise TLS-ALPN validation,
+live renewal, and offline restart using the cached certificate with a local
+[Pebble](https://github.com/letsencrypt/pebble) CA. This is separate from
+renewing the internal controller certificate or running a complete Dispatch
+exchange through the shared port.
 
 The Rust controller image includes the same `pnpm build:live` console as the
 Go image and enables it from `/usr/share/laneway-console`. For a standalone

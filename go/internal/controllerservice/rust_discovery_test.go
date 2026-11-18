@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -254,7 +255,7 @@ private_key = %q
 		if badErr == nil || timedOut || requests.Load() != 0 || !strings.Contains(string(out), "request relay configuration") {
 			t.Fatal("wrong controller identity was not rejected before the relay sent HTTP")
 		}
-		tcp := startRustPublicRelay(t, relayBinary, write("relay.toml", []byte(cfg)))
+		tcp, _ := startRustPublicRelay(t, relayBinary, write("relay.toml", []byte(cfg)))
 		publicRoots := x509.NewCertPool()
 		publicRoots.AddCert(publicRoot)
 		https := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
@@ -352,6 +353,9 @@ private_key = %q
 			t.Fatal("public listener accepted node transport with the wrong ALPN")
 		}
 		_ = work.Close()
+		if pebble := os.Getenv("LANEWAY_RUST_PEBBLE"); pebble != "" {
+			testRustAcme(t, pebble, relayBinary, cfg, roots, cert, key, ca)
+		}
 		if _, err := f.store.DisableRelay(t.Context(), relay.ID); err != nil {
 			t.Fatal(err)
 		}
@@ -366,7 +370,7 @@ private_key = %q
 	call("GET", bootstrap.WellKnownPath, 503)
 }
 
-func startRustPublicRelay(t *testing.T, binary, cfg string) string {
+func startRustPublicRelay(t *testing.T, binary, cfg string) (string, func()) {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), binary, "--config", cfg)
 	stdout, err := cmd.StdoutPipe()
@@ -378,7 +382,9 @@ func startRustPublicRelay(t *testing.T, binary, cfg string) string {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	var once sync.Once
+	stop := func() { once.Do(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }) }
+	t.Cleanup(stop)
 	addr := make(chan string, 1)
 	go func() {
 		scanner := bufio.NewScanner(stdout)
@@ -398,9 +404,9 @@ func startRustPublicRelay(t *testing.T, binary, cfg string) string {
 		if _, _, err := net.SplitHostPort(address); err != nil {
 			t.Fatal("Rust relay did not announce its shared TCP listener")
 		}
-		return address
+		return address, stop
 	case <-time.After(10 * time.Second):
 		t.Fatal("Rust relay did not start")
-		return ""
+		return "", nil
 	}
 }

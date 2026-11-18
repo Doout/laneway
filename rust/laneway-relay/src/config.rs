@@ -188,8 +188,11 @@ pub(crate) struct ControllerConfig {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PublicHttpsConfig {
     pub(crate) server_name: String,
-    pub(crate) certificate: PathBuf,
-    pub(crate) private_key: PathBuf,
+    pub(crate) certificate: Option<PathBuf>,
+    pub(crate) private_key: Option<PathBuf>,
+    pub(crate) cache_dir: Option<PathBuf>,
+    pub(crate) acme_directory: Option<String>,
+    pub(crate) acme_ca: Option<PathBuf>,
 }
 
 impl PublicHttpsConfig {
@@ -209,9 +212,49 @@ impl PublicHttpsConfig {
             "public_https.server_name must be a canonical DNS name"
         );
         ensure!(
-            self.certificate.is_absolute() && self.private_key.is_absolute(),
-            "public_https certificate and private key paths must be absolute"
+            self.certificate.is_some() == self.private_key.is_some(),
+            "public_https requires certificate and private_key together"
         );
+        ensure!(
+            self.certificate.is_some() || self.cache_dir.is_some(),
+            "public_https requires a PEM pair or an ACME cache_dir"
+        );
+        ensure!(
+            [
+                &self.certificate,
+                &self.private_key,
+                &self.cache_dir,
+                &self.acme_ca
+            ]
+            .into_iter()
+            .flatten()
+            .all(|path| path.is_absolute()
+                && !path
+                    .components()
+                    .any(|p| p == std::path::Component::ParentDir)),
+            "public_https paths must be absolute and must not contain '..'"
+        );
+        ensure!(
+            self.acme_directory.is_none() || self.cache_dir.is_some(),
+            "public_https.acme_directory requires cache_dir"
+        );
+        ensure!(
+            self.acme_ca.is_none() || self.acme_directory.is_some(),
+            "public_https.acme_ca requires an explicit acme_directory"
+        );
+        if let Some(url) = &self.acme_directory {
+            let url = reqwest::Url::parse(url).context("parse public_https.acme_directory")?;
+            ensure!(
+                url.scheme() == "https"
+                    && url.host().is_some()
+                    && url.path() != "/"
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "public_https.acme_directory must be an HTTPS directory URL without credentials or a query"
+            );
+        }
         Ok(())
     }
 }
@@ -424,8 +467,8 @@ impl Config {
                 "public_https requires tcp_fallback.listen and controller.endpoint"
             );
             ensure!(
-                public.certificate != self.tls.certificate_file
-                    && public.private_key != self.tls.private_key_file,
+                public.certificate.as_ref() != Some(&self.tls.certificate_file)
+                    && public.private_key.as_ref() != Some(&self.tls.private_key_file),
                 "public_https requires separate credentials from the authenticated relay"
             );
         }

@@ -11,13 +11,15 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{HeaderMap, Method, Request, Response, StatusCode as S, body::Incoming, header};
 use hyper_util::rt::{TokioIo, TokioTimer};
-use rustls::pki_types::ServerName;
 use tokio::{net::TcpStream, sync::Semaphore, time::timeout};
 use tokio_rustls::server::TlsStream;
 
-use crate::{config::PublicHttpsConfig, controller::Client, tls};
+use crate::{
+    config::PublicHttpsConfig,
+    controller::Client,
+    public_tls::{PublicTls, Renewal},
+};
 
-const HTTP_ALPN: &[u8] = b"http/1.1";
 const DISCOVERY: &str = "/.well-known/laneway/bootstrap.json";
 const PUBLIC_BUNDLE: &str = "/.well-known/laneway/bootstrap/";
 const PRIVATE_BUNDLE: &str = "/v1/bootstrap-bundles/";
@@ -28,7 +30,7 @@ const MAX_CONSOLE_RESPONSE: usize = 8 * 1024 * 1024;
 type Reply = Response<Full<Bytes>>;
 
 pub(crate) struct PublicHttps {
-    tls: Arc<rustls::ServerConfig>,
+    pub(crate) tls: PublicTls,
     server_name: String,
     slots: Semaphore,
     controller: Arc<Client>,
@@ -36,48 +38,21 @@ pub(crate) struct PublicHttps {
 }
 
 impl PublicHttps {
-    pub(crate) fn new(config: &PublicHttpsConfig, controller: Arc<Client>) -> Result<Self> {
-        let cert = tls::load_certificates(&config.certificate)?;
-        let leaf = rustls::server::ParsedCertificate::try_from(&cert[0])?;
-        rustls::client::verify_server_name(
-            &leaf,
-            &ServerName::try_from(config.server_name.as_str())?,
-        )?;
-        ensure!(
-            laneway_protocol::identity_from_certificate_der(cert[0].as_ref()).is_err(),
-            "public HTTPS must not use a Laneway workload credential"
-        );
-        let mut server =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_no_client_auth()
-                .with_single_cert(cert, tls::load_private_key(&config.private_key)?)
-                .context("load public HTTPS certificate and key")?;
-        server.alpn_protocols = vec![HTTP_ALPN.to_vec()];
-        server.send_tls13_tickets = 0;
-        Ok(Self {
-            tls: Arc::new(server),
-            server_name: config.server_name.clone(),
-            slots: Semaphore::new(32),
-            controller,
-            bootstrap: Mutex::new(BootstrapLimit::default()),
-        })
-    }
-
-    pub(crate) fn config_for_hello(
-        &self,
-        hello: rustls::server::ClientHello<'_>,
-    ) -> Result<Arc<rustls::ServerConfig>> {
-        ensure!(
-            hello.server_name() == Some(self.server_name.as_str()),
-            "unexpected public TLS server name"
-        );
-        ensure!(
-            hello
-                .alpn()
-                .is_none_or(|mut values| values.any(|p| p == HTTP_ALPN)),
-            "unsupported public TLS protocol"
-        );
-        Ok(Arc::clone(&self.tls))
+    pub(crate) fn new(
+        config: &PublicHttpsConfig,
+        controller: Arc<Client>,
+    ) -> Result<(Self, Option<Renewal>)> {
+        let (tls, renewal) = PublicTls::new(config)?;
+        Ok((
+            Self {
+                tls,
+                server_name: config.server_name.clone(),
+                slots: Semaphore::new(32),
+                controller,
+                bootstrap: Mutex::new(BootstrapLimit::default()),
+            },
+            renewal,
+        ))
     }
 
     pub(crate) fn admit(&self) -> Result<tokio::sync::SemaphorePermit<'_>> {

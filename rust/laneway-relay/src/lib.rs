@@ -13,6 +13,7 @@ mod diagnostics;
 mod metrics;
 mod packet_pool;
 mod public_https;
+mod public_tls;
 mod registry;
 mod server;
 mod tcp;

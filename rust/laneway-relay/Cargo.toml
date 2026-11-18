@@ -9,8 +9,10 @@ description = "Authenticated QUIC DATAGRAM and TLS/TCP fallback relay for Lanewa
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
+async-trait = "0.1"
 bytes.workspace = true
 crossbeam-queue.workspace = true
+futures-util = { version = "0.3", default-features = false }
 getrandom.workspace = true
 humantime-serde.workspace = true
 http-body-util = "0.1"
@@ -22,16 +24,19 @@ prost.workspace = true
 quinn.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-no-provider"] }
 rustls.workspace = true
+rustls-acme = { version = "0.15.4", default-features = false, features = ["ring", "webpki-roots"] }
 rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile = "3.26.0"
 tokio.workspace = true
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 x509-parser.workspace = true
+zeroize = "1"
 
 [dev-dependencies]
 rcgen = "0.14.5"
-tempfile = "3.26.0"
