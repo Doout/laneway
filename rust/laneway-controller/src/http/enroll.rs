@@ -8,7 +8,7 @@ use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 #[derive(Default)]
 pub(super) struct Limiter(HashMap<IpAddr, (Instant, f64)>);
 impl Limiter {
-    fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
+    pub(super) fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
         let ip = ip.to_canonical();
         if ip.is_unspecified() || ip.is_multicast() {
             return false;

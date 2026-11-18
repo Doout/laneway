@@ -15,6 +15,7 @@ use std::{
 use tokio::sync::Semaphore;
 mod access_admin;
 mod administrators;
+mod applications;
 mod audit;
 mod automation;
 mod endpoint_status;
@@ -50,6 +51,8 @@ pub struct State {
     pub(crate) snapshot_validity: u64,
     pub(crate) locations: Option<Arc<laneway_controller::node_location::Database>>,
     enrollments: Arc<std::sync::Mutex<enroll::Limiter>>,
+    applications: Arc<std::sync::Mutex<enroll::Limiter>>,
+    allow_loopback_callbacks: bool,
 }
 impl State {
     pub fn new(
@@ -59,6 +62,7 @@ impl State {
         workload_mtls_enabled: bool,
         snapshot_validity: u64,
         locations: Option<Arc<laneway_controller::node_location::Database>>,
+        allow_loopback_callbacks: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             snapshot_validity,
@@ -67,6 +71,8 @@ impl State {
             database: Arc::new(database),
             issuer: issuer.map(Arc::new),
             enrollments: Default::default(),
+            applications: Default::default(),
+            allow_loopback_callbacks,
             queries: Arc::new(Semaphore::new(8)),
             root: root.map(Arc::new),
             discovery: Default::default(),
@@ -216,6 +222,10 @@ fn valid_query_field(field: &str) -> bool {
 }
 
 fn query_limit(raw: Option<&str>) -> Result<usize, ListError> {
+    list_limit(raw, 100)
+}
+
+fn list_limit(raw: Option<&str>, default: usize) -> Result<usize, ListError> {
     // Go's URL.Query discards individual fields with invalid escapes or raw
     // semicolons. Keep the first valid limit, like url.Values.Get.
     let limit = raw
@@ -228,7 +238,7 @@ fn query_limit(raw: Option<&str>) -> Result<usize, ListError> {
         .filter(|s| !s.is_empty())
         .map(|v| v.parse::<usize>().map_err(|_| ListError::Limit))
         .transpose()?
-        .unwrap_or(100);
+        .unwrap_or(default);
     if !(1..=1000).contains(&limit) {
         return Err(ListError::Limit);
     }
@@ -316,6 +326,9 @@ async fn dispatch(
     }
     if let Some(route) = automation::Route::parse(&pieces) {
         return automation::handle(req, state, id, route).await;
+    }
+    if let Some(route) = applications::Route::parse(&pieces) {
+        return applications::handle(req, state, id, peer, route).await;
     }
     let root_probe = path == "/v1/admin/auth/root";
     let logout = path == "/v1/admin/auth/logout";

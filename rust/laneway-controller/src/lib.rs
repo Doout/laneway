@@ -12,6 +12,7 @@ use rusqlite::{Connection, OpenFlags, Row, Transaction};
 use serde::Serialize;
 pub mod access_admin;
 pub mod administrators;
+pub mod applications;
 pub mod audit;
 pub mod automation;
 mod bearer;

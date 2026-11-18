@@ -200,6 +200,17 @@ the plaintext; the database holds a digest. Network boundaries and the
 100-active-token cap per principal apply in both implementations. Disabling
 a service principal revokes its outstanding tokens atomically.
 
+The Rust controller can accept application registrations, return a reviewed
+manifest, record owner approval or denial, and exchange an approved code for
+a client credential. It also serves the application inventory. Registration
+does not install an application on a network. The lab gate crosses Go and
+Rust at consent and exchange, validates PKCE and replay rejection, and
+checks that an audit failure leaves the registration pending.
+Callbacks require HTTPS by default. For a local lab only, the
+`--allow-insecure-application-callbacks` flag permits HTTP on loopback
+addresses. OAuth authorization, installation, and token endpoints still
+require Go.
+
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly
 granted `network.create`. The Rust transaction creates the IPv4 or dual-stack
