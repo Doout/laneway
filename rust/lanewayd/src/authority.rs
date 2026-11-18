@@ -1,21 +1,26 @@
 use std::{
-    future::Future,
+    future::{Future, pending},
+    num::NonZeroU64,
     pin::Pin,
     sync::{Arc, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use laneway_protocol::Id;
 use tokio::time::{Instant, sleep, sleep_until};
 use tracing::warn;
 
 use crate::{
-    controller::{Client, PollResult, Snapshot},
+    controller::{AuthorityRejected, Client, PollResult, Snapshot},
     tls::LocalCertificateHealth,
 };
 
 pub(crate) trait ConfigurationSource: Send + Sync {
+    fn exit_generation(&self) -> Option<NonZeroU64> {
+        None
+    }
+
     fn poll<'a>(
         &'a self,
         known_epoch: u64,
@@ -23,6 +28,10 @@ pub(crate) trait ConfigurationSource: Send + Sync {
 }
 
 impl ConfigurationSource for Arc<Client> {
+    fn exit_generation(&self) -> Option<NonZeroU64> {
+        self.as_ref().exit_generation()
+    }
+
     fn poll<'a>(
         &'a self,
         known_epoch: u64,
@@ -50,26 +59,28 @@ pub(crate) trait SnapshotApplier: Send + Sync {
 /// Monotonic controller state. The last expired snapshot is retained only so a
 /// valid 304 can renew it; `active()` never returns expired authority.
 pub(crate) struct Authority {
-    current: RwLock<Option<Arc<Snapshot>>>,
+    state: RwLock<AuthorityState>,
+}
+
+#[derive(Default)]
+struct AuthorityState {
+    current: Option<Arc<Snapshot>>,
+    retired: bool,
 }
 
 impl Authority {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            current: RwLock::new(None),
+            state: RwLock::new(AuthorityState::default()),
         })
     }
 
     pub(crate) fn epoch(&self) -> u64 {
-        self.current
-            .read()
-            .ok()
-            .and_then(|value| value.as_ref().map(|snapshot| snapshot.epoch))
-            .unwrap_or(0)
+        self.retained().map_or(0, |snapshot| snapshot.epoch)
     }
 
     pub(crate) fn retained(&self) -> Option<Arc<Snapshot>> {
-        self.current.read().ok()?.clone()
+        self.state.read().ok()?.current.clone()
     }
 
     pub(crate) fn active(&self) -> Option<Arc<Snapshot>> {
@@ -85,33 +96,48 @@ impl Authority {
     }
 
     fn publish_modified(&self, next: Arc<Snapshot>) -> Result<()> {
-        let mut current = self
-            .current
+        let mut state = self
+            .state
             .write()
             .map_err(|_| anyhow::anyhow!("controller authority lock poisoned"))?;
-        if let Some(previous) = current.as_ref() {
+        ensure!(!state.retired, "controller authority is retired");
+        if let Some(previous) = state.current.as_ref() {
+            previous.validate_exit_successor(&next)?;
             ensure!(
                 next.epoch > previous.epoch,
                 "controller configuration epoch did not advance"
             );
         }
-        *current = Some(next);
+        state.current = Some(next);
         Ok(())
     }
 
     fn publish_renewal(&self, renewed: Arc<Snapshot>) -> Result<()> {
-        let mut current = self
-            .current
+        let mut state = self
+            .state
             .write()
             .map_err(|_| anyhow::anyhow!("controller authority lock poisoned"))?;
-        let previous = current
+        ensure!(!state.retired, "controller authority is retired");
+        let previous = state
+            .current
             .as_ref()
             .context("controller renewed authority before initial snapshot")?;
+        previous.validate_exit_successor(&renewed)?;
         ensure!(
             renewed.epoch == previous.epoch && renewed.valid_until >= previous.valid_until,
             "controller lease renewal did not preserve epoch and a monotonic deadline"
         );
-        *current = Some(renewed);
+        state.current = Some(renewed);
+        Ok(())
+    }
+
+    fn retire(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("controller authority lock poisoned"))?;
+        state.retired = true;
+        state.current = None;
         Ok(())
     }
 }
@@ -155,10 +181,15 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
     }
 
     pub(crate) async fn run(&self) -> Result<()> {
+        let initial = self
+            .authority
+            .active()
+            .context("controller runner was not initialized")?;
         ensure!(
-            self.authority.active().is_some(),
-            "controller runner was not initialized"
+            initial.exit_generation() == self.client.exit_generation(),
+            "controller runner lease generation differs from the initial snapshot"
         );
+        drop(initial);
         let mut delay = self.poll_interval;
         let mut failed_closed = false;
         loop {
@@ -166,73 +197,91 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
                 .authority
                 .retained()
                 .context("controller authority disappeared")?;
-            let lease = deadline(retained.valid_until);
-            tokio::select! {
-                _ = sleep(delay) => {
-                    let poll = self.client.poll(self.authority.epoch());
-                    let result = if failed_closed {
-                        poll.await
-                    } else {
-                        tokio::select! {
-                            result = poll => result,
-                            _ = sleep_until(lease) => {
-                                self.applier.fail_close().await.context("fail close expired controller authority")?;
-                                failed_closed = true;
-                                delay = Duration::from_millis(250).min(self.poll_interval);
-                                warn!(epoch = retained.epoch, "controller node authority expired during poll; dataplane failed closed");
-                                continue;
-                            }
-                        }
-                    };
-                    let prepared = match result {
-                        Ok(result) => self.prepare_poll(result).await,
-                        Err(error) => Err(error),
-                    };
-                    match prepared {
-                        Ok(prepared) => match self.apply_poll(prepared, failed_closed).await {
-                        Ok(now_active) => {
-                            failed_closed = !now_active;
-                            delay = self.poll_interval;
-                        }
-                        Err(error) => {
-                            warn!(%error, "controller node snapshot poll failed");
-                            delay = self.poll_interval;
-                        }
-                        },
-                        Err(error) => {
-                            warn!(%error, "controller node snapshot poll failed");
-                            delay = self.poll_interval;
-                        }
-                    }
+            let terminal = retained.exit_terminal_at();
+            if terminal.is_some() && !failed_closed {
+                // Poll early enough even when the controller clamps validity
+                // to the nearest revocation or route-expiry deadline.
+                delay = delay.min((until(retained.valid_until) / 2).max(Duration::from_millis(50)));
+            }
+            let result = tokio::select! {
+                biased;
+                _ = wait_deadline(terminal) => {
+                    self.retire_exit().await.context("fail close terminal ephemeral Exit")?;
+                    bail!("ephemeral Exit lease is terminal");
                 }
-                _ = sleep_until(lease), if !failed_closed => {
+                _ = wait_deadline((!failed_closed).then_some(retained.valid_until)) => {
                     self.applier.fail_close().await.context("fail close expired controller authority")?;
                     failed_closed = true;
                     delay = Duration::from_millis(250).min(self.poll_interval);
                     warn!(epoch = retained.epoch, "controller node authority expired; dataplane failed closed");
+                    continue;
                 }
+                result = async {
+                    sleep(delay).await;
+                    let result = self.client.poll(retained.epoch).await?;
+                    self.prepare_poll(result).await
+                } => result,
+            };
+            let prepared = match result {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    if terminal.is_some() && error.is::<AuthorityRejected>() {
+                        self.retire_exit()
+                            .await
+                            .context("fail close rejected ephemeral Exit")?;
+                        return Err(error);
+                    }
+                    warn!(%error, "controller node snapshot poll failed");
+                    delay = self.poll_interval;
+                    continue;
+                }
+            };
+            if terminal.is_some() && prepared.local_certificate_revoked() {
+                self.retire_exit()
+                    .await
+                    .context("fail close revoked ephemeral Exit certificate")?;
+                bail!("ephemeral Exit certificate is revoked");
             }
+            match self.apply_poll(prepared, failed_closed).await {
+                Ok(now_active) => failed_closed = !now_active,
+                Err(error) => warn!(%error, "controller node snapshot apply failed"),
+            }
+            delay = self.poll_interval;
         }
+    }
+
+    async fn retire_exit(&self) -> Result<()> {
+        let retire = self.authority.retire();
+        // Cut the dataplane even if marking the local lease retired fails.
+        self.applier.fail_close().await?;
+        retire
     }
 
     async fn prepare_poll(&self, result: PollResult) -> Result<PreparedPoll> {
         match result {
             PollResult::Modified(configuration) => {
-                let snapshot = Arc::new(
-                    Snapshot::compile(
-                        *configuration,
-                        self.network,
-                        self.node,
-                        &self.local_certificate,
-                    )?
-                    .resolve_relays()
-                    .await?,
-                );
+                let snapshot = Snapshot::compile_for(
+                    *configuration,
+                    self.network,
+                    self.node,
+                    &self.local_certificate,
+                    self.client.exit_generation(),
+                )?;
+                if let Some(previous) = self.authority.retained() {
+                    previous.validate_exit_successor(&snapshot)?;
+                    if snapshot.epoch == previous.epoch && previous.ephemeral_exit.is_some() {
+                        return Ok(PreparedPoll::Renewed(Arc::new(
+                            previous.renew_exit(snapshot)?,
+                        )));
+                    }
+                }
                 ensure!(
                     snapshot.epoch > self.authority.epoch(),
                     "controller configuration epoch did not advance"
                 );
-                Ok(PreparedPoll::Modified(snapshot))
+                Ok(PreparedPoll::Modified(Arc::new(
+                    snapshot.resolve_relays().await?,
+                )))
             }
             PollResult::NotModified { valid_until } => {
                 let retained = self
@@ -289,10 +338,33 @@ enum PreparedPoll {
     Renewed(Arc<Snapshot>),
 }
 
-fn deadline(unix_seconds: u64) -> Instant {
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    Instant::now() + Duration::from_secs(unix_seconds.saturating_sub(now_unix))
+impl PreparedPoll {
+    fn local_certificate_revoked(&self) -> bool {
+        match self {
+            Self::Modified(snapshot) | Self::Renewed(snapshot) => {
+                snapshot.local_certificate_revoked
+            }
+        }
+    }
 }
+
+async fn wait_deadline(unix_seconds: Option<u64>) {
+    if let Some(unix_seconds) = unix_seconds {
+        let remaining = until(unix_seconds).min(Duration::from_secs(31_536_000));
+        sleep_until(Instant::now() + remaining).await;
+    } else {
+        pending().await
+    }
+}
+
+fn until(unix_seconds: u64) -> Duration {
+    Duration::from_secs(unix_seconds).saturating_sub(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default(),
+    )
+}
+
+#[cfg(test)]
+#[path = "authority_tests.rs"]
+mod tests;

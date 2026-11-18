@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    num::NonZeroU64,
     path::PathBuf,
     sync::{
         Arc,
@@ -32,6 +33,7 @@ use rustls::{
     },
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::tls::LocalCertificateHealth;
@@ -43,6 +45,7 @@ const MAX_ROUTES: usize = 65_536;
 const MAX_RELAY_ADDRESSES: usize = 16;
 const MAX_RESOLVED_RELAY_TARGETS: usize = 128;
 const RELAY_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+const EXIT_REVOKE_AFTER_SUSPECT_SECONDS: u64 = 40;
 
 /// Fully pinned controller connection material for one node.
 #[derive(Clone, Debug)]
@@ -56,6 +59,7 @@ pub(crate) struct ClientOptions {
     pub(crate) private_key: PathBuf,
     pub(crate) ca: PathBuf,
     pub(crate) timeout: Duration,
+    pub(crate) exit_generation: Option<NonZeroU64>,
 }
 
 /// One bounded conditional controller response.
@@ -64,6 +68,17 @@ pub(crate) enum PollResult {
     Modified(Box<NodeConfiguration>),
     NotModified { valid_until: u64 },
 }
+
+#[derive(Debug)]
+pub(crate) struct AuthorityRejected(laneway_protocol::v1::ErrorCode);
+
+impl std::fmt::Display for AuthorityRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "controller rejected node authority: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for AuthorityRejected {}
 
 /// Strict HTTPS/protobuf controller snapshot client.
 pub(crate) struct Client {
@@ -90,6 +105,10 @@ impl Client {
         ensure!(
             !options.timeout.is_zero() && options.timeout <= Duration::from_secs(300),
             "controller timeout must be in (0,5m]"
+        );
+        ensure!(
+            options.exit_generation.is_none() || options.quic_endpoint.is_some(),
+            "ephemeral Exit authority requires controller QUIC"
         );
         let (url, http_origin) = controller_origins(&options.endpoint, &options.server_name)?;
         let host = origin_host(&url);
@@ -153,6 +172,10 @@ impl Client {
         self.resolved.iter().map(SocketAddr::ip).collect()
     }
 
+    pub(crate) fn exit_generation(&self) -> Option<NonZeroU64> {
+        self.options.exit_generation
+    }
+
     pub(crate) async fn report_status(
         &self,
         report: &laneway_protocol::endpoint_status::Report,
@@ -184,6 +207,10 @@ impl Client {
         &self,
         csr: Vec<u8>,
     ) -> Result<laneway_protocol::v1::RenewalResponse> {
+        ensure!(
+            self.exit_generation().is_none(),
+            "ephemeral Exit certificates cannot be renewed by the runtime"
+        );
         use laneway_protocol::v1::{ControllerEnvelope, RenewalRequest, controller_envelope::Body};
         let control = self
             .quic
@@ -208,7 +235,7 @@ impl Client {
 
     pub(crate) async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
         if let Some(control) = &self.quic {
-            return control.poll(known_epoch).await;
+            return control.poll(known_epoch, self.exit_generation()).await;
         }
         let request = ConfigurationRequest {
             known_configuration_epoch: known_epoch,
@@ -483,7 +510,7 @@ impl QuicControl {
         })
     }
 
-    async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
+    async fn poll(&self, known_epoch: u64, generation: Option<NonZeroU64>) -> Result<PollResult> {
         use laneway_protocol::v1::{ControllerEnvelope, controller_envelope};
         let envelope = ControllerEnvelope {
             schema_version: 1,
@@ -491,7 +518,7 @@ impl QuicControl {
             body: Some(controller_envelope::Body::ConfigurationRequest(
                 ConfigurationRequest {
                     known_configuration_epoch: known_epoch,
-                    ephemeral_exit_lease_generation: 0,
+                    ephemeral_exit_lease_generation: generation.map_or(0, NonZeroU64::get),
                 },
             )),
         };
@@ -502,7 +529,15 @@ impl QuicControl {
             }
             Some(controller_envelope::Body::ConfigurationLease(lease)) => {
                 ensure!(
-                    lease.configuration_epoch == known_epoch
+                    generation.is_none()
+                        && lease.ephemeral_exit_lease_generation == 0
+                        && lease.ephemeral_exit_suspect_at_unix_seconds == 0
+                        && lease.ephemeral_exit_revoke_at_unix_seconds == 0,
+                    "ephemeral Exit heartbeat requires a complete snapshot"
+                );
+                ensure!(
+                    known_epoch != 0
+                        && lease.configuration_epoch == known_epoch
                         && lease.valid_until_unix_seconds != 0
                         && !expired(lease.valid_until_unix_seconds),
                     "controller QUIC lease is expired"
@@ -518,6 +553,7 @@ impl QuicControl {
                         | laneway_protocol::v1::ErrorCode::PermissionDenied
                 ) {
                     self.invalidate().await;
+                    return Err(AuthorityRejected(error.code()).into());
                 }
                 bail!(
                     "controller QUIC error {:?}: {} (retryable={})",
@@ -693,6 +729,7 @@ pub(crate) struct Snapshot {
     pub(crate) epoch: u64,
     pub(crate) valid_until: u64,
     pub(crate) identity_lease_expires_at: u64,
+    pub(crate) ephemeral_exit: Option<EphemeralExitLease>,
     pub(crate) overlays: Vec<IpNet>,
     pub(crate) peers: HashMap<Id, Peer>,
     pub(crate) routes: Vec<Route>,
@@ -705,6 +742,66 @@ pub(crate) struct Snapshot {
     pub(crate) authorized_exits: HashSet<Id>,
     pub(crate) certificate_renew_after: u64,
     pub(crate) certificate_not_after: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EphemeralExitLease {
+    generation: NonZeroU64,
+    suspect_at: u64,
+    revoke_at: u64,
+    snapshot_digest: [u8; 32],
+}
+
+impl EphemeralExitLease {
+    fn from_wire(
+        configuration: &mut NodeConfiguration,
+        generation: Option<NonZeroU64>,
+        class: EnrollmentClass,
+    ) -> Result<Option<Self>> {
+        let wire_generation = configuration.ephemeral_exit_lease_generation;
+        let suspect_at = configuration.ephemeral_exit_suspect_at_unix_seconds;
+        let revoke_at = configuration.ephemeral_exit_revoke_at_unix_seconds;
+        let exit_capability = Capability::LanewayExitNodeV1 as u64;
+        let Some(generation) = generation else {
+            ensure!(
+                wire_generation == 0
+                    && suspect_at == 0
+                    && revoke_at == 0
+                    && !(class == EnrollmentClass::EphemeralUser
+                        && configuration.enabled_capabilities & exit_capability != 0),
+                "ordinary node received ephemeral Exit authority"
+            );
+            return Ok(None);
+        };
+        ensure!(
+            class == EnrollmentClass::EphemeralUser
+                && configuration.enabled_capabilities == exit_capability
+                && wire_generation == generation.get(),
+            "ephemeral Exit enrollment or lease generation differs from bootstrap"
+        );
+        ensure!(
+            !expired(suspect_at)
+                && revoke_at.checked_sub(suspect_at) == Some(EXIT_REVOKE_AFTER_SUSPECT_SECONDS)
+                && revoke_at <= i64::MAX as u64
+                && configuration.valid_until_unix_seconds <= suspect_at,
+            "invalid ephemeral Exit heartbeat deadlines"
+        );
+        // Renewals may change only these clocks at the same epoch. Hash all
+        // other wire fields, including keys and policy not used by this actor.
+        let valid_until = std::mem::take(&mut configuration.valid_until_unix_seconds);
+        configuration.ephemeral_exit_suspect_at_unix_seconds = 0;
+        configuration.ephemeral_exit_revoke_at_unix_seconds = 0;
+        let snapshot_digest = Sha256::digest(configuration.encode_to_vec()).into();
+        configuration.valid_until_unix_seconds = valid_until;
+        configuration.ephemeral_exit_suspect_at_unix_seconds = suspect_at;
+        configuration.ephemeral_exit_revoke_at_unix_seconds = revoke_at;
+        Ok(Some(Self {
+            generation,
+            suspect_at,
+            revoke_at,
+            snapshot_digest,
+        }))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -729,6 +826,16 @@ impl Snapshot {
         local_node: Id,
         local_certificate: &LocalCertificateHealth,
     ) -> Result<Self> {
+        Self::compile_for(configuration, network, local_node, local_certificate, None)
+    }
+
+    pub(crate) fn compile_for(
+        mut configuration: NodeConfiguration,
+        network: Id,
+        local_node: Id,
+        local_certificate: &LocalCertificateHealth,
+        exit_generation: Option<NonZeroU64>,
+    ) -> Result<Self> {
         let epoch = configuration.configuration_epoch;
         ensure!(epoch > 0, "controller configuration epoch is zero");
         ensure!(
@@ -747,7 +854,8 @@ impl Snapshot {
             ),
             EnrollmentClass::EphemeralUser => {
                 ensure!(
-                    identity_lease_expires_at != 0 && !expired(identity_lease_expires_at),
+                    identity_lease_expires_at <= i64::MAX as u64
+                        && !expired(identity_lease_expires_at),
                     "ephemeral controller identity lease is missing or expired"
                 );
                 ensure!(
@@ -756,6 +864,8 @@ impl Snapshot {
                 );
             }
         }
+        let ephemeral_exit =
+            EphemeralExitLease::from_wire(&mut configuration, exit_generation, enrollment_class)?;
         ensure!(
             configuration.peers.len() <= MAX_PEERS,
             "controller peer snapshot exceeds limit"
@@ -1032,10 +1142,16 @@ impl Snapshot {
             certificate_not_after > unix_now(),
             "local certificate is expired"
         );
+        ensure!(
+            ephemeral_exit.is_none()
+                || configuration.valid_until_unix_seconds <= certificate_not_after,
+            "ephemeral Exit configuration exceeds the certificate lifetime"
+        );
         Ok(Self {
             epoch,
             valid_until: configuration.valid_until_unix_seconds,
             identity_lease_expires_at,
+            ephemeral_exit,
             overlays,
             peers,
             routes,
@@ -1056,6 +1172,14 @@ impl Snapshot {
     }
 
     pub(crate) fn renew(&self, valid_until: u64) -> Result<Self> {
+        ensure!(
+            self.ephemeral_exit.is_none(),
+            "ephemeral Exit cannot renew from a bare lease"
+        );
+        ensure!(
+            self.identity_lease_expires_at == 0 || valid_until <= self.identity_lease_expires_at,
+            "controller renewal exceeds the identity lease"
+        );
         ensure!(!expired(valid_until), "controller renewed an expired lease");
         ensure!(
             valid_until >= self.valid_until,
@@ -1063,6 +1187,63 @@ impl Snapshot {
         );
         Ok(Self {
             valid_until,
+            ..self.clone()
+        })
+    }
+
+    pub(crate) fn exit_terminal_at(&self) -> Option<u64> {
+        self.ephemeral_exit.as_ref().map(|lease| {
+            lease
+                .revoke_at
+                .min(self.identity_lease_expires_at)
+                .min(self.certificate_not_after)
+        })
+    }
+
+    pub(crate) fn exit_generation(&self) -> Option<NonZeroU64> {
+        self.ephemeral_exit.as_ref().map(|lease| lease.generation)
+    }
+
+    pub(crate) fn validate_exit_successor(&self, next: &Self) -> Result<()> {
+        let (Some(old), Some(new)) = (&self.ephemeral_exit, &next.ephemeral_exit) else {
+            ensure!(
+                self.ephemeral_exit.is_none() && next.ephemeral_exit.is_none(),
+                "node cannot switch into or out of ephemeral Exit authority"
+            );
+            return Ok(());
+        };
+        ensure!(
+            !expired(
+                self.exit_terminal_at()
+                    .expect("ephemeral Exit has terminal deadline")
+            ) && old.generation == new.generation
+                && self.identity_lease_expires_at == next.identity_lease_expires_at
+                && self.overlays == next.overlays
+                && next.epoch >= self.epoch
+                && new.suspect_at >= old.suspect_at
+                && new.revoke_at >= old.revoke_at
+                && !next.expired(),
+            "ephemeral Exit authority moved backward or changed its enrollment"
+        );
+        if next.epoch == self.epoch {
+            ensure!(
+                next.valid_until >= self.valid_until && old.snapshot_digest == new.snapshot_digest,
+                "ephemeral Exit heartbeat changed configuration without a newer epoch"
+            );
+        }
+        Ok(())
+    }
+
+    /// Keep the already installed routing table on a heartbeat at the same epoch.
+    pub(crate) fn renew_exit(&self, next: Self) -> Result<Self> {
+        self.validate_exit_successor(&next)?;
+        ensure!(
+            self.ephemeral_exit.is_some() && self.epoch == next.epoch,
+            "expected a same-epoch ephemeral Exit heartbeat"
+        );
+        Ok(Self {
+            valid_until: next.valid_until,
+            ephemeral_exit: next.ephemeral_exit,
             ..self.clone()
         })
     }
@@ -1227,14 +1408,14 @@ fn expired(deadline: u64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use laneway_protocol::v1::{
         CandidateExchangePolicy, CertificateHealth, ExitNodePolicy, IpPrefix, NodePeer,
         PolicyAction, PolicySnapshot, RelayEndpoint, Route as WireRoute, RouteSnapshot,
     };
 
-    fn id(value: u8) -> Id {
+    pub(crate) fn id(value: u8) -> Id {
         Id::new([value; 16]).unwrap()
     }
 
@@ -1315,7 +1496,7 @@ mod tests {
         }
     }
 
-    fn local_certificate() -> LocalCertificateHealth {
+    pub(crate) fn local_certificate() -> LocalCertificateHealth {
         LocalCertificateHealth {
             serial: vec![8],
             not_after: 4_000_000_000,
@@ -1406,6 +1587,72 @@ mod tests {
         }
     }
 
+    pub(crate) const EXIT_TEST_GENERATION: u64 = 17;
+
+    pub(crate) fn ephemeral_configuration() -> NodeConfiguration {
+        let mut configuration = valid();
+        let now = unix_now();
+        configuration.enrollment_class = EnrollmentClass::EphemeralUser as i32;
+        configuration.enabled_capabilities = Capability::LanewayExitNodeV1 as u64;
+        configuration.identity_lease_expires_at_unix_seconds = now + 120;
+        configuration.valid_until_unix_seconds = now + 20;
+        configuration.ephemeral_exit_lease_generation = EXIT_TEST_GENERATION;
+        configuration.ephemeral_exit_suspect_at_unix_seconds = now + 20;
+        configuration.ephemeral_exit_revoke_at_unix_seconds = now + 60;
+        configuration
+    }
+
+    #[test]
+    fn ephemeral_heartbeat_only_renews_the_bound_exit_and_unchanged_snapshot() {
+        let wire = ephemeral_configuration();
+        let cert = local_certificate();
+        let compile = |wire| {
+            Snapshot::compile_for(
+                wire,
+                id(1),
+                id(2),
+                &cert,
+                NonZeroU64::new(EXIT_TEST_GENERATION),
+            )
+        };
+        assert!(Snapshot::compile(wire.clone(), id(1), id(2), &cert).is_err());
+        assert!(
+            Snapshot::compile_for(
+                wire.clone(),
+                id(1),
+                id(2),
+                &cert,
+                NonZeroU64::new(EXIT_TEST_GENERATION + 1)
+            )
+            .is_err()
+        );
+        let initial = compile(wire.clone()).unwrap();
+        assert!(initial.renew(initial.valid_until + 1).is_err());
+        assert_eq!(
+            initial.exit_terminal_at(),
+            Some(wire.ephemeral_exit_revoke_at_unix_seconds)
+        );
+        let mut next = wire.clone();
+        next.valid_until_unix_seconds += 5;
+        next.ephemeral_exit_suspect_at_unix_seconds += 5;
+        next.ephemeral_exit_revoke_at_unix_seconds += 5;
+        let renewed = initial.renew_exit(compile(next.clone()).unwrap()).unwrap();
+        assert_eq!(renewed.valid_until, initial.valid_until + 5);
+        assert!(renewed.renew_exit(compile(wire.clone()).unwrap()).is_err());
+        let mut peers_changed = next.clone();
+        peers_changed.peers[1].wireguard_public_key[0] ^= 1;
+        assert!(initial.renew_exit(compile(peers_changed).unwrap()).is_err());
+        let mut extended = next.clone();
+        extended.identity_lease_expires_at_unix_seconds += 1;
+        assert!(initial.renew_exit(compile(extended).unwrap()).is_err());
+        next.ephemeral_exit_revoke_at_unix_seconds += 1;
+        assert!(compile(next).is_err());
+        let mut inconsistent = wire;
+        inconsistent.valid_until_unix_seconds =
+            inconsistent.ephemeral_exit_suspect_at_unix_seconds + 1;
+        assert!(compile(inconsistent).is_err());
+    }
+
     #[test]
     fn compiles_complete_default_deny_snapshot() {
         let snapshot = Snapshot::compile(valid(), id(1), id(2), &local_certificate()).unwrap();
@@ -1441,7 +1688,9 @@ mod tests {
         configuration.enrollment_class = EnrollmentClass::EphemeralUser as i32;
         configuration.valid_until_unix_seconds = now + 60;
         configuration.identity_lease_expires_at_unix_seconds = now + 120;
-        Snapshot::compile(configuration.clone(), id(1), id(2), &local_certificate()).unwrap();
+        let snapshot =
+            Snapshot::compile(configuration.clone(), id(1), id(2), &local_certificate()).unwrap();
+        assert!(snapshot.renew(now + 121).is_err());
 
         configuration.valid_until_unix_seconds = now + 121;
         assert!(

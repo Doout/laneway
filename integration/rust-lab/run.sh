@@ -15,9 +15,10 @@ mounts=(-v "$root:/src:ro"
 docker run --rm "${mounts[@]}" laneway-rust-lab:local sh -ec \
   'cargo fetch --locked --manifest-path rust/Cargo.toml; cd go && go mod download'
 docker run --rm --network none --cap-drop ALL \
-  -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
-  "${mounts[@]}" laneway-rust-lab:local \
-  cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs connector
+  -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
+  "${mounts[@]}" laneway-rust-lab:local sh -ec '
+    cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs connector
+    bash integration/rust-lab/exit-lease.sh'
 docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
   --security-opt systempaths=unconfined --device /dev/net/tun \
   -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \

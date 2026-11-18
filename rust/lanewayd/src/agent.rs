@@ -627,6 +627,7 @@ impl Agent {
             private_key: self.config.tls.private_key.clone(),
             ca: self.config.tls.ca.clone(),
             timeout: settings.timeout,
+            exit_generation: None,
         })
         .await?;
         let PollResult::Modified(configuration) = client.poll(0).await? else {
@@ -1690,6 +1691,7 @@ mod tests {
                 .as_secs()
                 + 60,
             identity_lease_expires_at: 0,
+            ephemeral_exit: None,
             overlays: vec!["100.96.0.1/32".parse().unwrap()],
             peers: HashMap::from([
                 (

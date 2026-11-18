@@ -459,6 +459,7 @@ mod tests {
             epoch,
             valid_until: now + 1,
             identity_lease_expires_at: 0,
+            ephemeral_exit: None,
             overlays: vec!["100.96.0.1/32".parse::<IpNet>().unwrap()],
             peers: HashMap::from([
                 (

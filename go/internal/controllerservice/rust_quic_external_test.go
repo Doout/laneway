@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -495,6 +496,83 @@ func TestRustControllerQUIC(t *testing.T) {
 		}
 		if _, err := b.Renew(ctx, csr, nil); err == nil || !strings.Contains(err.Error(), "ERROR_CODE_PERMISSION_DENIED") {
 			t.Fatalf("terminated exit session: %v", err)
+		}
+	})
+	t.Run("rust ephemeral exit lease", func(t *testing.T) {
+		binary := os.Getenv("LANEWAY_RUST_EXIT_LEASE_TEST")
+		if binary == "" {
+			t.Skip("run integration/rust-lab/exit-lease.sh to include the native node")
+		}
+		relayID, err := identity.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.RegisterRelay(ctx, net1.ID, relayID, nil, "rust-exit-lease-relay", "127.0.0.1:4433"); err != nil {
+			t.Fatal(err)
+		}
+		service, err := controllerservice.New(controllerservice.Options{Store: store, CACertificate: ca, CAKey: signer.PrivateKey, LeafValidity: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool := x509.NewCertPool()
+		pool.AddCert(ca)
+		goServer, err := service.ListenQUIC("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{server.CertificateDER}, PrivateKey: server.PrivateKey}}, ClientCAs: pool})
+		if err != nil {
+			t.Fatal(err)
+		}
+		served := make(chan error, 1)
+		go func() { served <- goServer.Serve(ctx) }()
+		defer func() { _ = goServer.Close(); <-served }()
+
+		for _, target := range []struct{ name, quic string }{{"go", goServer.Addr().String()}, {"rust", endpoint}} {
+			t.Run(target.name, func(t *testing.T) {
+				material, leaf := enroll(net1.ID, "rust-exit-"+target.name, true)
+				node, err := identity.IdentityFromCertificate(leaf)
+				if err != nil {
+					t.Fatal(err)
+				}
+				session, err := store.EphemeralExitSession(ctx, node.NodeID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				nodeCert, nodeKey := pair("rust-exit-"+target.name, material)
+				childCtx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(childCtx, binary, "--ignored", "--exact", "--nocapture", "authority::tests::live_ephemeral_exit_lease")
+				cmd.Env = append(os.Environ(),
+					"LANEWAY_EXIT_LEASE_CA="+root, "LANEWAY_EXIT_LEASE_CERT="+nodeCert, "LANEWAY_EXIT_LEASE_KEY="+nodeKey,
+					"LANEWAY_EXIT_LEASE_NETWORK="+net1.ID.String(), "LANEWAY_EXIT_LEASE_NODE="+node.NodeID.String(),
+					"LANEWAY_EXIT_LEASE_SERVICE="+sid.String(), "LANEWAY_EXIT_LEASE_QUIC="+target.quic,
+					"LANEWAY_EXIT_LEASE_GENERATION="+strconv.FormatUint(session.Generation, 10),
+				)
+				out, err := cmd.StdoutPipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				cmd.Stderr = os.Stderr
+				if err := cmd.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+				revoked := false
+				scanner := bufio.NewScanner(out)
+				for scanner.Scan() {
+					line := scanner.Text()
+					t.Log(line)
+					if !revoked && line == "rust ephemeral exit heartbeat verified" {
+						if _, err := store.RevokeNode(ctx, node.NodeID, "Rust exit lease lab"); err != nil {
+							t.Fatal(err)
+						}
+						revoked = true
+					}
+				}
+				if scanErr := scanner.Err(); scanErr != nil {
+					t.Fatal(scanErr)
+				}
+				if err := cmd.Wait(); err != nil || !revoked {
+					t.Fatalf("native node lease test: verified and revoked=%t err=%v", revoked, err)
+				}
+			})
 		}
 	})
 }

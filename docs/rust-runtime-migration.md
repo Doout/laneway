@@ -298,6 +298,20 @@ The release default remains Go until promotion. The supported legacy profile
 uses NAT and enables direct paths. WireGuard-enabled, routed-only and shared-host
 ephemeral exits are separate migration work.
 
+### Ephemeral exit control
+
+Run `bash integration/rust-lab/exit-lease.sh` to exercise the Rust node control
+loop against both controller implementations. The fixture uses separate
+disposable identities and revokes each while its authenticated QUIC session runs.
+It checks that a same-epoch heartbeat extends only the lease, and that revocation
+retires the authority without waiting for a timeout. The unit gate also checks
+terminal expiry while a request is stalled.
+
+This is a control-plane gate only. It does not launch a WireGuard device,
+install routes, or replace the existing ephemeral exit launcher. Keep using the
+existing encrypted runtime until Rust also passes packet, drain, and credential
+cleanup gates.
+
 ### Verified on the local ARM64 Linux VM
 
 - Direct and relayed IPv4/IPv6 packets between the Go and Rust node binaries,
