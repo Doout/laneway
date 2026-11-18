@@ -69,7 +69,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 		t.Fatal(err)
 	}
 	caKey := write("issuer.key", "PRIVATE KEY", caPK)
-	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key, "--root-token-file", rootFile, "--node-issuer", ca, caKey, "86400")
+	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key, "--root-token-file", rootFile, "--node-issuer", ca, caKey, "86400", "--node-client-ca", ca)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -299,6 +299,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	t.Run("network-management", func(t *testing.T) { testRustNetworkManagement(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("enrollment-issuance", func(t *testing.T) { testRustEnrollmentIssuance(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("enrollment-redemption", func(t *testing.T) { testRustRedemption(t, f, client, rustURL, goServer.URL) })
+	t.Run("node-renewal", func(t *testing.T) { testRustRenewal(t, f, client, rustURL, goServer.URL) })
 	if err := f.store.LogoutAdministratorSession(t.Context(), adminauth.SessionSubject(session.PrincipalID, session.ID)); err != nil {
 		t.Fatal(err)
 	}

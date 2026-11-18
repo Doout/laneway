@@ -2,6 +2,7 @@
 mod addresses;
 mod exit;
 mod maintenance;
+pub mod renewal;
 
 use crate::enrollment_tokens::{EXIT, ROUTER};
 use crate::{
@@ -26,6 +27,8 @@ pub enum EnrollError {
     Malformed(&'static str),
     #[error("authentication failed")]
     Invalid,
+    #[error("permission denied")]
+    Denied,
     #[error("enrollment code has expired")]
     Expired,
     #[error("enrollment code has already been used")]
@@ -73,6 +76,33 @@ struct Grant {
     name: Option<String>,
     caps: i64,
     user: Option<[u8; 16]>,
+}
+
+fn record_certificate(
+    tx: &Transaction<'_>,
+    net: Id,
+    node: Id,
+    issuer: &NodeIssuer,
+    cert: crate::node_pki::IssuedCertificate,
+    now: i64,
+) -> Result<CertificateChain> {
+    let id = new_id()?;
+    tx.execute("INSERT INTO certificates(id,network_id,node_id,serial,der,not_before,not_after,created_at) VALUES(?,?,?,?,?,?,?,?)",params![id.as_bytes(),net.as_bytes(),node.as_bytes(),cert.serial,cert.der,cert.not_before,cert.not_after,now])?;
+    audit(
+        tx,
+        net,
+        Some(node),
+        "certificate.issue",
+        ("certificate", id),
+        json!({}),
+        now,
+    )?;
+    Ok(CertificateChain {
+        certificates_der: std::iter::once(cert.der)
+            .chain(issuer.intermediates().iter().cloned())
+            .collect(),
+        not_after_unix_seconds: u64::try_from(cert.not_after)?,
+    })
 }
 
 impl SessionStore {
@@ -233,28 +263,13 @@ impl SessionStore {
             )?;
         }
         let cert = issuer.issue(&csr, net, node, now, lease)?;
-        let cert_id = new_id()?;
-        tx.execute("INSERT INTO certificates(id,network_id,node_id,serial,der,not_before,not_after,created_at) VALUES(?,?,?,?,?,?,?,?)",params![cert_id.as_bytes(),net.as_bytes(),node.as_bytes(),cert.serial,cert.der,cert.not_before,cert.not_after,now])?;
-        audit(
-            &tx,
-            net,
-            Some(node),
-            "certificate.issue",
-            ("certificate", cert_id),
-            json!({}),
-            now,
-        )?;
+        let chain = record_certificate(&tx, net, node, issuer, cert, now)?;
         ensure!(!cancelled(), "enrollment cancelled");
         tx.commit()?;
         Ok(EnrollmentResponse {
             network_id: net.as_bytes().to_vec(),
             node_id: node.as_bytes().to_vec(),
-            certificate_chain: Some(CertificateChain {
-                certificates_der: std::iter::once(cert.der)
-                    .chain(issuer.intermediates().iter().cloned())
-                    .collect(),
-                not_after_unix_seconds: cert.not_after as u64,
-            }),
+            certificate_chain: Some(chain),
             overlay_addresses: addresses
                 .into_iter()
                 .map(|a| match a {

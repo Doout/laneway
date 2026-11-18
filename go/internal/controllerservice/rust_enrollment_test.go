@@ -30,14 +30,28 @@ func labRedeem(t *testing.T, client *http.Client, server string, msg *v1.Enrollm
 	if err != nil {
 		t.Fatal(err)
 	}
-	req, err := http.NewRequestWithContext(t.Context(), "POST", server+"/v1/enroll", bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/x-protobuf")
-	res, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	var res *http.Response
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(t.Context(), "POST", server+"/v1/enroll", bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		res, err = client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The other interop cases use the same loopback source. Retry only
+		// explicit pre-admission throttling, never an ambiguous redemption.
+		if res.StatusCode != 429 || want == 429 || attempt == 3 || res.Header.Get("Retry-After") != "1" {
+			break
+		}
+		res.Body.Close()
+		select {
+		case <-time.After(time.Second):
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
 	}
 	defer res.Body.Close()
 	if res.StatusCode != want {

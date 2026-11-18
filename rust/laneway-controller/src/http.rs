@@ -18,6 +18,8 @@ mod form;
 mod login;
 mod management;
 mod mutations;
+mod node_proto;
+mod renew;
 
 const COOKIE: &str = "__Host-laneway_admin_session";
 const CSRF: &str = "__Host-laneway_admin_csrf";
@@ -26,6 +28,7 @@ type Reply = Response<Full<Bytes>>;
 
 #[derive(Clone)]
 pub struct State {
+    renewal_enabled: bool,
     database: Arc<PathBuf>,
     queries: Arc<Semaphore>,
     root: Option<Arc<RootCredential>>,
@@ -40,8 +43,10 @@ impl State {
         database: PathBuf,
         root: Option<RootCredential>,
         issuer: Option<laneway_controller::node_pki::NodeIssuer>,
+        renewal_enabled: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
+            renewal_enabled,
             database: Arc::new(database),
             issuer: issuer.map(Arc::new),
             enrollments: Default::default(),
@@ -217,6 +222,9 @@ async fn dispatch(
     peer: std::net::IpAddr,
 ) -> Result<Reply, Failure> {
     let path = req.uri().path();
+    if path == "/v1/renew" && state.renewal_enabled {
+        return Ok(renew::handle(req, state, id).await);
+    }
     if path == "/v1/enroll" && state.issuer.is_some() {
         return Ok(enroll::handle(req, state, id, peer).await);
     }
@@ -315,8 +323,8 @@ async fn dispatch(
         .await;
     }
     if discovery {
-        // This loopback listener does not authenticate relay client certificates.
-        // Never trust a forwarded address on this transport.
+        // Node renewal's TLS verifier does not delegate proxy authority.
+        // Never trust a forwarded client address on this listener.
         if req.headers().contains_key("x-laneway-public-client-ip") {
             return Err(AUTH);
         }

@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM]";
 
 pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let database = PathBuf::from(args.next().context(USAGE)?);
@@ -33,6 +33,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let key = PathBuf::from(args.next().context(USAGE)?);
     let mut root = None;
     let mut issuer = None;
+    let mut client_ca = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -57,17 +58,23 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
                 &key,
                 lifetime,
             )?);
+        } else if flag == "--node-client-ca" && client_ca.is_none() {
+            client_ca = Some(PathBuf::from(args.next().context(USAGE)?));
         } else {
             anyhow::bail!(USAGE)
         }
     }
-    let config = tls(&cert, &key)?;
+    ensure!(
+        client_ca.is_none() || issuer.is_some(),
+        "node renewal requires --node-issuer"
+    );
+    let config = tls(&cert, &key, client_ca.as_deref())?;
     laneway_controller::SessionStore::check_database(&database)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(serve(
-            super::http::State::new(database, root, issuer)?,
+            super::http::State::new(database, root, issuer, client_ca.is_some())?,
             address,
             config,
         ))
@@ -91,16 +98,29 @@ fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>
     Ok(Cursor::new(data))
 }
 
-fn tls(cert: &Path, key: &Path) -> Result<ServerConfig> {
+fn tls(cert: &Path, key: &Path, client_ca: Option<&Path>) -> Result<ServerConfig> {
     let chain =
         rustls_pemfile::certs(&mut pem(cert, false)?).collect::<std::io::Result<Vec<_>>>()?;
     let key =
         rustls_pemfile::private_key(&mut pem(key, true)?)?.context("missing TLS private key")?;
-    let mut config =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_protocol_versions(&[&rustls::version::TLS13])?
-            .with_no_client_auth()
-            .with_single_cert(chain, key)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = ServerConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])?;
+    let builder = if let Some(path) = client_ca {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut pem(path, false)?) {
+            roots.add(cert?)?;
+        }
+        let verifier =
+            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
+                .allow_unauthenticated()
+                .build()?;
+        builder.with_client_cert_verifier(verifier)
+    } else {
+        builder.with_no_client_auth()
+    };
+    let mut config = builder.with_single_cert(chain, key)?;
+    config.send_tls13_tickets = 0;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
 }
@@ -138,7 +158,11 @@ async fn serve(state: super::http::State, address: SocketAddr, config: ServerCon
                 tasks.spawn(async move {
                     let _permit=permit;
                     let Ok(Ok(tls))=timeout(Duration::from_secs(5),acceptor.accept(socket)).await else {return};
-                    let handler=service_fn(move |req| {
+                    // Incoming HTTP headers never supply an identity. rustls has
+                    // verified both the client chain and proof of key possession.
+                    let leaf=tls.get_ref().1.peer_certificates().and_then(|c|c.first()).map(|c|c.clone().into_owned());
+                    let handler=service_fn(move |mut req:hyper::Request<hyper::body::Incoming>| {
+                        if let Some(cert)=&leaf{req.extensions_mut().insert(cert.clone());}
                         let state=state.clone();
                         async move {Ok::<_,Infallible>(super::http::handle(req,state,peer.ip()).await)}
                     });

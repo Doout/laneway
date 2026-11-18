@@ -204,5 +204,23 @@ The interop gate checks all three classes, rollback on a late audit failure,
 Go and Rust racing to redeem one invite, and address reuse after expiry. A
 Go client also presents its Rust-issued certificate over mutual TLS and
 renews that same node identity at the Go controller.
-Credential renewal and authenticated configuration still require Go. Keep
-all production controllers and node update channels unchanged.
+
+### Renew node certificates over HTTPS (lab only)
+
+With enrollment configured, append `--node-client-ca /lab/node-trust-roots.pem`
+to enable `POST /v1/renew`. This file contains the public CA certificates
+trusted for workload client authentication. Keep it separate from the HTTPS
+server certificate and the private signing key. Omit the flag to disable
+renewal without disabling enrollment or administrator sessions.
+
+The Go HTTPS client can present its existing certificate, renew at Rust using
+a new CSR, and use the new private key and certificate at Go. Renewal leaves
+the old certificate valid until expiry or explicit revocation. Omitting the
+WireGuard key preserves its binding; changing it commits the new certificate,
+key, audit events, and network epoch together. Ephemeral certificates cannot
+outlive their leases. The interop gate revokes an admitted request's certificate
+before sending its body and checks that no replacement is issued.
+
+This is the HTTPS server endpoint. It does not yet implement the controller's
+QUIC renewal path, automatic certificate replacement in the Rust node, or
+authenticated configuration snapshots. Keep Go serving production.
