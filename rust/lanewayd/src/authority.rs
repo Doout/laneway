@@ -22,12 +22,12 @@ pub(crate) trait ConfigurationSource: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + 'a>>;
 }
 
-impl ConfigurationSource for Client {
+impl ConfigurationSource for Arc<Client> {
     fn poll<'a>(
         &'a self,
         known_epoch: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + 'a>> {
-        Box::pin(async move { self.poll(known_epoch).await })
+        Box::pin(async move { self.as_ref().poll(known_epoch).await })
     }
 }
 

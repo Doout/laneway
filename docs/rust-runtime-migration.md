@@ -221,6 +221,27 @@ key, audit events, and network epoch together. Ephemeral certificates cannot
 outlive their leases. The interop gate revokes an admitted request's certificate
 before sending its body and checks that no replacement is issued.
 
-This is the HTTPS server endpoint. It does not yet implement the controller's
-QUIC renewal path, automatic certificate replacement in the Rust node, or
-authenticated configuration snapshots. Keep Go serving production.
+This is the Rust controller's HTTPS endpoint. The node workflow below uses the
+Go controller: the Rust controller does not yet serve the authenticated QUIC
+renewal and configuration requests the Rust node needs. Keep Go serving production.
+
+### Renew a Rust node at a Go controller (lab only)
+
+Set `auto_renew_certificate = true` in the node's `[controller]` section.
+Leave it off (the default) for read-only mounts or externally managed certificates.
+Use a dedicated, writable directory owned by the node user and not writable by
+group or others. The certificate must be a regular, singly linked, certificate-only
+file owned by that user, with the same group as new files in that directory.
+Keep the private key in its own file; the node never rewrites it.
+
+At two-thirds of the certificate lifetime, a node with current authority can
+request a replacement over authenticated QUIC. It keeps its key and WireGuard
+binding. Before replacing the old file, it verifies the new identity, chain,
+usages and expiry, then fetches a fresh configuration using the staged certificate.
+A failed check leaves the old file in place; renewal cannot extend an ephemeral
+lease. If the certificate expires first, recover through enrollment.
+
+Successful replacement briefly interrupts traffic: the same process releases
+its old connections and interface, then bootstraps again using the new leaf.
+`integration/rust-controller-node-netns.sh` exercises this handoff, revokes
+the superseded certificate, and sends real traffic through the renewed node.

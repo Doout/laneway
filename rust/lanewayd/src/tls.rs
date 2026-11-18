@@ -344,7 +344,7 @@ pub(crate) fn validate_peer(
     Ok(identity)
 }
 
-fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
+pub(crate) fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
     let roots = load_certificates(path)?;
     let mut store = RootCertStore::empty();
     let (accepted, rejected) = store.add_parsable_certificates(roots);
@@ -374,7 +374,7 @@ fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'stati
     Ok(certificates)
 }
 
-fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
+pub(crate) fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
     let metadata =
         fs::metadata(path).with_context(|| format!("stat private key {}", path.display()))?;
     ensure!(metadata.len() <= 1 << 20, "private key exceeds 1 MiB");

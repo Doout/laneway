@@ -250,6 +250,7 @@ controller_command=(
   -admin-token-file "${work_dir}/admin.token"
   -snapshot-validity 2s
   -initial-node-delay 1500ms
+  -first-enrollment-validity 30s
 )
 start_process "${controller_ns}" "${work_dir}/controller.log" "${controller_command[@]}"
 controller_pid="${last_pid}"
@@ -375,6 +376,7 @@ certificate = "${work_dir}/pki/rust.crt"
 private_key = "${work_dir}/pki/rust.key"
 ca = "${work_dir}/pki/ca.crt"
 [controller]
+auto_renew_certificate = true
 endpoint = "${controller_endpoint}"
 quic_endpoint = "${controller_quic_endpoint}"
 server_name = "10.254.0.1"
@@ -402,6 +404,10 @@ listen = "0.0.0.0:4434"
 EOF
 
 echo "==> bootstrap is held before TUN creation, then the controller assignment is applied"
+old_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/rust.crt")"
+old_serial="${old_info##* serial=}"
+[[ "${old_serial}" =~ ^[0-9a-f]{2,64}$ ]]
+initial_key_hash="$(sha256sum "${work_dir}/pki/rust.key")"
 start_process "${rust_ns}" "${work_dir}/rust.log" env RUST_LOG=info \
   "${work_dir}/rust-node" --config "${work_dir}/rust.toml"
 rust_pid="${last_pid}"
@@ -412,6 +418,23 @@ if ip -n "${rust_ns}" link show lane0 >/dev/null 2>&1; then
 fi
 wait_log "${controller_pid}" "${work_dir}/controller.log" "node configuration response status=200"
 wait_log "${rust_pid}" "${work_dir}/rust.log" "native Rust Laneway agent started"
+wait_log "${rust_pid}" "${work_dir}/rust.log" "renewed node certificate; restarting authenticated connections"
+for _ in $(seq 1 160); do
+  if [[ "$(grep -c 'native Rust Laneway agent started' "${work_dir}/rust.log")" -ge 2 ]]; then break; fi
+  sleep 0.05
+done
+if [[ "$(grep -c 'native Rust Laneway agent started' "${work_dir}/rust.log")" -lt 2 ]]; then
+  echo "ERROR: renewed credentials were not loaded into the Rust node" >&2
+  tail -25 "${work_dir}/rust.log" >&2
+  exit 1
+fi
+new_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/rust.crt")"
+[[ "${new_info% serial=*}" == "${old_info% serial=*}" && "${new_info##* serial=}" != "${old_serial}" ]]
+[[ "$(sha256sum "${work_dir}/pki/rust.key")" == "${initial_key_hash}" ]]
+echo "==> revoking the superseded Rust certificate before testing routed traffic"
+ip netns exec "${controller_ns}" "${work_dir}/laneway" controller certificate revoke \
+  --network-id "${network_id}" --serial "${old_serial}" --reason rust-renewal-test \
+  "${admin_connection[@]}" >"${work_dir}/old-certificate-revocation.json"
 for _ in $(seq 1 120); do
   if ip -n "${rust_ns}" -4 address show dev lane0 2>/dev/null | grep -q "${rust_address}/32"; then
     break

@@ -48,6 +48,7 @@ func run() error {
 	adminTokenFile := flag.String("admin-token-file", "", "admin bearer token file")
 	snapshotValidity := flag.Duration("snapshot-validity", 2*time.Second, "node and relay snapshot lease")
 	initialNodeDelay := flag.Duration("initial-node-delay", 0, "hold the first node configuration response")
+	firstEnrollmentValidity := flag.Duration("first-enrollment-validity", 0, "optional shorter first enrollment leaf for the renewal gate")
 	flag.Parse()
 	if flag.NArg() != 0 || *listen == "" || *database == "" || *caCertificate == "" ||
 		*caKey == "" || *controllerCertificate == "" || *controllerKey == "" ||
@@ -116,7 +117,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	service, err := controllerservice.New(controllerservice.Options{
+	options := controllerservice.Options{
 		Store:            store,
 		CACertificate:    issuer,
 		CAKey:            signer,
@@ -124,13 +125,33 @@ func run() error {
 		LeafValidity:     time.Hour,
 		AdminAuthorizer:  authorizeAdmin,
 		SnapshotValidity: *snapshotValidity,
-	})
+	}
+	service, err := controllerservice.New(options)
 	if err != nil {
 		return err
 	}
 	server := service.NewHTTPServer(*listen, tlsConfig)
 	middleware := func(next http.Handler) http.Handler { return observeNodeConfiguration(next, *initialNodeDelay) }
 	server.Handler = middleware(service.Handler())
+	if *firstEnrollmentValidity != 0 {
+		if *firstEnrollmentValidity <= 0 || *firstEnrollmentValidity >= options.LeafValidity {
+			return errors.New("invalid first enrollment validity")
+		}
+		options.LeafValidity = *firstEnrollmentValidity
+		short, err := controllerservice.New(options)
+		if err != nil {
+			return err
+		}
+		first, normal := short.Handler(), server.Handler
+		var used atomic.Bool
+		server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && r.URL.Path == "/v1/enroll" && used.CompareAndSwap(false, true) {
+				first.ServeHTTP(w, r)
+				return
+			}
+			normal.ServeHTTP(w, r)
+		})
+	}
 	var quicServer *controllerservice.QUICServer
 	if *quicListen != "" {
 		quicServer, err = service.ListenQUICWithMiddleware(*quicListen, tlsConfig, middleware)

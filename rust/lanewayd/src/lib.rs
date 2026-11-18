@@ -21,6 +21,7 @@ mod nft_state;
 mod packet_pool;
 mod probe;
 mod relay;
+mod renewal;
 mod routing;
 mod state;
 mod tcp_fallback;

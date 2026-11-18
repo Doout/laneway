@@ -21,6 +21,9 @@ humantime-serde.workspace = true
 ipnet.workspace = true
 laneway-protocol = { path = "../laneway-protocol" }
 prost.workspace = true
+rcgen = { version = "0.14.8", default-features = false, features = ["ring","zeroize"] }
+tempfile = "3.26.0"
+base64.workspace = true
 quinn.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
 rustls.workspace = true
@@ -41,4 +44,3 @@ x509-parser.workspace = true
 [dev-dependencies]
 laneway-relay = { path = "../laneway-relay" }
 rcgen = "0.14.5"
-tempfile = "3.26.0"

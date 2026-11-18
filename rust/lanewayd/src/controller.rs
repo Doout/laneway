@@ -63,6 +63,7 @@ pub(crate) enum PollResult {
 
 /// Strict HTTPS/protobuf controller snapshot client.
 pub(crate) struct Client {
+    options: ClientOptions,
     endpoint: String,
     http: reqwest::Client,
     expected_controller: AuthenticatedIdentity,
@@ -164,6 +165,7 @@ impl Client {
             resolved.dedup();
         }
         Ok(Self {
+            options: options.clone(),
             endpoint: format!(
                 "{}/v1/configuration",
                 options.endpoint.trim_end_matches('/')
@@ -177,6 +179,38 @@ impl Client {
 
     pub(crate) fn resolved_ips(&self) -> Vec<IpAddr> {
         self.resolved.iter().map(SocketAddr::ip).collect()
+    }
+
+    pub(crate) async fn with_certificate(&self, path: PathBuf) -> Result<Self> {
+        let mut options = self.options.clone();
+        options.certificate = path;
+        Self::new(options).await
+    }
+
+    pub(crate) async fn renew_certificate(
+        &self,
+        csr: Vec<u8>,
+    ) -> Result<laneway_protocol::v1::RenewalResponse> {
+        use laneway_protocol::v1::{ControllerEnvelope, RenewalRequest, controller_envelope::Body};
+        let control = self
+            .quic
+            .as_ref()
+            .context("renewal requires authenticated controller QUIC")?;
+        // Omitting the WireGuard key is the protocol's preserve-current-binding
+        // operation. Certificate maintenance must never rotate dataplane keys.
+        let request = ControllerEnvelope {
+            schema_version: 1,
+            request_id: control.next_request_id(),
+            body: Some(Body::RenewalRequest(RenewalRequest {
+                pkcs10_csr_der: csr,
+                wireguard_public_key: Vec::new(),
+            })),
+        };
+        match control.exchange(request).await?.body {
+            Some(Body::RenewalResponse(reply)) => Ok(reply),
+            Some(Body::Error(e)) => bail!("controller refused node renewal: {:?}", e.code()),
+            _ => bail!("unexpected controller renewal response"),
+        }
     }
 
     pub(crate) async fn poll(&self, known_epoch: u64) -> Result<PollResult> {

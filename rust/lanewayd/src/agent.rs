@@ -79,6 +79,31 @@ impl Agent {
     where
         F: Future<Output = ()>,
     {
+        let configured = Arc::clone(&self.config);
+        tokio::pin!(shutdown);
+        loop {
+            let mut reload = None;
+            self.run_generation(shutdown.as_mut(), &mut reload).await?;
+            let Some(socket) = reload else { return Ok(()) };
+            // Quinn's endpoint driver may retain the UDP socket while draining
+            // closed connections, even after our last Endpoint was dropped.
+            tokio::select! {
+                _ = shutdown.as_mut()=>return Ok(()),
+                result=tokio::time::timeout(Duration::from_secs(15),async {
+                    while socket.strong_count()!=0 {tokio::time::sleep(Duration::from_millis(20)).await;}
+                })=>result.context("previous node generation did not release its UDP socket")?,
+            }
+            // Start from the operator config, not the last derived snapshot.
+            // Every control and packet connection must present the new leaf.
+            self = Self::new((*configured).clone())?;
+        }
+    }
+
+    async fn run_generation<F: Future<Output = ()>>(
+        mut self,
+        shutdown: F,
+        reload: &mut Option<std::sync::Weak<ProbeSocket>>,
+    ) -> Result<()> {
         let mut authority_base = (*self.config).clone();
         let certificate_presented_serial =
             hex::encode(tls::local_certificate_health(&authority_base.tls)?.serial);
@@ -123,6 +148,7 @@ impl Agent {
         let (endpoint, probe) = ProbeSocket::bind(self.config.direct.listen, server)
             .context("bind shared direct/relay UDP endpoint")?;
         let direct_address = endpoint.local_addr()?;
+        let socket_lifetime = Arc::downgrade(&probe);
         let diagnostics = if let Some(address) = self.config.diagnostics.listen {
             let server = DiagnosticsServer::bind(address, Arc::clone(&self.metrics)).await?;
             info!(address = %server.local_addr()?, "Rust node diagnostics listening");
@@ -219,6 +245,8 @@ impl Agent {
         let intent_persisted = Arc::new(StdMutex::new(intent_persisted));
         let device = tun.lock().await.device();
         let mut tasks = JoinSet::new();
+        let mut replacement: Pin<Box<dyn Future<Output = ()> + Send>> =
+            Box::pin(std::future::pending());
 
         if let Some((client, snapshot, authority, local_certificate)) = bootstrap {
             let applier = Arc::new(RuntimeApplier {
@@ -279,6 +307,17 @@ impl Agent {
                     ("restore TUN after controller runner failure", tun_restore),
                 ]);
             };
+            let client = Arc::new(client);
+            if settings.auto_renew_certificate {
+                replacement = Box::pin(crate::renewal::when_due(
+                    Arc::clone(&client),
+                    Arc::clone(&authority),
+                    self.config.tls.clone(),
+                    self.network,
+                    self.node,
+                    local_certificate.clone(),
+                ));
+            }
             let runner = match Runner::new(
                 client,
                 authority,
@@ -443,7 +482,9 @@ impl Agent {
 
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
+            biased;
             _ = &mut shutdown => Ok(()),
+            _ = &mut replacement => { *reload=Some(socket_lifetime); Ok(()) },
             completed = tasks.join_next() => match completed {
                 Some(Ok(result)) => result,
                 Some(Err(error)) => Err(error.into()),

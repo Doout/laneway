@@ -168,6 +168,10 @@ pub struct DiagnosticsConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControllerConfig {
+    /// Renew a controller-managed certificate in place using the existing TLS
+    /// key. Requires a writable certificate directory owned by the node.
+    #[serde(default)]
+    pub auto_renew_certificate: bool,
     /// HTTPS origin of the Go controller, without an API path.
     pub endpoint: String,
     /// Required reliable mTLS QUIC controller endpoint in host:port form.
