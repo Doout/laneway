@@ -12,6 +12,7 @@ use subtle::ConstantTimeEq;
 pub(crate) enum BrowserWrite {
     CreateNetwork,
     IssueEnrollment,
+    ManageAccess,
 }
 
 impl SessionStore {
@@ -28,7 +29,7 @@ impl SessionStore {
                 "SELECT p.role,s.csrf_hash FROM administrator_sessions s JOIN administrator_principals p ON p.id=s.principal_id WHERE s.id=?1",
                 [session.as_bytes()],|r|Ok((r.get(0)?,r.get(1)?)))?;
             ensure!(bool::from(stored.ct_eq(&proof)),SessionError::Denied);
-            ensure!(role=="owner" || (role=="operator" && matches!(operation,BrowserWrite::IssueEnrollment)),SessionError::Denied);
+            ensure!(role=="owner" || (role=="operator" && matches!(operation,BrowserWrite::IssueEnrollment | BrowserWrite::ManageAccess)),SessionError::Denied);
             write(tx,principal,all,now)
         })
     }

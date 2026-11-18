@@ -13,6 +13,7 @@ use std::{
     },
 };
 use tokio::sync::Semaphore;
+mod access_admin;
 mod enroll;
 mod form;
 mod login;
@@ -225,7 +226,8 @@ async fn dispatch(
     head: bool,
     peer: std::net::IpAddr,
 ) -> Result<Reply, Failure> {
-    let path = req.uri().path();
+    let uri = req.uri().clone();
+    let path = uri.path();
     if path == "/v1/renew" && state.workload_mtls_enabled {
         return Ok(renew::handle(req, state, id).await);
     }
@@ -245,6 +247,9 @@ async fn dispatch(
         return Err(malformed("administrator path must be canonical"));
     }
     let pieces: Vec<_> = path.split('/').collect();
+    if let Some(route) = access_admin::Route::parse(&pieces) {
+        return access_admin::handle(req, state, id, route).await;
+    }
     let root_probe = path == "/v1/admin/auth/root";
     let logout = path == "/v1/admin/auth/logout";
     let rotate = path == "/v1/admin/auth/session/rotate";

@@ -257,8 +257,12 @@ The Rust controller compiles existing user and team grants into node snapshots.
 Named resources remain pinned to their approved route and service port ranges.
 A deny rule for the user's devices precedes ordinary ACLs, so a global allow
 cannot widen managed access. Disabling the user removes their grants and
-retains that deny rule. Use the Go controller to manage the grants themselves;
-the Rust administration endpoints for managed access are still pending.
+retains that deny rule. Rust serves the full access inventory and supports
+creating users and teams, toggling users, changing team membership, and
+adding or removing direct grants. Browser writes require same-origin CSRF
+proof; scoped automation uses `acl.read` or `acl.manage`. Each policy change,
+epoch advance, and audit entry commits together. Creating or editing named
+resources, services, and their grants still uses the Go controller.
 Keep Go serving production.
 
 ### Renew a Rust node at a Go or Rust controller (lab only)
