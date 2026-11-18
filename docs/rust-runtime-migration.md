@@ -185,8 +185,12 @@ checks that the old credential is rejected.
 
 Administrator and session inventory is available to the root bearer and
 owner browser sessions. Exact username lookup is limited to the root bearer.
-The responses contain no credential hashes or plaintext. General
-administrator writes and explicit session revocation still require Go.
+The responses contain no credential hashes or plaintext. The root bearer and
+owner browser sessions can also create administrators, update access, replace
+passwords, and revoke sessions. Browser writes require same-origin and CSRF
+checks. Access updates protect the last enabled owner, and a password or
+access change revokes affected sessions in the same transaction. Revoking a
+rotated session also revokes its successors.
 
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly

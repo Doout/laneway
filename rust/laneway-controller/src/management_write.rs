@@ -15,6 +15,27 @@ pub(crate) enum BrowserWrite {
     ManageAccess,
 }
 
+pub(crate) fn verify_browser_write(
+    tx: &Transaction<'_>,
+    session: Id,
+    csrf: Option<&str>,
+    operator_allowed: bool,
+) -> Result<()> {
+    let proof = csrf
+        .and_then(|s| csrf_digest(s).ok())
+        .ok_or(SessionError::Denied)?;
+    let (role, stored): (String, [u8; 32]) = tx.query_row(
+        "SELECT p.role,s.csrf_hash FROM administrator_sessions s JOIN administrator_principals p ON p.id=s.principal_id WHERE s.id=?1",
+        [session.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    ensure!(bool::from(stored.ct_eq(&proof)), SessionError::Denied);
+    ensure!(
+        role == "owner" || (role == "operator" && operator_allowed),
+        SessionError::Denied
+    );
+    Ok(())
+}
+
 impl SessionStore {
     pub fn deny_root_only_session<T>(&mut self, token: &str) -> Result<T> {
         self.with_session(token, false, |_, _, _, _, _| {
@@ -42,14 +63,13 @@ impl SessionStore {
         operation: BrowserWrite,
         write: impl FnOnce(&Transaction<'_>, Id, bool, i64) -> Result<T>,
     ) -> Result<SessionReply<T>> {
-        self.with_session(token,true,|tx,principal,session,all,now|{
-            let proof=csrf.and_then(|s| csrf_digest(s).ok()).ok_or(SessionError::Denied)?;
-            let (role,stored):(String,[u8;32])=tx.query_row(
-                "SELECT p.role,s.csrf_hash FROM administrator_sessions s JOIN administrator_principals p ON p.id=s.principal_id WHERE s.id=?1",
-                [session.as_bytes()],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            ensure!(bool::from(stored.ct_eq(&proof)),SessionError::Denied);
-            ensure!(role=="owner" || (role=="operator" && matches!(operation,BrowserWrite::IssueEnrollment | BrowserWrite::ManageAccess)),SessionError::Denied);
-            write(tx,principal,all,now)
+        self.with_session(token, true, |tx, principal, session, all, now| {
+            let operator_allowed = matches!(
+                operation,
+                BrowserWrite::IssueEnrollment | BrowserWrite::ManageAccess
+            );
+            verify_browser_write(tx, session, csrf, operator_allowed)?;
+            write(tx, principal, all, now)
         })
     }
     pub(crate) fn bearer_write<T>(

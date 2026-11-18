@@ -9,6 +9,9 @@ use rusqlite::{OpenFlags, OptionalExtension, Row, Transaction, params};
 use serde::Serialize;
 use std::path::Path;
 
+mod changes;
+pub use changes::{Access, Caller, Change, Changed};
+
 #[derive(Debug, thiserror::Error)]
 pub enum AdministratorError {
     #[error("invalid {0}")]
@@ -17,6 +20,8 @@ pub enum AdministratorError {
     Username,
     #[error("request conflicts with controller state")]
     Conflict,
+    #[error("invalid request")]
+    Invalid,
 }
 
 #[derive(Clone, Copy)]

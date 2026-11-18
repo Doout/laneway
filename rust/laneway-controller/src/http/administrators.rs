@@ -9,10 +9,15 @@ use laneway_controller::{
 };
 use laneway_protocol::Id;
 
+mod changes;
+
+#[derive(Clone, Copy)]
 pub(super) enum Route<'a> {
     List,
     Principal(&'a str),
     Sessions(&'a str),
+    Password(&'a str),
+    Revoke(&'a str),
     Rotation(&'a str, Rotation),
 }
 
@@ -22,6 +27,8 @@ impl<'a> Route<'a> {
             ["", "v1", "admin", "administrators"] => Self::List,
             ["", "v1", "admin", "administrators", id] => Self::Principal(id),
             ["", "v1", "admin", "administrators", id, "sessions"] => Self::Sessions(id),
+            ["", "v1", "admin", "administrators", id, "password"] => Self::Password(id),
+            ["", "v1", "admin", "sessions", id, "revoke"] => Self::Revoke(id),
             [
                 "",
                 "v1",
@@ -76,12 +83,23 @@ pub(super) async fn handle(
     id: &str,
     route: Route<'_>,
 ) -> Result<Reply, Failure> {
+    let change = match (route, req.method()) {
+        (Route::List, &Method::POST) => Some(changes::Route::Create),
+        (Route::Principal(id), &Method::PATCH) => Some(changes::Route::Update(id)),
+        (Route::Password(id), &Method::POST) => Some(changes::Route::Password(id)),
+        (Route::Revoke(id), &Method::POST) => Some(changes::Route::Revoke(id)),
+        _ => None,
+    };
+    if let Some(change) = change {
+        return changes::handle(req, state, id, change).await;
+    }
     let is_rotation = matches!(route, Route::Rotation(..));
     let head = req.method() == Method::HEAD;
     let allowed = if is_rotation {
         req.method() == Method::POST
     } else {
-        head || req.method() == Method::GET
+        !matches!(route, Route::Password(_) | Route::Revoke(_))
+            && (head || req.method() == Method::GET)
     };
     if !allowed {
         let mut reply = Failure(
@@ -91,11 +109,15 @@ pub(super) async fn handle(
             false,
         )
         .reply(id, head);
-        if is_rotation {
-            reply
-                .headers_mut()
-                .insert(header::ALLOW, "POST".parse().unwrap());
-        }
+        let allow = match route {
+            Route::Rotation(..) | Route::Password(_) | Route::Revoke(_) => "POST",
+            Route::List => "GET, HEAD, POST",
+            Route::Principal(_) => "GET, HEAD, PATCH",
+            Route::Sessions(_) => "GET, HEAD",
+        };
+        reply
+            .headers_mut()
+            .insert(header::ALLOW, header::HeaderValue::from_static(allow));
         return Ok(reply);
     }
     let caller = credential(req.headers())?;
@@ -114,6 +136,7 @@ pub(super) async fn handle(
         Route::Sessions(target) => {
             Read::Sessions(parse_id(target, "principal_id"), query_limit(query))
         }
+        Route::Password(_) | Route::Revoke(_) => unreachable!("only POST allowed"),
         Route::Rotation(target, phase) => {
             let target = parse_id(target, "rotation_id");
             tokio::task::spawn_blocking(move || {
@@ -167,6 +190,7 @@ fn failure(err: anyhow::Error) -> Failure {
                 "request conflicts with controller state",
                 false,
             ),
+            AdministratorError::Invalid => malformed("invalid request"),
         };
     }
     match err.downcast_ref::<ListError>() {

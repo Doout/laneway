@@ -1,6 +1,10 @@
 use super::{
     AUTH, COOKIE, Credential, Failure, INTERNAL, Reply, State, cookie, credential,
-    form::required_json_form, login::limited, malformed, mutations::DENIED, no_content, response,
+    form::{empty_secret, required_json_form, secret},
+    login::limited,
+    malformed,
+    mutations::DENIED,
+    no_content, response,
 };
 use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
@@ -9,7 +13,7 @@ use laneway_controller::{
     recovery::{Purpose, RecoveryError, valid_username},
 };
 use laneway_protocol::Id;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::json;
 use std::{net::IpAddr, time::Instant};
 use zeroize::Zeroizing;
@@ -38,12 +42,6 @@ impl<'a> Route<'a> {
     }
 }
 
-fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
-    Ok(Zeroizing::new(
-        Option::<String>::deserialize(d)?.unwrap_or_default(),
-    ))
-}
-
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RecoveryForm {
@@ -70,10 +68,6 @@ struct BootstrapForm {
     grant: Zeroizing<String>,
     #[serde(default = "empty_secret", deserialize_with = "secret")]
     password: Zeroizing<String>,
-}
-
-fn empty_secret() -> Zeroizing<String> {
-    Zeroizing::new(String::new())
 }
 
 fn store_error(err: anyhow::Error) -> Failure {

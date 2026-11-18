@@ -73,10 +73,10 @@ pub fn valid_username(username: &str) -> bool {
         })
 }
 
-struct AuditActor(&'static str, Option<RawId>);
+pub(crate) struct AuditActor(pub(crate) &'static str, pub(crate) Option<RawId>);
 
 impl AuditActor {
-    fn write(
+    pub(crate) fn write(
         &self,
         tx: &Transaction<'_>,
         action: &str,
@@ -137,7 +137,7 @@ fn eligible(tx: &Transaction<'_>, candidate: &Candidate, now: i64) -> Result<Gra
     .ok_or_else(|| SessionError::Invalid.into())
 }
 
-fn insert_password(
+pub(crate) fn insert_password(
     tx: &Transaction<'_>,
     principal: RawId,
     hash: &PasswordHash,

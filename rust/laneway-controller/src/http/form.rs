@@ -1,8 +1,18 @@
 use super::{Failure, malformed};
 use http_body_util::BodyExt;
 use hyper::{Request, StatusCode, body::Incoming, header};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use zeroize::Zeroizing;
+
+pub(super) fn empty_secret() -> Zeroizing<String> {
+    Zeroizing::new(String::new())
+}
+
+pub(super) fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String>, D::Error> {
+    Ok(Zeroizing::new(
+        Option::<String>::deserialize(d)?.unwrap_or_default(),
+    ))
+}
 
 pub(super) async fn json_form<T: serde::de::DeserializeOwned + Default>(
     req: Request<Incoming>,

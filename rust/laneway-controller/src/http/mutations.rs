@@ -22,6 +22,12 @@ pub(super) fn csrf_proof(headers: &HeaderMap) -> Option<String> {
         .then(|| cookie.to_owned())
 }
 
+pub(super) fn clear_cookies(reply: &mut Reply) {
+    for name in [COOKIE, CSRF] {
+        reply.headers_mut().append(header::SET_COOKIE,format!("{name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0; HttpOnly; Secure; SameSite=Strict").parse().unwrap());
+    }
+}
+
 pub(super) fn issued(id: &str, s: IssuedSession) -> Result<Reply, Failure> {
     let mut r = response(
         StatusCode::OK,
@@ -107,8 +113,6 @@ pub(super) async fn session(
         Ok(Err(e)) if e.is::<SessionError>() => AUTH.reply(id, false),
         _ => INTERNAL.reply(id, false),
     };
-    for name in [COOKIE, CSRF] {
-        reply.headers_mut().append(header::SET_COOKIE,format!("{name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0; HttpOnly; Secure; SameSite=Strict").parse().unwrap());
-    }
+    clear_cookies(&mut reply);
     Ok(reply)
 }
