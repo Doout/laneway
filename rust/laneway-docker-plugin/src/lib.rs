@@ -1,5 +1,7 @@
 //! Docker's local-scope Laneway driver and v1 ownership state.
 mod driver;
+#[cfg(target_os = "linux")]
+mod linux;
 mod listener;
 mod model;
 mod store;
@@ -9,6 +11,8 @@ mod tests;
 use thiserror::Error;
 
 pub use driver::{Backend, Driver, Reply};
+#[cfg(target_os = "linux")]
+pub use linux::LinuxBackend;
 pub use listener::serve_until;
 pub use model::{Authorization, Egress, Endpoint, Ingress, Network, Phase, Policy};
 pub use store::Store;

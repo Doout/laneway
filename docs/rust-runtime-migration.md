@@ -280,9 +280,18 @@ the derived bridge, route table, and veth names. It checks authorization before
 creation, join, or startup reconciliation. Failed cleanup keeps the ownership
 record, and an interrupted join stays pending until the backend confirms it.
 
-The Rust crate is not a drop-in plugin yet: the Linux bridge, veth, nftables,
-and policy-routing backend and managed-plugin image still need migration and
-privileged lifecycle tests. The published plugin and its packaging remain Go.
+The Linux backend uses the same bridge and veth aliases as Go. It installs
+the nftables policy as one transaction and removes exact recorded routes and
+rules rather than flushing tables or deleting rules by priority. The Rust
+managed-plugin rootfs is opt-in with `LANEWAY_DOCKER_PLUGIN_RUNTIME=rust`;
+CI tests both runtimes against Docker Engine. Tagged plugin releases still
+default to Go.
+
+The isolated Linux ARM64 lab verified in-place adoption of a Go-created
+network, preservation of unrelated routes and rules, and authorized packets
+through the tunnel. After removing the tunnel, the container's traffic was
+rejected even though the host could still reach the destination. The Rust
+image also recovered persisted state across restart through its Unix socket.
 
 ## Linux node image
 
