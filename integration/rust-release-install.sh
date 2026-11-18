@@ -49,6 +49,8 @@ restore=$work/restore
 restore_volume=$project-restored-controller
 server=
 install_started=false
+connector=
+connector_volume=
 export COMPOSE_PROJECT_NAME="$project" NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,$name"
 compose() {
   local directory=$1
@@ -64,6 +66,11 @@ cleanup() {
   if [[ -n $server ]]; then
     kill "$server" 2>/dev/null || true
     wait "$server" 2>/dev/null || true
+  fi
+  if [[ -n $connector ]]; then
+    if (( result != 0 )); then docker logs --tail 20 "$connector" >&2 2>/dev/null || true; fi
+    docker rm -f "$connector" >/dev/null 2>&1 || true
+    docker volume rm "$connector_volume" >/dev/null 2>&1 || true
   fi
   if [[ -f $restore/.env ]]; then restore_compose down --volumes >/dev/null 2>&1 || true; fi
   if [[ -f $destination/.env ]]; then
@@ -143,6 +150,72 @@ sed -i '/^  relay:$/,/^  exit-node:$/ { /    volumes:$/a\      - ./generated/pki
 compose "$destination" up -d --no-deps --force-recreate --pull never --wait --wait-timeout 90 relay
 "$destination/laneway-control" readiness
 
+# Exercise the real one-time invitation from the packaged control tool. Both
+# invocations of the pinned image need lab-only access to loopback listeners.
+connector_name="$project-connector"
+candidate="laneway-connector-$connector_name"
+candidate_volume="$candidate-state"
+if docker container inspect "$candidate" >/dev/null 2>&1 ||
+  docker volume inspect "$candidate_volume" >/dev/null 2>&1; then
+  echo 'Refusing to reuse an existing Connector or state volume.' >&2
+  exit 2
+fi
+connector=$candidate
+connector_volume=$candidate_volume
+"$destination/laneway-control" invite --docker --connector --name "$connector_name" > "$work/invitation"
+read -r url key < <(awk -F"'" 'NF == 7 {print $4, $6}' "$work/invitation")
+bundle=${url##*/}
+[[ $url == "https://$name/.well-known/laneway/bootstrap/$bundle" &&
+  $bundle =~ ^[A-Za-z0-9_-]{43}$ && $key =~ ^[A-Za-z0-9_-]{43}$ ]]
+curl --fail --silent --show-error --proto '=https' --tlsv1.3 --max-time 15 "$url" -o "$work/bootstrap.sh"
+[[ $(curl --silent --show-error --proto '=https' --tlsv1.3 --max-time 15 -o /dev/null -w '%{http_code}' "$url") == 404 ]]
+(
+  # shellcheck disable=SC2329 # The downloaded bootstrap calls the exported function.
+  docker() {
+    if [[ ${1:-} == run ]]; then
+      shift
+      command docker run --network host --add-host "$LANEWAY_RELEASE_LAB_HOST:127.0.0.1" "$@"
+    else
+      command docker "$@"
+    fi
+  }
+  export LANEWAY_RELEASE_LAB_HOST="$name"
+  export -f docker
+  bash "$work/bootstrap.sh" "$key" >/dev/null
+)
+unset key
+connector_digest=$(sed -n 's/^LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=//p' "$destination/.env")
+[[ $connector_digest =~ ^sha256:[a-f0-9]{64}$ ]]
+docker inspect "$connector" | jq -e --arg image "ghcr.io/doout/lane-edge-rust:${tag#v}@$connector_digest" '
+  .[0].Config | .Image == $image and
+  all(.Env[]; (startswith("SETUP_TOKEN") or startswith("ENROLLMENT_TOKEN")) | not)
+' >/dev/null
+
+connector_node_id() {
+  local status
+  # A new node waits for the relay's authorization poll, then reconnects.
+  for _ in {1..90}; do
+    if status=$(docker exec "$connector" /usr/local/bin/laneway status --socket /run/laneway/lanewayd.sock --json 2>/dev/null) &&
+      jq -e --arg version "${tag#v}" --argjson now "$(date +%s)" '
+        .running and .product_version == $version and .interface == "userspace" and .selected_path == "relay-quic" and
+        .controller.configuration_lease_expired == false and
+        .controller.configuration_lease_valid_until_unix_seconds > $now
+      ' <<<"$status" >/dev/null; then
+      docker top "$connector" -eo pid,comm | awk 'NR > 1 { if ($2 != "lanewayd-rs") exit 1; seen++ } END { if (seen != 1) exit 1 }' ||
+        return 1
+      jq -er '.node_id | select(test("^[a-f0-9]{32}$"))' <<<"$status"
+      return
+    fi
+    sleep 1
+  done
+  echo 'The Rust Connector did not acquire a live controller lease and QUIC path.' >&2
+  return 1
+}
+node_id=$(connector_node_id)
+docker restart --time 10 "$connector" >/dev/null
+[[ $(connector_node_id) == "$node_id" ]]
+echo "PASS: Connector enrolled through the one-time HTTPS bootstrap and restarted with the same identity."
+
 # Verify the installer's original encrypted bundle in a separate, empty
 # controller volume, leaving the first database untouched.
 shopt -s nullglob
@@ -160,4 +233,4 @@ COMPOSE_PROJECT_NAME="$project-restore" LANEWAY_RUST_CONTROLLER_STATE_VOLUME="$r
 network_id=$(sed -n 's/^LANEWAY_NETWORK_ID=//p' "$destination/.env")
 restore_compose run --rm --no-deps --pull never controller inventory networks /var/lib/laneway-controller/controller.db |
   jq -e --arg id "$network_id" '.networks | length == 1 and .[0].network_id == $id' >/dev/null
-echo "PASS: signed $tag installed from empty state, passed HTTPS readiness, and restored its encrypted backup into a separate volume."
+echo "PASS: signed $tag installed from empty state, passed HTTPS readiness and Connector enrollment, and restored its encrypted backup into a separate volume."

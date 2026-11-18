@@ -27,8 +27,11 @@ The tagged publish job now runs `integration/rust-release-install.sh` before
 creating the GitHub release. It installs the exact signed AMD64 archive using
 the release installer, verifies the running digest-pinned services and HTTPS
 discovery, and restores its encrypted backup into a separate, empty controller
-volume. Download transport and the relay's public certificate are local to
-the disposable runner; release signature verification and image pulls are real.
+volume. It also redeems a one-time HTTPS invitation with the pinned Connector
+image, checks for a live controller lease and QUIC relay path, and restarts the
+Rust process with the same identity and no enrollment token. Download transport
+and the relay's public certificate are local to the disposable runner; release
+signature verification and image pulls are real.
 The same gate passed an ARM64 rehearsal using fixture signatures and local
 images; the actual tagged workflow is still required.
 
