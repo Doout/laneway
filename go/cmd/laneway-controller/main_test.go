@@ -723,7 +723,17 @@ func TestMaintenanceBackupAndFreshRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored := filepath.Join(directory, "restored.db")
-	if err := runRestore(writeControllerConfig(t, restored), backup); err != nil {
+	err = runRestore(writeControllerConfig(t, restored), backup)
+	if runtime.GOOS != "linux" {
+		if err == nil || !strings.Contains(err.Error(), "lifecycle locking is not supported") {
+			t.Fatalf("restore without lifecycle locking returned %v", err)
+		}
+		if _, err := os.Lstat(restored); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("restore created a database without lifecycle locking: %v", err)
+		}
+		return
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := controller.Open(context.Background(), restored)

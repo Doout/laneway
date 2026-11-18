@@ -35,6 +35,7 @@ jobs:
       - name: Build rootfs
         env:
           VERSION: ${{ steps.version.outputs.value }}
+          LANEWAY_DOCKER_PLUGIN_RUNTIME: rust
         run: ./deploy/docker-plugin/build-rootfs.sh dist/docker-plugin
       - name: Test managed-plugin package
         run: |

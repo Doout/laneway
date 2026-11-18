@@ -186,11 +186,18 @@ impl Metrics {
         if count == 0 {
             return;
         }
-        let _ = self
-            .queue_depth
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| {
-                Some(depth.saturating_sub(count))
-            });
+        let mut depth = self.queue_depth.load(Ordering::Acquire);
+        loop {
+            match self.queue_depth.compare_exchange_weak(
+                depth,
+                depth.saturating_sub(count),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(updated) => depth = updated,
+            }
+        }
     }
 }
 
@@ -204,6 +211,19 @@ fn unix_now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_removal_saturates_without_affecting_the_recorded_peak() {
+        let metrics = Metrics::default();
+        metrics.queue_enqueue_completed(metrics.queue_enqueue_started());
+        metrics.queue_enqueue_completed(metrics.queue_enqueue_started());
+        metrics.queue_removed(1);
+        assert_eq!(metrics.snapshot().queue_depth, 1);
+        metrics.queue_removed(u64::MAX);
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.queue_depth, 0);
+        assert_eq!(snapshot.queue_depth_peak, 2);
+    }
 
     #[test]
     fn certificate_renewal_health_flips_at_deadline_and_honors_forced_failure() {

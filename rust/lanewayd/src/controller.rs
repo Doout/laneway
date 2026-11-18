@@ -1,8 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::PathBuf,
+    num::NonZeroU64,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -15,6 +15,7 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use laneway_protocol::{
     AuthenticatedIdentity, Id, Role, identity_from_certificate_der,
     policy::{CompiledPolicy, prefix_from_wire},
+    relay_endpoint::{MAX_RELAY_ENDPOINTS, canonical_host_port},
     v1::{
         Capability, ConfigurationRequest, EnrollmentClass, NodeConfiguration,
         RouteAdvertisementMode, RouteKind,
@@ -22,11 +23,18 @@ use laneway_protocol::{
 };
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
-use reqwest::{Certificate, Identity, StatusCode};
+use reqwest::StatusCode;
+#[cfg(test)]
+use rustls::RootCertStore;
 use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    DigitallySignedStruct, SignatureScheme,
+    client::{
+        WebPkiServerVerifier,
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    },
+    pki_types::{CertificateDer, ServerName, UnixTime},
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::tls::LocalCertificateHealth;
@@ -35,10 +43,10 @@ const MAX_RESPONSE: usize = 1 << 20;
 const VALID_UNTIL_HEADER: &str = "X-Laneway-Configuration-Valid-Until";
 const MAX_PEERS: usize = 65_536;
 const MAX_ROUTES: usize = 65_536;
-const MAX_RELAYS: usize = 32;
 const MAX_RELAY_ADDRESSES: usize = 16;
 const MAX_RESOLVED_RELAY_TARGETS: usize = 128;
 const RELAY_DNS_TIMEOUT: Duration = Duration::from_secs(5);
+const EXIT_REVOKE_AFTER_SUSPECT_SECONDS: u64 = 40;
 
 /// Fully pinned controller connection material for one node.
 #[derive(Clone, Debug)]
@@ -52,6 +60,7 @@ pub(crate) struct ClientOptions {
     pub(crate) private_key: PathBuf,
     pub(crate) ca: PathBuf,
     pub(crate) timeout: Duration,
+    pub(crate) exit_generation: Option<NonZeroU64>,
 }
 
 /// One bounded conditional controller response.
@@ -61,9 +70,21 @@ pub(crate) enum PollResult {
     NotModified { valid_until: u64 },
 }
 
+#[derive(Debug)]
+pub(crate) struct AuthorityRejected(laneway_protocol::v1::ErrorCode);
+
+impl std::fmt::Display for AuthorityRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "controller rejected node authority: {:?}", self.0)
+    }
+}
+
+impl std::error::Error for AuthorityRejected {}
+
 /// Strict HTTPS/protobuf controller snapshot client.
 pub(crate) struct Client {
-    endpoint: String,
+    options: ClientOptions,
+    http_origin: reqwest::Url,
     http: reqwest::Client,
     expected_controller: AuthenticatedIdentity,
     resolved: Vec<SocketAddr>,
@@ -83,78 +104,19 @@ struct QuicControl {
 impl Client {
     pub(crate) async fn new(options: ClientOptions) -> Result<Self> {
         ensure!(
-            !options.timeout.is_zero() && options.timeout <= Duration::from_secs(300),
-            "controller timeout must be in (0,5m]"
+            options.exit_generation.is_none() || options.quic_endpoint.is_some(),
+            "ephemeral Exit authority requires controller QUIC"
         );
-        let url = reqwest::Url::parse(&options.endpoint).context("parse controller endpoint")?;
-        ensure!(
-            url.scheme() == "https"
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-                && matches!(url.path(), "" | "/"),
-            "controller endpoint must be an HTTPS origin"
-        );
-        if !options.server_name.is_empty() {
-            ensure!(
-                url.host_str() == Some(options.server_name.as_str()),
-                "controller server_name must match endpoint host"
-            );
-        }
-        let host = url
-            .host_str()
-            .context("controller endpoint host is missing")?;
-        let port = url
-            .port_or_known_default()
-            .context("controller endpoint port is unknown")?;
-        let mut resolved: Vec<SocketAddr> = if let Ok(address) = host.parse::<IpAddr>() {
-            vec![SocketAddr::new(address, port)]
-        } else {
-            tokio::time::timeout(options.timeout, tokio::net::lookup_host((host, port)))
-                .await
-                .context("controller DNS resolution timed out")?
-                .context("resolve controller endpoint")?
-                .take(17)
-                .collect()
-        };
-        resolved.sort_unstable();
-        resolved.dedup();
-        ensure!(
-            !resolved.is_empty() && resolved.len() <= 16,
-            "controller endpoint resolved outside the bounded 1..=16 address set"
-        );
-        let mut identity = bounded_read(&options.certificate, 4 << 20, "node certificate")?;
-        identity.extend_from_slice(&bounded_read(
-            &options.private_key,
-            1 << 20,
-            "node private key",
-        )?);
-        let ca = bounded_read(&options.ca, 4 << 20, "controller CA")?;
-        let mut builder = reqwest::Client::builder()
-            .https_only(true)
-            .identity(Identity::from_pem(&identity).context("load node controller identity")?)
-            .add_root_certificate(Certificate::from_pem(&ca).context("load controller CA")?)
-            .min_tls_version(reqwest::tls::Version::TLS_1_3)
-            .max_tls_version(reqwest::tls::Version::TLS_1_3)
-            .timeout(options.timeout)
-            .tls_info(true);
-        if host.parse::<IpAddr>().is_err() {
-            builder = builder.resolve_to_addrs(host, &resolved);
-        }
-        let http = builder
-            .build()
-            .context("build node controller HTTP client")?;
+        let expected = expected_controller(options.network, options.service);
+        let (http, http_origin, mut resolved) = https_transport(
+            &options.endpoint,
+            &options.server_name,
+            options.timeout,
+            controller_tls(&options, expected)?,
+        )
+        .await?;
         let quic = if let Some(endpoint) = options.quic_endpoint.as_deref() {
-            Some(
-                QuicControl::new(
-                    endpoint,
-                    &options,
-                    expected_controller(options.network, options.service),
-                )
-                .await?,
-            )
+            Some(QuicControl::new(endpoint, &options, expected).await?)
         } else {
             None
         };
@@ -164,12 +126,10 @@ impl Client {
             resolved.dedup();
         }
         Ok(Self {
-            endpoint: format!(
-                "{}/v1/configuration",
-                options.endpoint.trim_end_matches('/')
-            ),
+            options: options.clone(),
+            http_origin,
             http,
-            expected_controller: expected_controller(options.network, options.service),
+            expected_controller: expected,
             resolved,
             quic,
         })
@@ -179,23 +139,148 @@ impl Client {
         self.resolved.iter().map(SocketAddr::ip).collect()
     }
 
-    pub(crate) async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
+    pub(crate) fn exit_generation(&self) -> Option<NonZeroU64> {
+        self.options.exit_generation
+    }
+
+    pub(crate) fn begin_quic_shutdown(&self) {
         if let Some(control) = &self.quic {
-            return control.poll(known_epoch).await;
+            control
+                .endpoint
+                .close(0_u32.into(), b"node control shutdown");
         }
-        let request = ConfigurationRequest {
-            known_configuration_epoch: known_epoch,
-            ephemeral_exit_lease_generation: 0,
+    }
+
+    pub(crate) async fn close_quic(&self) {
+        self.begin_quic_shutdown();
+        if let Some(control) = &self.quic {
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), control.endpoint.wait_idle()).await;
         }
-        .encode_to_vec();
-        let mut response = self
+    }
+
+    pub(crate) async fn reconnect_quic(&self) {
+        if let Some(control) = &self.quic {
+            control
+                .invalidate(b"ephemeral Exit proof of possession required")
+                .await;
+        }
+    }
+
+    pub(crate) async fn report_status(
+        &self,
+        report: &laneway_protocol::endpoint_status::Report,
+    ) -> Result<()> {
+        report.validate().map_err(anyhow::Error::msg)?;
+        let response = self
             .http
-            .post(&self.endpoint)
-            .header("content-type", "application/x-protobuf")
-            .body(request)
+            .put(self.http_origin.join("/v1/status")?)
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(report)?)
             .send()
             .await
-            .context("request node configuration")?;
+            .context("send endpoint health report")?;
+        ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "controller endpoint health returned {}",
+            response.status()
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn report_topology(
+        &self,
+        report: &laneway_protocol::topology::Report,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .put(self.http_origin.join("/v1/topology")?)
+            .timeout(Duration::from_secs(5))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(report)?)
+            .send()
+            .await
+            .context("send peer topology report")?;
+        ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "controller topology returned {}",
+            response.status()
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn private_dns(&self) -> Result<crate::private_dns::Catalog> {
+        let response = self
+            .http
+            .get(self.http_origin.join("/v1/node/private-dns")?)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .context("request private DNS catalog")?;
+        self.check_response_identity(&response)?;
+        ensure!(
+            response.status() == StatusCode::OK,
+            "private DNS controller returned {}",
+            response.status()
+        );
+        ensure!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(';').next())
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json")),
+            "private DNS controller did not return JSON"
+        );
+        crate::private_dns::Catalog::decode(&read_response(response).await?, self.options.network)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn claim_update(
+        &self,
+        poll: &laneway_protocol::fleet_updates::Poll,
+    ) -> Result<laneway_protocol::fleet_updates::PollReply> {
+        let response = self
+            .update_request(laneway_protocol::fleet_updates::POLL_PATH, poll)
+            .await?;
+        ensure!(response.status() == StatusCode::OK, "update poll rejected");
+        Ok(serde_json::from_slice(&read_response(response).await?)?)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn acknowledge_update(
+        &self,
+        id: Id,
+        result: &laneway_protocol::fleet_updates::Report,
+    ) -> Result<()> {
+        let response = self
+            .update_request(&laneway_protocol::fleet_updates::result_path(id), result)
+            .await?;
+        ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "update result rejected"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn update_request(
+        &self,
+        path: &str,
+        body: &impl serde::Serialize,
+    ) -> Result<reqwest::Response> {
+        let response = self
+            .http
+            .post(self.http_origin.join(path)?)
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(body)?)
+            .send()
+            .await?;
+        self.check_response_identity(&response)?;
+        Ok(response)
+    }
+
+    fn check_response_identity(&self, response: &reqwest::Response) -> Result<()> {
         let peer = response
             .extensions()
             .get::<reqwest::tls::TlsInfo>()
@@ -206,6 +291,63 @@ impl Client {
                 == self.expected_controller,
             "controller SPIFFE identity differs from configured network/service ID"
         );
+        Ok(())
+    }
+
+    pub(crate) async fn with_certificate(&self, path: PathBuf) -> Result<Self> {
+        let mut options = self.options.clone();
+        options.certificate = path;
+        Self::new(options).await
+    }
+
+    pub(crate) async fn renew_certificate(
+        &self,
+        csr: Vec<u8>,
+    ) -> Result<laneway_protocol::v1::RenewalResponse> {
+        ensure!(
+            self.exit_generation().is_none(),
+            "ephemeral Exit certificates cannot be renewed by the runtime"
+        );
+        use laneway_protocol::v1::{ControllerEnvelope, RenewalRequest, controller_envelope::Body};
+        let control = self
+            .quic
+            .as_ref()
+            .context("renewal requires authenticated controller QUIC")?;
+        // Omitting the WireGuard key is the protocol's preserve-current-binding
+        // operation. Certificate maintenance must never rotate dataplane keys.
+        let request = ControllerEnvelope {
+            schema_version: 1,
+            request_id: control.next_request_id(),
+            body: Some(Body::RenewalRequest(RenewalRequest {
+                pkcs10_csr_der: csr,
+                wireguard_public_key: Vec::new(),
+            })),
+        };
+        match control.exchange(request).await?.body {
+            Some(Body::RenewalResponse(reply)) => Ok(reply),
+            Some(Body::Error(e)) => bail!("controller refused node renewal: {:?}", e.code()),
+            _ => bail!("unexpected controller renewal response"),
+        }
+    }
+
+    pub(crate) async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
+        if let Some(control) = &self.quic {
+            return control.poll(known_epoch, self.exit_generation()).await;
+        }
+        let request = ConfigurationRequest {
+            known_configuration_epoch: known_epoch,
+            ephemeral_exit_lease_generation: 0,
+        }
+        .encode_to_vec();
+        let response = self
+            .http
+            .post(self.http_origin.join("/v1/configuration")?)
+            .header("content-type", "application/x-protobuf")
+            .body(request)
+            .send()
+            .await
+            .context("request node configuration")?;
+        self.check_response_identity(&response)?;
         if response.status() == StatusCode::NOT_MODIFIED {
             let valid_until = response
                 .headers()
@@ -223,37 +365,183 @@ impl Client {
             "controller returned {}",
             response.status()
         );
-        if let Some(length) = response.content_length() {
-            ensure!(
-                length <= MAX_RESPONSE as u64,
-                "controller response exceeds limit"
-            );
-        }
-        let mut body = Vec::with_capacity(
-            response
-                .content_length()
-                .unwrap_or(0)
-                .min(MAX_RESPONSE as u64) as usize,
-        );
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .context("read node configuration chunk")?
-        {
-            ensure!(
-                body.len() <= MAX_RESPONSE.saturating_sub(chunk.len()),
-                "controller response exceeds limit"
-            );
-            body.extend_from_slice(&chunk);
-        }
-        ensure!(
-            !body.is_empty(),
-            "controller returned an empty configuration"
-        );
+        let body = read_response(response).await?;
         Ok(PollResult::Modified(Box::new(
             NodeConfiguration::decode(body.as_slice()).context("decode node configuration")?,
         )))
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn recover_certificate(
+    config: &crate::config::ControllerConfig,
+    roots: &Path,
+    network: Id,
+    token: &str,
+    csr: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let expected = expected_controller(network, config.service_id.parse()?);
+    let tls = pinned_controller(roots, expected)?.with_no_client_auth();
+    let (http, origin, _) =
+        https_transport(&config.endpoint, &config.server_name, config.timeout, tls).await?;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "recovery_token": token,
+        "pkcs10_csr_der": STANDARD.encode(csr),
+    }))?;
+    let response = http
+        .post(origin.join("/v1/node-credential-recovery")?)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .context("request node credential recovery")?;
+    ensure!(
+        response.status() == StatusCode::OK,
+        "controller refused node recovery: {}",
+        response.status()
+    );
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RecoveryReply {
+        certificates_der: Vec<String>,
+    }
+    let reply: RecoveryReply = serde_json::from_slice(&read_response(response).await?)?;
+    ensure!(
+        (1..=9).contains(&reply.certificates_der.len()),
+        "invalid recovery chain length"
+    );
+    reply
+        .certificates_der
+        .iter()
+        .map(|der| {
+            let bytes = STANDARD
+                .decode(der)
+                .context("invalid recovery certificate encoding")?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() <= 65536,
+                "invalid recovery certificate size"
+            );
+            Ok(bytes)
+        })
+        .collect()
+}
+
+async fn https_transport(
+    endpoint: &str,
+    server_name: &str,
+    timeout: Duration,
+    mut tls: rustls::ClientConfig,
+) -> Result<(reqwest::Client, reqwest::Url, Vec<SocketAddr>)> {
+    ensure!(
+        !timeout.is_zero() && timeout <= Duration::from_secs(300),
+        "controller timeout must be in (0,5m]"
+    );
+    let (dial, http_origin) = controller_origins(endpoint, server_name)?;
+    let host = origin_host(&dial);
+    let port = dial
+        .port_or_known_default()
+        .context("controller endpoint port is unknown")?;
+    let mut resolved: Vec<SocketAddr> = if let Ok(address) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(address, port)]
+    } else {
+        tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
+            .await
+            .context("controller DNS resolution timed out")?
+            .context("resolve controller endpoint")?
+            .take(17)
+            .collect()
+    };
+    resolved.sort_unstable();
+    resolved.dedup();
+    ensure!(
+        !resolved.is_empty() && resolved.len() <= 16,
+        "controller endpoint resolved outside the bounded 1..=16 address set"
+    );
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let mut builder = reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .use_preconfigured_tls(tls)
+        .timeout(timeout)
+        .tls_info(true);
+    let tls_host = origin_host(&http_origin);
+    if tls_host.parse::<IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(tls_host, &resolved);
+    }
+    Ok((
+        builder
+            .build()
+            .context("build node controller HTTP client")?,
+        http_origin,
+        resolved,
+    ))
+}
+
+async fn read_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
+    let capacity = response.content_length().unwrap_or(0);
+    ensure!(
+        capacity <= MAX_RESPONSE as u64,
+        "controller response exceeds limit"
+    );
+    let mut body = Vec::with_capacity(capacity as usize);
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .context("read controller response chunk")?
+    {
+        ensure!(
+            chunk.len() <= MAX_RESPONSE - body.len(),
+            "controller response exceeds limit"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    ensure!(!body.is_empty(), "controller returned an empty response");
+    Ok(body)
+}
+
+pub(crate) fn controller_origins(
+    endpoint: &str,
+    tls_name: &str,
+) -> Result<(reqwest::Url, reqwest::Url)> {
+    let dial = reqwest::Url::parse(endpoint).context("parse controller endpoint")?;
+    ensure!(
+        dial.scheme() == "https"
+            && dial.host_str().is_some()
+            && dial.username().is_empty()
+            && dial.password().is_none()
+            && dial.query().is_none()
+            && dial.fragment().is_none()
+            && matches!(dial.path(), "" | "/"),
+        "controller endpoint must be an HTTPS origin"
+    );
+    let mut https = dial.clone();
+    if !tls_name.is_empty() && origin_host(&dial) != tls_name {
+        // Resolve only the configured dial endpoint; present the certificate's
+        // DNS name as SNI. This permits the Docker service alias without DNS
+        // queries to the public certificate name or relaxing its verification.
+        ensure!(
+            matches!(ServerName::try_from(tls_name), Ok(ServerName::DnsName(_))),
+            "a distinct controller TLS name must be a DNS name"
+        );
+        https
+            .set_host(Some(tls_name))
+            .context("set controller TLS host")?;
+        ensure!(
+            origin_host(&https) == tls_name && tls_name.parse::<IpAddr>().is_err(),
+            "controller TLS name must be a canonical DNS name"
+        );
+    }
+    Ok((dial, https))
+}
+
+fn origin_host(url: &reqwest::Url) -> &str {
+    url.host_str()
+        .expect("validated controller origin")
+        .trim_matches(['[', ']'])
 }
 
 fn expected_controller(network: Id, service: Id) -> AuthenticatedIdentity {
@@ -262,6 +550,88 @@ fn expected_controller(network: Id, service: Id) -> AuthenticatedIdentity {
         role: Role::Controller,
         subject_id: service,
     }
+}
+
+#[derive(Debug)]
+struct PinnedController {
+    expected: AuthenticatedIdentity,
+    web: Arc<WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for PinnedController {
+    fn verify_server_cert(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        let valid = self
+            .web
+            .verify_server_cert(leaf, intermediates, server_name, ocsp, now)?;
+        // The normal chain and host checks are necessary but not sufficient.
+        // Verify the exact controller role/network/service before sending
+        // the client's certificate or any HTTP request body.
+        let identity = identity_from_certificate_der(leaf.as_ref()).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        if identity != self.expected {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(valid)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signed: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.web.verify_tls12_signature(message, cert, signed)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signed: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.web.verify_tls13_signature(message, cert, signed)
+    }
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.web.supported_verify_schemes()
+    }
+}
+
+fn controller_tls(
+    options: &ClientOptions,
+    expected: AuthenticatedIdentity,
+) -> Result<rustls::ClientConfig> {
+    let certificates = crate::tls::load_certificates(&options.certificate)?;
+    let key = crate::tls::load_private_key(&options.private_key)?;
+    let mut config = pinned_controller(&options.ca, expected)?
+        .with_client_auth_cert(certificates, key)
+        .context("load node controller identity")?;
+    if options.exit_generation.is_some() {
+        config.resumption = rustls::client::Resumption::disabled();
+    }
+    Ok(config)
+}
+
+fn pinned_controller(
+    ca: &Path,
+    expected: AuthenticatedIdentity,
+) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>> {
+    let roots = crate::tls::root_store(ca)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+        .build()?;
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedController { expected, web })))
 }
 
 impl QuicControl {
@@ -291,35 +661,7 @@ impl QuicControl {
             "controller QUIC endpoint resolved outside the bounded 1..=16 address set"
         );
 
-        let certificate_pem = bounded_read(&options.certificate, 4 << 20, "node certificate")?;
-        let mut cursor = std::io::Cursor::new(certificate_pem);
-        let certificates: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cursor)
-            .collect::<std::result::Result<_, _>>()
-            .context("parse node controller certificate")?;
-        ensure!(
-            !certificates.is_empty(),
-            "node controller certificate chain is empty"
-        );
-        let key_pem = bounded_read(&options.private_key, 1 << 20, "node private key")?;
-        let mut cursor = std::io::Cursor::new(key_pem);
-        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut cursor)
-            .context("parse node controller private key")?
-            .context("node controller private key is missing")?;
-        let ca_pem = bounded_read(&options.ca, 4 << 20, "controller CA")?;
-        let mut cursor = std::io::Cursor::new(ca_pem);
-        let roots_der: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cursor)
-            .collect::<std::result::Result<_, _>>()
-            .context("parse controller CA")?;
-        let mut roots = RootCertStore::empty();
-        let (accepted, rejected) = roots.add_parsable_certificates(roots_der);
-        ensure!(
-            accepted > 0 && rejected == 0,
-            "controller CA contains an invalid certificate"
-        );
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(certificates, key)
-            .context("load node QUIC controller identity")?;
+        let mut crypto = controller_tls(options, expected)?;
         crypto.alpn_protocols = vec![b"laneway-control/1".to_vec()];
         crypto.enable_early_data = false;
         let crypto = QuicClientConfig::try_from(crypto).context("build controller QUIC TLS")?;
@@ -353,7 +695,7 @@ impl QuicControl {
         })
     }
 
-    async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
+    async fn poll(&self, known_epoch: u64, generation: Option<NonZeroU64>) -> Result<PollResult> {
         use laneway_protocol::v1::{ControllerEnvelope, controller_envelope};
         let envelope = ControllerEnvelope {
             schema_version: 1,
@@ -361,7 +703,7 @@ impl QuicControl {
             body: Some(controller_envelope::Body::ConfigurationRequest(
                 ConfigurationRequest {
                     known_configuration_epoch: known_epoch,
-                    ephemeral_exit_lease_generation: 0,
+                    ephemeral_exit_lease_generation: generation.map_or(0, NonZeroU64::get),
                 },
             )),
         };
@@ -372,7 +714,15 @@ impl QuicControl {
             }
             Some(controller_envelope::Body::ConfigurationLease(lease)) => {
                 ensure!(
-                    lease.configuration_epoch == known_epoch
+                    generation.is_none()
+                        && lease.ephemeral_exit_lease_generation == 0
+                        && lease.ephemeral_exit_suspect_at_unix_seconds == 0
+                        && lease.ephemeral_exit_revoke_at_unix_seconds == 0,
+                    "ephemeral Exit heartbeat requires a complete snapshot"
+                );
+                ensure!(
+                    known_epoch != 0
+                        && lease.configuration_epoch == known_epoch
                         && lease.valid_until_unix_seconds != 0
                         && !expired(lease.valid_until_unix_seconds),
                     "controller QUIC lease is expired"
@@ -387,7 +737,8 @@ impl QuicControl {
                     laneway_protocol::v1::ErrorCode::Unauthenticated
                         | laneway_protocol::v1::ErrorCode::PermissionDenied
                 ) {
-                    self.invalidate().await;
+                    self.invalidate(b"controller authorization rejected").await;
+                    return Err(AuthorityRejected(error.code()).into());
                 }
                 bail!(
                     "controller QUIC error {:?}: {} (retryable={})",
@@ -412,9 +763,9 @@ impl QuicControl {
         }
     }
 
-    async fn invalidate(&self) {
+    async fn invalidate(&self, reason: &'static [u8]) {
         if let Some(connection) = self.connection.lock().await.take() {
-            connection.close(0_u32.into(), b"controller authorization rejected");
+            connection.close(0_u32.into(), reason);
         }
     }
 
@@ -544,6 +895,7 @@ pub(crate) struct Peer {
     pub(crate) node: Id,
     pub(crate) name: String,
     pub(crate) overlays: Vec<IpAddr>,
+    pub(crate) wireguard_key: Option<[u8; 32]>,
 }
 
 /// One fully validated controller route.
@@ -563,6 +915,7 @@ pub(crate) struct Snapshot {
     pub(crate) epoch: u64,
     pub(crate) valid_until: u64,
     pub(crate) identity_lease_expires_at: u64,
+    pub(crate) ephemeral_exit: Option<EphemeralExitLease>,
     pub(crate) overlays: Vec<IpNet>,
     pub(crate) peers: HashMap<Id, Peer>,
     pub(crate) routes: Vec<Route>,
@@ -575,6 +928,66 @@ pub(crate) struct Snapshot {
     pub(crate) authorized_exits: HashSet<Id>,
     pub(crate) certificate_renew_after: u64,
     pub(crate) certificate_not_after: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EphemeralExitLease {
+    generation: NonZeroU64,
+    suspect_at: u64,
+    revoke_at: u64,
+    snapshot_digest: [u8; 32],
+}
+
+impl EphemeralExitLease {
+    fn from_wire(
+        configuration: &mut NodeConfiguration,
+        generation: Option<NonZeroU64>,
+        class: EnrollmentClass,
+    ) -> Result<Option<Self>> {
+        let wire_generation = configuration.ephemeral_exit_lease_generation;
+        let suspect_at = configuration.ephemeral_exit_suspect_at_unix_seconds;
+        let revoke_at = configuration.ephemeral_exit_revoke_at_unix_seconds;
+        let exit_capability = Capability::LanewayExitNodeV1 as u64;
+        let Some(generation) = generation else {
+            ensure!(
+                wire_generation == 0
+                    && suspect_at == 0
+                    && revoke_at == 0
+                    && !(class == EnrollmentClass::EphemeralUser
+                        && configuration.enabled_capabilities & exit_capability != 0),
+                "ordinary node received ephemeral Exit authority"
+            );
+            return Ok(None);
+        };
+        ensure!(
+            class == EnrollmentClass::EphemeralUser
+                && configuration.enabled_capabilities == exit_capability
+                && wire_generation == generation.get(),
+            "ephemeral Exit enrollment or lease generation differs from bootstrap"
+        );
+        ensure!(
+            !expired(suspect_at)
+                && revoke_at.checked_sub(suspect_at) == Some(EXIT_REVOKE_AFTER_SUSPECT_SECONDS)
+                && revoke_at <= i64::MAX as u64
+                && configuration.valid_until_unix_seconds <= suspect_at,
+            "invalid ephemeral Exit heartbeat deadlines"
+        );
+        // Renewals may change only these clocks at the same epoch. Hash all
+        // other wire fields, including keys and policy not used by this actor.
+        let valid_until = std::mem::take(&mut configuration.valid_until_unix_seconds);
+        configuration.ephemeral_exit_suspect_at_unix_seconds = 0;
+        configuration.ephemeral_exit_revoke_at_unix_seconds = 0;
+        let snapshot_digest = Sha256::digest(configuration.encode_to_vec()).into();
+        configuration.valid_until_unix_seconds = valid_until;
+        configuration.ephemeral_exit_suspect_at_unix_seconds = suspect_at;
+        configuration.ephemeral_exit_revoke_at_unix_seconds = revoke_at;
+        Ok(Some(Self {
+            generation,
+            suspect_at,
+            revoke_at,
+            snapshot_digest,
+        }))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -599,6 +1012,16 @@ impl Snapshot {
         local_node: Id,
         local_certificate: &LocalCertificateHealth,
     ) -> Result<Self> {
+        Self::compile_for(configuration, network, local_node, local_certificate, None)
+    }
+
+    pub(crate) fn compile_for(
+        mut configuration: NodeConfiguration,
+        network: Id,
+        local_node: Id,
+        local_certificate: &LocalCertificateHealth,
+        exit_generation: Option<NonZeroU64>,
+    ) -> Result<Self> {
         let epoch = configuration.configuration_epoch;
         ensure!(epoch > 0, "controller configuration epoch is zero");
         ensure!(
@@ -617,7 +1040,8 @@ impl Snapshot {
             ),
             EnrollmentClass::EphemeralUser => {
                 ensure!(
-                    identity_lease_expires_at != 0 && !expired(identity_lease_expires_at),
+                    identity_lease_expires_at <= i64::MAX as u64
+                        && !expired(identity_lease_expires_at),
                     "ephemeral controller identity lease is missing or expired"
                 );
                 ensure!(
@@ -626,12 +1050,14 @@ impl Snapshot {
                 );
             }
         }
+        let ephemeral_exit =
+            EphemeralExitLease::from_wire(&mut configuration, exit_generation, enrollment_class)?;
         ensure!(
             configuration.peers.len() <= MAX_PEERS,
             "controller peer snapshot exceeds limit"
         );
         ensure!(
-            !configuration.relays.is_empty() && configuration.relays.len() <= MAX_RELAYS,
+            !configuration.relays.is_empty() && configuration.relays.len() <= MAX_RELAY_ENDPOINTS,
             "controller relay snapshot is outside bounds"
         );
         let mut relays = HashMap::with_capacity(configuration.relays.len());
@@ -710,6 +1136,7 @@ impl Snapshot {
         let mut peers = HashMap::with_capacity(configuration.peers.len());
         let mut names = HashSet::with_capacity(configuration.peers.len());
         let mut overlay_owners = HashMap::new();
+        let mut wireguard_keys = HashSet::new();
         for (index, input) in configuration.peers.into_iter().enumerate() {
             let node = Id::from_slice(&input.node_id)
                 .with_context(|| format!("controller peer {index} node ID"))?;
@@ -735,6 +1162,20 @@ impl Snapshot {
                     "controller overlay address has multiple owners"
                 );
             }
+            let wireguard_key = if input.wireguard_public_key.is_empty() {
+                None
+            } else {
+                let key: [u8; 32] = input
+                    .wireguard_public_key
+                    .as_slice()
+                    .try_into()
+                    .context("controller WireGuard public key has the wrong length")?;
+                ensure!(
+                    key != [0; 32] && wireguard_keys.insert(key),
+                    "controller WireGuard public key is zero or has multiple owners"
+                );
+                Some(key)
+            };
             ensure!(
                 peers
                     .insert(
@@ -743,6 +1184,7 @@ impl Snapshot {
                             node,
                             name: input.name,
                             overlays: peer_overlays,
+                            wireguard_key,
                         },
                     )
                     .is_none(),
@@ -902,10 +1344,16 @@ impl Snapshot {
             certificate_not_after > unix_now(),
             "local certificate is expired"
         );
+        ensure!(
+            ephemeral_exit.is_none()
+                || configuration.valid_until_unix_seconds <= certificate_not_after,
+            "ephemeral Exit configuration exceeds the certificate lifetime"
+        );
         Ok(Self {
             epoch,
             valid_until: configuration.valid_until_unix_seconds,
             identity_lease_expires_at,
+            ephemeral_exit,
             overlays,
             peers,
             routes,
@@ -925,7 +1373,32 @@ impl Snapshot {
         expired(self.valid_until)
     }
 
+    pub(crate) fn wireguard_authority_expired(&self) -> bool {
+        self.expired() || expired(self.certificate_not_after)
+    }
+
+    /// A shorter snapshot lease can mean an earlier peer or route deadline.
+    /// Only the explicit heartbeat boundary is eligible for disconnect drain.
+    pub(crate) fn wireguard_drain_eligible(&self) -> bool {
+        self.ephemeral_exit.as_ref().is_some_and(|lease| {
+            self.valid_until == lease.suspect_at
+                && self.expired()
+                && self
+                    .exit_terminal_at()
+                    .is_some_and(|deadline| !expired(deadline))
+                && !self.local_certificate_revoked
+        })
+    }
+
     pub(crate) fn renew(&self, valid_until: u64) -> Result<Self> {
+        ensure!(
+            self.ephemeral_exit.is_none(),
+            "ephemeral Exit cannot renew from a bare lease"
+        );
+        ensure!(
+            self.identity_lease_expires_at == 0 || valid_until <= self.identity_lease_expires_at,
+            "controller renewal exceeds the identity lease"
+        );
         ensure!(!expired(valid_until), "controller renewed an expired lease");
         ensure!(
             valid_until >= self.valid_until,
@@ -933,6 +1406,63 @@ impl Snapshot {
         );
         Ok(Self {
             valid_until,
+            ..self.clone()
+        })
+    }
+
+    pub(crate) fn exit_terminal_at(&self) -> Option<u64> {
+        self.ephemeral_exit.as_ref().map(|lease| {
+            lease
+                .revoke_at
+                .min(self.identity_lease_expires_at)
+                .min(self.certificate_not_after)
+        })
+    }
+
+    pub(crate) fn exit_generation(&self) -> Option<NonZeroU64> {
+        self.ephemeral_exit.as_ref().map(|lease| lease.generation)
+    }
+
+    pub(crate) fn validate_exit_successor(&self, next: &Self) -> Result<()> {
+        let (Some(old), Some(new)) = (&self.ephemeral_exit, &next.ephemeral_exit) else {
+            ensure!(
+                self.ephemeral_exit.is_none() && next.ephemeral_exit.is_none(),
+                "node cannot switch into or out of ephemeral Exit authority"
+            );
+            return Ok(());
+        };
+        ensure!(
+            !expired(
+                self.exit_terminal_at()
+                    .expect("ephemeral Exit has terminal deadline")
+            ) && old.generation == new.generation
+                && self.identity_lease_expires_at == next.identity_lease_expires_at
+                && self.overlays == next.overlays
+                && next.epoch >= self.epoch
+                && new.suspect_at >= old.suspect_at
+                && new.revoke_at >= old.revoke_at
+                && !next.expired(),
+            "ephemeral Exit authority moved backward or changed its enrollment"
+        );
+        if next.epoch == self.epoch {
+            ensure!(
+                next.valid_until >= self.valid_until && old.snapshot_digest == new.snapshot_digest,
+                "ephemeral Exit heartbeat changed configuration without a newer epoch"
+            );
+        }
+        Ok(())
+    }
+
+    /// Keep the already installed routing table on a heartbeat at the same epoch.
+    pub(crate) fn renew_exit(&self, next: Self) -> Result<Self> {
+        self.validate_exit_successor(&next)?;
+        ensure!(
+            self.ephemeral_exit.is_some() && self.epoch == next.epoch,
+            "expected a same-epoch ephemeral Exit heartbeat"
+        );
+        Ok(Self {
+            valid_until: next.valid_until,
+            ephemeral_exit: next.ephemeral_exit,
             ..self.clone()
         })
     }
@@ -983,29 +1513,9 @@ impl Snapshot {
 }
 
 fn parse_relay_endpoint(value: &str) -> Result<(String, Vec<SocketAddr>)> {
-    ensure!(
-        !value.is_empty() && value.trim() == value,
-        "relay endpoint is empty or padded"
-    );
-    if let Ok(address) = value.parse::<SocketAddr>() {
-        ensure!(
-            canonical_relay_socket(address).is_some_and(|canonical| canonical == address),
-            "relay endpoint address class or port is invalid"
-        );
-        return Ok((address.to_string(), vec![address]));
-    }
-    let (host, port) = value
-        .rsplit_once(':')
-        .context("relay endpoint must be host:port")?;
-    ensure!(
-        !host.is_empty() && !host.contains(':'),
-        "relay DNS host is invalid"
-    );
-    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
-    ensure!(valid_dns_name(&host), "relay DNS host is invalid");
-    let port = port.parse::<u16>().context("relay endpoint port")?;
-    ensure!(port != 0, "relay endpoint port is zero");
-    Ok((format!("{host}:{port}"), Vec::new()))
+    let canonical = canonical_host_port(value).context("invalid relay endpoint")?;
+    let addresses = canonical.parse::<SocketAddr>().into_iter().collect();
+    Ok((canonical, addresses))
 }
 
 fn canonical_relay_socket(address: SocketAddr) -> Option<SocketAddr> {
@@ -1030,20 +1540,6 @@ fn canonical_relay_socket(address: SocketAddr) -> Option<SocketAddr> {
         }
     };
     Some(SocketAddr::new(ip, address.port()))
-}
-
-fn valid_dns_name(host: &str) -> bool {
-    !host.is_empty()
-        && host.len() <= 253
-        && host.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
 }
 
 fn merge_relay_resolutions(
@@ -1075,13 +1571,6 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn bounded_read(path: &std::path::Path, maximum: u64, label: &str) -> Result<Vec<u8>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("stat {label} {}", path.display()))?;
-    ensure!(metadata.len() <= maximum, "{label} exceeds size limit");
-    fs::read(path).with_context(|| format!("read {label} {}", path.display()))
 }
 
 fn parse_host_prefix(raw: Vec<u8>) -> Result<IpNet> {
@@ -1131,15 +1620,85 @@ fn expired(deadline: u64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use laneway_protocol::v1::{
         CandidateExchangePolicy, CertificateHealth, ExitNodePolicy, IpPrefix, NodePeer,
         PolicyAction, PolicySnapshot, RelayEndpoint, Route as WireRoute, RouteSnapshot,
     };
 
-    fn id(value: u8) -> Id {
+    pub(crate) fn id(value: u8) -> Id {
         Id::new([value; 16]).unwrap()
+    }
+
+    #[test]
+    fn controller_dial_origin_can_differ_from_the_authenticated_dns_name() {
+        let (dial, https) =
+            controller_origins("https://controller:8443", "internal.example.test").unwrap();
+        assert_eq!(dial.as_str(), "https://controller:8443/");
+        assert_eq!(https.as_str(), "https://internal.example.test:8443/");
+        assert!(controller_origins("https://controller:8443", "10.0.0.3").is_err());
+        assert!(
+            controller_origins("https://controller:8443", "internal.example.test/api").is_err()
+        );
+        assert!(
+            controller_origins("https://user@controller:8443", "internal.example.test").is_err()
+        );
+        assert!(
+            controller_origins("https://controller:8443/api", "internal.example.test").is_err()
+        );
+        let (_, ipv6) = controller_origins("https://[::1]:8443", "::1").unwrap();
+        assert_eq!(ipv6.as_str(), "https://[::1]:8443/");
+    }
+
+    #[test]
+    fn controller_requires_both_hostname_and_exact_service_identity() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            SanType,
+        };
+        let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let key = KeyPair::generate().unwrap();
+        let ca = ca_params.self_signed(&key).unwrap();
+        let issuer = Issuer::new(ca_params, key);
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        let web = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        let (network, service) = (id(1), id(2));
+        let pinned = PinnedController {
+            expected: expected_controller(network, service),
+            web,
+        };
+        let name = ServerName::try_from("controller.test").unwrap();
+        for (host, role, subject, accepted) in [
+            ("controller.test", "controller", service, true),
+            ("controller.test", "relay", service, false),
+            ("controller.test", "controller", id(3), false),
+            ("other.test", "controller", service, false),
+        ] {
+            let mut params = CertificateParams::new(vec![host.to_owned()]).unwrap();
+            params.subject_alt_names.push(SanType::URI(
+                format!("spiffe://laneway/network/{network}/{role}/{subject}")
+                    .try_into()
+                    .unwrap(),
+            ));
+            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let leaf = params
+                .signed_by(&KeyPair::generate().unwrap(), &issuer)
+                .unwrap();
+            assert_eq!(
+                pinned
+                    .verify_server_cert(leaf.der(), &[], &name, &[], UnixTime::now())
+                    .is_ok(),
+                accepted
+            );
+        }
     }
 
     fn host(address: [u8; 4]) -> IpPrefix {
@@ -1149,7 +1708,7 @@ mod tests {
         }
     }
 
-    fn local_certificate() -> LocalCertificateHealth {
+    pub(crate) fn local_certificate() -> LocalCertificateHealth {
         LocalCertificateHealth {
             serial: vec![8],
             not_after: 4_000_000_000,
@@ -1240,6 +1799,107 @@ mod tests {
         }
     }
 
+    pub(crate) const EXIT_TEST_GENERATION: u64 = 17;
+
+    #[test]
+    fn wireguard_drain_is_only_for_the_heartbeat_boundary_and_before_terminal() -> Result<()> {
+        let wire = ephemeral_configuration();
+        let now = unix_now();
+        let mut snapshot = Snapshot::compile_for(
+            wire,
+            id(1),
+            id(2),
+            &local_certificate(),
+            NonZeroU64::new(EXIT_TEST_GENERATION),
+        )?;
+        assert!(!snapshot.wireguard_drain_eligible());
+        snapshot
+            .ephemeral_exit
+            .as_mut()
+            .expect("test lease")
+            .suspect_at = now;
+        snapshot.valid_until = now - 1;
+        assert!(
+            !snapshot.wireguard_drain_eligible(),
+            "an earlier deadline fails closed"
+        );
+        snapshot.valid_until = now;
+        assert!(
+            snapshot.wireguard_drain_eligible(),
+            "the heartbeat boundary can drain"
+        );
+        snapshot.identity_lease_expires_at = now;
+        assert!(
+            !snapshot.wireguard_drain_eligible(),
+            "the enrollment lease ends drain"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn ephemeral_configuration() -> NodeConfiguration {
+        let mut configuration = valid();
+        let now = unix_now();
+        configuration.enrollment_class = EnrollmentClass::EphemeralUser as i32;
+        configuration.enabled_capabilities = Capability::LanewayExitNodeV1 as u64;
+        configuration.identity_lease_expires_at_unix_seconds = now + 120;
+        configuration.valid_until_unix_seconds = now + 20;
+        configuration.ephemeral_exit_lease_generation = EXIT_TEST_GENERATION;
+        configuration.ephemeral_exit_suspect_at_unix_seconds = now + 20;
+        configuration.ephemeral_exit_revoke_at_unix_seconds = now + 60;
+        configuration
+    }
+
+    #[test]
+    fn ephemeral_heartbeat_only_renews_the_bound_exit_and_unchanged_snapshot() {
+        let wire = ephemeral_configuration();
+        let cert = local_certificate();
+        let compile = |wire| {
+            Snapshot::compile_for(
+                wire,
+                id(1),
+                id(2),
+                &cert,
+                NonZeroU64::new(EXIT_TEST_GENERATION),
+            )
+        };
+        assert!(Snapshot::compile(wire.clone(), id(1), id(2), &cert).is_err());
+        assert!(
+            Snapshot::compile_for(
+                wire.clone(),
+                id(1),
+                id(2),
+                &cert,
+                NonZeroU64::new(EXIT_TEST_GENERATION + 1)
+            )
+            .is_err()
+        );
+        let initial = compile(wire.clone()).unwrap();
+        assert!(initial.renew(initial.valid_until + 1).is_err());
+        assert_eq!(
+            initial.exit_terminal_at(),
+            Some(wire.ephemeral_exit_revoke_at_unix_seconds)
+        );
+        let mut next = wire.clone();
+        next.valid_until_unix_seconds += 5;
+        next.ephemeral_exit_suspect_at_unix_seconds += 5;
+        next.ephemeral_exit_revoke_at_unix_seconds += 5;
+        let renewed = initial.renew_exit(compile(next.clone()).unwrap()).unwrap();
+        assert_eq!(renewed.valid_until, initial.valid_until + 5);
+        assert!(renewed.renew_exit(compile(wire.clone()).unwrap()).is_err());
+        let mut peers_changed = next.clone();
+        peers_changed.peers[1].wireguard_public_key[0] ^= 1;
+        assert!(initial.renew_exit(compile(peers_changed).unwrap()).is_err());
+        let mut extended = next.clone();
+        extended.identity_lease_expires_at_unix_seconds += 1;
+        assert!(initial.renew_exit(compile(extended).unwrap()).is_err());
+        next.ephemeral_exit_revoke_at_unix_seconds += 1;
+        assert!(compile(next).is_err());
+        let mut inconsistent = wire;
+        inconsistent.valid_until_unix_seconds =
+            inconsistent.ephemeral_exit_suspect_at_unix_seconds + 1;
+        assert!(compile(inconsistent).is_err());
+    }
+
     #[test]
     fn compiles_complete_default_deny_snapshot() {
         let snapshot = Snapshot::compile(valid(), id(1), id(2), &local_certificate()).unwrap();
@@ -1275,7 +1935,9 @@ mod tests {
         configuration.enrollment_class = EnrollmentClass::EphemeralUser as i32;
         configuration.valid_until_unix_seconds = now + 60;
         configuration.identity_lease_expires_at_unix_seconds = now + 120;
-        Snapshot::compile(configuration.clone(), id(1), id(2), &local_certificate()).unwrap();
+        let snapshot =
+            Snapshot::compile(configuration.clone(), id(1), id(2), &local_certificate()).unwrap();
+        assert!(snapshot.renew(now + 121).is_err());
 
         configuration.valid_until_unix_seconds = now + 121;
         assert!(

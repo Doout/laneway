@@ -1,0 +1,8 @@
+{
+  "epoch": 42,
+  "valid_until": "2030-01-01T00:00:00Z",
+  "container_subnets": ["172.30.60.0/24"],
+  "egress_cidrs": ["10.60.0.0/16"],
+  "ingress_sources": null,
+  "exits": null
+}

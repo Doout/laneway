@@ -68,7 +68,12 @@ pub(crate) fn match_meta(key: &str, value: &str) -> Value {
 }
 
 pub(crate) fn match_prefix(protocol: &str, field: &str, address: &str, bits: u8) -> Value {
-    json!({"match":{"op":"==","left":{"payload":{"protocol":protocol,"field":field}},"right":{"prefix":{"addr":address,"len":bits}}}})
+    let right = if (protocol == "ip" && bits == 32) || (protocol == "ip6" && bits == 128) {
+        json!(address)
+    } else {
+        json!({"prefix":{"addr":address,"len":bits}})
+    };
+    json!({"match":{"op":"==","left":{"payload":{"protocol":protocol,"field":field}},"right":right}})
 }
 
 pub(crate) fn match_ct_states() -> Value {
@@ -77,6 +82,10 @@ pub(crate) fn match_ct_states() -> Value {
 
 pub(crate) fn accept() -> Value {
     json!({"accept":null})
+}
+
+pub(crate) fn drop_packet() -> Value {
+    json!({"drop":null})
 }
 
 pub(crate) fn masquerade() -> Value {

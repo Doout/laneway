@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use laneway_protocol::{
-    AuthenticatedIdentity, TcpRecordKind, decode_packet, decode_tcp_record_prefix,
+    AuthenticatedIdentity, TcpRecordKind, decode_frame, decode_tcp_record_prefix,
     encode_tcp_record_prefix,
 };
 use rustls::ProtocolVersion;
@@ -17,7 +17,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, interval_at, timeout},
 };
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio_rustls::server::TlsStream;
 
 use crate::{
     Metrics,
@@ -82,21 +82,12 @@ impl Parts {
     }
 }
 
-pub(crate) async fn accept(
-    stream: TcpStream,
-    tls_config: Arc<rustls::ServerConfig>,
+pub(crate) fn from_tls(
+    stream: TlsStream<TcpStream>,
     config: &TcpFallbackConfig,
     packet_pool: PacketPool,
     metrics: Arc<Metrics>,
 ) -> Result<Parts> {
-    stream.set_nodelay(true).context("set TCP_NODELAY")?;
-    let stream = timeout(
-        config.handshake_timeout,
-        TlsAcceptor::from(tls_config).accept(stream),
-    )
-    .await
-    .context("TCP fallback TLS handshake timed out")?
-    .context("TCP fallback TLS handshake failed")?;
     let state = stream.get_ref().1;
     ensure!(
         state.protocol_version() == Some(ProtocolVersion::TLSv1_3),
@@ -178,8 +169,9 @@ async fn reader_loop(
                     .try_send(payload)
                     .context("TCP fallback control receive queue full")?,
                 Record::Packet(payload) => {
-                    decode_packet(payload.as_ref())
-                        .context("invalid TCP fallback packet record")?;
+                    // The shared registry authorizes both endpoint credentials
+                    // and their negotiated E2E capability before forwarding.
+                    decode_frame(payload.as_ref()).context("invalid TCP fallback packet record")?;
                     packets
                         .try_send(payload)
                         .context("TCP fallback packet receive queue full")?;

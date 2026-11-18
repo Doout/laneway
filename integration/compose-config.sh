@@ -78,8 +78,24 @@ jq -e '
   (.services.controller.build.target == "controller") and
   (.services.relay.build.target == "relay") and
   (.services.admin.build.target == "admin") and
+  (.services["exit-node"].build.target == "go-exit") and
   (.services.controller.command == ["-config", "/etc/laneway/controller.toml", "-console-dir", "/usr/share/laneway-console"]) and
   ([.services.controller.volumes[] | .target != "/usr/share/laneway-console"] | all)
 ' >/dev/null
 
-echo "Compose security, port, and console contract is valid"
+LANEWAY_VERSION=1.2.3 \
+LANEWAY_RUST_VERSION=1.2.3 \
+LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+LANEWAY_RUST_RELAY_IMAGE_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222 \
+LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:4444444444444444444444444444444444444444444444444444444444444444 \
+LANEWAY_CONTROLLER_SERVER_NAME=controller.example.test \
+docker compose --project-directory "$repo_dir/deploy/compose" \
+  --env-file /dev/null --profile exit-node \
+  -f "$compose_file" -f "$repo_dir/deploy/compose/compose.rust.yaml" config --format json |
+jq -e '
+  (.services.controller.healthcheck.test[1] == "/usr/local/bin/laneway-healthcheck") and
+  (.services.relay.healthcheck.test[1] == "/usr/local/bin/laneway-healthcheck") and
+  (.services["exit-node"].healthcheck.test == ["CMD", "/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"])
+' >/dev/null
+
+echo "Compose security, port, healthcheck, and console contract is valid"

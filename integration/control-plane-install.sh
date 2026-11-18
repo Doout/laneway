@@ -21,23 +21,47 @@ answers_file=$test_root/installer-state/answers
 mkdir -p "$source_dir" "$mock_bin" "$issuer_dir"
 printf '0.2.8\n' > "$test_root/package/VERSION"
 cp "$repo_dir/deploy/compose/install-control-plane.sh" "$source_dir/install-control-plane.sh"
-for name in compose.yaml bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh README.md; do
+cp "$repo_dir/deploy/compose/verify-rust-release.sh" "$source_dir/verify-rust-release.sh"
+for name in compose.yaml compose.rust.yaml recovery.sh validate.sh README.md; do
   printf 'fixture %s\n' "$name" > "$source_dir/$name"
 done
 cat > "$source_dir/laneway-control" <<'EOF'
 #!/bin/sh
 printf 'lane %s\n' "$*" >> "$LANEWAY_TEST_LOG"
 case "$1" in
-  init)
-    test "$2" = --issuer
-    test -d "$3"
-    ;;
   backup)
+    grep -Fx LANEWAY_CONTROL_RUNTIME=rust "$(dirname "$0")/.env" >/dev/null || exit 1
     mkdir -p "$(dirname "$0")/generated/recovery"
     printf 'encrypted recovery fixture\n' > "$(dirname "$0")/generated/recovery/$2"
     ;;
   *) exit 1 ;;
 esac
+EOF
+cat > "$source_dir/preflight.sh" <<'EOF'
+#!/bin/sh
+test "$1" = --rust
+EOF
+cat > "$source_dir/prepare.sh" <<'EOF'
+#!/bin/sh
+set -eu
+test -d "$1"
+test "$LANEWAY_BOOTSTRAP_ARTIFACTS_FILE" = "$PWD/release-metadata/bootstrap-artifacts.toml"
+test -s "$LANEWAY_BOOTSTRAP_ARTIFACTS_FILE"
+printf 'stage pki\n' >> "$LANEWAY_TEST_LOG"
+EOF
+cat > "$source_dir/prepare-rust.py" <<'EOF'
+import os, pathlib, sys
+assert sys.argv[1:] == ["--release-metadata", str(pathlib.Path.cwd() / "release-metadata")]
+assert (pathlib.Path(sys.argv[2]) / "checksums.sigstore.json").is_file()
+with open(os.environ["LANEWAY_TEST_LOG"], "a") as log:
+    log.write("stage rust\n")
+EOF
+cat > "$source_dir/bootstrap.sh" <<'EOF'
+#!/bin/sh
+set -eu
+test "$#" -eq 1
+test "$1" = --rust
+printf 'bootstrap %s\n' "$1" >> "$LANEWAY_TEST_LOG"
 EOF
 cat > "$source_dir/prepare-control-plane.sh" <<'EOF'
 #!/bin/sh
@@ -85,20 +109,35 @@ EOF
 cat > "$mock_bin/cosign" <<'EOF'
 #!/bin/sh
 printf 'cosign %s\n' "$*" >> "$LANEWAY_TEST_LOG"
-test "$1" = verify
-[ "${LANEWAY_TEST_COSIGN_FAIL:-0}" = 0 ]
+identity=https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v0.2.8
+case "$1" in
+  verify-blob)
+    test "$5" = "$identity" && test "$(cat "$3")" = fixture-signature
+    ;;
+  verify)
+    test "$3" = "$identity" || exit 1
+    [ "${LANEWAY_TEST_COSIGN_FAIL:-0}" = 0 ]
+    ;;
+  *) exit 1 ;;
+esac
 EOF
 cat > "$mock_bin/curl" <<'EOF'
 #!/bin/sh
 destination=
+asset=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) destination=$2; shift 2 ;;
+    https://release.invalid/v0.2.8/*) asset=${1##*/}; shift ;;
     *) shift ;;
   esac
 done
 test -n "$destination"
-cp "$LANEWAY_TEST_DIGESTS" "$destination"
+test -n "$asset"
+cp "$(dirname "$LANEWAY_TEST_DIGESTS")/$asset" "$destination"
+if [ "$asset" = image-digests.txt ] && [ "${LANEWAY_TEST_TAMPER:-0}" = 1 ]; then
+  printf '\ntampered\n' >> "$destination"
+fi
 EOF
 cat > "$mock_bin/laneway" <<'EOF'
 #!/bin/sh
@@ -117,11 +156,14 @@ chmod 0755 "$mock_bin"/*
 
 cat > "$test_root/image-digests.txt" <<'EOF'
 ghcr.io/doout/laneway-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-ghcr.io/doout/laneway-controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-ghcr.io/doout/lane-edge@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-ghcr.io/doout/laneway-exit-node@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-ghcr.io/doout/laneway-relay@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ghcr.io/doout/laneway-controller-rust@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ghcr.io/doout/lane-edge-rust@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+ghcr.io/doout/laneway-exit-node-rust@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+ghcr.io/doout/laneway-relay-rust@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 EOF
+printf 'fixture-signature\n' > "$test_root/checksums.sigstore.json"
+printf 'fixture-artifacts\n' > "$test_root/bootstrap-artifacts.toml"
+(cd "$test_root" && sha256sum image-digests.txt bootstrap-artifacts.toml > checksums.txt)
 printf '0\n' > "$counter_file"
 
 recipient=age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
@@ -145,21 +187,32 @@ test "$(stat -c %a "$destination")" = 700
 test "$(stat -c %a "$destination/.env")" = 600
 grep -Fx 'LANEWAY_VERSION=0.2.8' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_INSTALL_PROFILE=quick' "$destination/.env" >/dev/null
-grep -Fx 'LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$destination/.env" >/dev/null
-grep -Fx 'LANEWAY_CONNECTOR_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$destination/.env" >/dev/null
-grep -Fx 'LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_CONTROL_RUNTIME=rust' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_RUST_VERSION=0.2.8' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' "$destination/.env" >/dev/null
+if grep -E '^LANEWAY_(CONTROLLER|RELAY|CONNECTOR|EXIT_NODE)_IMAGE_DIGEST=' "$destination/.env"; then
+  echo "fresh installer pinned a Go runtime" >&2
+  exit 1
+fi
 grep -Fx 'LANEWAY_CONTROLLER_SERVER_NAME=lane.example.test' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_NETWORK_ID=000102030405060708090a0b0c0d0e0f' "$destination/.env" >/dev/null
 test "$(grep -c '^cosign verify ' "$log_file")" -eq 5
-grep -Fx "lane init --issuer $issuer_dir" "$log_file" >/dev/null
+test "$(grep -c '^cosign verify-blob ' "$log_file")" -eq 1
+grep -Fx "stage pki" "$log_file" >/dev/null
+grep -Fx "stage rust" "$log_file" >/dev/null
+grep -Fx "bootstrap --rust" "$log_file" >/dev/null
 grep -E '^lane backup initial-recovery-[0-9]{8}T[0-9]{6}Z\.age$' "$log_file" >/dev/null
 test "$(stat -c %a "$answers_file")" = 600
 grep -Fx 'LANEWAY_DOMAIN=lane.example.test' "$answers_file" >/dev/null
 grep -Fx 'LANEWAY_CONTROLLER_PORT=8443' "$answers_file" >/dev/null
 grep -Fx "LANEWAY_PREPARED_INPUT_DIR=$issuer_dir" "$answers_file" >/dev/null
 test -f "$destination/PRODUCTION-CHECKLIST.md"
-grep -F 'laneway-control production-check' "$destination/PRODUCTION-CHECKLIST.md" >/dev/null
+grep -F 'laneway-control readiness' "$destination/PRODUCTION-CHECKLIST.md" >/dev/null
+test "$(stat -c %a "$destination/release-metadata")" = 700
+test "$(stat -c %a "$destination/release-metadata/image-digests.txt")" = 600
 test -x "$destination/laneway-control"
 test -L "$destination/lane"
 test "$(readlink "$destination/lane")" = laneway-control
@@ -202,7 +255,6 @@ env \
   LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" \
   LANEWAY_TEST_COUNTER="$counter_file" \
   LANEWAY_TEST_LOG="$log_file" \
-  LANEWAY_TEST_COSIGN_FAIL=1 \
   LANEWAY_INSTALLER_ANSWERS_FILE="$automatic_answers" \
   "$source_dir/install-control-plane.sh" >/dev/null
 test -f "$automatic_kit/laneway-recovery.identity"
@@ -213,7 +265,7 @@ test ! -e "$automatic_kit/control-plane-input"
 test "$(find "$automatic_kit" -maxdepth 1 -name 'initial-recovery-*.age' | wc -l)" -eq 1
 grep -Fx "LANEWAY_BACKUP_RECIPIENT=$recipient" "$automatic/.env" >/dev/null
 grep -Fx 'LANEWAY_INSTALL_PROFILE=quick' "$automatic/.env" >/dev/null
-grep -F 'All container image signatures verified: **false**' "$automatic/PRODUCTION-CHECKLIST.md" >/dev/null
+grep -F 'Release checksum and container image signatures: **verified**' "$automatic/PRODUCTION-CHECKLIST.md" >/dev/null
 find /usr/local/sbin/laneway-control -maxdepth 0 -delete
 
 production_failed=$test_root/production-failed
@@ -238,8 +290,25 @@ if env \
   echo "production installer accepted failed image signatures" >&2
   exit 1
 fi
-grep -F 'production signature verification failed' "$test_root/production.err" >/dev/null
+grep -F 'Rust release signature verification failed' "$test_root/production.err" >/dev/null
 test ! -e "$production_failed"
+test ! -e /usr/local/sbin/laneway-control
+
+tampered=$test_root/tampered
+if env \
+  PATH="$mock_bin:$PATH" LANEWAY_NONINTERACTIVE=true LANEWAY_VERSION=0.2.8 \
+  LANEWAY_DOMAIN=lane.example.test LANEWAY_DEPLOY_DIR="$tampered" LANEWAY_CONFIRM=deploy \
+  LANEWAY_ISSUER_DIR="$issuer_dir" LANEWAY_BACKUP_RECIPIENT="$recipient" \
+  LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.2.8 LANEWAY_TEST_TAMPER=1 \
+  LANEWAY_TEST_DIGESTS="$test_root/image-digests.txt" LANEWAY_TEST_LOG="$log_file" \
+  LANEWAY_INSTALLER_ANSWERS_FILE="$test_root/tampered-answers" \
+  "$source_dir/install-control-plane.sh" >/dev/null 2>"$test_root/tampered.err"; then
+  echo "quick installer accepted tampered release metadata" >&2
+  exit 1
+fi
+grep -F 'image-digests.txt differs from its signed checksum' "$test_root/tampered.err" >/dev/null
+test ! -e "$tampered"
+test ! -e "$test_root/tampered-answers"
 
 cancelled=$test_root/cancelled
 printf '0\n' > "$counter_file"

@@ -13,6 +13,14 @@ recovery_dir=$base_dir/generated/recovery
 work=
 published=
 database_snapshot=
+runtime=go
+rust_relay_directory_created=false
+if [ "${1:-}" = --rust ]; then
+  runtime=rust
+  shift
+fi
+rust_files='generated/config/bootstrap.rust.json
+generated/config/relay.rust.toml'
 umask 077
 
 cleanup_database_snapshot() {
@@ -44,6 +52,9 @@ cleanup() {
     done
   fi
   cleanup_database_snapshot
+  if [ "$rust_relay_directory_created" = true ]; then
+    rmdir "$base_dir/generated/rust-relay-workload" 2>/dev/null || true
+  fi
   [ -z "$work" ] || [ ! -e "$work" ] || find "$work" -depth -delete
   return 0
 }
@@ -54,6 +65,9 @@ trap 'exit 143' TERM
 
 die() { echo "lane recovery: $*" >&2; exit 1; }
 compose() {
+  if [ "$runtime" = rust ]; then
+    set -- -f "$base_dir/compose.rust.yaml" "$@"
+  fi
   docker compose --project-directory "$base_dir" --env-file "$compose_env_file" -f "$base_dir/compose.yaml" "$@"
 }
 read_setting() {
@@ -74,8 +88,57 @@ require_regular() {
   fi
 }
 
+validate_rust_settings() {
+  require_regular "$base_dir/compose.rust.yaml"
+  [ "$compose_env_file" = "$env_file" ] || die "Rust recovery requires the deployment's own .env"
+  version=$(read_setting LANEWAY_RUST_VERSION)
+  printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "Rust recovery needs a pinned release version"
+  for key in LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST LANEWAY_RUST_RELAY_IMAGE_DIGEST LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST; do
+    digest=$(read_setting "$key")
+    printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$key must be an immutable image digest"
+    [ "$digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] ||
+      die "$key cannot use the development placeholder"
+  done
+}
+
+validate_deployment() {
+  if [ "$runtime" = rust ]; then set -- --rust; fi
+  "$base_dir/validate.sh" "$@"
+}
+
+snapshot_service_tls() {
+  role=$1; replacement=$2
+  cert=$work/generated/pki/$role.crt
+  key=$work/generated/pki/$role.key
+  if [ -e "$replacement" ] || [ -L "$replacement" ]; then
+    require_regular "$replacement"
+    [ -s "$replacement" ] && [ "$(wc -c < "$replacement")" -le 131072 ] ||
+      die "$role renewal bundle is empty or too large"
+    # The managed cache is an atomically published PEM chain and PKCS8 key.
+    # Use that identity as the restore seed, not a possibly expired original.
+    original_names=$(openssl x509 -in "$cert" -noout -ext subjectAltName)
+    awk '/^-----BEGIN CERTIFICATE-----$/ { emit=1 } emit { print } /^-----END CERTIFICATE-----$/ { emit=0 }' \
+      "$replacement" > "$work/renewed.crt"
+    openssl pkey -in "$replacement" -out "$work/renewed.key"
+    renewed_names=$(openssl x509 -in "$work/renewed.crt" -noout -ext subjectAltName)
+    # Renewal can reorder DNS/IP SAN entries; compare the same set, including the workload URI.
+    canonical_names() { printf '%s\n' "$1" | sed '1d' | tr ',' '\n' | sed 's/^[[:space:]]*//' | LC_ALL=C sort; }
+    [ -n "$original_names" ] && [ "$(canonical_names "$original_names")" = "$(canonical_names "$renewed_names")" ] ||
+      die "$role renewal changed the workload identity"
+    mv "$work/renewed.crt" "$cert"
+    mv "$work/renewed.key" "$key"
+  fi
+  openssl verify -CAfile "$work/generated/pki/ca.crt" \
+    -untrusted "$work/generated/pki/intermediate-chain.crt" "$cert" >/dev/null ||
+    die "$role has no current trusted certificate to restore"
+  openssl x509 -in "$cert" -checkend 300 -noout >/dev/null || die "$role certificate is about to expire"
+  public_cert=$(openssl x509 -in "$cert" -noout -pubkey)
+  public_key=$(openssl pkey -in "$key" -pubout)
+  [ "$public_cert" = "$public_key" ] || die "$role recovery certificate and private key do not match"
+}
+
 [ "$(id -u)" -eq 0 ] || die "run as root to read and restore fixed-UID secrets safely"
-for command in age chown docker find grep install sed sha256sum sort sync tar; do
+for command in age chown cmp docker find grep install sed sha256sum sort sync tar; do
   command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
 done
 
@@ -85,12 +148,17 @@ case "${1:-}" in
     name=$2; validate_name "$name"
     require_regular "$env_file"
     require_regular "$compose_env_file"
+    if [ "$runtime" = rust ]; then
+      validate_rust_settings
+      command -v openssl >/dev/null 2>&1 || die "Rust recovery requires openssl"
+      command -v jq >/dev/null 2>&1 || die "Rust recovery requires jq"
+    fi
     recipient=$(read_setting LANEWAY_BACKUP_RECIPIENT)
     printf '%s\n' "$recipient" | grep -Eq '^age1[0-9a-z]{58}$' || die "LANEWAY_BACKUP_RECIPIENT must be an age X25519 recipient"
     if [ -e "$recovery_dir/$name" ] || [ -L "$recovery_dir/$name" ]; then
       die "recovery bundle already exists: $name"
     fi
-    "$base_dir/validate.sh"
+    validate_deployment
     install -d -m 0700 "$backup_dir"
     chown 65532:65532 "$backup_dir"
     if [ -e "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
@@ -103,7 +171,18 @@ case "${1:-}" in
     install -d -m 0700 "$work/database" "$work/generated/config" "$work/generated/pki" "$work/generated/secrets"
     database_name=.lane-recovery-$PPID-$$.db
     database_snapshot=$backup_dir/$database_name
-    compose run --rm --no-deps controller -config /etc/laneway/controller.toml -backup "/backups/$database_name"
+    if [ "$runtime" = rust ]; then
+      controller_container=$(compose ps --status running -q controller)
+      [ -n "$controller_container" ] || die "Rust backup requires a running controller"
+      selected_image=$(compose config --format json | jq -er '.services.controller.image')
+      running_image=$(docker inspect --format '{{.Config.Image}}' "$controller_container")
+      [ "$running_image" = "$selected_image" ] ||
+        die "running controller image does not match the Rust recovery configuration"
+      compose exec -T controller /usr/local/bin/laneway-controller \
+        backup /var/lib/laneway-controller/controller.db "/backups/$database_name"
+    else
+      compose run --rm --no-deps controller -config /etc/laneway/controller.toml -backup "/backups/$database_name"
+    fi
     require_regular "$database_snapshot"
     install -m 0600 "$database_snapshot" "$work/database/controller.db"
     cleanup_database_snapshot
@@ -119,6 +198,8 @@ generated/pki/controller.key
 generated/pki/relay.crt
 generated/pki/relay.key
 generated/secrets/admin.token"
+    if [ "$runtime" = rust ]; then files="$files
+$rust_files"; fi
     install -m 0600 "$env_file" "$work/.env"
     for relative in $files; do
       require_regular "$base_dir/$relative"
@@ -136,7 +217,19 @@ generated/secrets/admin.token"
 $relative"
       done
     fi
-    printf '%s\n' 'LANEWAY_RECOVERY_VERSION=1' > "$work/FORMAT"
+    if [ "$runtime" = rust ]; then
+      install -d -m 0700 "$work/controller-tls"
+      docker cp "$controller_container:/var/lib/laneway-controller/rust-tls/." "$work/controller-tls"
+      snapshot_service_tls controller "$work/controller-tls/controller-service.pem"
+      relay_workload_dir=$base_dir/generated/rust-relay-workload
+      [ -d "$relay_workload_dir" ] && [ ! -L "$relay_workload_dir" ] &&
+        [ "$(stat -c '%a:%u:%g' "$relay_workload_dir")" = 700:65532:65532 ] ||
+        die "Rust relay workload state directory is unsafe"
+      snapshot_service_tls relay "$relay_workload_dir/relay-service.pem"
+      printf '%s\n' 'LANEWAY_RECOVERY_VERSION=2' > "$work/FORMAT"
+    else
+      printf '%s\n' 'LANEWAY_RECOVERY_VERSION=1' > "$work/FORMAT"
+    fi
     (
       cd "$work"
       # Every value in files is an internally fixed, whitespace-free relative path.
@@ -184,6 +277,8 @@ generated/pki/relay.key
 generated/pki/exit-node.crt
 generated/pki/exit-node.key
 generated/secrets/admin.token'
+    if [ "$runtime" = rust ]; then allowed="$allowed
+$rust_files"; fi
     while IFS= read -r entry; do
       printf '%s\n' "$allowed" | grep -Fx "$entry" >/dev/null || die "unexpected recovery archive entry: $entry"
     done < "$work/list"
@@ -194,13 +289,28 @@ generated/secrets/admin.token'
       generated/pki/relay.key generated/secrets/admin.token; do
       grep -Fx "$entry" "$work/list" >/dev/null || die "recovery archive is missing: $entry"
     done
+    if [ "$runtime" = rust ]; then
+      for entry in $rust_files; do
+        grep -Fx "$entry" "$work/list" >/dev/null || die "Rust recovery archive is missing: $entry"
+      done
+    fi
     exit_count=$(grep -Ec '^(generated/config/exit-node.toml|generated/pki/exit-node.crt|generated/pki/exit-node.key)$' "$work/list" || true)
     [ "$exit_count" -eq 0 ] || [ "$exit_count" -eq 3 ] || die "recovery archive has partial Exit Node material"
     install -d -m 0700 "$work/extracted/database" "$work/extracted/generated/config" \
       "$work/extracted/generated/pki" "$work/extracted/generated/secrets"
     tar --extract --file "$work/recovery.tar" --directory "$work/extracted" \
       --no-same-owner --no-same-permissions --keep-old-files
-    [ "$(cat "$work/extracted/FORMAT")" = LANEWAY_RECOVERY_VERSION=1 ] || die "unsupported recovery bundle format"
+    case "$runtime:$(cat "$work/extracted/FORMAT")" in
+      go:LANEWAY_RECOVERY_VERSION=1|rust:LANEWAY_RECOVERY_VERSION=2) ;;
+      *) die "recovery bundle format does not match the selected runtime" ;;
+    esac
+    if LC_ALL=C grep -Ev '^[0-9a-f]{64}  [A-Za-z0-9._/-]+$' "$work/extracted/MANIFEST.sha256" >/dev/null; then
+      die "invalid recovery manifest entry"
+    fi
+    LC_ALL=C sed -n -E 's/^[0-9a-f]{64}  ([A-Za-z0-9._\/-]+)$/\1/p' \
+      "$work/extracted/MANIFEST.sha256" | LC_ALL=C sort > "$work/manifest-list"
+    sed '/^MANIFEST\.sha256$/d' "$work/list" > "$work/data-list"
+    cmp -s "$work/manifest-list" "$work/data-list" || die "manifest does not cover exactly the archived files"
     (cd "$work/extracted" && sha256sum --check --strict MANIFEST.sha256 >/dev/null) || die "recovery bundle integrity check failed"
     while IFS= read -r entry; do require_regular "$work/extracted/$entry"; done < "$work/list"
 
@@ -215,6 +325,8 @@ generated/pki/controller.key
 generated/pki/relay.crt
 generated/pki/relay.key
 generated/secrets/admin.token"
+    if [ "$runtime" = rust ]; then targets="$targets
+$rust_files"; fi
     [ "$exit_count" -eq 0 ] || targets="$targets
 generated/config/exit-node.toml
 generated/pki/exit-node.crt
@@ -245,16 +357,32 @@ generated/pki/exit-node.key"
       ln "$work/extracted/$relative" "$base_dir/$relative"
       published="$published $base_dir/$relative"
     done
-    if [ -n "$(compose ps --status running -q controller)" ]; then die "restore requires a stopped controller"; fi
-    "$base_dir/validate.sh"
+    if [ "$runtime" = rust ]; then validate_rust_settings; fi
+    running_controller=$(compose ps --status running -q controller) || die "could not determine controller state"
+    [ -z "$running_controller" ] || die "restore requires a stopped controller"
+    validate_deployment
     restore_db=$backup_dir/.lane-restore-$PPID-$$.db
     install -m 0600 "$work/extracted/database/controller.db" "$restore_db"
     chown 65532:65532 "$restore_db"
     database_snapshot=$restore_db
-    compose run --rm --no-deps controller -config /etc/laneway/controller.toml -restore "/backups/$(basename "$restore_db")"
+    if [ "$runtime" = rust ]; then
+      relay_workload_dir=$base_dir/generated/rust-relay-workload
+      mkdir -m 0700 "$relay_workload_dir" || die "Rust restore refuses an existing relay workload directory"
+      rust_relay_directory_created=true
+      chown 65532:65532 "$relay_workload_dir"
+      compose run --rm --no-deps --pull never controller restore \
+        "/backups/$(basename "$restore_db")" /var/lib/laneway-controller/controller.db
+    else
+      compose run --rm --no-deps controller -config /etc/laneway/controller.toml -restore "/backups/$(basename "$restore_db")"
+    fi
     published=
+    rust_relay_directory_created=false
     cleanup_database_snapshot
-    echo "laneway-control: recovery bundle restored; run laneway-control init to verify signed images and start the stack"
+    if [ "$runtime" = rust ]; then
+      echo "laneway-control: Rust recovery bundle restored; verify signed images before starting with compose.rust.yaml"
+    else
+      echo "laneway-control: recovery bundle restored; run laneway-control init to verify signed images and start the stack"
+    fi
     ;;
   *) die "usage: recovery.sh <backup NAME.age|restore BUNDLE.age IDENTITY>" ;;
 esac

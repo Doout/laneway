@@ -4,11 +4,16 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Native Linux Laneway node dataplane"
+description = "Native Laneway node dataplane"
+default-run = "lanewayd-rs"
 
 [[bin]]
 name = "lanewayd-rs"
 path = "src/main.rs"
+
+[[bin]]
+name = "laneway-update-rs"
+path = "src/managed_update_main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -17,10 +22,15 @@ bytes.workspace = true
 crossbeam-queue.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+hickory-proto = "0.26.3"
 humantime-serde.workspace = true
 ipnet.workspace = true
+laneway-healthcheck = { path = "../laneway-healthcheck" }
 laneway-protocol = { path = "../laneway-protocol" }
 prost.workspace = true
+rcgen = { version = "0.14.8", default-features = false, features = ["ring","zeroize"] }
+tempfile = "3.26.0"
+base64.workspace = true
 quinn.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
 rustls.workspace = true
@@ -29,16 +39,28 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-reno"] }
 tokio.workspace = true
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
-tokio-tun.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 wait-timeout.workspace = true
 x509-parser.workspace = true
+zeroize = "1.9.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+flate2 = "1.1.11"
+tokio-tun.workspace = true
+libc = "0.2.189"
+tar = { version = "0.4.46", default-features = false }
+tokio = { workspace = true, features = ["fs", "process"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
 
 [dev-dependencies]
 laneway-relay = { path = "../laneway-relay" }
 rcgen = "0.14.5"
-tempfile = "3.26.0"
+thiserror.workspace = true

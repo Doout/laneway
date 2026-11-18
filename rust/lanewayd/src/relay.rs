@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use laneway_protocol::{
-    Id, PacketHeader, Role, decode_packet,
+    Id, PACKET_FLAG_E2E_ENCRYPTED, PacketHeader, Role, decode_frame, decode_packet,
     v1::{
         Capability, ControlEnvelope, EndpointCandidate, EndpointTransport, Hello, RelayEnvelope,
         RelayRegister, Welcome, control_envelope, relay_envelope,
@@ -36,9 +36,12 @@ use crate::{
     routing::{locally_owned, packet_meta},
     state::{Handle, State},
     tcp_fallback, tls,
+    wireguard::{MAX_WIREGUARD_DATAGRAM, WireGuardDatagram},
 };
 
 const CONTROL_PREFACE: &[u8] = b"LWC1";
+const RAW_IP_CARRIER_LIMIT: u32 = 1280;
+const E2E: u64 = Capability::LanewayE2ePacketV1 as u64;
 const REQUIRED_CAPABILITIES: u64 =
     Capability::LanewayRelayV1 as u64 | Capability::LanewayQuicDatagramV1 as u64;
 const REQUIRED_TCP_CAPABILITIES: u64 =
@@ -51,13 +54,14 @@ const KNOWN_CAPABILITIES: u64 = REQUIRED_CAPABILITIES
     | Capability::LanewayIpv6V1 as u64
     | Capability::LanewayE2ePacketV1 as u64;
 
-/// One packet queued from the TUN reader toward the relay.
+/// One packet queued from the local device toward the relay.
 #[derive(Debug)]
 pub(crate) struct OutboundPacket {
     /// Authenticated next-hop node selected by the route snapshot.
     pub peer: Id,
-    /// Complete raw IP packet.
+    /// Complete IP packet or opaque WireGuard UDP datagram.
     packet: PooledPacket,
+    wireguard_key: Option<[u8; 32]>,
 }
 
 impl OutboundPacket {
@@ -67,13 +71,42 @@ impl OutboundPacket {
         Self {
             peer,
             packet: PooledPacket::unpooled(packet),
+            wireguard_key: None,
         }
     }
 
     pub(crate) fn pooled(peer: Id, packet: &[u8], pool: &PacketPool) -> (Self, bool) {
         let (packet, miss) = pool.copy(packet);
-        (Self { peer, packet }, miss)
+        (
+            Self {
+                peer,
+                packet,
+                wireguard_key: None,
+            },
+            miss,
+        )
     }
+
+    pub(crate) fn wireguard(datagram: WireGuardDatagram, pool: &PacketPool) -> (Self, bool) {
+        let (packet, miss) = pool.copy(datagram.payload());
+        (
+            Self {
+                peer: datagram.peer(),
+                packet,
+                wireguard_key: Some(datagram.peer_key()),
+            },
+            miss,
+        )
+    }
+}
+
+/// The authenticated origin travels with each queued packet; a later route
+/// update must never reinterpret the packet as coming from a different peer.
+#[derive(Clone)]
+pub(crate) struct InboundPacket {
+    pub(crate) peer: Id,
+    pub(crate) direct_serial: Option<Bytes>,
+    pub(crate) bytes: Bytes,
 }
 
 /// Reconnecting QUIC relay client.
@@ -86,9 +119,15 @@ pub struct RelayClient {
     node: Id,
     boot: Id,
     owned: Arc<Vec<ipnet::IpNet>>,
-    inject: mpsc::Sender<Bytes>,
+    inject: mpsc::Sender<InboundPacket>,
     candidates: mpsc::Sender<EndpointCandidate>,
+    wireguard: Option<WireGuardPlane>,
     relay_cursor: AtomicUsize,
+}
+
+struct WireGuardPlane {
+    local_key: [u8; 32],
+    receive: mpsc::Sender<WireGuardDatagram>,
 }
 
 struct QuicSession {
@@ -104,6 +143,7 @@ struct QuicSession {
 
 struct TcpSession {
     connection: tcp_fallback::Session,
+    relay_service: Id,
     negotiated: u64,
     inbound_sequence: u64,
 }
@@ -122,7 +162,7 @@ impl RelayClient {
         node: Id,
         boot: Id,
         owned: Arc<Vec<ipnet::IpNet>>,
-        inject: mpsc::Sender<Bytes>,
+        inject: mpsc::Sender<InboundPacket>,
         candidates: mpsc::Sender<EndpointCandidate>,
     ) -> Self {
         Self {
@@ -136,7 +176,29 @@ impl RelayClient {
             owned,
             inject,
             candidates,
+            wireguard: None,
             relay_cursor: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn require_wireguard(
+        mut self,
+        local_key: [u8; 32],
+        receive: mpsc::Sender<WireGuardDatagram>,
+    ) -> Self {
+        self.wireguard = Some(WireGuardPlane { local_key, receive });
+        self
+    }
+
+    fn carrier_capabilities(&self, required: u64) -> (u64, u64) {
+        let offered = hello_capabilities_for(&self.config, required);
+        if self.wireguard.is_some() {
+            (
+                (offered & !(Capability::LanewayDirectPeerV1 as u64)) | E2E,
+                required | E2E,
+            )
+        } else {
+            (offered, required)
         }
     }
 
@@ -213,7 +275,7 @@ impl RelayClient {
     async fn prepare_quic(&self) -> Result<QuicSession> {
         let (connection, relay_service, relay_address) = self.connect().await?;
         let result = timeout(self.config.relay.handshake_timeout, async {
-            let offered = hello_capabilities_for(&self.config, REQUIRED_CAPABILITIES);
+            let (offered, required) = self.carrier_capabilities(REQUIRED_CAPABILITIES);
             let (mut send, mut receive) = connection
                 .open_bi()
                 .await
@@ -230,8 +292,7 @@ impl RelayClient {
             )
             .await?;
             let welcome: ControlEnvelope = read_message(&mut receive, MAX_CONTROL_PAYLOAD).await?;
-            let (welcome, negotiated) =
-                validate_control_welcome(welcome, offered, REQUIRED_CAPABILITIES)?;
+            let (welcome, negotiated) = validate_control_welcome(welcome, offered, required)?;
             write_message(
                 &mut send,
                 &RelayEnvelope {
@@ -272,21 +333,15 @@ impl RelayClient {
     }
 
     async fn prepare_tcp(&self) -> Result<TcpSession> {
-        if self.state.relay_targets().is_some() {
-            let service =
-                Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
-            let address = self
-                .config
-                .relay
-                .address
-                .context("relay QUIC address is disabled")?;
-            ensure!(
-                self.state.relay_authorized(service, address),
-                "configured TCP fallback relay is no longer controller-authorized"
-            );
-        }
-        let mut connection = tcp_fallback::connect(&self.config, self.network).await?;
-        let offered = hello_capabilities_for(&self.config, REQUIRED_TCP_CAPABILITIES);
+        let service = Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
+        let mut connection = tcp_fallback::connect(
+            &self.config,
+            self.network,
+            self.wireguard.is_some(),
+            |address| self.state.relay_authorized_ip(service, address.ip()),
+        )
+        .await?;
+        let (offered, required) = self.carrier_capabilities(REQUIRED_TCP_CAPABILITIES);
         let hello = ControlEnvelope {
             schema_version: SCHEMA_VERSION,
             sequence: 1,
@@ -308,8 +363,7 @@ impl RelayClient {
         .context("TCP fallback Welcome timed out")?
         .context("TCP fallback control queue closed")?;
         let welcome: ControlEnvelope = decode_message(&payload)?;
-        let (welcome, negotiated) =
-            validate_control_welcome(welcome, offered, REQUIRED_TCP_CAPABILITIES)?;
+        let (welcome, negotiated) = validate_control_welcome(welcome, offered, required)?;
         connection
             .writer
             .control(encode_message(
@@ -326,6 +380,7 @@ impl RelayClient {
             .await?;
         Ok(TcpSession {
             connection,
+            relay_service: service,
             negotiated,
             inbound_sequence: 1,
         })
@@ -435,7 +490,9 @@ impl RelayClient {
                 }
                 _ = authority_check.tick() => {
                     ensure!(
-                        self.state.relay_authorized(session.relay_service, session.relay_address),
+                        self.state.relay_authorized(session.relay_service, session.relay_address)
+                            || (self.wireguard.is_some()
+                                && self.state.wireguard_drain_relay(session.relay_service, session.relay_address, false)),
                         "active relay was withdrawn by controller"
                     );
                 }
@@ -481,9 +538,12 @@ impl RelayClient {
                         recovery = Some(Box::pin(self.prepare_quic()));
                     }
                     _ = authority_check.tick() => {
-                        let service = Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
-                        let address = self.config.relay.address.context("relay QUIC address is disabled")?;
-                        ensure!(self.state.relay_authorized(service, address), "active TCP relay was withdrawn by controller");
+                        ensure!(
+                            self.state.relay_authorized_ip(session.relay_service, session.connection.remote.ip())
+                                || (self.wireguard.is_some()
+                                    && self.state.wireguard_drain_relay(session.relay_service, session.connection.remote, true)),
+                            "active TCP relay was withdrawn by controller"
+                        );
                     }
                     prepared = async { recovery.as_mut().expect("recovery future exists").await }, if recovery.is_some() => {
                         match prepared {
@@ -568,6 +628,14 @@ impl RelayClient {
         let Some(frame) = self.frame_packet(outbound, negotiated_capabilities)? else {
             return Ok(());
         };
+        if self.wireguard.is_some()
+            && connection
+                .max_datagram_size()
+                .is_none_or(|limit| frame.len() > limit)
+        {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return Ok(());
+        }
         connection
             .send_datagram(Bytes::from_owner(frame))
             .context("send relay datagram")?;
@@ -579,6 +647,23 @@ impl RelayClient {
         outbound: OutboundPacket,
         negotiated_capabilities: u64,
     ) -> Result<Option<PooledPacket>> {
+        if let Some(wireguard) = &self.wireguard {
+            let live_key =
+                self.state
+                    .wireguard_peer_key(self.node, outbound.peer, &wireguard.local_key);
+            if negotiated_capabilities & E2E == 0
+                || live_key.is_none()
+                || outbound.wireguard_key != live_key
+            {
+                Metrics::increment(&self.metrics.auth_drops);
+                return Ok(None);
+            }
+            return self.frame_for_handle(outbound, PACKET_FLAG_E2E_ENCRYPTED);
+        }
+        if outbound.wireguard_key.is_some() {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return Ok(None);
+        }
         let Ok(meta) = packet_meta(&outbound.packet) else {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
@@ -590,16 +675,33 @@ impl RelayClient {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         }
-        if !packet_capabilities_allow(
-            &self.config,
-            &self.state.routes.load(),
-            meta,
-            negotiated_capabilities,
-            false,
-        ) {
+        let forwards_exit = !self.state.owns(&self.owned, meta.source);
+        let routes = self.state.routes.load();
+        if (forwards_exit
+            && !(self.state.gateway_allows(meta.destination)
+                && routes
+                    .lookup(meta.destination)
+                    .is_some_and(|r| r.via == outbound.peer)))
+            || !packet_capabilities_allow(
+                &self.config,
+                &routes,
+                meta,
+                negotiated_capabilities,
+                false,
+                forwards_exit,
+            )
+        {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         }
+        self.frame_for_handle(outbound, 0)
+    }
+
+    fn frame_for_handle(
+        &self,
+        outbound: OutboundPacket,
+        flags: u8,
+    ) -> Result<Option<PooledPacket>> {
         let handles = self.state.handles.load();
         let Some(handle) = handles.outbound.get(&outbound.peer) else {
             Metrics::increment(&self.metrics.no_path_drops);
@@ -617,7 +719,7 @@ impl RelayClient {
         frame[..5].copy_from_slice(
             &PacketHeader {
                 version: 1,
-                flags: 0,
+                flags,
                 route_handle: handle.value,
             }
             .encode()?,
@@ -627,11 +729,19 @@ impl RelayClient {
     }
 
     async fn receive_packet(&self, frame: Bytes, negotiated_capabilities: u64) {
+        if let Some(wireguard) = &self.wireguard {
+            self.receive_wireguard(wireguard, frame, negotiated_capabilities);
+            return;
+        }
         let Ok((header, packet)) = decode_packet(&frame) else {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.malformed_drops);
             return;
         };
+        if packet.len() > usize::from(self.config.tun.mtu) {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return;
+        }
         let handles = self.state.handles.load();
         let Some(peer) = handles.inbound.get(&header.route_handle).copied() else {
             Metrics::increment(&self.metrics.invalid_drops);
@@ -648,21 +758,37 @@ impl RelayClient {
             return;
         }
         let routes = self.state.routes.load();
-        if !packet_capabilities_allow(&self.config, &routes, meta, negotiated_capabilities, true) {
+        let forwards_exit = !self.state.owns(&self.owned, meta.destination);
+        if !packet_capabilities_allow(
+            &self.config,
+            &routes,
+            meta,
+            negotiated_capabilities,
+            true,
+            forwards_exit,
+        ) {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.policy_drops);
             return;
         }
         if !routes.authorizes_source(peer, meta.source)
-            || (!self.state.owns(&self.owned, meta.destination)
-                && !self.config.forwarding.exit_gateway)
+            || (forwards_exit && !self.state.gateway_allows(meta.source))
         {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.auth_drops);
             return;
         }
         let payload_offset = frame.len() - packet.len();
-        let sent = self.inject.try_send(frame.slice(payload_offset..));
+        let sent = self.inject.try_send(InboundPacket {
+            peer,
+            direct_serial: None,
+            bytes: frame.slice(payload_offset..),
+        });
+        if sent.is_ok()
+            && let Some(topology) = &self.state.topology
+        {
+            topology.received(peer, None);
+        }
         let depth = self
             .inject
             .max_capacity()
@@ -673,31 +799,74 @@ impl RelayClient {
         }
     }
 
+    fn receive_wireguard(&self, wireguard: &WireGuardPlane, frame: Bytes, negotiated: u64) {
+        let Ok((header, packet)) = decode_frame(&frame) else {
+            Metrics::increment(&self.metrics.malformed_drops);
+            return;
+        };
+        if header.flags != PACKET_FLAG_E2E_ENCRYPTED
+            || negotiated & E2E == 0
+            || packet.len() > MAX_WIREGUARD_DATAGRAM
+        {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return;
+        }
+        let handles = self.state.handles.load();
+        let Some(&peer) = handles.inbound.get(&header.route_handle) else {
+            Metrics::increment(&self.metrics.no_path_drops);
+            return;
+        };
+        let Some(key) = self
+            .state
+            .wireguard_peer_key(self.node, peer, &wireguard.local_key)
+        else {
+            Metrics::increment(&self.metrics.auth_drops);
+            return;
+        };
+        let offset = frame.len() - packet.len();
+        if wireguard
+            .receive
+            .try_send(WireGuardDatagram::checked(peer, key, frame.slice(offset..)))
+            .is_err()
+        {
+            Metrics::increment(&self.metrics.queue_drops);
+        }
+    }
+
     fn control(&self, envelope: RelayEnvelope, negotiated_capabilities: u64) -> Result<()> {
         match envelope.body {
             Some(relay_envelope::Body::RouteHandleBinding(binding)) => {
                 ensure!(binding.route_handle != 0, "relay bound zero handle");
                 let peer = Id::from_slice(&binding.peer_node_id).context("binding peer ID")?;
                 ensure!(peer != self.node, "relay bound local node as peer");
-                ensure!(
-                    binding.max_packet_payload >= 576
-                        && binding.max_packet_payload <= u32::from(self.config.tun.mtu),
-                    "invalid binding packet limit"
-                );
-                ensure!(
+                let max_payload = if self.wireguard.is_some() {
+                    let limit = binding.max_packet_payload as usize;
+                    ensure!(
+                        (576..=MAX_WIREGUARD_DATAGRAM).contains(&limit),
+                        "invalid encrypted binding packet limit"
+                    );
+                    limit
+                } else {
+                    local_packet_limit(binding.max_packet_payload, self.config.tun.mtu)?
+                };
+                let known_peer = if self.wireguard.is_some() {
+                    self.state
+                        .authority_snapshot()
+                        .is_some_and(|snapshot| snapshot.peers.contains_key(&peer))
+                } else {
                     self.state
                         .routes
                         .load()
                         .routes()
                         .iter()
-                        .any(|route| route.via == peer),
-                    "relay bound an unconfigured peer"
-                );
+                        .any(|route| route.via == peer)
+                };
+                ensure!(known_peer, "relay bound an unconfigured peer");
                 self.state.bind(
                     peer,
                     Handle {
                         value: binding.route_handle,
-                        max_payload: binding.max_packet_payload as usize,
+                        max_payload,
                     },
                 );
             }
@@ -745,7 +914,8 @@ fn hello_capabilities_for(config: &Config, required: u64) -> u64 {
     {
         capabilities |= Capability::LanewayDirectPeerV1 as u64;
     }
-    if config.forwarding.subnet_router
+    if config.connector.userspace
+        || config.forwarding.subnet_router
         || config
             .routes
             .iter()
@@ -765,9 +935,10 @@ fn hello_capabilities_for(config: &Config, required: u64) -> u64 {
         // Controller snapshots may add these route families after this relay
         // session is established. Negotiation declares implementation support;
         // the leased snapshot remains the independent authorization source.
-        capabilities |= Capability::LanewaySubnetRouterV1 as u64
-            | Capability::LanewayExitNodeV1 as u64
-            | Capability::LanewayIpv6V1 as u64;
+        capabilities |= Capability::LanewaySubnetRouterV1 as u64 | Capability::LanewayIpv6V1 as u64;
+        if !config.connector.userspace {
+            capabilities |= Capability::LanewayExitNodeV1 as u64;
+        }
     }
     if config
         .tun
@@ -788,6 +959,7 @@ fn packet_capabilities_allow(
     meta: crate::routing::PacketMeta,
     capabilities: u64,
     inbound: bool,
+    forwards_exit: bool,
 ) -> bool {
     if meta.source.is_ipv6() && capabilities & Capability::LanewayIpv6V1 as u64 == 0 {
         return false;
@@ -807,22 +979,24 @@ fn packet_capabilities_allow(
             return false;
         }
     }
-    if config.forwarding.subnet_router
+    if (config.forwarding.subnet_router || config.connector.userspace)
         && !locally_owned(&config.tun.addresses, meta.source)
         && locally_owned(&config.forwarding.owned_prefixes, meta.source)
         && capabilities & Capability::LanewaySubnetRouterV1 as u64 == 0
     {
         return false;
     }
-    if inbound
-        && config.forwarding.exit_gateway
-        && !locally_owned(&config.tun.addresses, meta.destination)
-        && !locally_owned(&config.forwarding.owned_prefixes, meta.destination)
-        && capabilities & Capability::LanewayExitNodeV1 as u64 == 0
-    {
-        return false;
-    }
-    true
+    !forwards_exit || capabilities & Capability::LanewayExitNodeV1 as u64 != 0
+}
+
+fn local_packet_limit(carrier_limit: u32, local_mtu: u16) -> Result<usize> {
+    // The relay advertises its path limit independently of the local TUN.
+    // Keep the smaller bound without rejecting a compatible path.
+    ensure!(
+        (576..=RAW_IP_CARRIER_LIMIT).contains(&carrier_limit),
+        "invalid binding packet limit"
+    );
+    Ok((carrier_limit as usize).min(usize::from(local_mtu)))
 }
 
 fn validate_welcome(
@@ -965,6 +1139,143 @@ mod tests {
     }
 
     #[test]
+    fn relay_binding_obeys_both_the_wire_limit_and_local_mtu() {
+        assert_eq!(local_packet_limit(1280, 1200).unwrap(), 1200);
+        assert_eq!(local_packet_limit(1000, 1200).unwrap(), 1000);
+        assert!(local_packet_limit(575, 1200).is_err());
+        assert!(local_packet_limit(1281, 1200).is_err());
+    }
+
+    #[tokio::test]
+    async fn wireguard_relay_is_ciphertext_only_and_fences_rotated_peers() {
+        use crate::controller::{
+            Snapshot,
+            tests::{EXIT_TEST_GENERATION, ephemeral_configuration, id, local_certificate},
+        };
+        use std::num::NonZeroU64;
+        let compile = |wire| {
+            Arc::new(
+                Snapshot::compile_for(
+                    wire,
+                    id(1),
+                    id(2),
+                    &local_certificate(),
+                    NonZeroU64::new(EXIT_TEST_GENERATION),
+                )
+                .unwrap(),
+            )
+        };
+        let local = id(2);
+        let peer = id(3);
+        let local_key = [1; 32];
+        let remote_key = [2; 32];
+        let state = Arc::new(State::controller(
+            RoutingTable::compile(&[]).unwrap(),
+            local,
+        ));
+        state.publish_authority(compile(ephemeral_configuration()));
+        state.bind(
+            peer,
+            Handle {
+                value: 7,
+                max_payload: MAX_WIREGUARD_DATAGRAM,
+            },
+        );
+        let config = toml::from_str(include_str!(
+            "../../../deploy/examples/node-rust-controller.toml"
+        ))
+        .unwrap();
+        let (raw, mut raw_rx) = mpsc::channel(2);
+        let (candidates, _candidates) = mpsc::channel(2);
+        let (encrypted, mut encrypted_rx) = mpsc::channel(2);
+        let client = RelayClient::new(
+            Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap(),
+            Arc::new(config),
+            Arc::clone(&state),
+            Arc::new(Metrics::default()),
+            id(1),
+            local,
+            id(4),
+            Arc::new(Vec::new()),
+            raw,
+            candidates,
+        )
+        .require_wireguard(local_key, encrypted);
+        let (offered, required) = client.carrier_capabilities(REQUIRED_CAPABILITIES);
+        assert_eq!(required & E2E, E2E);
+        assert_eq!(offered & Capability::LanewayDirectPeerV1 as u64, 0);
+        let welcome = Welcome {
+            session_id: vec![1; 16],
+            capabilities: REQUIRED_CAPABILITIES,
+            max_control_payload: 1024,
+            max_packet_payload: 2048,
+            ..Default::default()
+        };
+        assert!(validate_welcome(&welcome, offered, required).is_err());
+
+        let raw = ipv4([100, 96, 0, 2], [100, 96, 0, 1]);
+        assert!(
+            client
+                .frame_packet(OutboundPacket::new(peer, raw.clone()), offered)
+                .unwrap()
+                .is_none()
+        );
+        let mut plaintext = Vec::new();
+        laneway_protocol::encode_packet(
+            PacketHeader {
+                version: 1,
+                flags: 0,
+                route_handle: 7,
+            },
+            &raw,
+            &mut plaintext,
+        )
+        .unwrap();
+        client.receive_packet(Bytes::from(plaintext), offered).await;
+        assert!(raw_rx.try_recv().is_err());
+        assert!(encrypted_rx.try_recv().is_err());
+
+        let mut ciphertext = vec![0; 148];
+        ciphertext[0] = 1;
+        let pool = PacketPool::prewarmed(2, MAX_WIREGUARD_DATAGRAM + 5);
+        let packet = || {
+            OutboundPacket::wireguard(
+                WireGuardDatagram::new(peer, remote_key, Bytes::copy_from_slice(&ciphertext))
+                    .unwrap(),
+                &pool,
+            )
+            .0
+        };
+        assert!(
+            client
+                .frame_packet(packet(), REQUIRED_CAPABILITIES)
+                .unwrap()
+                .is_none()
+        );
+        let framed = client.frame_packet(packet(), offered).unwrap().unwrap();
+        let (header, payload) = decode_frame(&framed).unwrap();
+        assert_eq!(header.flags, PACKET_FLAG_E2E_ENCRYPTED);
+        assert_eq!(payload, ciphertext);
+        client
+            .receive_packet(Bytes::from_owner(framed), offered)
+            .await;
+        let delivered = encrypted_rx.try_recv().unwrap();
+        assert_eq!(delivered.peer(), peer);
+        assert_eq!(delivered.peer_key(), remote_key);
+        assert_eq!(delivered.payload(), ciphertext);
+
+        let mut rotated = ephemeral_configuration();
+        rotated.configuration_epoch = 8;
+        rotated.routes.as_mut().unwrap().configuration_epoch = 8;
+        rotated.policy.as_mut().unwrap().configuration_epoch = 8;
+        rotated.peers[1].wireguard_public_key.fill(3);
+        state.publish_authority(compile(rotated));
+        assert!(client.frame_packet(packet(), offered).unwrap().is_none());
+        state.fail_close();
+        assert!(client.frame_packet(packet(), offered).unwrap().is_none());
+    }
+
+    #[test]
     fn hello_advertises_only_configured_implemented_features() {
         let mut config: Config =
             toml::from_str(include_str!("../../../deploy/examples/node-rust.toml")).unwrap();
@@ -1022,6 +1333,7 @@ mod tests {
             ipv6,
             REQUIRED_CAPABILITIES,
             false,
+            false,
         ));
 
         config.forwarding.subnet_router = true;
@@ -1039,12 +1351,14 @@ mod tests {
             subnet,
             REQUIRED_CAPABILITIES,
             false,
+            false,
         ));
         assert!(packet_capabilities_allow(
             &config,
             &routes,
             subnet,
             REQUIRED_CAPABILITIES | Capability::LanewaySubnetRouterV1 as u64,
+            false,
             false,
         ));
     }
@@ -1350,6 +1664,15 @@ via_node = "202122232425262728292a2b2c2d2e2f"
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn healthy_tcp_session_promotes_to_quic_without_node_restart() {
+        tcp_promotion_case(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn userspace_connector_reaches_host_over_authenticated_relay() {
+        tcp_promotion_case(true).await;
+    }
+
+    async fn tcp_promotion_case(userspace: bool) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("laneway_relay=debug,lanewayd_rs=debug")
             .with_test_writer()
@@ -1359,6 +1682,12 @@ via_node = "202122232425262728292a2b2c2d2e2f"
         let first_node = "101112131415161718191a1b1c1d1e1f";
         let second_node = "202122232425262728292a2b2c2d2e2f";
         let service = "303132333435363738393a3b3c3d3e3f";
+        let relay_prefixes = if userspace {
+            r#"["100.96.0.2/32", "127.0.0.1/32"]"#
+        } else {
+            r#"["100.96.0.2/32"]"#
+        };
+        let connector_socket = directory.path().join("connector.sock");
         let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![
@@ -1431,7 +1760,7 @@ prefixes = ["100.96.0.1/32"]
 [[peers]]
 network_id = "{network}"
 node_id = "{second_node}"
-prefixes = ["100.96.0.2/32"]
+prefixes = {relay_prefixes}
 "#,
             relay_cert.display(),
             relay_key.display(),
@@ -1467,6 +1796,13 @@ prefixes = ["100.96.0.2/32"]
             gate_stopped,
         ));
 
+        let connector_route = if userspace {
+            format!(
+                "[[routes]]\nprefix = \"127.0.0.1/32\"\nvia_node = \"{second_node}\"\nkind = \"subnet\""
+            )
+        } else {
+            String::new()
+        };
         let first_config: Config = toml::from_str(&format!(
             r#"
 mode = "node"
@@ -1501,6 +1837,7 @@ queue_depth = 8
 [[routes]]
 prefix = "100.96.0.2/32"
 via_node = "{second_node}"
+{connector_route}
 "#,
             first_cert.display(),
             first_key.display(),
@@ -1512,7 +1849,7 @@ via_node = "{second_node}"
             RoutingTable::compile(&first_config.routes).unwrap(),
         ));
         let first_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let (first_inject_tx, _first_inject_rx) = mpsc::channel(8);
+        let (first_inject_tx, mut first_inject_rx) = mpsc::channel(8);
         let (first_candidate_tx, _first_candidate_rx) = mpsc::channel(8);
         let (first_outbound_tx, first_outbound_rx) = mpsc::channel(8);
         let first_client = RelayClient::new(
@@ -1538,9 +1875,15 @@ via_node = "{second_node}"
         .expect("first node did not establish TCP while UDP was gated");
         assert_eq!(server_metrics.snapshot().sessions_replaced, 0);
 
+        let connector_settings = if userspace {
+            "[connector]\nuserspace = true\n[forwarding]\nowned_prefixes = [\"127.0.0.1/32\"]"
+        } else {
+            ""
+        };
         let second_config: Config = toml::from_str(&format!(
             r#"
 mode = "node"
+socket_path = "{}"
 [identity]
 network_id = "{network}"
 node_id = "{second_node}"
@@ -1565,7 +1908,9 @@ quic_recovery_interval = "100ms"
 [[routes]]
 prefix = "100.96.0.1/32"
 via_node = "{first_node}"
+{connector_settings}
 "#,
+            connector_socket.display(),
             second_cert.display(),
             second_key.display(),
             ca_path.display(),
@@ -1575,23 +1920,31 @@ via_node = "{first_node}"
         let second_state = Arc::new(State::new(
             RoutingTable::compile(&second_config.routes).unwrap(),
         ));
-        let second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         let (second_inject_tx, mut second_inject_rx) = mpsc::channel(8);
         let (second_candidate_tx, _second_candidate_rx) = mpsc::channel(8);
         let (_second_outbound_tx, second_outbound_rx) = mpsc::channel(8);
-        let second_client = RelayClient::new(
-            second_endpoint,
-            Arc::new(second_config),
-            Arc::clone(&second_state),
-            Arc::new(Metrics::default()),
-            Id::from_str(network).unwrap(),
-            Id::from_str(second_node).unwrap(),
-            Id::new([2; 16]).unwrap(),
-            Arc::new(vec!["100.96.0.2/32".parse().unwrap()]),
-            second_inject_tx,
-            second_candidate_tx,
-        );
-        let second_task = tokio::spawn(second_client.run(second_outbound_rx));
+        let (stop_connector, connector_stopped) = oneshot::channel();
+        let second_task = if userspace {
+            let connector = crate::Agent::new(second_config).unwrap();
+            tokio::spawn(connector.run_until(async {
+                let _ = connector_stopped.await;
+            }))
+        } else {
+            let second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            let second_client = RelayClient::new(
+                second_endpoint,
+                Arc::new(second_config),
+                Arc::clone(&second_state),
+                Arc::new(Metrics::default()),
+                Id::from_str(network).unwrap(),
+                Id::from_str(second_node).unwrap(),
+                Id::new([2; 16]).unwrap(),
+                Arc::new(vec!["100.96.0.2/32".parse().unwrap()]),
+                second_inject_tx,
+                second_candidate_tx,
+            );
+            tokio::spawn(second_client.run(second_outbound_rx))
+        };
         timeout(Duration::from_secs(3), async {
             while server_metrics.snapshot().sessions != 2 {
                 sleep(Duration::from_millis(10)).await;
@@ -1615,7 +1968,8 @@ via_node = "{first_node}"
         timeout(Duration::from_secs(3), async {
             loop {
                 let first_bound = first_state.handles.load().outbound.contains_key(&second_id);
-                let second_bound = second_state.handles.load().outbound.contains_key(&first_id);
+                let second_bound =
+                    userspace || second_state.handles.load().outbound.contains_key(&first_id);
                 if first_bound && second_bound {
                     break;
                 }
@@ -1626,24 +1980,74 @@ via_node = "{first_node}"
         .expect("promoted control stream did not restore route bindings");
         assert_eq!(server_metrics.snapshot().sessions, 2);
 
-        let packet = ipv4([100, 96, 0, 1], [100, 96, 0, 2]);
-        first_outbound_tx
-            .send(OutboundPacket::new(second_id, packet.clone()))
+        if userspace {
+            let app = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let client = "100.96.0.1:45080".parse().unwrap();
+            let target = app.local_addr().unwrap();
+            let request = crate::connector::udp_packet(client, target, b"relay to host");
+            let mut payload = [0; 32];
+            // Session replacement and remote handle publication are asynchronous.
+            // Prove delivery on the promoted path without assuming its first
+            // datagram survives that transition.
+            let (size, host) = timeout(Duration::from_secs(3), async {
+                let mut retry = tokio::time::interval(Duration::from_millis(50));
+                loop {
+                    tokio::select! {
+                        _ = retry.tick() => first_outbound_tx
+                            .send(OutboundPacket::new(second_id, request.to_vec()))
+                            .await
+                            .unwrap(),
+                        result = app.recv_from(&mut payload) => break result,
+                    }
+                }
+            })
             .await
+            .expect("connector did not reach host socket")
             .unwrap();
-        assert_eq!(
-            timeout(Duration::from_secs(3), second_inject_rx.recv())
+            assert_eq!(&payload[..size], b"relay to host");
+            app.send_to(b"host to relay", host).await.unwrap();
+            assert_eq!(
+                timeout(Duration::from_secs(3), first_inject_rx.recv())
+                    .await
+                    .expect("host reply did not traverse relay")
+                    .unwrap()
+                    .bytes,
+                crate::connector::udp_packet(target, client, b"host to relay"),
+            );
+            assert!(connector_socket.exists());
+            stop_connector.send(()).unwrap();
+            timeout(Duration::from_secs(3), second_task)
                 .await
-                .expect("post-promotion packet was not delivered")
-                .expect("second injection queue closed"),
-            packet
-        );
-        assert_eq!(server_metrics.snapshot().forwarded_packets, 1);
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!connector_socket.exists());
+        } else {
+            let packet = ipv4([100, 96, 0, 1], [100, 96, 0, 2]);
+            // Binding publication can precede the peer's first usable datagram.
+            let received = timeout(Duration::from_secs(3), async {
+                let mut retry = tokio::time::interval(Duration::from_millis(50));
+                loop {
+                    tokio::select! {
+                        _ = retry.tick() => first_outbound_tx
+                            .send(OutboundPacket::new(second_id, packet.clone()))
+                            .await
+                            .unwrap(),
+                        received = second_inject_rx.recv() => break received,
+                    }
+                }
+            })
+            .await
+            .expect("post-promotion packet was not delivered")
+            .expect("second injection queue closed");
+            assert_eq!(received.bytes, packet);
+            assert!(server_metrics.snapshot().forwarded_packets >= 1);
+            second_task.abort();
+            let _ = second_task.await;
+        }
 
         first_task.abort();
-        second_task.abort();
         let _ = first_task.await;
-        let _ = second_task.await;
         tcp_gate_task.await.unwrap();
         let _ = gate_stop.send(());
         gate_task.await.unwrap();

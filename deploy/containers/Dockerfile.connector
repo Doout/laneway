@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.9@sha256:fe40cf4e92cd0c467be2cfc30657a680ae2398318afd50b0c80585784c604f28
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS source
 ARG BINARY=laneway
 ARG VERSION=dev
 ARG TARGETOS
@@ -8,6 +8,8 @@ WORKDIR /src
 COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
+
+FROM source AS build
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway ./cmd/${BINARY}
@@ -16,7 +18,23 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
 RUN mkdir -p /out/connector-state /out/connector-run && chown 65532:65532 /out/connector-state /out/connector-run
 
-FROM scratch
+FROM source AS rust-installer
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION} -X main.connectorRuntime=/usr/local/bin/lanewayd-rs" \
+    -o /out/laneway ./cmd/laneway
+RUN mkdir -p /out/connector-state /out/connector-run && chown 65532:65532 /out/connector-state /out/connector-run
+
+FROM rust:1.91-alpine@sha256:45c1c35cd364b8055e9e86f8ecd3e8c874b2dcb658d8a4f94b5d111aa0d651a2 AS rust-runtime
+ARG VERSION=dev
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY rust/ ./rust/
+COPY api/ ./api/
+RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --locked --release --manifest-path rust/Cargo.toml \
+      -p lanewayd-rs --bin lanewayd-rs
+
+FROM scratch AS go-connector
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/laneway /usr/local/bin/laneway
 COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
@@ -24,6 +42,18 @@ COPY --from=build --chown=65532:65532 /out/connector-state /var/lib/laneway
 COPY --from=build --chown=65532:65532 /out/connector-run /run/laneway
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
     CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/laneway"]
+CMD ["connector", "run"]
+
+FROM scratch AS rust-connector
+COPY --from=rust-installer /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=rust-installer /out/laneway /usr/local/bin/laneway
+COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
+COPY --from=rust-installer --chown=65532:65532 /out/connector-state /var/lib/laneway
+COPY --from=rust-installer --chown=65532:65532 /out/connector-run /run/laneway
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway"]
 CMD ["connector", "run"]

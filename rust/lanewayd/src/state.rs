@@ -51,8 +51,11 @@ pub struct State {
     /// Current authenticated direct connections keyed by peer.
     pub direct: ArcSwap<HashMap<Id, DirectPath>>,
     authority: ArcSwapOption<Snapshot>,
+    wireguard_drain: ArcSwapOption<Snapshot>,
+    exit_sources: ArcSwapOption<Vec<ipnet::IpNet>>,
     controller_managed: bool,
     local_node: Option<Id>,
+    pub(crate) topology: Option<crate::topology::Observations>,
 }
 
 impl State {
@@ -76,14 +79,18 @@ impl State {
             handles: ArcSwap::from_pointee(Handles::default()),
             direct: ArcSwap::from_pointee(HashMap::new()),
             authority: ArcSwapOption::empty(),
+            wireguard_drain: ArcSwapOption::empty(),
+            exit_sources: ArcSwapOption::empty(),
             controller_managed,
             local_node,
+            topology: None,
         }
     }
 
     /// Publishes a complete authority snapshot and closes direct paths whose
     /// peer or certificate is no longer authorized.
     pub(crate) fn publish_authority(&self, snapshot: Arc<Snapshot>) {
+        self.wireguard_drain.store(None);
         let paths = self.direct.swap(Arc::new(HashMap::new()));
         let mut retained = HashMap::new();
         for (peer, path) in paths.iter() {
@@ -102,6 +109,47 @@ impl State {
 
     pub(crate) fn authority_snapshot(&self) -> Option<Arc<Snapshot>> {
         self.authority.load_full()
+    }
+
+    /// Stop encrypted packets during device reconciliation. Relay session
+    /// handles are unchanged; every packet rechecks the published peer key.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn suspend_wireguard_authority(&self) {
+        self.wireguard_drain.store(None);
+        self.authority.store(None);
+    }
+
+    /// This snapshot only supports the encrypted carrier of a device whose
+    /// kernel is already enforcing its established-only forward guard.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn enter_wireguard_drain(&self, snapshot: Arc<Snapshot>) {
+        self.authority.store(None);
+        self.wireguard_drain.store(Some(snapshot));
+    }
+
+    fn wireguard_drain(&self) -> Option<Arc<Snapshot>> {
+        self.wireguard_drain
+            .load_full()
+            .filter(|snapshot| snapshot.wireguard_drain_eligible())
+    }
+
+    pub(crate) fn wireguard_peer_key(
+        &self,
+        local: Id,
+        peer: Id,
+        local_key: &[u8; 32],
+    ) -> Option<[u8; 32]> {
+        let snapshot = self
+            .authority_snapshot()
+            .filter(|s| !s.wireguard_authority_expired())
+            .or_else(|| self.wireguard_drain())?;
+        if local == peer
+            || snapshot.local_certificate_revoked
+            || snapshot.peers.get(&local)?.wireguard_key.as_ref() != Some(local_key)
+        {
+            return None;
+        }
+        snapshot.peers.get(&peer)?.wireguard_key
     }
 
     /// Returns the live candidate-exchange ceiling. Static mode has no
@@ -156,8 +204,47 @@ impl State {
         })
     }
 
+    pub(crate) fn relay_authorized_ip(&self, service: Id, address: std::net::IpAddr) -> bool {
+        if !self.controller_managed {
+            return true;
+        }
+        self.authority_snapshot().is_some_and(|snapshot| {
+            !snapshot.expired()
+                && snapshot.relays.get(&service).is_some_and(|relay| {
+                    relay
+                        .resolved
+                        .iter()
+                        .any(|endpoint| endpoint.ip() == address)
+                })
+        })
+    }
+
+    /// Drain can keep an existing authenticated relay session alive. It
+    /// never authorizes dialing a new or replacement relay session.
+    pub(crate) fn wireguard_drain_relay(
+        &self,
+        service: Id,
+        address: std::net::SocketAddr,
+        tcp: bool,
+    ) -> bool {
+        self.wireguard_drain().is_some_and(|snapshot| {
+            if tcp {
+                snapshot.relays.get(&service).is_some_and(|relay| {
+                    relay
+                        .resolved
+                        .iter()
+                        .any(|endpoint| endpoint.ip() == address.ip())
+                })
+            } else {
+                snapshot.authorizes_relay(service, Some(address))
+            }
+        })
+    }
+
     /// Removes all dynamic authority, routes, relay handles, and direct paths.
     pub(crate) fn fail_close(&self) {
+        self.suspend_gateway();
+        self.wireguard_drain.store(None);
         self.authority.store(None);
         self.routes.store(Arc::new(
             RoutingTable::compile(&[]).expect("empty routes compile"),
@@ -167,6 +254,27 @@ impl State {
             path.connection
                 .close(0_u32.into(), b"controller authority expired");
         }
+    }
+
+    pub(crate) fn suspend_gateway(&self) {
+        self.exit_sources.store(None);
+    }
+
+    pub(crate) fn set_gateway(&self, config: &crate::config::ForwardingConfig) {
+        self.exit_sources.store(
+            config
+                .exit_gateway
+                .then(|| Arc::new(config.exit_gateway_sources.clone())),
+        );
+    }
+
+    pub(crate) fn gateway_allows(&self, client_overlay: std::net::IpAddr) -> bool {
+        let scopes = self.exit_sources.load();
+        scopes.as_ref().is_some_and(|scopes| {
+            (!self.controller_managed
+                || self.authority.load().as_ref().is_some_and(|s| !s.expired()))
+                && crate::routing::locally_owned(scopes, client_overlay)
+        })
     }
 
     /// Checks the active controller ACL. Static configurations retain their
@@ -181,6 +289,46 @@ impl State {
                 && snapshot.peers.contains_key(&destination)
                 && snapshot.policy.allows(source, destination, packet)
         })
+    }
+
+    /// Recheck forwarding permission immediately before opening or using a
+    /// host socket. Overlay ownership alone never authorizes host dialing.
+    pub(crate) fn connector_allows(
+        &self,
+        local: Id,
+        static_prefixes: &[ipnet::IpNet],
+        ingress: &crate::relay::InboundPacket,
+    ) -> bool {
+        let Ok(meta) = crate::routing::packet_meta(&ingress.bytes) else {
+            return false;
+        };
+        let peer = ingress.peer;
+        if !self.routes.load().authorizes_source(peer, meta.source) {
+            return false;
+        }
+        if !self.controller_managed {
+            return crate::routing::locally_owned(static_prefixes, meta.destination);
+        }
+        let Some(snapshot) = self.authority.load_full() else {
+            return false;
+        };
+        let subnet = laneway_protocol::v1::Capability::LanewaySubnetRouterV1 as u64;
+        !snapshot.expired()
+            && !snapshot.local_certificate_revoked
+            && snapshot.enabled_capabilities & subnet != 0
+            && snapshot.peers.contains_key(&peer)
+            && snapshot.peers.contains_key(&local)
+            && !ingress
+                .direct_serial
+                .as_ref()
+                .is_some_and(|serial| snapshot.revoked_serials.contains::<[u8]>(serial.as_ref()))
+            && snapshot.routes.iter().any(|route| {
+                route.via == local
+                    && route.kind == laneway_protocol::v1::RouteKind::Subnet
+                    && route.destination.prefix_len() != 0
+                    && route.destination.contains(&meta.destination)
+            })
+            && snapshot.policy.allows(peer, local, &ingress.bytes)
     }
 
     /// Checks whether a direct certificate path remains controller-authorized.
@@ -380,6 +528,7 @@ mod tests {
             epoch,
             valid_until: now + 1,
             identity_lease_expires_at: 0,
+            ephemeral_exit: None,
             overlays: vec!["100.96.0.1/32".parse::<IpNet>().unwrap()],
             peers: HashMap::from([
                 (
@@ -388,6 +537,7 @@ mod tests {
                         node: local,
                         name: "local".into(),
                         overlays: vec!["100.96.0.1".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
                 (
@@ -396,6 +546,7 @@ mod tests {
                         node: peer,
                         name: "peer".into(),
                         overlays: vec!["100.96.0.2".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
             ]),
@@ -439,10 +590,13 @@ mod tests {
             ]
         );
         assert!(state.relay_authorized(relay_a, "127.0.0.1:4433".parse().unwrap()));
+        assert!(state.relay_authorized_ip(relay_a, "127.0.0.1".parse().unwrap()));
         let mut withdrawn = (*original).clone();
         withdrawn.relays.remove(&relay_a);
         state.publish_authority(Arc::new(withdrawn));
         assert!(!state.relay_authorized(relay_a, "127.0.0.1:4433".parse().unwrap()));
+        assert!(!state.relay_authorized_ip(relay_a, "127.0.0.1".parse().unwrap()));
+        assert!(state.relay_authorized_ip(relay_b, "127.0.0.1".parse().unwrap()));
         state.publish_authority(Arc::new(original.renew(now + 4).unwrap()));
         tokio::time::sleep(Duration::from_millis(1_200)).await;
         let mut packet = vec![0_u8; 20];
@@ -452,5 +606,53 @@ mod tests {
         packet[16..20].copy_from_slice(&[100, 96, 0, 1]);
         assert!(state.owns(&[], "100.96.0.1".parse().unwrap()));
         assert!(state.allows(peer, local, &packet));
+
+        // A local overlay address is not an approved connector destination.
+        let source_route = crate::config::RouteConfig {
+            prefix: "100.96.0.2/32".parse().unwrap(),
+            via_node: peer.to_string(),
+            metric: 100,
+            kind: crate::config::RouteKind::Overlay,
+        };
+        state
+            .routes
+            .store(Arc::new(RoutingTable::compile(&[source_route]).unwrap()));
+        let subnet = "10.20.0.0/24".parse().unwrap();
+        let mut snapshot = original.renew(now + 30).unwrap();
+        snapshot.enabled_capabilities =
+            laneway_protocol::v1::Capability::LanewaySubnetRouterV1 as u64;
+        snapshot.routes.push(crate::controller::Route {
+            id: relay_a,
+            destination: subnet,
+            via: local,
+            kind: laneway_protocol::v1::RouteKind::Subnet,
+            mode: laneway_protocol::v1::RouteAdvertisementMode::Nat,
+            metric: 100,
+        });
+        state.publish_authority(Arc::new(snapshot.clone()));
+        let mut ingress = crate::relay::InboundPacket {
+            peer,
+            direct_serial: Some(bytes::Bytes::from_static(&[42])),
+            bytes: packet.clone().into(),
+        };
+        assert!(!state.connector_allows(local, &[], &ingress));
+        packet[16..20].copy_from_slice(&[10, 20, 0, 8]);
+        ingress.bytes = packet.into();
+        assert!(state.connector_allows(local, &[], &ingress));
+        ingress.peer = relay_b;
+        assert!(!state.connector_allows(local, &[], &ingress));
+        ingress.peer = peer;
+
+        let mut revoked = snapshot.clone();
+        revoked.revoked_serials.insert(vec![42]);
+        state.publish_authority(Arc::new(revoked));
+        assert!(!state.connector_allows(local, &[], &ingress));
+        let mut withdrawn = snapshot.clone();
+        withdrawn.routes.clear();
+        state.publish_authority(Arc::new(withdrawn));
+        assert!(!state.connector_allows(local, &[], &ingress));
+        snapshot.valid_until = now - 1;
+        state.publish_authority(Arc::new(snapshot));
+        assert!(!state.connector_allows(local, &[], &ingress));
     }
 }

@@ -6,7 +6,7 @@ RUN corepack enable && corepack prepare pnpm@10.14.0 --activate && pnpm install 
 COPY web/ ./
 RUN pnpm build:live
 
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS build-base
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS build-base
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH
@@ -53,10 +53,9 @@ FROM runtime AS controller
 COPY --from=build-controller /out/laneway /usr/local/bin/laneway
 COPY --from=console /src/web/dist /usr/share/laneway-console
 
-FROM runtime AS admin
-COPY --from=build-admin /out/laneway /usr/local/bin/laneway
-
-# Relay remains the historical no-target default. A legacy BINARY argument
-# must still match this fixed target or its builder fails before producing an image.
 FROM runtime AS relay
 COPY --from=build-relay /out/laneway /usr/local/bin/laneway
+
+# The operator CLI is the default; Go service images are explicit fixtures.
+FROM runtime AS admin
+COPY --from=build-admin /out/laneway /usr/local/bin/laneway

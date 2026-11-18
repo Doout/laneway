@@ -1,4 +1,4 @@
-// Package releaseupdate downloads checksum-verified client binaries from an
+// Package releaseupdate downloads signature- and checksum-verified packages from an
 // immutable GitHub release.
 package releaseupdate
 
@@ -67,12 +67,14 @@ func (c *Client) Close() {
 	}
 }
 
-func (c *Client) DownloadLatest(ctx context.Context, asset, destination string, maxBytes int64) (Release, error) {
+type ManifestVerifier func(context.Context, string, []byte, []byte) error
+
+func (c *Client) DownloadLatest(ctx context.Context, asset, destination string, maxBytes int64, verify ManifestVerifier) (Release, error) {
 	if !validAssetName(asset) {
 		return Release{}, errors.New("release update: invalid asset name")
 	}
-	if maxBytes <= 0 {
-		return Release{}, errors.New("release update: invalid download limit")
+	if maxBytes <= 0 || verify == nil {
+		return Release{}, errors.New("release update: download limit and manifest verifier are required")
 	}
 	tag, err := c.latestTag(ctx)
 	if err != nil {
@@ -82,17 +84,25 @@ func (c *Client) DownloadLatest(ctx context.Context, asset, destination string, 
 	if err != nil {
 		return Release{}, fmt.Errorf("release update: download checksum manifest: %w", err)
 	}
+	bundle, err := c.downloadBytes(ctx, c.assetURL(tag, "checksums.sigstore.json"), checksumManifestLimit)
+	if err != nil {
+		return Release{}, fmt.Errorf("release update: download signature bundle: %w", err)
+	}
+	identity := "https://github.com/" + c.repository + "/.github/workflows/release.yml@refs/tags/" + tag
+	if err := verify(ctx, identity, manifest, bundle); err != nil {
+		return Release{}, fmt.Errorf("release update: checksum manifest signature verification failed: %w", err)
+	}
 	expected, err := checksumForAsset(manifest, asset)
 	if err != nil {
 		return Release{}, err
 	}
 	actual, err := c.downloadFile(ctx, c.assetURL(tag, asset), destination, maxBytes)
 	if err != nil {
-		return Release{}, fmt.Errorf("release update: download client: %w", err)
+		return Release{}, fmt.Errorf("release update: download package: %w", err)
 	}
 	if !bytes.Equal(actual, expected) {
 		_ = os.Remove(destination)
-		return Release{}, errors.New("release update: downloaded client failed checksum verification")
+		return Release{}, errors.New("release update: downloaded package failed checksum verification")
 	}
 	return Release{Tag: tag, SHA256: hex.EncodeToString(actual)}, nil
 }

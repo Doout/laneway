@@ -2,14 +2,15 @@
 set -eu
 
 base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-compose_files="-f $base_dir/compose.yaml"
+mode=standard
 case "${1:-}" in
   '') ;;
-  --dev) compose_files="$compose_files -f $base_dir/compose.dev.yaml" ;;
-  *) echo "usage: bootstrap.sh [--dev]" >&2; exit 1 ;;
+  --dev) mode=dev ;;
+  --rust) mode=rust ;;
+  *) echo "usage: bootstrap.sh [--dev | --rust]" >&2; exit 1 ;;
 esac
 if [ "$#" -gt 1 ]; then
-  echo "usage: bootstrap.sh [--dev]" >&2
+  echo "usage: bootstrap.sh [--dev | --rust]" >&2
   exit 1
 fi
 
@@ -32,18 +33,39 @@ relay_endpoint=$(read_setting LANEWAY_RELAY_PUBLIC_ENDPOINT)
 server_name=$(read_setting LANEWAY_CONTROLLER_SERVER_NAME)
 
 compose() {
-  # Paths are derived from this script's directory and contain no whitespace in
-  # the supported packaged layout.
-  # shellcheck disable=SC2086
+  case "$mode" in
+    dev) set -- -f "$base_dir/compose.dev.yaml" "$@" ;;
+    rust) set -- -f "$base_dir/compose.rust.yaml" "$@" ;;
+  esac
   docker compose --project-directory "$base_dir" --env-file "$base_dir/.env" \
-    $compose_files "$@"
+    -f "$base_dir/compose.yaml" "$@"
 }
 
 admin() {
   compose --profile tools run --rm admin "$@"
 }
 
-"$base_dir/validate.sh"
+if [ "$mode" = rust ]; then
+  [ "$(id -u)" -eq 0 ] || { echo "Rust bootstrap must run as root" >&2; exit 1; }
+  [ "$(read_setting LANEWAY_RUST_VERSION)" = "$(read_setting LANEWAY_VERSION)" ] ||
+    { echo "Rust bootstrap and the admin image must use the same release version" >&2; exit 1; }
+  # The signed pins and deployment settings are staged in .env. Environment
+  # values take precedence in Compose unless removed before rendering.
+  unset LANEWAY_VERSION LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_RUST_VERSION \
+    LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST LANEWAY_RUST_RELAY_IMAGE_DIGEST \
+    LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST LANEWAY_BIND_ADDRESS LANEWAY_CONTROLLER_PORT \
+    LANEWAY_RELAY_QUIC_PORT LANEWAY_RELAY_TCP_PORT LANEWAY_EXIT_DIRECT_PORT LANEWAY_CONTROLLER_SERVER_NAME
+  "$base_dir/validate.sh" --rust
+  existing=$(compose --profile exit-node ps --all --quiet controller relay exit-node)
+  if [ -n "$existing" ]; then
+    echo "Rust bootstrap requires a new deployment without existing service containers" >&2
+    exit 1
+  fi
+  compose run --rm --no-deps controller init /var/lib/laneway-controller/controller.db \
+    /run/laneway-secrets/controller.crt "$network_name" "$ipv4_pool"
+else
+  "$base_dir/validate.sh"
+fi
 compose up -d controller --wait
 
 common="--controller https://controller:8443 --ca /run/laneway-secrets/ca.crt --server-name $server_name --controller-network-id $network_id --controller-service-id $controller_id --admin-token-file /run/laneway-secrets/admin.token"
@@ -55,6 +77,10 @@ networks=$(admin controller network list $common --limit 1000)
 network_count=$(printf '%s\n' "$networks" | jq --arg id "$network_id" '[.networks[] | select(.network_id == $id)] | length')
 case "$network_count" in
   0)
+    if [ "$mode" = rust ]; then
+      echo "The Rust controller's initial network does not match .env; refusing to create another" >&2
+      exit 1
+    fi
     # shellcheck disable=SC2086
     admin controller network create $common --network-id "$network_id" \
       --name "$network_name" --ipv4-pool "$ipv4_pool" >/dev/null

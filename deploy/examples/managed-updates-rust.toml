@@ -1,0 +1,14 @@
+# Copy to /etc/laneway/managed-updates-rust.toml as root:root, mode 0600.
+# A timer run does not contact the controller until this is explicitly enabled.
+enabled = false
+channel = "stable"
+
+# Omit this section for the host's lanewayd-rs.service. For a Docker Connector,
+# use its existing Rust container, approved network, and root-managed CA.
+# [connector]
+# container = "laneway-connector-example"
+# endpoint = "https://controller.example.com:8443"
+# server_name = "controller.example.com"
+# network_id = "000102030405060708090a0b0c0d0e0f"
+# service_id = "404142434445464748494a4b4c4d4e4f"
+# ca_file = "/etc/laneway/controller-ca.crt"

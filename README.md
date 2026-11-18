@@ -59,10 +59,12 @@ Create a login token on the control-plane host:
 sudo laneway control user-token --name laptop
 ```
 
-Then enter that token from the client:
+Then enter that token from the client. On Linux, use `sudo` for both `login`
+and `connect` to keep the saved login and temporary network setup under the
+same account. On macOS, run the same commands without `sudo`.
 
 ```sh
-laneway login lane.example.com
+sudo laneway login lane.example.com
 ```
 
 ### 4. Allow traffic and connect
@@ -80,7 +82,7 @@ sudo laneway control route add \
 Connect from the client:
 
 ```sh
-laneway connect
+sudo laneway connect
 ```
 
 Only approved private prefixes use Laneway. Docker Connectors support TCP and

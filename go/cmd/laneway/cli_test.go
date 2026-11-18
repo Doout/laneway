@@ -1,3 +1,5 @@
+//go:build linux
+
 package main
 
 import (
@@ -85,7 +87,7 @@ func TestControlCommandIsIndependentOfWorkingDirectory(t *testing.T) {
 	}
 }
 
-func TestControlAdministratorCommandsForwardExactArguments(t *testing.T) {
+func TestControlCommandsForwardExactArguments(t *testing.T) {
 	directory := t.TempDir()
 	operator := filepath.Join(directory, "laneway-control")
 	output := filepath.Join(directory, "invocation")
@@ -105,6 +107,8 @@ func TestControlAdministratorCommandsForwardExactArguments(t *testing.T) {
 		{"bootstrap", []string{"administrator", "bootstrap", "--username", "owner"}, []string{"administrator", "bootstrap", "--username", "owner"}},
 		{"recover", []string{"administrator", "recover", "--username", "owner"}, []string{"administrator", "recover", "--username", "owner"}},
 		{"root token rotation", []string{"administrator", "root-token", "rotate"}, []string{"administrator", "root-token", "rotate"}},
+		{"readiness", []string{"readiness", "/trusted/release-metadata"}, []string{"readiness", "/trusted/release-metadata"}},
+		{"update selected release", []string{"update", "v1.2.3"}, []string{"update", "v1.2.3"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

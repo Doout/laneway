@@ -64,6 +64,8 @@ pub struct Config {
     #[serde(default)]
     pub tcp_fallback: Option<TcpFallbackConfig>,
     #[serde(default)]
+    pub(crate) public_https: Option<PublicHttpsConfig>,
+    #[serde(default)]
     pub(crate) controller: Option<ControllerConfig>,
     /// Statically authorized node identities and owned prefixes.
     #[serde(default)]
@@ -83,6 +85,8 @@ pub struct TlsConfig {
     /// Network CA certificate bundle in PEM form.
     #[serde(rename = "ca")]
     pub ca_file: PathBuf,
+    #[serde(default)]
+    pub(crate) renewal_dir: Option<PathBuf>,
     #[serde(default)]
     server_name: String,
 }
@@ -180,6 +184,81 @@ pub(crate) struct ControllerConfig {
     pub(crate) poll_interval: Duration,
     #[serde(default = "default_controller_timeout", with = "humantime_serde")]
     pub(crate) timeout: Duration,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PublicHttpsConfig {
+    pub(crate) server_name: String,
+    pub(crate) certificate: Option<PathBuf>,
+    pub(crate) private_key: Option<PathBuf>,
+    pub(crate) cache_dir: Option<PathBuf>,
+    pub(crate) acme_directory: Option<String>,
+    pub(crate) acme_ca: Option<PathBuf>,
+}
+
+impl PublicHttpsConfig {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.server_name.len() <= 253
+                && self.server_name.parse::<IpAddr>().is_err()
+                && self.server_name.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                }),
+            "public_https.server_name must be a canonical DNS name"
+        );
+        ensure!(
+            self.certificate.is_some() == self.private_key.is_some(),
+            "public_https requires certificate and private_key together"
+        );
+        ensure!(
+            self.certificate.is_some() || self.cache_dir.is_some(),
+            "public_https requires a PEM pair or an ACME cache_dir"
+        );
+        ensure!(
+            [
+                &self.certificate,
+                &self.private_key,
+                &self.cache_dir,
+                &self.acme_ca
+            ]
+            .into_iter()
+            .flatten()
+            .all(|path| path.is_absolute()
+                && !path
+                    .components()
+                    .any(|p| p == std::path::Component::ParentDir)),
+            "public_https paths must be absolute and must not contain '..'"
+        );
+        ensure!(
+            self.acme_directory.is_none() || self.cache_dir.is_some(),
+            "public_https.acme_directory requires cache_dir"
+        );
+        ensure!(
+            self.acme_ca.is_none() || self.acme_directory.is_some(),
+            "public_https.acme_ca requires an explicit acme_directory"
+        );
+        if let Some(url) = &self.acme_directory {
+            let url = reqwest::Url::parse(url).context("parse public_https.acme_directory")?;
+            ensure!(
+                url.scheme() == "https"
+                    && url.host().is_some()
+                    && url.path() != "/"
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "public_https.acme_directory must be an HTTPS directory URL without credentials or a query"
+            );
+        }
+        Ok(())
+    }
 }
 
 fn default_controller_poll() -> Duration {
@@ -344,6 +423,12 @@ impl Config {
             .controller
             .as_ref()
             .is_some_and(|controller| !controller.endpoint.is_empty());
+        if let Some(path) = &self.tls.renewal_dir {
+            ensure!(
+                controller_enabled && path.is_absolute(),
+                "tls.renewal_dir requires an absolute state path and controller.endpoint"
+            );
+        }
         ensure!(
             controller_enabled || !self.peers.is_empty(),
             "static peers or a controller endpoint are required"
@@ -382,7 +467,19 @@ impl Config {
                 );
             }
         }
-        self.tcp_fallback_addr()?;
+        let tcp_address = self.tcp_fallback_addr()?;
+        if let Some(public) = &self.public_https {
+            public.validate()?;
+            ensure!(
+                tcp_address.is_some() && controller_enabled,
+                "public_https requires tcp_fallback.listen and controller.endpoint"
+            );
+            ensure!(
+                public.certificate.as_ref() != Some(&self.tls.certificate_file)
+                    && public.private_key.as_ref() != Some(&self.tls.private_key_file),
+                "public_https requires separate credentials from the authenticated relay"
+            );
+        }
         if let Some(tcp) = &self.tcp_fallback {
             ensure!(
                 !tcp.handshake_timeout.is_zero()

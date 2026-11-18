@@ -1,6 +1,6 @@
 use std::{
     future::Future,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
@@ -12,7 +12,14 @@ use laneway_protocol::{
     v1::{Capability, Hello, RelayRegister, Welcome, control_envelope, relay_envelope},
 };
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
-use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpListener,
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
+    time::timeout,
+};
+use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -24,8 +31,11 @@ use crate::{
     controller::{Client as ControllerClient, State as ControllerState},
     diagnostics,
     packet_pool::PacketPool,
+    public_https::PublicHttps,
+    public_tls::Renewal,
     registry::{Registry, Session, SessionCapabilities, SessionChannels},
     tcp, tls,
+    workload::Workload,
 };
 
 const CONTROL_PREFACE: &[u8] = b"LWC1";
@@ -54,6 +64,7 @@ struct Inner {
     tcp_tls: Option<Arc<rustls::ServerConfig>>,
     tcp_config: Option<TcpFallbackConfig>,
     tcp_packet_pool: Option<PacketPool>,
+    public_https: Option<Arc<PublicHttps>>,
 }
 
 /// Bound Rust QUIC relay server.
@@ -62,8 +73,9 @@ pub struct Server {
     tcp_listener: Option<TcpListener>,
     inner: Arc<Inner>,
     metrics_interval: Duration,
-    controller: Option<ControllerClient>,
+    controller: Option<Arc<ControllerClient>>,
     diagnostics: Option<diagnostics::Server>,
+    renewal: Option<Renewal>,
 }
 
 impl Server {
@@ -76,23 +88,25 @@ impl Server {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let metrics = Arc::new(Metrics::default());
         let static_authorizations = config.authorizations()?;
+        let workload = Workload::load(&config.tls)?;
         let (authorizations, controller) = if let Some(controller_config) = config
             .controller
             .as_ref()
             .filter(|value| !value.endpoint.is_empty())
         {
-            let relay_identity = tls::local_identity(&config)?;
+            let relay_identity = workload.identity();
             (
                 ControllerState::controller_with_certificate(
                     relay_identity.network_id,
-                    &config.tls.certificate_file,
+                    Arc::clone(&workload),
                     Arc::clone(&metrics),
                 )?,
-                Some(ControllerClient::new(
+                Some(Arc::new(ControllerClient::new(
                     &config,
                     controller_config,
                     relay_identity.network_id,
-                )?),
+                    Arc::clone(&workload),
+                )?)),
             )
         } else {
             (
@@ -100,7 +114,7 @@ impl Server {
                 None,
             )
         };
-        let server_config = tls::server_config(&config)?;
+        let server_config = tls::server_config(&config, Arc::clone(&workload))?;
         let endpoint = Endpoint::server(server_config, config.listen_addr()?)
             .context("bind QUIC relay endpoint")?;
         let tcp_address = config.tcp_fallback_addr()?;
@@ -115,7 +129,7 @@ impl Server {
             None
         };
         let tcp_tls = if tcp_listener.is_some() {
-            Some(tls::tcp_server_config(&config)?)
+            Some(tls::tcp_server_config(&config, workload)?)
         } else {
             None
         };
@@ -127,6 +141,22 @@ impl Server {
         let tcp_packet_pool = tcp_config
             .as_ref()
             .map(|tcp| PacketPool::prewarmed(tcp.queue_depth, MAX_PACKET_PAYLOAD as usize + 5));
+        let (public_https, renewal) = config
+            .public_https
+            .as_ref()
+            .map(|public| {
+                PublicHttps::new(
+                    public,
+                    Arc::clone(
+                        controller
+                            .as_ref()
+                            .context("public HTTPS requires a controller")?,
+                    ),
+                )
+                .map(|(https, renewal)| (Some(Arc::new(https)), renewal))
+            })
+            .transpose()?
+            .unwrap_or_default();
         let diagnostics = config
             .metrics_listen_addr()?
             .map(|address| diagnostics::Server::bind(address, Arc::clone(&metrics)))
@@ -155,10 +185,12 @@ impl Server {
                 tcp_tls,
                 tcp_config,
                 tcp_packet_pool,
+                public_https,
             }),
             metrics_interval: config.relay.metrics_interval,
             controller,
             diagnostics,
+            renewal,
         })
     }
 
@@ -197,6 +229,7 @@ impl Server {
         F: Future<Output = ()>,
     {
         let slots = Arc::new(Semaphore::new(self.inner.max_sessions));
+        let tcp_handshakes = Arc::new(Semaphore::new(128));
         let mut tasks = JoinSet::new();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let mut diagnostics_task = self
@@ -205,6 +238,7 @@ impl Server {
         if let Some(controller) = self.controller.as_ref() {
             controller.initialize(&self.inner.authorizations).await?;
         }
+        let renewal_task = self.renewal.map(|renewal| tokio::spawn(renewal.run()));
         let mut controller_task = self.controller.map(|controller| {
             let state = Arc::clone(&self.inner.authorizations);
             tokio::spawn(async move { controller.run(state).await })
@@ -263,23 +297,35 @@ impl Server {
                             continue;
                         }
                     };
-                    self.inner.metrics.tcp_connection_attempts.fetch_add(1, Ordering::Relaxed);
-                    let permit = match Arc::clone(&slots).try_acquire_owned() {
+                    let public = self.inner.public_https.is_some();
+                    let budget = if public { &tcp_handshakes } else { &slots };
+                    if !public {
+                        self.inner.metrics.tcp_connection_attempts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let permit = match Arc::clone(budget).try_acquire_owned() {
                         Ok(permit) => permit,
                         Err(_) => {
-                            self.inner.metrics.tcp_connection_failures.fetch_add(1, Ordering::Relaxed);
-                            warn!(%peer, "refused TCP fallback connection: session limit reached");
+                            if !public {
+                                self.inner.metrics.tcp_connection_failures.fetch_add(1, Ordering::Relaxed);
+                            }
                             continue;
                         }
                     };
                     let inner = Arc::clone(&self.inner);
                     let metrics = Arc::clone(&self.inner.metrics);
                     let shutdown = stopped.clone();
+                    let slots = Arc::clone(&slots);
                     tasks.spawn(async move {
-                        let _permit = permit;
-                        if let Err(error) = serve_tcp_incoming(inner, stream, shutdown).await {
-                            metrics.tcp_connection_failures.fetch_add(1, Ordering::Relaxed);
-                            debug!(%peer, %error, "TCP fallback connection ended");
+                        if public {
+                            if let Err(error) = serve_shared_tcp(inner, stream, peer.ip(), permit, slots, shutdown).await {
+                                debug!(%peer, %error, "shared TCP connection ended");
+                            }
+                        } else {
+                            let _permit = permit;
+                            if let Err(error) = serve_tcp_incoming(inner, stream, shutdown).await {
+                                metrics.tcp_connection_failures.fetch_add(1, Ordering::Relaxed);
+                                debug!(%peer, %error, "TCP fallback connection ended");
+                            }
                         }
                     });
                 }
@@ -306,6 +352,10 @@ impl Server {
             let _ = task.await;
         }
         if let Some(task) = controller_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = renewal_task {
             task.abort();
             let _ = task.await;
         }
@@ -343,21 +393,104 @@ async fn serve_tcp_incoming(
         .tcp_config
         .as_ref()
         .context("TCP fallback configuration is unavailable")?;
+    stream.set_nodelay(true).context("set TCP_NODELAY")?;
+    let stream = tokio::select! {
+        result = timeout(config.handshake_timeout, TlsAcceptor::from(Arc::clone(tls)).accept(stream)) => {
+            result.context("TCP fallback TLS handshake timed out")?.context("TCP fallback TLS handshake failed")?
+        }
+        _ = wait_shutdown(&mut shutdown) => bail!("relay shutting down"),
+    };
+    serve_tcp_records(inner, stream, shutdown).await
+}
+
+async fn serve_shared_tcp(
+    inner: Arc<Inner>,
+    stream: tokio::net::TcpStream,
+    peer: IpAddr,
+    admission: OwnedSemaphorePermit,
+    slots: Arc<Semaphore>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let public = inner
+        .public_https
+        .as_ref()
+        .context("public HTTPS is unavailable")?;
+    let fallback = inner
+        .tcp_tls
+        .as_ref()
+        .context("TCP fallback TLS configuration is unavailable")?;
+    let deadline = tokio::time::Instant::now()
+        + inner
+            .tcp_config
+            .as_ref()
+            .context("TCP fallback configuration is unavailable")?
+            .handshake_timeout;
+    stream.set_nodelay(true).context("set TCP_NODELAY")?;
+    let hello = tokio::select! {
+        result = tokio::time::timeout_at(deadline, LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream)) => {
+            result.context("TLS client hello timed out")??
+        }
+        _ = wait_shutdown(&mut shutdown) => return Ok(()),
+    };
+    if hello
+        .client_hello()
+        .alpn()
+        .is_some_and(|mut protocols| protocols.any(|p| p == tls::TCP_FALLBACK_ALPN))
+    {
+        inner
+            .metrics
+            .tcp_connection_attempts
+            .fetch_add(1, Ordering::Relaxed);
+        let result = async {
+            let _slot = slots.try_acquire_owned().context("TCP fallback session limit")?;
+            let stream = tokio::select! {
+                result = tokio::time::timeout_at(deadline, hello.into_stream(Arc::clone(fallback))) => result.context("fallback TLS handshake timed out")??,
+                _ = wait_shutdown(&mut shutdown) => return Ok(()),
+            };
+            drop(admission);
+            serve_tcp_records(Arc::clone(&inner), stream, shutdown).await
+        }.await;
+        if result.is_err() {
+            inner
+                .metrics
+                .tcp_connection_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    } else {
+        let _slot = public.admit()?;
+        let selected = public.tls.select(hello.client_hello())?;
+        tokio::select! {
+            result = async {
+                let mut stream = tokio::time::timeout_at(deadline, hello.into_stream(selected.tls))
+                    .await.context("public TLS handshake timed out")??;
+                drop(admission);
+                if selected.challenge {
+                    let _ = tokio::time::timeout_at(deadline, stream.shutdown()).await;
+                    return Ok(());
+                }
+                public.serve(stream, peer).await
+            } => result,
+            _ = wait_shutdown(&mut shutdown) => Ok(()),
+        }
+    }
+}
+
+async fn serve_tcp_records(
+    inner: Arc<Inner>,
+    stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let config = inner
+        .tcp_config
+        .as_ref()
+        .context("TCP fallback configuration is unavailable")?;
     let packet_pool = inner
         .tcp_packet_pool
         .as_ref()
         .context("TCP fallback packet pool is unavailable")?
         .clone();
-    let mut connection = tokio::select! {
-        result = tcp::accept(
-            stream,
-            Arc::clone(tls),
-            config,
-            packet_pool,
-            Arc::clone(&inner.metrics),
-        ) => result?,
-        _ = wait_shutdown(&mut shutdown) => bail!("relay shutting down"),
-    };
+    let mut connection = tcp::from_tls(stream, config, packet_pool, Arc::clone(&inner.metrics))?;
     let result = serve_tcp_connection(Arc::clone(&inner), &mut connection, shutdown).await;
     connection.shutdown("session complete").await;
     result

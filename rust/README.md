@@ -3,6 +3,9 @@
 The workspace contains the shared `laneway-protocol` library, the
 `laneway-relay` QUIC/TCP relay, and the Linux `lanewayd-rs` Node. They use the
 same v1 protocol and [golden vectors](../testvectors/README.md) as Go.
+The `laneway-controller` crate currently supports read-only local network and
+node inventory. See the [migration runbook](../docs/rust-runtime-migration.md#controller-inventory)
+for supported commands and the Go/Rust comparison.
 
 ## Build
 

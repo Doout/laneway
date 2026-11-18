@@ -8,6 +8,10 @@ docker plugin create laneway:dev dist/docker-plugin
 docker plugin enable laneway:dev
 ```
 
+The local build and the tagged release workflow use the Rust driver. Install on
+a clean Docker host. Do not let two plugin processes share the `/data` directory
+or own the same Docker networks.
+
 Published releases use independent `docker-plugin/vX.Y.Z` source tags and are installed with:
 
 ```sh

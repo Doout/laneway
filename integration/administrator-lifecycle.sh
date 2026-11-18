@@ -204,9 +204,14 @@ cp "$LANEWAY_DEPLOY_DIR/generated/secrets/admin.token" "$LANE_TEST_ACTIVE_TOKEN"
 EOF
 chmod 0755 "$fake_bin/laneway" "$fake_bin/docker"
 
+install_fixture_token() {
+  sudo install -m 0400 "$1" "$2"
+  sudo chown 65532:65532 "$2"
+}
+
 sudo install -d -m 0700 -o 0 -g 0 "$compose_dir/generated" "$compose_dir/generated/secrets"
 printf '%s\n' "$old_token" > "$test_dir/admin.token"
-sudo install -m 0400 -o 65532 -g 65532 "$test_dir/admin.token" "$compose_dir/generated/secrets/admin.token"
+install_fixture_token "$test_dir/admin.token" "$compose_dir/generated/secrets/admin.token"
 cp "$test_dir/admin.token" "$active_token"
 rm "$test_dir/admin.token"
 
@@ -409,7 +414,7 @@ assert_no_secret_leak
 # Successful rotation publishes a new inode, recreates the controller, proves
 # both credentials, records completion, and removes all protected staging.
 printf '%s\n' "$new_token" > "$test_dir/orphan.token"
-sudo install -m 0400 -o 65532 -g 65532 "$test_dir/orphan.token" \
+install_fixture_token "$test_dir/orphan.token" \
   "$compose_dir/generated/secrets/.admin.token.rotate.orphan"
 rm "$test_dir/orphan.token"
 printf '%s\n' "$partial_token" > "$test_dir/partial.token"
@@ -450,7 +455,7 @@ assert_no_secret_leak
 
 reset_old_token() {
   printf '%s\n' "$old_token" > "$test_dir/admin.token"
-  sudo install -m 0400 -o 65532 -g 65532 "$test_dir/admin.token" "$compose_dir/generated/secrets/admin.token"
+  install_fixture_token "$test_dir/admin.token" "$compose_dir/generated/secrets/admin.token"
   cp "$test_dir/admin.token" "$active_token"
   rm "$test_dir/admin.token"
   sudo find "$compose_dir/generated/lifecycle" -mindepth 1 -depth -delete

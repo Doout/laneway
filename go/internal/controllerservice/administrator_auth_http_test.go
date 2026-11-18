@@ -66,7 +66,7 @@ func TestAdministratorRemoteAddressTrustsOnlyAuthenticatedRelay(t *testing.T) {
 	}
 }
 
-const testRootBearer = "root-automation-secret"
+const testRootBearer = "root-automation-secret-for-local-fixtures"
 
 func useProductionRootAccess(t *testing.T, fixture fixture) {
 	t.Helper()

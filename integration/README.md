@@ -44,16 +44,20 @@ sudo env LANEWAY_RUN_PRIVILEGED=1 \
 
 ```sh
 docker build --file deploy/containers/Dockerfile.connector \
-  --build-arg VERSION=ci --tag lane-edge:ci .
-./integration/connector-bootstrap.sh lane-edge:ci
-./integration/connector-upgrade.sh lane-edge:ci
+  --build-arg VERSION=0.0.0 --tag lane-edge-rust:lab .
+./integration/connector-bootstrap.sh lane-edge-rust:lab
+docker build --tag laneway-rust-lab:local integration/rust-lab
+bash integration/rust-lab/connector-cutover.sh --prime-cache
+bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:lab
+bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:lab tcp-fallback
 ```
 
-These gates cover the scratch image, encrypted bootstrap, and replacement flow.
+These gates cover the scratch image, encrypted bootstrap, and restart with the
+saved Rust Connector identity.
 
 ## Docker Exit Node
 
-This gate also requires Docker, `jq`, and OpenSSL. It creates and removes
+This historical Go reference gate requires Docker, `jq`, and OpenSSL. It creates and removes
 containers, networks, volumes, routes, and firewall state, so run it only on a
 disposable Docker host:
 

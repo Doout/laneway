@@ -1,12 +1,71 @@
-# syntax=docker/dockerfile:1.9
-FROM rust:1.88-alpine AS build
-RUN apk add --no-cache musl-dev
+# syntax=docker/dockerfile:1.9@sha256:fe40cf4e92cd0c467be2cfc30657a680ae2398318afd50b0c80585784c604f28
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS console-build
+WORKDIR /src/web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate && pnpm install --frozen-lockfile
+COPY web/ ./
+RUN pnpm build:live
+
+FROM rust:1.91.1-alpine3.22@sha256:8efbfb788786eeb127adc581394349c5fb567712156e0f8c2e499acadbc23756 AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY rust/ ./rust/
 COPY api/ ./api/
-RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-relay
+ENV CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_STRIP=symbols
+RUN cargo fetch --locked --manifest-path rust/Cargo.toml
 
-FROM scratch
-COPY --from=build /src/rust/target/release/laneway-relay /usr/local/bin/laneway-relay
+FROM build AS healthcheck-build
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p laneway-healthcheck
+
+FROM build AS node-build
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+
+FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS node
+RUN apk add --no-cache ca-certificates iproute2-minimal nftables procps-ng setpriv tini \
+    && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway \
+    && apk add --no-cache --virtual .cap-tools libcap-setcap \
+    && setcap cap_net_admin=ep /bin/setpriv && apk del .cap-tools
+COPY --from=node-build /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
+USER 65532:65532
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
+ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/lanewayd-rs"]
+CMD ["--config", "/etc/laneway/node.toml"]
+
+FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS connector
+RUN apk add --no-cache ca-certificates tini \
+    && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway
+COPY --from=node-build /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
+USER 65532:65532
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/lanewayd-rs"]
+CMD ["--config", "/etc/laneway/connector.toml"]
+
+FROM build AS relay-build
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p laneway-relay
+RUN install -d -m 0700 -o 65532 -g 65532 /out/relay-public
+
+FROM build AS controller-build
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p laneway-controller
+RUN install -d -m 0700 -o 65532 -g 65532 /out/controller-state
+
+FROM scratch AS controller
+COPY --from=controller-build /src/rust/target/release/laneway-controller /usr/local/bin/laneway-controller
+COPY --from=controller-build --chown=65532:65532 /out/controller-state /var/lib/laneway-controller
+COPY --from=healthcheck-build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+COPY --from=console-build /src/web/dist /usr/share/laneway-console
+ENV LANEWAY_CONSOLE_DIR=/usr/share/laneway-console
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/laneway-controller"]
+
+FROM scratch AS relay
+COPY --from=relay-build /src/rust/target/release/laneway-relay /usr/local/bin/laneway-relay
+COPY --from=relay-build --chown=65532:65532 /out/relay-public /var/lib/laneway-public
+COPY --from=healthcheck-build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway-relay"]

@@ -1,8 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -11,23 +9,23 @@ use anyhow::{Context, Result, bail, ensure};
 use arc_swap::ArcSwapOption;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use laneway_protocol::{
-    AuthenticatedIdentity, Id, Role, certificate_serial_from_der, identity_from_certificate_der,
+    AuthenticatedIdentity, Id, Role, identity_from_certificate_der,
     policy::CompiledPolicy,
-    v1::{IpPrefix, PolicySnapshot, RelayConfiguration, RelayConfigurationRequest},
+    v1::{
+        IpPrefix, PolicySnapshot, RelayConfiguration, RelayConfigurationRequest, RenewalRequest,
+        RenewalResponse,
+    },
 };
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
-use reqwest::{Certificate, Identity, StatusCode};
-use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, PrivateKeyDer},
-};
+use reqwest::StatusCode;
+use rustls::pki_types::CertificateDer;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::time::sleep;
-use x509_parser::parse_x509_certificate;
+use tokio::time::{Instant, sleep};
 
 use crate::Metrics;
 use crate::config::{Authorization, Config, ControllerConfig};
+use crate::workload::{Health as LocalCertificateHealth, RENEW_PATH, Workload};
 
 const MAX_RESPONSE: usize = 1 << 20;
 const VALID_UNTIL_HEADER: &str = "X-Laneway-Configuration-Valid-Until";
@@ -43,18 +41,11 @@ pub(crate) struct Snapshot {
     certificate_not_after: u64,
 }
 
-#[derive(Clone)]
-struct LocalCertificateHealth {
-    serial: Vec<u8>,
-    not_after: u64,
-    renew_after: u64,
-}
-
 pub(crate) struct State {
     network: Id,
     current: ArcSwapOption<Snapshot>,
     update: Mutex<()>,
-    local_certificate: Option<LocalCertificateHealth>,
+    local_certificate: Option<Arc<Workload>>,
     metrics: Option<Arc<Metrics>>,
 }
 
@@ -117,31 +108,15 @@ impl State {
 
     pub(crate) fn controller_with_certificate(
         network: Id,
-        certificate: &PathBuf,
+        certificate: Arc<Workload>,
         metrics: Arc<Metrics>,
     ) -> Result<Arc<Self>> {
-        let certificates = read_certificates(certificate, 4 << 20, "relay certificate")?;
-        let der = certificates
-            .first()
-            .context("relay certificate chain is empty")?
-            .as_ref();
-        let (_, parsed) = parse_x509_certificate(der)
-            .map_err(|_| anyhow::anyhow!("parse relay certificate health"))?;
-        let not_before = parsed.validity().not_before.timestamp();
-        let not_after = parsed.validity().not_after.timestamp();
-        ensure!(
-            not_before > 0 && not_after > not_before,
-            "relay certificate validity is invalid"
-        );
+        certificate.health()?;
         Ok(Arc::new(Self {
             network,
             current: ArcSwapOption::empty(),
             update: Mutex::new(()),
-            local_certificate: Some(LocalCertificateHealth {
-                serial: certificate_serial_from_der(der).context("relay certificate serial")?,
-                not_after: u64::try_from(not_after)?,
-                renew_after: u64::try_from(not_before + (not_after - not_before) * 2 / 3)?,
-            }),
+            local_certificate: Some(certificate),
             metrics: Some(metrics),
         }))
     }
@@ -246,7 +221,12 @@ impl State {
     }
 
     pub(crate) fn replace(&self, configuration: RelayConfiguration) -> Result<()> {
-        let snapshot = compile(configuration, self.network, self.local_certificate.as_ref())?;
+        let local = self
+            .local_certificate
+            .as_ref()
+            .map(|value| value.health())
+            .transpose()?;
+        let snapshot = compile(configuration, self.network, local.as_ref())?;
         let _update = self
             .update
             .lock()
@@ -305,14 +285,29 @@ impl State {
             .map(|snapshot| snapshot.epoch)
             .unwrap_or(0)
     }
+
+    fn record_rotated_health(&self, local: &LocalCertificateHealth) {
+        if let Some(metrics) = &self.metrics {
+            use std::sync::atomic::Ordering::Release;
+            metrics
+                .controller_certificate_renew_after_seconds
+                .store(local.renew_after, Release);
+            metrics
+                .controller_certificate_not_after_seconds
+                .store(local.not_after, Release);
+            metrics
+                .controller_certificate_renewal_forced
+                .store(0, Release);
+        }
+    }
 }
 
 pub(crate) struct Client {
-    endpoint: String,
+    origin: reqwest::Url,
     poll_interval: Duration,
     http: reqwest::Client,
-    expected_controller: AuthenticatedIdentity,
     quic: Option<QuicControl>,
+    workload: Arc<Workload>,
 }
 
 struct QuicControl {
@@ -327,7 +322,12 @@ struct QuicControl {
 }
 
 impl Client {
-    pub(crate) fn new(config: &Config, controller: &ControllerConfig, network: Id) -> Result<Self> {
+    pub(crate) fn new(
+        config: &Config,
+        controller: &ControllerConfig,
+        network: Id,
+        workload: Arc<Workload>,
+    ) -> Result<Self> {
         ensure!(
             controller
                 .network_id
@@ -336,29 +336,29 @@ impl Client {
                 == network,
             "controller.network_id differs from relay certificate network"
         );
-        let mut identity_pem = fs::read(&config.tls.certificate_file)
-            .context("read relay certificate for controller")?;
-        identity_pem.extend_from_slice(
-            &fs::read(&config.tls.private_key_file).context("read relay key for controller")?,
-        );
-        let root = fs::read(&config.tls.ca_file).context("read controller CA")?;
         let url = reqwest::Url::parse(&controller.endpoint).context("parse controller endpoint")?;
+        ensure!(
+            url.scheme() == "https"
+                && url.path() == "/"
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "controller.endpoint must be a clean HTTPS origin"
+        );
+        // Match the Go client's default: use the authenticated HTTPS
+        // authority, not the possibly different UDP dial target, for TLS.
+        let host = url.host_str().context("missing controller endpoint host")?;
+        let server_name = host
+            .strip_prefix('[')
+            .and_then(|ip| ip.strip_suffix(']'))
+            .unwrap_or(host);
         if !controller.server_name.is_empty() {
             ensure!(
-                url.host_str() == Some(controller.server_name.as_str()),
+                server_name == controller.server_name,
                 "Rust relay requires controller.server_name to match endpoint host"
             );
         }
-        let http = reqwest::Client::builder()
-            .https_only(true)
-            .identity(Identity::from_pem(&identity_pem).context("load relay controller identity")?)
-            .add_root_certificate(Certificate::from_pem(&root).context("load controller CA")?)
-            .min_tls_version(reqwest::tls::Version::TLS_1_3)
-            .max_tls_version(reqwest::tls::Version::TLS_1_3)
-            .timeout(Duration::from_secs(15))
-            .tls_info(true)
-            .build()
-            .context("build controller HTTP client")?;
         let expected_controller = AuthenticatedIdentity {
             network_id: network,
             role: Role::Controller,
@@ -367,35 +367,61 @@ impl Client {
                 .parse()
                 .context("controller.service_id")?,
         };
+        let client_tls =
+            crate::tls::controller_http_tls(config, expected_controller, Arc::clone(&workload))?;
+        let mut http = reqwest::Client::builder()
+            .https_only(true)
+            .http1_only()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .use_preconfigured_tls(client_tls.clone())
+            .timeout(controller.timeout);
+        if workload.managed() {
+            // Managed identities must not reuse an authenticated idle socket
+            // belonging to the previous generation.
+            http = http.pool_max_idle_per_host(0);
+        }
+        let http = http
+            .build()
+            .context("build pinned controller HTTP client")?;
         let quic = controller
             .quic_endpoint
             .as_deref()
             .map(|endpoint| {
                 QuicControl::new(
                     endpoint,
-                    controller.server_name.clone(),
+                    server_name.to_owned(),
                     expected_controller,
                     controller.timeout,
-                    &config.tls.certificate_file,
-                    &config.tls.private_key_file,
-                    &config.tls.ca_file,
+                    client_tls,
                 )
             })
             .transpose()?;
         Ok(Self {
-            endpoint: format!(
-                "{}/v1/relay/configuration",
-                controller.endpoint.trim_end_matches('/')
-            ),
+            origin: url,
             poll_interval: controller.poll_interval,
             http,
-            expected_controller,
             quic,
+            workload,
         })
+    }
+
+    pub(crate) fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let mut url = self.origin.clone();
+        url.set_path(path);
+        url.set_query(query);
+        self.http.request(method, url)
     }
 
     pub(crate) async fn run(&self, state: Arc<State>) -> Result<()> {
         let mut delay = Duration::from_millis(250);
+        let mut renew_retry_after = Instant::now();
         loop {
             match self.poll(&state).await {
                 Ok(()) => {
@@ -406,8 +432,61 @@ impl Client {
                     delay = delay.saturating_mul(2).min(self.poll_interval);
                 }
             }
+            if Instant::now() >= renew_retry_after
+                && let Err(error) = self.renew_workload(&state).await
+            {
+                renew_retry_after = Instant::now() + Duration::from_secs(15);
+                tracing::warn!(%error, "internal relay certificate renewal failed");
+            }
             sleep(delay).await;
         }
+    }
+
+    async fn renew_workload(&self, state: &State) -> Result<()> {
+        if !self.workload.due()? {
+            return Ok(());
+        }
+        let signer = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+        let csr = rcgen::CertificateParams::default().serialize_request(&signer)?;
+        let message = RenewalRequest {
+            pkcs10_csr_der: csr.der().to_vec(),
+            wireguard_public_key: Vec::new(),
+        };
+        let mut response = self
+            .request(reqwest::Method::POST, RENEW_PATH, None)
+            .header("content-type", "application/x-protobuf")
+            .body(message.encode_to_vec())
+            .send()
+            .await?;
+        ensure!(
+            response.status() == StatusCode::OK,
+            "relay renewal returned {}",
+            response.status()
+        );
+        let mut data = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            ensure!(
+                chunk.len() <= (128 << 10) - data.len(),
+                "relay renewal response exceeds limit"
+            );
+            data.extend_from_slice(&chunk);
+        }
+        let reply = RenewalResponse::decode(data.as_slice())?;
+        ensure!(
+            reply.wireguard_public_key.is_empty(),
+            "unexpected relay WireGuard key"
+        );
+        let chain = reply
+            .certificate_chain
+            .context("relay renewal did not return a certificate")?;
+        let workload = Arc::clone(&self.workload);
+        tokio::task::spawn_blocking(move || workload.install(chain, &signer)).await??;
+        if let Some(quic) = &self.quic {
+            quic.invalidate().await;
+        }
+        state.record_rotated_health(&self.workload.health()?);
+        tracing::info!("renewed internal relay TLS certificate");
+        Ok(())
     }
 
     pub(crate) async fn initialize(&self, state: &State) -> Result<()> {
@@ -423,23 +502,12 @@ impl Client {
         }
         .encode_to_vec();
         let mut response = self
-            .http
-            .post(&self.endpoint)
+            .request(reqwest::Method::POST, "/v1/relay/configuration", None)
             .header("content-type", "application/x-protobuf")
             .body(body)
             .send()
             .await
             .context("request relay configuration")?;
-        let peer = response
-            .extensions()
-            .get::<reqwest::tls::TlsInfo>()
-            .and_then(reqwest::tls::TlsInfo::peer_certificate)
-            .context("controller TLS peer certificate is unavailable")?;
-        ensure!(
-            identity_from_certificate_der(peer).context("controller SPIFFE identity")?
-                == self.expected_controller,
-            "controller SPIFFE identity differs from configured network/service ID"
-        );
         if response.status() == StatusCode::NOT_MODIFIED {
             let deadline = response
                 .headers()
@@ -489,28 +557,9 @@ impl QuicControl {
         server_name: String,
         expected: AuthenticatedIdentity,
         timeout: Duration,
-        certificate: &PathBuf,
-        private_key: &PathBuf,
-        ca: &PathBuf,
+        mut crypto: rustls::ClientConfig,
     ) -> Result<Self> {
         let (host, port) = split_host_port(address)?;
-        let certificates = read_certificates(certificate, 4 << 20, "relay controller certificate")?;
-        ensure!(
-            !certificates.is_empty(),
-            "relay controller certificate chain is empty"
-        );
-        let key = read_private_key(private_key, 1 << 20, "relay controller private key")?;
-        let roots_der = read_certificates(ca, 4 << 20, "controller CA")?;
-        let mut roots = RootCertStore::empty();
-        let (accepted, rejected) = roots.add_parsable_certificates(roots_der);
-        ensure!(
-            accepted > 0 && rejected == 0,
-            "controller CA contains an invalid certificate"
-        );
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(certificates, key)
-            .context("load relay QUIC controller identity")?;
         crypto.alpn_protocols = vec![b"laneway-control/1".to_vec()];
         crypto.enable_early_data = false;
         let crypto =
@@ -747,38 +796,6 @@ fn split_host_port(value: &str) -> Result<(String, u16)> {
         "controller QUIC endpoint must be host:port"
     );
     Ok((host.to_owned(), port))
-}
-
-fn read_certificates(
-    path: &PathBuf,
-    maximum: usize,
-    label: &str,
-) -> Result<Vec<CertificateDer<'static>>> {
-    let bytes = bounded_read(path, maximum, label)?;
-    rustls_pemfile::certs(&mut std::io::Cursor::new(bytes))
-        .collect::<std::result::Result<_, _>>()
-        .with_context(|| format!("parse {label}"))
-}
-
-fn bounded_read(path: &PathBuf, maximum: usize, label: &str) -> Result<Vec<u8>> {
-    let metadata = fs::metadata(path).with_context(|| format!("stat {label}"))?;
-    ensure!(
-        metadata.is_file() && metadata.len() <= maximum as u64,
-        "{label} exceeds limit or is not a regular file"
-    );
-    let bytes = fs::read(path).with_context(|| format!("read {label}"))?;
-    ensure!(
-        !bytes.is_empty() && bytes.len() <= maximum,
-        "{label} is empty or exceeds limit"
-    );
-    Ok(bytes)
-}
-
-fn read_private_key(path: &PathBuf, maximum: usize, label: &str) -> Result<PrivateKeyDer<'static>> {
-    let bytes = bounded_read(path, maximum, label)?;
-    rustls_pemfile::private_key(&mut std::io::Cursor::new(bytes))
-        .with_context(|| format!("parse {label}"))?
-        .with_context(|| format!("{label} is missing"))
 }
 
 fn compile(

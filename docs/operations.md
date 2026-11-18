@@ -20,19 +20,33 @@ off the control-plane host. Laneway does not manage the host firewall.
 
 ```sh
 sudo laneway control status
-sudo laneway control update
 sudo laneway control backup
+sudo laneway control update
 ```
 
-`status` exits nonzero when a required service is unhealthy. `update` verifies
-the release, creates a backup, and retains the prior release for rollback.
+`status` exits nonzero when a required service is unhealthy. On a fresh Rust
+Compose install, `update` selects the latest stable release; pass `vX.Y.Z` to
+select an exact release. It verifies release and image signatures, creates an
+encrypted backup, and brings the release up against a separate copy of the
+controller state. If startup or authenticated inventory fails, it restarts
+the previous release against the original state. Plan a maintenance window:
+the controller and relay stop briefly, and changes accepted by a failed
+candidate are discarded. The command reports the retained source volume
+and settings. It does not migrate Go deployments, perform downgrades, or
+replace host CLI and Compose templates.
 
 Connector identities persist in named Docker volumes. Do not remove the volume
-during an upgrade. Update a Connector with:
+during an upgrade. From the Connector host, use the updater in the signed
+Linux package to update a standard durable Rust Connector:
 
 ```sh
 sudo laneway-update-connector laneway-connector-office
 ```
+
+Add `--version vX.Y.Z` to select an exact signed release. The updater does
+not downgrade or convert a Go Connector. It checks the candidate against
+the existing identity without giving it network access or write access to
+the volume, then switches containers only after those checks pass.
 
 ## Administrator lifecycle
 
@@ -109,7 +123,8 @@ sudo laneway control administrator root-token rotate
 Rotation uses the same shared lifecycle lock as backup, restore, update,
 upgrade, rollback, bootstrap, and recovery. It atomically publishes the
 replacement at the existing token path and force-recreates only the controller.
-Expect a brief control-plane interruption.
+On Rust, it checks the selected image digest and the read-only credential mount
+before changing the token. Expect a brief control-plane interruption.
 
 Protected progress and credential copies are kept under:
 
@@ -135,16 +150,20 @@ rotation. Successful completion removes the protected rotation directory.
 ## Client lifecycle
 
 With one saved login, `laneway connect` remembers its domain. With several,
-specify it:
+specify it. On Linux, run the Rust foreground client with `sudo` to create a
+TUN interface and manage routes. Use `sudo laneway login` for the saved login
+in that case. On macOS, continue to run `laneway login` and `laneway connect`
+as your normal user.
 
 ```sh
-laneway connect lane.example.com
+sudo laneway login lane.example.com
+sudo laneway connect lane.example.com
 ```
 
 Use an ephemeral session when no identity should be saved:
 
 ```sh
-laneway connect lane.example.com --ephemeral
+sudo laneway connect lane.example.com --ephemeral
 ```
 
 To borrow a systemd Linux host as a RAM-only Exit, use
@@ -194,7 +213,7 @@ refuse to remove files they do not own.
 After a package update:
 
 ```sh
-sudo systemctl restart lanewayd
+sudo systemctl restart lanewayd-rs
 sudo laneway node status
 ```
 
@@ -276,7 +295,7 @@ Stop Nodes normally so they can restore routes, DNS, nftables, sysctls, and TUN
 state:
 
 ```sh
-sudo systemctl stop lanewayd
+sudo systemctl stop lanewayd-rs
 ```
 
 After a crash, Laneway reclaims only exact state carrying its ownership markers.

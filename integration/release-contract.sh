@@ -12,6 +12,8 @@ dockerfile=$repo_dir/deploy/containers/Dockerfile
 connector_dockerfile=$repo_dir/deploy/containers/Dockerfile.connector
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 connector_updater=$repo_dir/deploy/containers/update-connector.sh
+rust_updater_release=$repo_dir/rust/lanewayd/src/fleet_update/release.rs
+rust_connector_transaction=$repo_dir/rust/lanewayd/src/fleet_update/connector.rs
 compose_file=$repo_dir/deploy/compose/compose.yaml
 compose_dev_file=$repo_dir/deploy/compose/compose.dev.yaml
 docker_exit_integration=$repo_dir/integration/docker-exit-node.sh
@@ -85,18 +87,23 @@ if sed -n 's/^[[:space:]]*- uses: \([^ #]*\).*/\1/p' "$workflow" |
   exit 1
 fi
 
-for image in \
-  ghcr.io/doout/laneway-controller \
-  ghcr.io/doout/laneway-relay \
-  ghcr.io/doout/laneway-admin \
-  ghcr.io/doout/lane-edge \
-  ghcr.io/doout/laneway-exit-node
-do
-  require "image: $image" "$workflow"
-done
-require_release_target ghcr.io/doout/laneway-controller controller
-require_release_target ghcr.io/doout/laneway-relay relay
+expected_images='ghcr.io/doout/lane-edge-rust
+ghcr.io/doout/laneway-admin
+ghcr.io/doout/laneway-controller-rust
+ghcr.io/doout/laneway-exit-node-rust
+ghcr.io/doout/laneway-node-rust
+ghcr.io/doout/laneway-relay-rust'
+actual_images=$(awk '$1 == "image:" && $2 ~ /^ghcr\.io\/doout\// { print $2 }' "$workflow" | LC_ALL=C sort)
+if [ "$actual_images" != "$expected_images" ]; then
+  echo "tagged releases must publish exactly the Rust runtime images and the operator image" >&2
+  exit 1
+fi
 require_release_target ghcr.io/doout/laneway-admin admin
+require_release_target ghcr.io/doout/laneway-controller-rust controller
+require_release_target ghcr.io/doout/laneway-relay-rust relay
+require_release_target ghcr.io/doout/laneway-node-rust node
+require_release_target ghcr.io/doout/laneway-exit-node-rust rust-exit
+require_release_target ghcr.io/doout/lane-edge-rust rust-connector
 if grep -F 'BINARY=' "$workflow" >/dev/null || grep -F 'matrix.binary' "$workflow" >/dev/null; then
   echo "release images must use fixed Docker targets instead of a free-form binary argument" >&2
   exit 1
@@ -115,7 +122,8 @@ for value in \
   'invite) acquire_lock; run_invite "$@" ;;' \
   'route) acquire_lock; run_route "$@" ;;' \
   'status) run_status "$@" ;;' \
-  'production-check) acquire_lock; run_production_check "$@" ;;'
+  'run_production_check "$@"' \
+  'use laneway-control readiness for Rust deployments'
 do
   require "$value" "$lane_workflow"
 done
@@ -125,7 +133,7 @@ done
 for value in 'age --encrypt' 'age --decrypt' 'unexpected recovery archive entry' 'generated/recovery' 'chown 0:0'; do
   require "$value" "$recovery_workflow"
 done
-for value in 'Release tag' 'image-digests.txt' 'production signature verification failed' 'PRODUCTION-CHECKLIST.md' 'LANEWAY_INSTALL_PROFILE' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup' 'control-plane.answers' 'save_answers'; do
+for value in 'Release tag' 'image-digests.txt' 'Rust release signature verification failed' 'PRODUCTION-CHECKLIST.md' 'LANEWAY_INSTALL_PROFILE' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup' 'control-plane.answers' 'save_answers' 'LANEWAY_CONTROL_RUNTIME=rust' 'bootstrap.sh --rust'; do
   require "$value" "$installer"
 done
 for value in '/dev/shm' 'offline-root.tar.age' 'control-plane-input' 'pki verify-authority' 'Never copy laneway-recovery.identity'; do
@@ -148,6 +156,25 @@ do
 done
 require 'ephemeral-exit-bootstrap.sh' "$workflow"
 require 'ephemeral-exit' "$package_workflow"
+require 'verify-rust-release-runtime.sh' "$package_workflow"
+require 'verify-rust-release.sh' "$package_workflow"
+require 'sh deploy/compose/verify-rust-release.sh --publish "$GITHUB_REF_NAME" dist' "$workflow"
+require 'bash integration/rust-release-install.sh dist "$GITHUB_REF_NAME"' "$workflow"
+for pipeline in "$workflow" "$ci_workflow"; do
+  require 'FLEET_ACTIVATION_FIXTURE=1' "$pipeline"
+  require 'bash integration/rust-release-fleet-update.sh' "$pipeline"
+done
+require 'the installed Rust utun probe did not run' "$repo_dir/integration/rust-release-macos.sh"
+if ! awk '/cosign sign-blob/ { signed=1 }
+  /bash integration\/rust-release-install\.sh/ { installed=signed }
+  /gh release create/ { if (!installed) exit 1; published=1 }
+  END { if (!published || !installed) exit 1 }' "$workflow"; then
+  echo 'release must install the signed candidate before publishing' >&2
+  exit 1
+fi
+require 'set -- --control-tools' "$client_installer"
+require 'sh integration/rust-compose-release.sh' "$ci_workflow"
+require 'verified release does not contain the Rust Exit runtime' "$ephemeral_exit_bootstrap"
 require 'mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"' "$ephemeral_exit_bootstrap"
 require 'systemd-run --unit="$cleanup_unit"' "$ephemeral_exit_bootstrap"
 require '/bin/sh "$cleanup_path"' "$ephemeral_exit_bootstrap"
@@ -162,7 +189,14 @@ if grep -F "cp -R \"\$project_dir/deploy/.\"" "$package_workflow" >/dev/null; th
 fi
 
 for value in \
-	'os: [linux, darwin]' \
+  'os: linux, arch: amd64, runner: ubuntu-24.04' \
+  'os: linux, arch: arm64, runner: ubuntu-24.04-arm' \
+  'os: darwin, arch: amd64, runner: macos-15-intel' \
+  'os: darwin, arch: arm64, runner: macos-15' \
+  'PACKAGE_RUST_RUNTIME_DIR=' \
+  'PACKAGE_RUST_MACOS=' \
+  'integration/rust-release-macos.sh' \
+  'integration/rust-release-systemd.sh' \
 	"dist/laneway_\${{ matrix.os }}_\${{ matrix.arch }}" \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \
 	'install.sh' \
@@ -172,6 +206,8 @@ for value in \
   'sbom: true' \
   'cosign sign' \
   'cosign sign-blob' \
+  'verify_exit_release_signature "$(command -v cosign)" dist "$GITHUB_REF_NAME"' \
+  'sha256sum --strict -c checksums.txt' \
   'actions/attest-build-provenance@' \
   'aquasecurity/trivy-action@' \
   'Extract OCI layout for vulnerability scanning' \
@@ -191,6 +227,9 @@ do
   require "$value" "$workflow"
 done
 require 'bootstrap-artifacts.toml ephemeral-exit-bootstrap.sh image-digests.txt install.sh' "$workflow"
+for image in laneway-controller-rust laneway-relay-rust laneway-node-rust laneway-exit-node-rust; do
+  require "image: ghcr.io/doout/$image" "$workflow"
+done
 
 for value in \
   'LANEWAY_CONTROLLER_IMAGE_DIGEST' \
@@ -234,13 +273,21 @@ if [ "$console_copy_stage" != controller ]; then
   echo "console assets must be copied exactly once and only by the controller target" >&2
   exit 1
 fi
-if [ "$(awk '/^FROM / { stage = $NF } END { print stage }' "$dockerfile")" != relay ]; then
-  echo "the shared Dockerfile default target must preserve the historical relay image" >&2
-  exit 1
-fi
+require_default_target() {
+  actual=$(awk '/^FROM / { stage = $NF } END { print stage }' "$1")
+  if [ "$actual" != "$2" ]; then
+    echo "$1 selects default Docker target ${actual:-none}, want $2" >&2
+    exit 1
+  fi
+}
+
+require_default_target "$dockerfile" admin
+require_default_target "$connector_dockerfile" rust-connector
+require_default_target "$exit_dockerfile" rust-exit
 require_compose_target controller controller
 require_compose_target relay relay
 require_compose_target admin admin
+require_compose_target exit-node go-exit
 if grep -F 'BINARY:' "$compose_dev_file" >/dev/null ||
   grep -F -- '--build-arg BINARY=' "$docker_exit_integration" >/dev/null ||
   grep -F -- '--build-arg BINARY=' "$ci_workflow" >/dev/null; then
@@ -250,6 +297,7 @@ fi
 require '--target controller' "$docker_exit_integration"
 require '--target relay' "$docker_exit_integration"
 require '--target admin' "$docker_exit_integration"
+require '--target go-exit' "$docker_exit_integration"
 require '"dev": "vite --mode demo"' "$web_package"
 require '"build": "vite build"' "$web_package"
 require '"build:live": "tsc -b && vite build --mode live"' "$web_package"
@@ -271,9 +319,11 @@ done
 require 'FROM scratch' "$connector_dockerfile"
 require 'HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6' "$connector_dockerfile"
 require 'CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
+require 'CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
 require 'ENTRYPOINT ["/usr/local/bin/laneway"]' "$connector_dockerfile"
 require 'CMD ["connector", "run"]' "$connector_dockerfile"
-if grep -E '^RUN apk|/bin/sh|/sbin/tini|/bin/setpriv' "$connector_dockerfile" >/dev/null; then
+if awk '/^FROM / { runtime = ($2 == "scratch") } runtime { print }' "$connector_dockerfile" |
+  grep -E '^RUN apk|/bin/sh|/sbin/tini|/bin/setpriv' >/dev/null; then
   echo "scratch Connector image contains an OS package or interactive runtime tool" >&2
   exit 1
 fi
@@ -303,10 +353,11 @@ require '--target relay --build-arg VERSION=ci' "$ci_workflow"
 require '--target admin --build-arg VERSION=ci' "$ci_workflow"
 require 'docker run --rm --network none laneway-controller:ci -version' "$ci_workflow"
 require 'docker run --rm --network none laneway-relay:ci -version' "$ci_workflow"
-require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci' "$ci_workflow"
-require '! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true' "$ci_workflow"
-require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
-require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
+require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge-rust:ci laneway-exit-node:ci' "$ci_workflow"
+require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true; then' "$ci_workflow"
+require './integration/connector-bootstrap.sh lane-edge-rust:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci tcp-fallback' "$ci_workflow"
 require './integration/connector-updater.sh' "$ci_workflow"
 require './integration/administrator-lifecycle.sh' "$ci_workflow"
 if ! grep -Eq '^[[:space:]]+\./integration/administrator-lifecycle\.sh[[:space:]]*$' "$ci_workflow" ||
@@ -330,14 +381,14 @@ for value in \
   'checksums.sigstore.json' \
   'verify-blob' \
   'image-digests.txt' \
-  'Connector image signature verification failed' \
-  'connector validate --state-dir /var/lib/laneway/connector' \
-  'container must mount the named volume' \
-  'docker rename' \
-  'previous Connector restored'
+  'Rust connector image signature verification failed'
 do
-  require "$value" "$connector_updater"
+  require "$value" "$rust_updater_release"
 done
+require 'exec "$updater" --connector "$@"' "$connector_updater"
+require 'Connector must use its own writable named identity volume' "$rust_connector_transaction"
+require 'serving_connector' "$rust_connector_transaction"
+require 'Activated::RolledBack' "$rust_connector_transaction"
 require 'deploy/containers/update-connector.sh' "$package_workflow"
 require 'laneway-update-connector' "$package_installer"
 

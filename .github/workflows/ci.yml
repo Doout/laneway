@@ -61,7 +61,7 @@ jobs:
 
   desktop:
     name: Desktop foundation (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -144,7 +144,7 @@ jobs:
 
   macos-client:
     name: macOS client and privileged-helper protocol
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -178,11 +178,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate Compose security, storage, health, and port model
         run: |
-          python3 -m unittest discover -s deploy/compose -p test_service_certificate_renewal.py
+          python3 -m unittest discover -s deploy/compose -p 'test_*.py'
           ./integration/compose-config.sh
           bash -n deploy/ephemeral-exit/bootstrap.sh
           shellcheck deploy/ephemeral-exit/bootstrap.sh
           ./integration/release-contract.sh
+          ./integration/client-installer.sh
+          sh integration/rust-compose-release.sh
+          sh integration/rust-go-runtime-guard.sh
           ./integration/connector-updater.sh
           ./integration/control-plane-prepare.sh
           sudo env PATH="$PATH" ./integration/control-plane-install.sh
@@ -202,19 +205,27 @@ jobs:
           docker build --file deploy/containers/Dockerfile \
             --target admin --build-arg VERSION=ci \
             --tag laneway-admin:ci .
-          docker build --file deploy/containers/Dockerfile.connector \
-            --build-arg VERSION=ci --tag lane-edge:ci .
           docker build --file deploy/containers/Dockerfile.exit-node \
             --build-arg VERSION=ci --tag laneway-exit-node:ci .
           test "$(docker run --rm --network none laneway-controller:ci -version)" = ci
           test "$(docker run --rm --network none laneway-relay:ci -version)" = ci
           test "$(docker run --rm --network none laneway-admin:ci version)" = ci
-          test "$(docker run --rm --network none lane-edge:ci version)" = ci
           test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = ci
-          ! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true
-          ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci
-          ./integration/connector-bootstrap.sh lane-edge:ci
-          ./integration/connector-upgrade.sh lane-edge:ci
+      - name: Verify fresh Rust Connector enrollment and restart
+        run: |
+          docker build --file deploy/containers/Dockerfile.connector \
+            --target rust-connector --build-arg VERSION=ci --tag lane-edge-rust:ci .
+          test "$(docker run --rm --network none lane-edge-rust:ci version)" = ci
+          if docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true; then
+            echo "the Rust connector image unexpectedly contains a runnable shell" >&2
+            exit 1
+          fi
+          ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge-rust:ci laneway-exit-node:ci
+          ./integration/connector-bootstrap.sh lane-edge-rust:ci
+          docker build --tag laneway-rust-lab:local integration/rust-lab
+          bash integration/rust-lab/connector-cutover.sh --prime-cache
+          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci
+          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci tcp-fallback
 
   rust:
     name: Rust workspace and Go interoperability
@@ -241,6 +252,8 @@ jobs:
       - name: Go nodes through Rust relay
         working-directory: go
         run: go test -count=1 -race -tags=rustinterop ./integration/rustrelay -v
+      - name: Compare Rust inventory with Go controller HTTP responses
+        run: make rust-controller-interop
       - name: Install Rust node interoperability network tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping
       - name: Rust node executable interoperability
@@ -249,6 +262,68 @@ jobs:
           CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
           RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
+
+  rust-macos-endpoint:
+    name: Rust macOS endpoint (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --lib
+      - run: cargo build --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+        env:
+          LANEWAY_PRODUCT_VERSION: 0.0.0-ci
+      - name: Check the macOS CLI handoff to the Rust binary
+        run: |
+          cd go
+          LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" go test ./cmd/laneway -run '^Test(RustForeground|MacRustRuntime)' -count=1
+      - name: Install the default archive and verify real utun traffic and cleanup
+        run: |
+          set -euo pipefail
+          arch=$(go env GOARCH)
+          PACKAGE_RUST_MACOS="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" make package VERSION=0.0.0-ci
+          LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
+            sh integration/rust-release-macos.sh \
+            "dist/laneway_darwin_$arch.tar.gz" "$arch" 0.0.0-ci
+
+  rust-linux-package:
+    name: Static Rust Linux package preview
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - name: Build and smoke test the preview without publishing
+        run: |
+          # The fleet updater accepts only a stable numeric release version.
+          version=0.0.1
+          output="$RUNNER_TEMP/laneway-rust"
+          docker buildx build --platform linux/amd64 --build-arg VERSION="$version" \
+            --build-arg FLEET_ACTIVATION_FIXTURE=1 \
+            --file deploy/containers/Dockerfile.rust-release --target artifacts \
+            --output "type=local,dest=$output" .
+          PACKAGE_GOOS=linux PACKAGE_GOARCH=amd64 PACKAGE_RUST_RUNTIME_DIR="$output" make package VERSION="$version"
+      - name: Test the AMD64 preview archive under systemd
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps
+          sudo modprobe tun
+          sudo modprobe wireguard
+          sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
+          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh dist/laneway_linux_amd64.tar.gz amd64 0.0.1
+          sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh dist/laneway_linux_amd64.tar.gz \
+            "$RUNNER_TEMP/laneway-rust/activation-fixture"
 
   cross-build:
     name: Go build ${{ matrix.goos }}/${{ matrix.goarch }}

@@ -1,0 +1,30 @@
+mode = "node"
+
+[identity]
+network_id = "000102030405060708090a0b0c0d0e0f"
+node_id = "101112131415161718191a1b1c1d1e1f"
+
+[tls]
+certificate = "/etc/laneway/node.crt"
+private_key = "/etc/laneway/node.key"
+ca = "/etc/laneway/ca.crt"
+
+[connector]
+userspace = true
+
+[tun]
+# The name is a configuration label; the agent does not open a device.
+name = "userspace"
+addresses = ["100.96.0.1/32"]
+
+[relay]
+address = "203.0.113.10:4433"
+server_name = "relay.example.com"
+service_id = "303132333435363738393a3b3c3d3e3f"
+
+[forwarding]
+owned_prefixes = ["192.168.50.0/24"]
+
+[[routes]]
+prefix = "100.96.0.2/32"
+via_node = "202122232425262728292a2b2c2d2e2f"

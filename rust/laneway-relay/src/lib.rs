@@ -12,10 +12,13 @@ mod controller;
 mod diagnostics;
 mod metrics;
 mod packet_pool;
+mod public_https;
+mod public_tls;
 mod registry;
 mod server;
 mod tcp;
 mod tls;
+mod workload;
 
 pub use config::{Config, PeerConfig, RelayConfig, TcpFallbackConfig, TlsConfig};
 pub use metrics::{Metrics, MetricsSnapshot};

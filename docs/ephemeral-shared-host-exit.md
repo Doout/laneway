@@ -16,11 +16,17 @@ one-use invitation to stdout. Run the command on the Linux host, then paste the
 invitation at its hidden `/dev/tty` prompt. Never put the invitation in argv,
 an environment variable, shell history, or a pipe shared with another user.
 
+The signed Linux archive must contain the Rust runtime
+`laneway/sbin/lanewayd-rs`. The bootstrap checks it before accepting an
+invitation. The service requires a kernel with WireGuard support, but does
+not require a `wg` executable or a TUN device.
+
 ## Runtime and failure semantics
 
 The bootstrap verifies the signed release manifest, creates a bounded executable
-tmpfs beneath `/run` (without changing `/run`'s own mount policy), extracts only
-the Laneway binary there, and enrolls with a fresh Ed25519 key and WireGuard key.
+tmpfs beneath `/run` (without changing `/run`'s own mount policy), extracts the
+Laneway enrollment CLI and Rust runtime, and enrolls with a
+fresh Ed25519 key and WireGuard key.
 It starts a collected transient systemd unit with `DynamicUser`,
 `PrivateNetwork`, a strict capability and device allowlist, no application
 stdout/stderr, no core dumps, locked memory, and an absolute runtime limit.
@@ -30,15 +36,17 @@ files and executable are unlinked after startup.
 The private namespace receives an anonymous veth carrier. The bootstrap creates
 only a randomly named, ownership-marked host veth and nftables table; cleanup
 removes exactly those objects. It refuses conflicting state and does not change
-global forwarding settings. IPv4 forwarding and `/dev/net/tun` must already be
-available. The host must expose at least one non-loopback IPv4 resolver (the
-systemd-resolved upstream resolver file is preferred); a private read-only copy
-is mounted into the runtime namespace.
+global forwarding settings. IPv4 forwarding must already be enabled.
+The host must expose at least one non-loopback
+IPv4 resolver (the systemd-resolved upstream resolver file is preferred); a
+private read-only copy is mounted into the runtime namespace.
 
 The controller accepts one active control session for the identity. A
 configuration request is also its 10-second heartbeat. After 20 seconds without
 a heartbeat the local configuration enters drain: it refuses new outbound flows
-and permits only established or related traffic. At 60 seconds the controller
+and permits only established or related traffic. Rust drains only on the
+heartbeat deadline itself; an earlier authorization deadline fails closed.
+At 60 seconds the controller
 atomically terminates the lease, revokes its certificate,
 withdraws its route, releases its overlay address, increments the network epoch,
 and records a system audit event. Reconnection before revocation requires a new

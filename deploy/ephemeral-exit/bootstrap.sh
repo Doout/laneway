@@ -1,12 +1,159 @@
 #!/bin/bash
+
+# Keep the release verifier and unit reusable by the release gates.
+# Sourcing this file defines only these helpers; executing it runs bootstrap.
+verify_exit_release_signature() {
+	local cosign=$1 assets=$2 version=$3
+	[[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || return 2
+	"$cosign" verify-blob --bundle "$assets/checksums.sigstore.json" \
+		--certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$version" \
+		--certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$assets/checksums.txt"
+}
+
+stage_exit_entrypoint() {
+	local runtime_dir=$1
+	cat > "$runtime_dir/entrypoint" <<EOF
+#!/bin/sh
+set -eu
+attempt=0
+while [ ! -e $runtime_dir/network.ready ]; do
+  attempt=\$((attempt + 1))
+  [ \$attempt -le 600 ] || exit 1
+  sleep 0.05
+done
+exec $runtime_dir/lanewayd-rs --shared-host-exit
+EOF
+	chmod 0555 "$runtime_dir/entrypoint"
+}
+
+start_transient_exit() {
+	local unit=$1 runtime_dir=$2 credentials=$3 max_runtime=$4
+	systemd-run --unit="$unit" --collect --quiet \
+		--property=Type=exec --property=DynamicUser=yes --property=PrivateNetwork=yes \
+		--property=RuntimeDirectory="${unit%.service}" --property=RuntimeDirectoryMode=0700 \
+		--property=LoadCredential=ca.crt:"$credentials/ca.crt" \
+		--property=LoadCredential=node.crt:"$credentials/node.crt" \
+		--property=LoadCredential=node.key:"$credentials/node.key" \
+		--property=LoadCredential=wireguard.key:"$credentials/wireguard.key" \
+		--property=LoadCredential=config:"$credentials/laneway.toml" \
+		--property=BindReadOnlyPaths="$runtime_dir/resolv.conf:/etc/resolv.conf" \
+		--property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=ProtectSystem=strict \
+		--property=ProtectHome=yes --property=ProtectKernelTunables=no --property=ProtectKernelModules=yes \
+		--property=ProtectControlGroups=yes --property=LockPersonality=yes --property=MemoryDenyWriteExecute=yes \
+		--property=RestrictSUIDSGID=yes --property=RestrictRealtime=yes --property=RemoveIPC=yes \
+		--property=CapabilityBoundingSet='CAP_NET_ADMIN CAP_IPC_LOCK' \
+		--property=AmbientCapabilities='CAP_NET_ADMIN CAP_IPC_LOCK' \
+		--property=DevicePolicy=closed \
+		--property=RestrictAddressFamilies='AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+		--property=LimitCORE=0 --property=LimitMEMLOCK=infinity --property=MemoryMax=512M --property=TasksMax=128 --property=UMask=0077 \
+		--property=StandardOutput=null --property=StandardError=null --property=RuntimeMaxSec="$max_runtime" \
+		--property=TimeoutStopSec=15s --property=KillMode=mixed "$runtime_dir/entrypoint"
+}
+
+# The daemon, carrier and cleanup can be exercised with only a lab underlay.
+die() { printf 'laneway ephemeral Exit: %s\n' "$*" >&2; exit 1; }
+
+describe_exit_carrier() {
+	local runtime_name=$1 random=${1#laneway-ephemeral-exit-} carrier_index carrier_third carrier_base
+	[[ $runtime_name == laneway-ephemeral-exit-* && $random =~ ^[0-9a-f]{16}$ ]] || die 'invalid carrier identity'
+	host_if=lxe${random:0:12}
+	peer_if=lxp${random:0:12}
+	nft_table=lxe_${random:0:12}
+	marker=laneway:$runtime_name
+	carrier_index=$((16#${random:0:4} & 0x3fff))
+	carrier_third=$((carrier_index / 64))
+	carrier_base=$(((carrier_index % 64) * 4))
+	carrier_prefix=169.254.$carrier_third.$carrier_base/30
+	carrier_host=169.254.$carrier_third.$((carrier_base + 1))
+	carrier_peer=169.254.$carrier_third.$((carrier_base + 2))
+}
+
+attach_exit_carrier() {
+	local pid=$1
+	[[ $pid =~ ^[1-9][0-9]*$ ]] || die 'invalid carrier namespace process'
+	ip link show dev "$host_if" >/dev/null 2>&1 && die 'random carrier interface already exists'
+	nft list table inet "$nft_table" >/dev/null 2>&1 && die 'random carrier firewall state already exists'
+	ip link add "$host_if" type veth peer name "$peer_if"
+	carrier_created=true
+	ip link set dev "$host_if" alias "$marker"
+	ip address add "$carrier_host/30" dev "$host_if"
+	ip link set "$host_if" up
+	ip link set "$peer_if" netns "$pid"
+	nsenter -t "$pid" -n ip link set lo up
+	nsenter -t "$pid" -n ip link set "$peer_if" name uplink0
+	nsenter -t "$pid" -n ip address add "$carrier_peer/30" dev uplink0
+	nsenter -t "$pid" -n ip link set uplink0 up
+	nsenter -t "$pid" -n ip route add default via "$carrier_host" dev uplink0
+	nft add table inet "$nft_table"
+	nft add chain inet "$nft_table" owner || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not claim carrier firewall state'; }
+	nft "add rule inet $nft_table owner counter comment \"$marker\"" || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not mark carrier firewall ownership'; }
+	nft "add chain inet $nft_table forward { type filter hook forward priority 100; policy accept; }"
+	nft add rule inet "$nft_table" forward iifname "$host_if" accept
+	nft add rule inet "$nft_table" forward oifname "$host_if" ct state established,related accept
+	nft "add chain inet $nft_table postrouting { type nat hook postrouting priority srcnat; policy accept; }"
+	nft add rule inet "$nft_table" postrouting ip saddr "$carrier_prefix" masquerade
+	if nft list chain ip filter DOCKER-USER >/dev/null 2>&1; then
+		command -v iptables >/dev/null || die 'Docker forwarding requires iptables'
+		iptables -I DOCKER-USER 1 -o "$host_if" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$marker" -j ACCEPT
+		docker_user_rules=true
+		iptables -I DOCKER-USER 1 -i "$host_if" -m comment --comment "$marker" -j ACCEPT
+	fi
+}
+
+stage_exit_cleanup() {
+	local work=$1 runtime_dir=$2 unit=$3 cleanup_path=$4 cleanup_ready_path=$5
+	if [[ -e $cleanup_path || -L $cleanup_path || -e $cleanup_ready_path || -L $cleanup_ready_path ]]; then
+		die 'random cleanup path already exists'
+	fi
+	cat > "$work/cleanup" <<EOF
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+while kill -0 $$ >/dev/null 2>&1 && [ ! -e $cleanup_ready_path ]; do
+  sleep 0.1
+done
+if [ -e $cleanup_ready_path ]; then
+  while :; do
+    state=\$(systemctl is-active $unit 2>/dev/null || true)
+    case "\$state" in active|activating) sleep 1 ;; *) break ;; esac
+  done
+fi
+if ip -j -d link show dev $host_if 2>/dev/null | grep -F -- '"ifalias":"$marker"' >/dev/null; then
+  ip link delete $host_if || true
+fi
+if nft list chain inet $nft_table owner 2>/dev/null | grep -F -- 'comment "$marker"' >/dev/null; then
+  nft delete table inet $nft_table || true
+fi
+if command -v iptables >/dev/null 2>&1; then
+  iptables -D DOCKER-USER -i $host_if -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
+  iptables -D DOCKER-USER -o $host_if -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
+fi
+find $runtime_dir -mindepth 1 -depth -delete 2>/dev/null || true
+umount $runtime_dir 2>/dev/null || true
+rmdir $runtime_dir 2>/dev/null || true
+find $work -depth -delete 2>/dev/null || true
+rm -f $cleanup_path $cleanup_ready_path
+EOF
+	install -m 0500 "$work/cleanup" "$cleanup_path"
+}
+
+start_exit_cleanup() {
+	local cleanup_unit=$1 cleanup_path=$2
+	shift 2
+	systemd-run --unit="$cleanup_unit" --collect --quiet --property=Type=exec --property=StandardOutput=null \
+		--property=StandardError=null --property=NoNewPrivileges=yes "$@" /bin/sh "$cleanup_path"
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+	return 0
+fi
+
 set -euo pipefail
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 IFS=$' \t\n'
 umask 077
-
-die() { printf 'laneway ephemeral Exit: %s\n' "$*" >&2; exit 1; }
 
 version=
 authority=
@@ -18,6 +165,7 @@ while (($#)); do
 		--authority) (($# >= 2)) || die '--authority requires a value'; authority=$2; shift 2 ;;
 		--name) (($# >= 2)) || die '--name requires a value'; name=$2; shift 2 ;;
 		--max-runtime) (($# >= 2)) || die '--max-runtime requires a value'; max_runtime=$2; shift 2 ;;
+		--runtime) (($# >= 2)) && [[ $2 == rust ]] || die 'only the Rust Exit runtime is supported'; shift 2 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
@@ -40,7 +188,6 @@ for command in awk curl find findmnt grep install ip mount nft nsenter od readli
 done
 systemd_state=$(systemctl is-system-running 2>/dev/null || true)
 [[ $systemd_state == running || $systemd_state == degraded ]] || die 'systemd is not the active service manager'
-[[ -c /dev/net/tun ]] || die '/dev/net/tun is unavailable'
 [[ $(sysctl -n net.ipv4.ip_forward 2>/dev/null) == 1 ]] || die 'host IPv4 forwarding must already be enabled'
 
 architecture=$(uname -m)
@@ -57,16 +204,7 @@ unit=$runtime_name.service
 cleanup_unit=$runtime_name-cleanup.service
 cleanup_path=/run/.$runtime_name.cleanup
 cleanup_ready_path=/run/.$runtime_name.cleanup.ready
-host_if=lxe${random:0:12}
-peer_if=lxp${random:0:12}
-nft_table=lxe_${random:0:12}
-marker=laneway:$runtime_name
-carrier_index=$((16#${random:0:4} & 0x3fff))
-carrier_third=$((carrier_index / 64))
-carrier_base=$(((carrier_index % 64) * 4))
-carrier_prefix=169.254.$carrier_third.$carrier_base/30
-carrier_host=169.254.$carrier_third.$((carrier_base + 1))
-carrier_peer=169.254.$carrier_third.$((carrier_base + 2))
+describe_exit_carrier "$runtime_name"
 work=$(mktemp -d /run/.laneway-ephemeral-exit.XXXXXXXX)
 mkdir "$work/home"
 HOME=$work/home
@@ -103,41 +241,8 @@ cleanup_failed_bootstrap() {
 	exit "$status"
 }
 trap cleanup_failed_bootstrap EXIT HUP INT TERM
-if [[ -e $cleanup_path || -L $cleanup_path || -e $cleanup_ready_path || -L $cleanup_ready_path ]]; then
-	die 'random cleanup path already exists'
-fi
-cat > "$work/cleanup" <<EOF
-#!/bin/sh
-set -eu
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-while kill -0 $$ >/dev/null 2>&1 && [ ! -e $cleanup_ready_path ]; do
-  sleep 0.1
-done
-if [ -e $cleanup_ready_path ]; then
-  while :; do
-    state=\$(systemctl is-active $unit 2>/dev/null || true)
-    case "\$state" in active|activating) sleep 1 ;; *) break ;; esac
-  done
-fi
-if [ -e /sys/class/net/$host_if/ifalias ] && [ "\$(cat /sys/class/net/$host_if/ifalias)" = '$marker' ]; then
-  ip link delete $host_if || true
-fi
-if nft list chain inet $nft_table owner 2>/dev/null | grep -F -- 'comment "$marker"' >/dev/null; then
-  nft delete table inet $nft_table || true
-fi
-if command -v iptables >/dev/null 2>&1; then
-  iptables -D DOCKER-USER -i $host_if -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
-  iptables -D DOCKER-USER -o $host_if -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
-fi
-find $runtime_dir -mindepth 1 -depth -delete 2>/dev/null || true
-umount $runtime_dir 2>/dev/null || true
-rmdir $runtime_dir 2>/dev/null || true
-find $work -depth -delete 2>/dev/null || true
-rm -f $cleanup_path $cleanup_ready_path
-EOF
-install -m 0500 "$work/cleanup" "$cleanup_path"
-systemd-run --unit="$cleanup_unit" --collect --quiet --property=Type=exec --property=StandardOutput=null \
-	--property=StandardError=null --property=NoNewPrivileges=yes /bin/sh "$cleanup_path"
+stage_exit_cleanup "$work" "$runtime_dir" "$unit" "$cleanup_path" "$cleanup_ready_path"
+start_exit_cleanup "$cleanup_unit" "$cleanup_path"
 mkdir "$runtime_dir"
 claimed_runtime=true
 mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"
@@ -158,9 +263,7 @@ printf '%s  %s\n' "$cosign_sha" "$cosign" | sha256sum -c - >/dev/null || die 'pi
 chmod 0500 "$cosign"
 cosign_version=$($cosign version --json 2>/dev/null | sed -n 's/.*"gitVersion":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
 [[ $cosign_version == v3.1.3 ]] || die 'pinned Cosign reported an unexpected version'
-"$cosign" verify-blob --bundle "$work/checksums.sigstore.json" \
-	--certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$version" \
-	--certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$work/checksums.txt" >/dev/null 2>&1 || die 'release checksum signature verification failed'
+verify_exit_release_signature "$cosign" "$work" "$version" >/dev/null 2>&1 || die 'release checksum signature verification failed'
 (
 	cd "$work"
 	grep -E "  ${archive}$" checksums.txt > selected-checksum
@@ -171,6 +274,12 @@ entries=$(tar -tzf "$work/$archive")
 [[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/bin/laneway') == 1 ]] || die 'release archive has no unique laneway executable'
 tar -xzf "$work/$archive" -C "$work" laneway/bin/laneway
 install -m 0555 "$work/laneway/bin/laneway" "$runtime_dir/laneway"
+[[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/sbin/lanewayd-rs') == 1 ]] ||
+	die 'verified release does not contain the Rust Exit runtime'
+tar -xzf "$work/$archive" -C "$work" laneway/sbin/lanewayd-rs
+install -m 0555 "$work/laneway/sbin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
+[[ $("$runtime_dir/lanewayd-rs" --version) == "${version#v}" ]] ||
+	die 'verified Rust Exit runtime reports a different release version'
 
 printf 'One-use Exit invitation: ' >&2
 stty -echo </dev/tty
@@ -202,38 +311,8 @@ awk '$1 == "nameserver" && $2 !~ /^(127\.|0\.0\.0\.0$)/ && $2 ~ /^[0-9.]+$/ { pr
 [[ -s $runtime_dir/resolv.conf ]] || die 'no non-loopback DNS resolver is available to the private namespace'
 chmod 0444 "$runtime_dir/resolv.conf"
 
-cat > "$runtime_dir/entrypoint" <<EOF
-#!/bin/sh
-set -eu
-attempt=0
-while [ ! -e /run/$runtime_name/network.ready ]; do
-  attempt=\$((attempt + 1))
-  [ \$attempt -le 600 ] || exit 1
-  sleep 0.05
-done
-exec /run/$runtime_name/laneway node run -config "\$CREDENTIALS_DIRECTORY/config"
-EOF
-chmod 0555 "$runtime_dir/entrypoint"
-systemd-run --unit="$unit" --collect --quiet \
-	--property=Type=exec --property=DynamicUser=yes --property=PrivateNetwork=yes \
-	--property=RuntimeDirectory="$runtime_name" --property=RuntimeDirectoryMode=0700 \
-	--property=LoadCredential=ca.crt:"$work/credentials/ca.crt" \
-	--property=LoadCredential=node.crt:"$work/credentials/node.crt" \
-	--property=LoadCredential=node.key:"$work/credentials/node.key" \
-	--property=LoadCredential=wireguard.key:"$work/credentials/wireguard.key" \
-	--property=LoadCredential=config:"$work/credentials/laneway.toml" \
-	--property=BindReadOnlyPaths="$runtime_dir/resolv.conf:/etc/resolv.conf" \
-	--property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=ProtectSystem=strict \
-	--property=ProtectHome=yes --property=ProtectKernelTunables=no --property=ProtectKernelModules=yes \
-	--property=ProtectControlGroups=yes --property=LockPersonality=yes --property=MemoryDenyWriteExecute=yes \
-	--property=RestrictSUIDSGID=yes --property=RestrictRealtime=yes --property=RemoveIPC=yes \
-	--property=CapabilityBoundingSet='CAP_NET_ADMIN CAP_IPC_LOCK' \
-	--property=AmbientCapabilities='CAP_NET_ADMIN CAP_IPC_LOCK' \
-	--property=DevicePolicy=closed --property=DeviceAllow='/dev/net/tun rw' \
-	--property=RestrictAddressFamilies='AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
-	--property=LimitCORE=0 --property=LimitMEMLOCK=infinity --property=MemoryMax=512M --property=TasksMax=128 --property=UMask=0077 \
-	--property=StandardOutput=null --property=StandardError=null --property=RuntimeMaxSec="$max_runtime" \
-	--property=TimeoutStopSec=15s --property=KillMode=mixed "$runtime_dir/entrypoint"
+stage_exit_entrypoint "$runtime_dir"
+start_transient_exit "$unit" "$runtime_dir" "$work/credentials" "$max_runtime"
 unit_started=true
 
 pid=
@@ -243,38 +322,12 @@ for _ in $(seq 1 100); do
 	sleep 0.05
 done
 [[ $pid =~ ^[1-9][0-9]*$ ]] || die 'transient unit did not enter its private network namespace'
-[[ ! -e /sys/class/net/$host_if ]] || die 'random carrier interface already exists'
-nft list table inet "$nft_table" >/dev/null 2>&1 && die 'random carrier firewall state already exists'
-ip link add "$host_if" type veth peer name "$peer_if"
-carrier_created=true
-ip link set dev "$host_if" alias "$marker"
-ip address add "$carrier_host/30" dev "$host_if"
-ip link set "$host_if" up
-ip link set "$peer_if" netns "$pid"
-nsenter -t "$pid" -n ip link set lo up
-nsenter -t "$pid" -n ip link set "$peer_if" name uplink0
-nsenter -t "$pid" -n ip address add "$carrier_peer/30" dev uplink0
-nsenter -t "$pid" -n ip link set uplink0 up
-nsenter -t "$pid" -n ip route add default via "$carrier_host" dev uplink0
-nft add table inet "$nft_table"
-nft add chain inet "$nft_table" owner || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not claim carrier firewall state'; }
-nft "add rule inet $nft_table owner counter comment \"$marker\"" || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not mark carrier firewall ownership'; }
-nft "add chain inet $nft_table forward { type filter hook forward priority 100; policy accept; }"
-nft add rule inet "$nft_table" forward iifname "$host_if" accept
-nft add rule inet "$nft_table" forward oifname "$host_if" ct state established,related accept
-nft "add chain inet $nft_table postrouting { type nat hook postrouting priority srcnat; policy accept; }"
-nft add rule inet "$nft_table" postrouting ip saddr "$carrier_prefix" masquerade
-if nft list chain ip filter DOCKER-USER >/dev/null 2>&1; then
-	command -v iptables >/dev/null || die 'Docker forwarding requires iptables'
-	iptables -I DOCKER-USER 1 -o "$host_if" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$marker" -j ACCEPT
-	docker_user_rules=true
-	iptables -I DOCKER-USER 1 -i "$host_if" -m comment --comment "$marker" -j ACCEPT
-fi
+attach_exit_carrier "$pid"
 touch "$runtime_dir/network.ready"
 
 executed=false
 for _ in $(seq 1 200); do
-	if [[ $(readlink "/proc/$pid/exe" 2>/dev/null || true) == "$runtime_dir/laneway" ]]; then
+	if [[ $(readlink "/proc/$pid/exe" 2>/dev/null || true) == "$runtime_dir/lanewayd-rs" ]]; then
 		executed=true
 		break
 	fi
@@ -285,7 +338,7 @@ done
 
 install -m 0600 /dev/null "$cleanup_ready_path"
 rm -f "$runtime_dir/ca.crt" "$runtime_dir/node.crt" "$runtime_dir/node.key" "$runtime_dir/wireguard.key" "$runtime_dir/laneway.toml" "$runtime_dir/resolv.conf" \
-	"$runtime_dir/cosign-v3.1.3" "$runtime_dir/entrypoint" "$runtime_dir/laneway" "$runtime_dir/network.ready"
+	"$runtime_dir/cosign-v3.1.3" "$runtime_dir/entrypoint" "$runtime_dir/laneway" "$runtime_dir/lanewayd-rs" "$runtime_dir/network.ready"
 find "$work" -depth -delete
 claimed_runtime=false
 carrier_created=false

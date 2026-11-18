@@ -12,7 +12,12 @@ use ipnet::IpNet;
 use laneway_protocol::Id;
 use serde::Deserialize;
 
+#[path = "installed_state.rs"]
+mod installed_state;
+
 const MAX_CONFIG_BYTES: u64 = 1 << 20;
+const MAX_SOCKET_PATH_BYTES: usize = if cfg!(target_os = "macos") { 103 } else { 107 };
+pub(crate) const MAX_FOREGROUND_ROUTES: usize = 1024;
 
 fn default_mtu() -> u16 {
     1280
@@ -111,7 +116,7 @@ fn default_exit_intent_path() -> PathBuf {
     PathBuf::from("/var/lib/laneway/exit-intent-v1.json")
 }
 
-/// Strict top-level configuration for the native Linux agent.
+/// Strict top-level configuration for the native agent.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -131,8 +136,14 @@ pub struct Config {
     /// peers, policy, capabilities, and revocations come only from its lease.
     #[serde(default)]
     pub controller: Option<ControllerConfig>,
+    /// Optional route scope selected by a foreground user session.
+    #[serde(default)]
+    pub foreground_routes: Option<ForegroundRoutes>,
     /// Linux TUN interface settings.
     pub tun: TunConfig,
+    /// Unprivileged TCP/UDP subnet forwarding in place of Linux TUN.
+    #[serde(default)]
+    pub connector: ConnectorConfig,
     /// Primary relay path and reconnect policy.
     pub relay: RelayConfig,
     /// Optional stable-v1 TLS/TCP fallback carrier.
@@ -155,6 +166,18 @@ pub struct Config {
     pub diagnostics: DiagnosticsConfig,
 }
 
+/// Foreground routes are a subset of controller authority, not additional grants.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForegroundRoutes {
+    /// Keep policy-derived private routes in addition to the overlay.
+    #[serde(default)]
+    pub policy_private: bool,
+    /// Explicit controller-advertised subnet prefixes, if requested by the user.
+    #[serde(default)]
+    pub requested: Vec<IpNet>,
+}
+
 /// Local Prometheus diagnostics endpoint.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -164,17 +187,39 @@ pub struct DiagnosticsConfig {
     pub listen: Option<SocketAddr>,
 }
 
+/// Subnet connector dataplane selection.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorConfig {
+    /// Use ordinary host TCP and UDP sockets without kernel forwarding.
+    #[serde(default)]
+    pub userspace: bool,
+}
+
 /// Strict controller authority and lease polling settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControllerConfig {
-    /// HTTPS origin of the Go controller, without an API path.
+    /// Opt in to short-lived, authenticated peer path observations for the map.
+    #[serde(default)]
+    pub topology_reporting: bool,
+    /// Renew a controller-managed certificate in place using the existing TLS
+    /// key. Requires a writable certificate directory owned by the node.
+    #[serde(default)]
+    pub auto_renew_certificate: bool,
+    /// Do not publish the bounded node-health report to the controller.
+    #[serde(default)]
+    pub disable_status_reporting: bool,
+    /// Optional numeric loopback UDP socket for the controller's private directory.
+    #[serde(default, deserialize_with = "private_dns_listen")]
+    pub private_dns_listen: Option<SocketAddr>,
+    /// HTTPS origin of the controller, without an API path.
     pub endpoint: String,
     /// Required reliable mTLS QUIC controller endpoint in host:port form.
-    /// Authenticated snapshots use QUIC; HTTPS remains enrollment-only.
+    /// Authenticated snapshots use QUIC; enrollment and status use HTTPS.
     #[serde(default)]
     pub quic_endpoint: Option<String>,
-    /// TLS DNS name; it must exactly equal the endpoint host.
+    /// Verified TLS hostname. A DNS name can differ from the private dial host.
     pub server_name: String,
     /// Exact controller service ID pinned from its SPIFFE URI SAN.
     pub service_id: String,
@@ -184,6 +229,29 @@ pub struct ControllerConfig {
     /// Complete HTTPS request deadline.
     #[serde(default = "default_controller_timeout", with = "humantime_serde")]
     pub timeout: Duration,
+}
+
+pub(crate) fn private_dns_listen<'de, D>(d: D) -> std::result::Result<Option<SocketAddr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(d)?;
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let address: SocketAddr = value.parse().map_err(serde::de::Error::custom)?;
+    if value.contains('%') || !private_dns_loopback(address) {
+        return Err(serde::de::Error::custom(
+            "private DNS requires a numeric loopback address and a nonzero port",
+        ));
+    }
+    Ok(Some(address))
+}
+
+pub(crate) fn private_dns_loopback(address: SocketAddr) -> bool {
+    address.ip().is_loopback()
+        && address.port() != 0
+        && !matches!(address, SocketAddr::V6(v6) if v6.scope_id() != 0)
 }
 
 fn default_direct_listen() -> SocketAddr {
@@ -256,11 +324,11 @@ pub struct TlsConfig {
     pub ca: PathBuf,
 }
 
-/// Linux TUN settings.
+/// Native tunnel settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunConfig {
-    /// Interface name, normally `lane0`.
+    /// Interface name, normally `lane0` on Linux and `utun` on macOS.
     pub name: String,
     /// Interface MTU. Laneway v1 defaults to the IPv6 minimum of 1280.
     #[serde(default = "default_mtu")]
@@ -268,7 +336,7 @@ pub struct TunConfig {
     /// Host prefixes assigned to the interface.
     #[serde(default)]
     pub addresses: Vec<IpNet>,
-    /// Install interface addresses and routes with `ip(8)`.
+    /// Configure addresses and routes using the platform network manager.
     #[serde(default)]
     pub configure: bool,
 }
@@ -314,8 +382,9 @@ pub struct RelayConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpFallbackConfig {
-    /// Relay TCP fallback socket address.
-    pub address: SocketAddr,
+    /// Relay TCP fallback host and port. DNS names require controller
+    /// authority; each resolved address is checked before use.
+    pub address: String,
     /// TLS handshake deadline.
     #[serde(default = "default_handshake_timeout", with = "humantime_serde")]
     pub handshake_timeout: Duration,
@@ -491,6 +560,10 @@ pub struct ForwardingConfig {
     /// Exact overlay sources permitted to use this exit gateway.
     #[serde(default)]
     pub exit_gateway_sources: Vec<IpNet>,
+    /// Derive Exit NAT sources from the current controller-approved overlay
+    /// host routes, instead of maintaining a static source allowlist.
+    #[serde(default)]
+    pub exit_gateway_controller_sources: bool,
     /// Native public interface for exit NAT/NAT66.
     #[serde(default)]
     pub exit_output_interface: Option<String>,
@@ -526,6 +599,16 @@ pub struct ForwardingConfig {
     pub dns_state_file: PathBuf,
 }
 
+impl ForwardingConfig {
+    pub(crate) fn rule_count(&self) -> usize {
+        let subnet = self.subnet_routes.len().saturating_mul(3);
+        let exit = self.exit_gateway_sources.len().saturating_mul(3);
+        subnet
+            .saturating_add(exit)
+            .saturating_add(if self.exit_gateway { 2 } else { 0 })
+    }
+}
+
 impl Default for ForwardingConfig {
     fn default() -> Self {
         Self {
@@ -534,6 +617,7 @@ impl Default for ForwardingConfig {
             owned_prefixes: Vec::new(),
             subnet_routes: Vec::new(),
             exit_gateway_sources: Vec::new(),
+            exit_gateway_controller_sources: false,
             exit_output_interface: None,
             exit_client: ExitClientConfig::default(),
             max_rules: default_max_kernel_rules(),
@@ -578,7 +662,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.mode == "node", "mode must be \"node\"");
         ensure!(
-            valid_absolute_path(&self.socket_path, 107),
+            valid_absolute_path(&self.socket_path, MAX_SOCKET_PATH_BYTES),
             "socket_path must be an absolute bounded path"
         );
         ensure!(
@@ -605,7 +689,7 @@ impl Config {
                     .name
                     .bytes()
                     .all(|value| value.is_ascii_alphanumeric() || value == b'_' || value == b'-'),
-            "tun.name must be a simple Linux interface name"
+            "tun.name must be a simple interface name"
         );
         ensure!(
             (576..=1280).contains(&self.tun.mtu),
@@ -616,6 +700,12 @@ impl Config {
             "tun.addresses must not be empty without controller authority"
         );
         if let Some(controller) = &self.controller {
+            ensure!(
+                controller
+                    .private_dns_listen
+                    .is_none_or(private_dns_loopback),
+                "controller.private_dns_listen must be a numeric loopback address and a nonzero port"
+            );
             ensure!(
                 self.tun.addresses.is_empty()
                     && self.routes.is_empty()
@@ -643,6 +733,27 @@ impl Config {
             }
             Id::from_str(&controller.service_id).context("controller.service_id")?;
         }
+        if let Some(scope) = &self.foreground_routes {
+            let exit = &self.forwarding.exit_client;
+            ensure!(
+                self.controller.is_some()
+                    && !self.connector.userspace
+                    && !self.forwarding.subnet_router
+                    && !self.forwarding.exit_gateway
+                    && ((!exit.authorized && !exit.enabled)
+                        || (cfg!(target_os = "linux") && exit.authorized && exit.enabled))
+                    && (!scope.policy_private || scope.requested.is_empty())
+                    && scope.requested.len() <= MAX_FOREGROUND_ROUTES,
+                "foreground route scope needs an authorized controller-backed endpoint (explicit exit selection requires Linux)"
+            );
+            let mut seen = HashSet::new();
+            for prefix in &scope.requested {
+                ensure!(
+                    prefix.prefix_len() != 0 && *prefix == prefix.trunc() && seen.insert(prefix),
+                    "foreground routes must be unique canonical non-default prefixes"
+                );
+            }
+        }
         let carries_ipv6 = self
             .tun
             .addresses
@@ -666,7 +777,9 @@ impl Config {
         );
         Id::from_str(&self.relay.service_id).context("relay.service_id")?;
         ensure!(
-            self.relay.address.is_some() || self.tcp_fallback.is_some(),
+            self.controller.is_some()
+                || self.relay.address.is_some()
+                || self.tcp_fallback.is_some(),
             "at least one relay carrier must be configured"
         );
         if let Some(address) = self.relay.address {
@@ -700,7 +813,12 @@ impl Config {
         );
         if let Some(tcp) = &self.tcp_fallback {
             ensure!(
-                tcp.address.port() != 0
+                (tcp.address
+                    .parse::<SocketAddr>()
+                    .is_ok_and(|addr| addr.port() != 0)
+                    || (self.controller.is_some()
+                        && laneway_protocol::relay_endpoint::canonical_host_port(&tcp.address)
+                            .is_some()))
                     && tcp.handshake_timeout <= Duration::from_secs(300)
                     && tcp.write_timeout <= Duration::from_secs(300)
                     && tcp.idle_timeout <= Duration::from_secs(300)
@@ -778,6 +896,34 @@ impl Config {
             );
         }
         let forwarding = &self.forwarding;
+        if self.connector.userspace {
+            ensure!(
+                !self.tun.configure
+                    && self.tun.mtu == 1280
+                    && !forwarding.subnet_router
+                    && forwarding.subnet_routes.is_empty()
+                    && !forwarding.exit_gateway
+                    && !forwarding.exit_client.enabled
+                    && !forwarding.exit_client.authorized
+                    && self
+                        .routes
+                        .iter()
+                        .all(|route| route.kind != RouteKind::Exit)
+                    && forwarding
+                        .owned_prefixes
+                        .iter()
+                        .all(|prefix| prefix.prefix_len() != 0),
+                "userspace connector cannot use kernel routing, exit mode, or default forwarding prefixes; MTU must be 1280"
+            );
+            ensure!(
+                if self.controller.is_some() {
+                    forwarding.owned_prefixes.is_empty()
+                } else {
+                    !forwarding.owned_prefixes.is_empty()
+                },
+                "userspace connector subnet prefixes must come from controller approval or an explicit static configuration, not both"
+            );
+        }
         ensure!(
             (1..=16_384).contains(&forwarding.max_rules)
                 && !forwarding.shutdown_timeout.is_zero()
@@ -838,9 +984,18 @@ impl Config {
                 "forwarding.exit_gateway_sources[{index}] is duplicate"
             );
         }
+        if forwarding.exit_gateway_controller_sources {
+            ensure!(
+                self.controller.is_some()
+                    && forwarding.exit_gateway
+                    && forwarding.exit_gateway_sources.is_empty(),
+                "controller Exit sources require a managed gateway without static sources"
+            );
+        }
         if forwarding.exit_gateway {
             ensure!(
-                !forwarding.exit_gateway_sources.is_empty(),
+                !forwarding.exit_gateway_sources.is_empty()
+                    || forwarding.exit_gateway_controller_sources,
                 "exit_gateway requires forwarding.exit_gateway_sources"
             );
             let interface = forwarding
@@ -929,10 +1084,8 @@ impl Config {
                 "exit routes require explicit forwarding.exit_client.enabled"
             );
         }
-        let subnet_rules = forwarding.subnet_routes.len().saturating_mul(3);
-        let exit_rules = forwarding.exit_gateway_sources.len().saturating_mul(3);
         ensure!(
-            subnet_rules.saturating_add(exit_rules) <= forwarding.max_rules,
+            forwarding.rule_count() <= forwarding.max_rules,
             "forwarding rules exceed max_rules"
         );
         Ok(())
@@ -944,8 +1097,12 @@ impl Config {
         if let Some(address) = self.relay.address {
             values.push(address.ip());
         }
-        if let Some(fallback) = &self.tcp_fallback {
-            values.push(fallback.address.ip());
+        if let Some(address) = self
+            .tcp_fallback
+            .as_ref()
+            .and_then(|fallback| fallback.address.parse::<SocketAddr>().ok())
+        {
+            values.push(address.ip());
         }
         values.extend(
             self.direct_peers
@@ -1081,6 +1238,38 @@ via_node = "202122232425262728292a2b2c2d2e2f"
     }
 
     #[test]
+    fn private_dns_listen_is_explicit_and_numeric() {
+        let source = "endpoint = 'https://controller.test'\nserver_name = 'controller.test'\nservice_id = '404142434445464748494a4b4c4d4e4f'\n";
+        let parse = |address| {
+            toml::from_str::<ControllerConfig>(&format!(
+                "{source}private_dns_listen = '{address}'\n"
+            ))
+        };
+        assert!(
+            toml::from_str::<ControllerConfig>(source)
+                .unwrap()
+                .private_dns_listen
+                .is_none()
+        );
+        assert!(parse("").unwrap().private_dns_listen.is_none());
+        for address in ["127.0.0.1:5354", "[::1]:5354"] {
+            assert_eq!(
+                parse(address).unwrap().private_dns_listen,
+                Some(address.parse().unwrap())
+            );
+        }
+        for address in [
+            "0.0.0.0:5354",
+            "[::]:5354",
+            "[::1%0]:5354",
+            "localhost:5354",
+            "127.0.0.1:0",
+        ] {
+            assert!(parse(address).is_err(), "accepted {address}");
+        }
+    }
+
+    #[test]
     fn rejects_unknown_duplicate_and_noncanonical_values() {
         assert!(
             toml::from_str::<Config>(&VALID.replace("[identity]", "unknown = 1\n[identity]"))
@@ -1173,6 +1362,23 @@ via_node = "202122232425262728292a2b2c2d2e2f"
         ))
         .unwrap();
         controller.validate().unwrap();
+    }
+
+    #[test]
+    fn userspace_connector_rejects_kernel_and_default_route_configuration() {
+        let config: Config =
+            toml::from_str(include_str!("../../../deploy/examples/connector-rust.toml")).unwrap();
+        config.validate().unwrap();
+        assert!(config.connector.userspace);
+        let mut invalid = config.clone();
+        invalid.tun.configure = true;
+        assert!(invalid.validate().is_err());
+        let mut invalid = config.clone();
+        invalid.forwarding.exit_gateway = true;
+        assert!(invalid.validate().is_err());
+        let mut invalid = config;
+        invalid.forwarding.owned_prefixes = vec!["0.0.0.0/0".parse().unwrap()];
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

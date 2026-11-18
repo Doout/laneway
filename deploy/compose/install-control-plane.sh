@@ -120,9 +120,12 @@ valid_ipv4_pool() {
 }
 
 missing=
-for command in age age-keygen chown curl date dirname docker find getent grep install jq laneway ln sed sha256sum ss stat sync wc; do
+for command in age age-keygen chown curl date dirname docker find getent grep install jq laneway ln openssl python3 sed sha256sum ss stat sync tr wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
+if command -v python3 >/dev/null 2>&1; then
+  python3 -c 'import tomllib' >/dev/null 2>&1 || add_missing "Python 3.11 or newer"
+fi
 [ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"
 if command -v docker >/dev/null 2>&1; then
   docker compose version >/dev/null 2>&1 || add_missing "Docker Compose v2"
@@ -168,7 +171,7 @@ if [ -n "$package_version" ] && [ "$package_version" != "$release" ]; then
 fi
 
 ask "Public DNS name" "${LANEWAY_DOMAIN:-$(remembered LANEWAY_DOMAIN)}"
-domain=$REPLY
+domain=$(printf '%s' "$REPLY" | LC_ALL=C tr '[:upper:]' '[:lower:]')
 valid_dns_name "$domain" || die "public DNS name is invalid"
 getent ahosts "$domain" >/dev/null 2>&1 || die "public DNS does not resolve: $domain"
 
@@ -256,46 +259,26 @@ else
   recovery_description="generate automatically; copy $recovery_kit off-host after setup"
 fi
 
-save_answers
-
 metadata_dir=$(mktemp -d)
 cleanup() { [ ! -e "$metadata_dir" ] || find "$metadata_dir" -depth -delete; }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 base_url=${LANEWAY_RELEASE_BASE_URL:-https://github.com/$repository/releases/download/$tag}
-curl --fail --location --silent --show-error "$base_url/image-digests.txt" -o "$metadata_dir/image-digests.txt"
-
-image_digest() {
-  image=$1
-  matches=$(sed -n "s|^${image}@\(sha256:[0-9a-f]\{64\}\)$|\1|p" "$metadata_dir/image-digests.txt")
-  [ "$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)" -eq 1 ] || die "release metadata has no unique digest for $image"
-  printf '%s' "$matches"
-}
-
-controller_digest=$(image_digest ghcr.io/doout/laneway-controller)
-relay_digest=$(image_digest ghcr.io/doout/laneway-relay)
-admin_digest=$(image_digest ghcr.io/doout/laneway-admin)
-connector_digest=$(image_digest ghcr.io/doout/lane-edge)
-exit_node_digest=$(image_digest ghcr.io/doout/laneway-exit-node)
-identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag"
-image_signatures_verified=true
-for reference in \
-  "ghcr.io/doout/laneway-controller@$controller_digest" \
-  "ghcr.io/doout/laneway-relay@$relay_digest" \
-  "ghcr.io/doout/laneway-admin@$admin_digest" \
-  "ghcr.io/doout/lane-edge@$connector_digest" \
-  "ghcr.io/doout/laneway-exit-node@$exit_node_digest"
-do
-  if [ -n "$cosign_bin" ] && command -v "$cosign_bin" >/dev/null 2>&1 && \
-    "$cosign_bin" verify --certificate-identity "$identity" \
-      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$reference" >/dev/null; then
-    :
-  elif [ "$production_mode" = true ]; then
-    die "production signature verification failed for $reference"
-  else
-    image_signatures_verified=false
-    echo "WARNING: image signature could not be verified now: $reference" >&2
-  fi
+release_assets='checksums.txt checksums.sigstore.json image-digests.txt bootstrap-artifacts.toml'
+deployment_files='compose.yaml compose.rust.yaml laneway-control bootstrap.sh preflight.sh prepare.sh prepare-rust.py verify-rust-release.sh recovery.sh validate.sh README.md'
+for name in $deployment_files; do
+  [ -f "$source_dir/$name" ] && [ ! -L "$source_dir/$name" ] ||
+    die "packaged deployment file is missing or unsafe: $name"
 done
+for asset in $release_assets; do
+  curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error \
+    "${base_url%/}/$asset" -o "$metadata_dir/$asset"
+done
+export LANEWAY_COSIGN_BIN="$cosign_bin"
+sh "$source_dir/verify-rust-release.sh" --install "$tag" "$metadata_dir" > "$metadata_dir/settings.env" ||
+  die "Rust release signature verification failed; no deployment was started"
 
 network_id=$(laneway id)
 controller_id=$(laneway id)
@@ -318,7 +301,7 @@ Laneway is ready to deploy:
   listeners:    $bind_address:$controller_port TCP+UDP, $bind_address:$relay_quic_port UDP, $bind_address:$relay_tcp_port TCP
   recovery:     $recovery_description
 
-This starts an isolated Docker Compose control plane. It does not edit the host
+This starts a fresh Rust Docker Compose control plane. It does not edit the host
 firewall, routes, interfaces, DNS, or sysctls. Ensure DNS and your external
 firewall already allow the listed ports while preserving SSH access.
 EOF
@@ -329,6 +312,7 @@ else
   confirmation=$REPLY
 fi
 [ "$confirmation" = deploy ] || die "cancelled before changing the deployment"
+save_answers
 
 if [ "$automatic_issuer" = true ]; then
   if [ ! -f "$source_dir/prepare-control-plane.sh" ] || [ -L "$source_dir/prepare-control-plane.sh" ]; then
@@ -343,16 +327,17 @@ if [ "$automatic_issuer" = true ]; then
 fi
 
 install -d -m 0700 -o 0 -g 0 "$destination"
-for name in compose.yaml laneway-control bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh install-control-plane.sh prepare-control-plane.sh upgrade-control-plane.sh README.md; do
-  if [ ! -f "$source_dir/$name" ] || [ -L "$source_dir/$name" ]; then
-    die "packaged deployment file is missing or unsafe: $name"
-  fi
+for name in $deployment_files; do
   mode=0644
   case "$name" in laneway-control|*.sh) mode=0755 ;; esac
   install -m "$mode" -o 0 -g 0 "$source_dir/$name" "$destination/$name"
 done
 ln -s laneway-control "$destination/lane"
-ln -s "$destination/laneway-control" /usr/local/sbin/laneway-control
+release_metadata=$destination/release-metadata
+install -d -m 0700 -o 0 -g 0 "$release_metadata"
+for asset in $release_assets; do
+  install -m 0600 -o 0 -g 0 "$metadata_dir/$asset" "$release_metadata/$asset"
+done
 
 cat > "$destination/PRODUCTION-CHECKLIST.md" <<EOF
 # Laneway production checklist
@@ -368,18 +353,14 @@ firewall were not changed by the installer.
 - [ ] Confirm DNS \`$domain\` resolves to this server's public address.
 - [ ] Confirm the external firewall allows TCP 443, UDP 4433, and TCP+UDP 8443.
 - [ ] Keep SSH restricted to your trusted access path; do not expose TCP 22 publicly.
-- [ ] Run \`sudo laneway-control production-check\` until it succeeds.
+- [ ] Run \`sudo laneway-control readiness\` once public HTTPS is available.
 - [ ] Test a client enrollment and recovery restore before depending on the service.
 - [ ] Configure monitoring, security updates, and recurring encrypted backups.
 
 ## Verification recorded during install
 
-- Release checksum signature verified: **$checksum_signature_verified**
-- All container image signatures verified: **$image_signatures_verified**
-
-Signature verification can depend on registry and transparency-log availability.
-The \`production-check\` command is fail-closed and records a root-only marker only
-after signatures, configuration, service health, DNS, and recovery backup checks pass.
+- Release checksum and container image signatures: **verified**
+- Outer installer archive signature verification: **$checksum_signature_verified**
 
 Cloud firewall policy cannot be inspected reliably from inside this host. Confirm it
 in your provider's control panel before putting Laneway into production.
@@ -390,12 +371,9 @@ umask 077
 env_tmp=$(mktemp "$destination/.env.XXXXXX")
 {
   printf 'LANEWAY_VERSION=%s\n' "$release"
+  printf 'LANEWAY_CONTROL_RUNTIME=rust\n'
   printf 'LANEWAY_INSTALL_PROFILE=%s\n' "$install_profile"
-  printf 'LANEWAY_CONTROLLER_IMAGE_DIGEST=%s\n' "$controller_digest"
-  printf 'LANEWAY_RELAY_IMAGE_DIGEST=%s\n' "$relay_digest"
-  printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\n' "$admin_digest"
-  printf 'LANEWAY_CONNECTOR_IMAGE_DIGEST=%s\n' "$connector_digest"
-  printf 'LANEWAY_EXIT_NODE_IMAGE_DIGEST=%s\n' "$exit_node_digest"
+  cat "$metadata_dir/settings.env"
   printf 'LANEWAY_BIND_ADDRESS=%s\n' "$bind_address"
   printf 'LANEWAY_CONTROLLER_PORT=%s\n' "$controller_port"
   printf 'LANEWAY_RELAY_QUIC_PORT=%s\n' "$relay_quic_port"
@@ -413,7 +391,11 @@ env_tmp=$(mktemp "$destination/.env.XXXXXX")
 chmod 0600 "$env_tmp"
 mv "$env_tmp" "$destination/.env"
 
-(cd "$destination" && ./laneway-control init --issuer "$issuer_dir")
+(cd "$destination" &&
+  /bin/sh ./preflight.sh --rust &&
+  LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$release_metadata/bootstrap-artifacts.toml" /bin/sh ./prepare.sh "$issuer_dir" &&
+  python3 ./prepare-rust.py --release-metadata "$release_metadata" &&
+  /bin/sh ./bootstrap.sh --rust)
 initial_backup=initial-recovery-$(date -u +%Y%m%dT%H%M%SZ).age
 (cd "$destination" && ./laneway-control backup "$initial_backup")
 if [ "$automatic_issuer" = true ]; then
@@ -434,13 +416,16 @@ EOF
   sync -f "$recovery_kit/MANIFEST.sha256"
   sync -f "$recovery_kit"
 fi
+ln -s "$destination/laneway-control" /usr/local/sbin/laneway-control
 cat <<EOF
 
-Laneway $tag is running. Useful commands:
+Laneway $tag is running on Rust. Useful commands:
   sudo laneway-control status
-  sudo laneway-control production-check
+  sudo laneway-control readiness
+  sudo laneway-control administrator bootstrap --username owner
   sudo laneway-control invite --name DEVICE --ephemeral
   sudo laneway-control backup
+  sudo laneway-control update
   initial encrypted backup: $destination/generated/recovery/$initial_backup
 EOF
 if [ "$automatic_issuer" = true ]; then

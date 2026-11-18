@@ -178,8 +178,9 @@ func controlCommand() *cobra.Command {
 		{"invite", "Create a single-use enrollment command"},
 		{"route", "Assign an approved destination to a Connector"},
 		{"status", "Show service health, active enrollments, and forwarding"},
-		{"update", "Update to the latest stable release"},
+		{"update", "Update to a signed release (latest stable by default)"},
 		{"production-check", "Run fail-closed production checks"},
+		{"readiness", "Verify the running Rust release and public discovery"},
 		{"backup", "Create an encrypted recovery bundle"},
 		{"restore", "Restore an encrypted recovery bundle"},
 		{"upgrade", "Upgrade using a prepared release environment"},
@@ -187,8 +188,11 @@ func controlCommand() *cobra.Command {
 	} {
 		name := item.name
 		use := name
-		if name == "route" {
+		switch name {
+		case "route":
 			use = "route add --connector NAME --to IP_OR_PREFIX"
+		case "update":
+			use = "update [vMAJOR.MINOR.PATCH]"
 		}
 		control.AddCommand(command(use, item.summary, func(args []string) error {
 			return runControl(append([]string{name}, args...))

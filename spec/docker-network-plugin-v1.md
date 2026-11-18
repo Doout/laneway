@@ -24,13 +24,15 @@ The generic Docker network options are:
 
 `selective` requires at least one egress prefix. `full-tunnel` requires an exit. `allow` ingress requires at least one source prefix. Prefixes within the same list may not overlap. Any IPv6 request fails closed. Separate managed container subnets may not overlap.
 
-Except for a direct/deny network, requested container subnets, egress prefixes, ingress sources, and exits must be contained by a current controller authorization lease. The plugin reads a complete authenticated snapshot from `controller-authorization-v1.json`; a missing, malformed, partial, or expired snapshot denies creation and startup reconciliation. Docker options are never treated as authority.
+Non-direct egress or `allow` ingress requires a current controller lease covering the requested container subnet, egress prefixes, ingress sources, and exit. The plugin reads a complete authorization snapshot from `controller-authorization-v1.json`; a missing, malformed, partial, or expired snapshot denies creation and startup reconciliation. Docker options are never treated as authority.
 
 ## Linux ownership and packet behavior
 
 Names are derived from the full Docker object identifier using SHA-256. Before reusing an existing object, the plugin checks its type, MTU, and nftables ownership marker. Cleanup deletes only recorded objects with the expected marker. State is written with mode `0600` by atomic rename before and after Linux mutations.
 
 Each network has a dedicated `inet laneway_*` nftables table. New ingress is rejected unless the policy is `allow` and the source is authorized; established and related packets are accepted first. Selective destinations and all full-tunnel destinations are rejected when their output interface is not the Laneway tunnel. Isolated networks reject every other destination. An explicit NAT option applies only to traffic leaving outside the tunnel.
+
+The Rust driver checks the controller lease before all of those forwarding rules, including established flows. The Linux firewall expires the lease even if the plugin stops. While running, the driver removes forwarding authorization when its snapshot no longer grants the recorded policy and applies valid renewals without recreating the network. This does not gate direct networks that require no lease, unrelated host traffic, or traffic switched locally inside a network's bridge.
 
 Tunnel ingress receives a per-network conntrack mark. Reply packets restore that mark to the packet mark, and a dedicated policy rule selects the network's tunnel table. Consequently direct ingress replies through the main table while tunneled ingress replies through Laneway. Routes use protocol 99 in a dedicated table. Full-tunnel controller, relay, peer-transport, and management bypass prefixes come only from the controller snapshot and are persisted as part of the owned policy.
 
@@ -39,6 +41,8 @@ If the tunnel disappears, retained policy rules and nftables output-interface ch
 ## Privileges and operations
 
 Installation grants host network administration authority and is supported only on trusted Linux Docker Engine hosts. The managed plugin requests `CAP_NET_ADMIN`, `CAP_NET_RAW`, host networking, `/dev/net/tun`, and a Docker-managed propagated state mount at `/data`. Docker preserves that mount across plugin upgrades. It does not request all devices, an arbitrary host bind mount, or the Docker socket.
+
+Routed traffic also requires IPv4 forwarding and permission in the host firewall. If Docker's iptables backend sets `FORWARD` to `DROP`, add narrowly scoped `DOCKER-USER` rules for the intended Laneway bridge traffic and replies. Do not disable Docker's firewall to make the plugin work. Laneway leaves Docker's chains and the host's default policy unchanged; its own nftables rules still enforce the network policy. See [Docker's firewall documentation](https://docs.docker.com/engine/network/packet-filtering-firewalls/).
 
 `POST /status` on the plugin socket reports version, readiness, managed network and endpoint counts, and effective policy counts. Docker endpoint operational info includes the assigned address, join state, and egress policy. Authorization, route, tunnel, and ownership errors have distinct error prefixes in Docker's response.
 

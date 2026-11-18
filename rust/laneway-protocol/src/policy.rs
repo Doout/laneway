@@ -10,11 +10,12 @@ use crate::{Id, v1};
 #[derive(Clone, Debug)]
 pub struct CompiledPolicy {
     default_accept: bool,
-    rules: Vec<Rule>,
+    rules: Vec<CompiledRule>,
 }
 
+/// One validated stable-v1 rule in an immutable policy snapshot.
 #[derive(Clone, Debug)]
-struct Rule {
+pub struct CompiledRule {
     id: Id,
     priority: u32,
     accept: bool,
@@ -81,7 +82,7 @@ impl CompiledPolicy {
                 }
                 destination_ports.push((port.first as u16, port.last as u16));
             }
-            rules.push(Rule {
+            rules.push(CompiledRule {
                 id,
                 priority: input.priority,
                 accept: action(input.action)?,
@@ -110,19 +111,86 @@ impl CompiledPolicy {
         let Some(packet) = Packet::parse(raw) else {
             return false;
         };
-        self.rules
-            .iter()
-            .find(|rule| rule.matches(source, destination, packet))
-            .map_or(self.default_accept, |rule| rule.accept)
+        self.evaluate(source, destination, packet, |_, _| {}).0
+    }
+
+    /// Evaluates an already validated flow using the packet path's first-match
+    /// logic. The observer sees each evaluated rule, including the first match.
+    /// Returns the resulting action and the matched rule, if any.
+    pub fn evaluate(
+        &self,
+        source: Id,
+        destination: Id,
+        packet: Packet,
+        mut observe: impl FnMut(&CompiledRule, bool),
+    ) -> (bool, Option<Id>) {
+        for rule in &self.rules {
+            let matched = rule.matches(source, destination, packet);
+            observe(rule, matched);
+            if matched {
+                return (rule.accept, Some(rule.id));
+            }
+        }
+        (self.default_accept, None)
     }
 
     /// Returns the explicit fallback action carried by the snapshot.
     pub const fn default_accepts(&self) -> bool {
         self.default_accept
     }
+
+    /// Validated selectors in first-match order for native policy backends.
+    pub fn rules(&self) -> &[CompiledRule] {
+        &self.rules
+    }
 }
 
-impl Rule {
+impl CompiledRule {
+    /// Rule identity for audit and native rule labels.
+    pub fn id(&self) -> Id {
+        self.id
+    }
+
+    /// First-match evaluation order, before the rule ID tiebreaker.
+    pub fn priority(&self) -> u32 {
+        self.priority
+    }
+
+    /// True for accept, false for deny.
+    pub fn accepts(&self) -> bool {
+        self.accept
+    }
+
+    /// Exact node allowlist for the source (empty means any node).
+    pub fn source_nodes(&self) -> &[Id] {
+        &self.source_nodes
+    }
+
+    /// Exact node allowlist for the destination (empty means any node).
+    pub fn destination_nodes(&self) -> &[Id] {
+        &self.destination_nodes
+    }
+
+    /// Source prefix alternatives, in addition to any node selector.
+    pub fn source_prefixes(&self) -> &[IpNet] {
+        &self.source_prefixes
+    }
+
+    /// Destination prefix alternatives, in addition to any node selector.
+    pub fn destination_prefixes(&self) -> &[IpNet] {
+        &self.destination_prefixes
+    }
+
+    /// Stable-v1 IP protocol selector.
+    pub fn protocol(&self) -> v1::IpProtocol {
+        self.protocol
+    }
+
+    /// Inclusive TCP/UDP destination port ranges (empty means any port).
+    pub fn destination_ports(&self) -> &[(u16, u16)] {
+        &self.destination_ports
+    }
+
     fn matches(&self, source: Id, destination: Id, packet: Packet) -> bool {
         (self.source_nodes.is_empty() || self.source_nodes.contains(&source))
             && (self.destination_nodes.is_empty() || self.destination_nodes.contains(&destination))
@@ -157,12 +225,14 @@ fn action(value: i32) -> Result<bool, PolicyError> {
 
 fn ids_from_wire(values: &[Vec<u8>]) -> Result<Vec<Id>, PolicyError> {
     let mut output = Vec::with_capacity(values.len());
+    let mut seen = std::collections::HashSet::with_capacity(values.len());
     for value in values {
         let id = Id::from_slice(value).map_err(|_| PolicyError::Selector)?;
-        if output.contains(&id) {
-            return Err(PolicyError::Selector);
+        // A repeated selector ID has no effect on membership. Go can persist
+        // these selectors; compile them without rejecting an otherwise live policy.
+        if seen.insert(id) {
+            output.push(id);
         }
-        output.push(id);
     }
     Ok(output)
 }
@@ -209,12 +279,17 @@ fn prefixes_from_wire(values: Vec<v1::IpPrefix>) -> Result<Vec<IpNet>, PolicyErr
     Ok(output)
 }
 
+/// The packet fields used by traffic policy, without retaining packet bytes.
 #[derive(Clone, Copy)]
-struct Packet {
-    source: IpAddr,
-    destination: IpAddr,
-    protocol: u8,
-    destination_port: Option<u16>,
+pub struct Packet {
+    /// Packet source address.
+    pub source: IpAddr,
+    /// Packet destination address.
+    pub destination: IpAddr,
+    /// IP protocol number.
+    pub protocol: u8,
+    /// Destination transport port, when present.
+    pub destination_port: Option<u16>,
 }
 
 impl Packet {
@@ -297,7 +372,12 @@ mod tests {
                     priority: 10,
                     action: v1::PolicyAction::Accept as i32,
                     selector: Some(TrafficSelector {
-                        source_node_ids: vec![source.as_bytes().to_vec()],
+                        // Repeated IDs in Go-stored selectors are redundant,
+                        // not a change in scope.
+                        source_node_ids: vec![
+                            source.as_bytes().to_vec(),
+                            source.as_bytes().to_vec(),
+                        ],
                         destination_node_ids: vec![destination.as_bytes().to_vec()],
                         source_prefixes: vec![prefix([100, 96, 0, 0], 24)],
                         destination_prefixes: vec![prefix([100, 96, 0, 2], 32)],
@@ -318,6 +398,20 @@ mod tests {
         assert!(!policy.allows(source, destination, &udp(54)));
         assert!(!policy.allows(destination, source, &udp(53)));
         assert!(!policy.allows(source, destination, &[0x45; 19]));
+        let id = Id::new([9; 16]).unwrap();
+        for (port, result) in [(53, Some(id)), (54, None)] {
+            let raw = udp(port);
+            let mut trace = Vec::new();
+            let (accepted, matched) = policy.evaluate(
+                source,
+                destination,
+                Packet::parse(&raw).unwrap(),
+                |rule, matched| trace.push((rule.id(), rule.priority(), matched)),
+            );
+            assert_eq!(accepted, policy.allows(source, destination, &raw));
+            assert_eq!(matched, result);
+            assert_eq!(trace, [(id, 10, result.is_some())]);
+        }
     }
 
     #[test]

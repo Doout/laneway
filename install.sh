@@ -8,6 +8,7 @@ prepare_control_plane=false
 upgrade_control_plane=false
 production_mode=false
 quick_control_plane=false
+client_install=false
 cosign_bin=
 cosign_is_fallback=false
 
@@ -45,15 +46,24 @@ select_cosign() {
   else
     echo "Laneway pre-check: host Cosign is missing; using pinned v3.1.3" >&2
   fi
-  case "$architecture" in
-    amd64) cosign_sha=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71 ;;
-    arm64) cosign_sha=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a ;;
-    *) echo "no pinned Cosign verifier for architecture: $architecture" >&2; return 1 ;;
+  case "$operating_system:$architecture" in
+    linux:amd64) cosign_sha=4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71 ;;
+    linux:arm64) cosign_sha=c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a ;;
+    darwin:amd64) cosign_sha=2347488e5d5b25336644024dfeca5601b190e91197a71a917bda44744aff106c ;;
+    darwin:arm64) cosign_sha=5cf948c2f4dfe59687bdd0b8523709067383e03982cc543475c8a7dc70e92a76 ;;
+    *) echo "no pinned Cosign verifier for $operating_system/$architecture" >&2; return 1 ;;
   esac
   cosign_bin=$download_dir/cosign-v3.1.3
   if ! curl --fail --location --silent --show-error \
-    "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-$architecture" -o "$cosign_bin" || \
-    ! printf '%s  %s\n' "$cosign_sha" "$cosign_bin" | sha256sum -c - >/dev/null; then
+    "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-$operating_system-$architecture" -o "$cosign_bin" || \
+    ! (
+      cd "$download_dir"
+      if [ "$operating_system" = darwin ]; then
+        printf '%s  cosign-v3.1.3\n' "$cosign_sha" | shasum -a 256 -c - >/dev/null
+      else
+        printf '%s  cosign-v3.1.3\n' "$cosign_sha" | sha256sum -c - >/dev/null
+      fi
+    ); then
     echo "Laneway verification: could not install the pinned Cosign verifier" >&2
     cosign_bin=
     return 1
@@ -74,7 +84,7 @@ case "${1:-}" in
       quick_control_plane=true
     fi
     ;;
-  --client) shift ;;
+  --client|--rust-preview) shift ;;
   --control-plane)
     install_control_plane=true; shift
     if [ "${1:-}" = --production ]; then production_mode=true; shift; fi
@@ -91,10 +101,12 @@ usage: sh install.sh [--client | --control-plane [--production] | --prepare-cont
 Without options, install the latest Laneway client and packaged files on Linux
 or macOS. On Linux, setting LANEWAY_DOMAIN runs the control-plane quick setup
 with non-interactive defaults. Use --client to force a client-only install.
+Linux and macOS clients use the signed Rust release archive. Installing the
+client does not start a tunnel.
 With --control-plane, select a stable release tag, verify its signed release,
 install it, and start the interactive hardened control-plane installer.
-The default quick profile warns on unavailable signature services and writes a
-production checklist. Add --production to make all signature checks fail closed.
+Both control-plane install profiles require valid signatures and write a
+production checklist.
 With --prepare-control-plane, create a recovery kit and the limited input that
 may be copied to a separate production control-plane server.
 With --upgrade-control-plane, safely upgrade an existing /opt/laneway control
@@ -129,13 +141,15 @@ case "$(uname -m)" in
     exit 1
     ;;
 esac
+if [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
+  client_install=true
+fi
 missing=
 checksum_command=sha256sum
 if [ "$operating_system" = darwin ]; then checksum_command=shasum; fi
-for command in awk base64 curl date find grep mktemp readlink sed "$checksum_command" tar wc; do
+for command in awk base64 cat curl date find grep mktemp readlink sed "$checksum_command" tar wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
-
 if [ "$operating_system" = darwin ] && \
   [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
   [ "$(id -u)" -ne 0 ] || add_missing "a normal macOS user (do not run the client installer with sudo)"
@@ -172,6 +186,11 @@ if [ "$install_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; t
     elif command -v awk >/dev/null 2>&1 && ! version_at_least "$docker_version" 26.0.0; then
       add_missing "Docker Engine 26 or newer (found $docker_version)"
     fi
+  fi
+fi
+if [ "$install_control_plane" = true ]; then
+  if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import tomllib' >/dev/null 2>&1; then
+    add_missing "Python 3.11 or newer"
   fi
 fi
 if [ -n "$missing" ]; then
@@ -224,9 +243,13 @@ fi
 download_dir=$(mktemp -d)
 trap 'find "$download_dir" -depth -delete' EXIT HUP INT TERM
 
+if [ "$client_install" = true ] && ! select_cosign; then
+  echo "Laneway client install requires a working signature verifier." >&2
+  exit 1
+fi
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
-  if ! select_cosign && [ "$production_mode" = true ]; then
-    echo "Laneway production install requires a working pinned signature verifier." >&2
+  if ! select_cosign && { [ "$install_control_plane" = true ] || [ "$production_mode" = true ]; }; then
+    echo "Laneway control-plane install requires a working pinned signature verifier." >&2
     exit 1
   fi
 fi
@@ -235,6 +258,17 @@ curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$base_url/$asset" -o "$download_dir/$asset"
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$base_url/checksums.txt" -o "$download_dir/checksums.txt"
+if [ "$client_install" = true ]; then
+  curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    "$base_url/checksums.sigstore.json" -o "$download_dir/checksums.sigstore.json"
+  if ! "$cosign_bin" verify-blob --bundle "$download_dir/checksums.sigstore.json" \
+    --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$release" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$download_dir/checksums.txt" >/dev/null; then
+    echo "Laneway client install: release checksum signature verification failed" >&2
+    exit 1
+  fi
+fi
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   curl --fail --location --silent --show-error \
     "$base_url/checksums.sigstore.json" -o "$download_dir/checksums.sigstore.json"
@@ -244,8 +278,8 @@ if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] ||
       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
       "$download_dir/checksums.txt" >/dev/null; then
     checksum_signature_verified=true
-  elif [ "$production_mode" = true ]; then
-    echo "Laneway production install: release checksum signature verification failed." >&2
+  elif [ "$install_control_plane" = true ] || [ "$production_mode" = true ]; then
+    echo "Laneway control-plane install: release checksum signature verification failed." >&2
     exit 1
   else
     echo "WARNING: checksum signature could not be verified; archive checksum validation will still run." >&2
@@ -264,7 +298,7 @@ if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] ||
 fi
 (
   cd "$download_dir"
-  grep "  $asset\$" checksums.txt > selected-checksum.txt
+  awk -v asset="$asset" 'NF == 2 && $2 == asset { print $1 "  " $2 }' checksums.txt > selected-checksum.txt
   test "$(wc -l < selected-checksum.txt)" -eq 1
   if [ "$operating_system" = darwin ]; then
     shasum -a 256 -c selected-checksum.txt
@@ -285,8 +319,20 @@ if [ "$upgrade_control_plane" = true ] && \
   exit 1
 fi
 if [ "$operating_system" = darwin ]; then
-  "$download_dir/laneway/bin/laneway" configure --yes
-  "$download_dir/laneway/bin/laneway" configure --check
+  package=$download_dir/laneway
+  if [ ! -f "$package/macos-runtime" ] || [ -L "$package/macos-runtime" ] ||
+     [ "$(cat "$package/macos-runtime")" != rust-v1 ] ||
+     [ ! -f "$package/VERSION" ] || [ "$(cat "$package/VERSION")" != "${release#v}" ]; then
+    echo "release $release does not provide the macOS Rust package" >&2
+    exit 1
+  fi
+  for binary in laneway lanewayd-rs; do
+    [ -f "$package/bin/$binary" ] && [ ! -L "$package/bin/$binary" ] && [ -x "$package/bin/$binary" ] || {
+      echo "macOS Rust package missing bin/$binary" >&2; exit 1;
+    }
+  done
+  "$package/bin/laneway" configure --yes
+  "$package/bin/laneway" configure --check
   echo "Laneway $release is ready."
   echo "Next: ask your administrator for a user token, then run:"
   echo "  laneway login ${LANEWAY_DOMAIN:-YOUR_DOMAIN}"
@@ -294,13 +340,24 @@ if [ "$operating_system" = darwin ]; then
   exit 0
 fi
 
+set --
+if [ "$install_control_plane" = true ]; then set -- --control-tools; fi
+if [ "$client_install" = true ]; then
+  if [ ! -x "$download_dir/laneway/sbin/lanewayd-rs" ] ||
+     [ ! -f "$download_dir/laneway/VERSION" ] ||
+     [ "$(sed -n '1p' "$download_dir/laneway/VERSION")" != "${release#v}" ]; then
+    echo "release $release does not provide the Linux Rust package" >&2
+    exit 1
+  fi
+  set -- --rust-preview
+fi
 if [ -z "${DESTDIR:-}" ] && [ "$(id -u)" -ne 0 ]; then
-  sudo env DESTDIR= PREFIX=/usr/local sh "$download_dir/laneway/install.sh"
+  sudo env DESTDIR= PREFIX=/usr/local sh "$download_dir/laneway/install.sh" "$@"
 else
-  env DESTDIR="${DESTDIR:-}" PREFIX=/usr/local sh "$download_dir/laneway/install.sh"
+  env DESTDIR="${DESTDIR:-}" PREFIX=/usr/local sh "$download_dir/laneway/install.sh" "$@"
 fi
 
-if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ]; then
+if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ] && [ "$client_install" = false ]; then
   install -D -m 0755 -o 0 -g 0 "$cosign_bin" /usr/local/libexec/laneway/cosign-v3.1.3
   cosign_bin=/usr/local/libexec/laneway/cosign-v3.1.3
 fi
@@ -312,14 +369,14 @@ if [ "$install_control_plane" = true ]; then
     control_noninteractive=true
     control_confirmation=deploy
   fi
-  exec env LANEWAY_VERSION="${release#v}" LANEWAY_COSIGN_BIN="$cosign_bin" \
-    LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$download_dir/bootstrap-artifacts.toml" \
+  env LANEWAY_VERSION="${release#v}" LANEWAY_COSIGN_BIN="$cosign_bin" \
     LANEWAY_PRODUCTION_MODE="$production_mode" \
     LANEWAY_CHECKSUM_SIGNATURE_VERIFIED="${checksum_signature_verified:-false}" \
     LANEWAY_NONINTERACTIVE="$control_noninteractive" \
     LANEWAY_CONFIRM="$control_confirmation" \
     LANEWAY_DOMAIN="${LANEWAY_DOMAIN:-}" \
     sh /usr/local/share/laneway/deploy/compose/install-control-plane.sh
+  exit 0
 fi
 if [ "$prepare_control_plane" = true ]; then
   output=${LANEWAY_RECOVERY_KIT_DIR:-/root/laneway-recovery-kit-$(date -u +%Y%m%dT%H%M%SZ)}

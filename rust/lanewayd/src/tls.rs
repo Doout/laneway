@@ -1,4 +1,4 @@
-use std::{fs, io::BufReader, sync::Arc};
+use std::{fs, io::Read, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
 use laneway_protocol::{
@@ -44,6 +44,40 @@ pub(crate) fn validate_local(config: &TlsConfig, network: Id, node: Id) -> Resul
     let _ = load_private_key(&config.private_key)?;
     let _ = root_store(&config.ca)?;
     Ok(())
+}
+
+pub(crate) fn verify_installed_node(config: &TlsConfig) -> Result<AuthenticatedIdentity> {
+    let certificates = load_certificates(&config.certificate)?;
+    let key = load_private_key(&config.private_key)?;
+    let provider = rustls::crypto::ring::default_provider();
+    let credential = rustls::sign::CertifiedKey::from_der(certificates, key, &provider)?;
+    credential
+        .keys_match()
+        .context("node certificate and key do not match")?;
+    let (leaf, intermediates) = credential
+        .cert
+        .split_first()
+        .context("node certificate is empty")?;
+    let parsed = webpki::EndEntityCert::try_from(leaf)
+        .map_err(|_| anyhow::anyhow!("invalid node leaf certificate"))?;
+    let roots = root_store(&config.ca)?;
+    for usage in [
+        webpki::KeyUsage::client_auth(),
+        webpki::KeyUsage::server_auth(),
+    ] {
+        parsed
+            .verify_for_usage(
+                provider.signature_verification_algorithms.all,
+                &roots.roots,
+                intermediates,
+                UnixTime::now(),
+                usage,
+                None,
+                None,
+            )
+            .map_err(|error| anyhow::anyhow!("certificate is not trusted for node TLS: {error}"))?;
+    }
+    identity_from_certificate_der(leaf.as_ref()).context("invalid node certificate identity")
 }
 
 #[derive(Clone, Debug)]
@@ -344,7 +378,7 @@ pub(crate) fn validate_peer(
     Ok(identity)
 }
 
-fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
+pub(crate) fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
     let roots = load_certificates(path)?;
     let mut store = RootCertStore::empty();
     let (accepted, rejected) = store.add_parsable_certificates(roots);
@@ -355,17 +389,9 @@ fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
     Ok(store)
 }
 
-fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("stat certificate {}", path.display()))?;
-    ensure!(
-        metadata.len() <= 4 << 20,
-        "certificate bundle exceeds 4 MiB"
-    );
-    let file =
-        fs::File::open(path).with_context(|| format!("open certificate {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let certificates: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
+pub(crate) fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let bytes = read_credential(path, 4 << 20, false)?;
+    let certificates: Result<Vec<_>, _> = rustls_pemfile::certs(&mut bytes.as_slice()).collect();
     let certificates =
         certificates.with_context(|| format!("parse certificate {}", path.display()))?;
     if certificates.is_empty() {
@@ -374,29 +400,106 @@ fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'stati
     Ok(certificates)
 }
 
-fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("stat private key {}", path.display()))?;
-    ensure!(metadata.len() <= 1 << 20, "private key exceeds 1 MiB");
+pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+    let bytes = zeroize::Zeroizing::new(read_credential(path, 1 << 20, true)?);
+    rustls_pemfile::private_key(&mut bytes.as_slice())
+        .with_context(|| format!("parse private key {}", path.display()))?
+        .with_context(|| format!("private key file {} is empty", path.display()))
+}
+
+fn read_credential(path: &Path, limit: u64, private: bool) -> Result<Vec<u8>> {
+    let file =
+        fs::File::open(path).with_context(|| format!("open credential {}", path.display()))?;
+    let metadata = file.metadata().context("inspect open credential")?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= limit,
+        "invalid credential file type or size"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         ensure!(
-            private_key_mode_allowed(metadata.permissions().mode()),
+            !private || private_key_mode_allowed(metadata.permissions().mode()),
             "private key may be owner/group-readable but not group-writable/executable or world-accessible"
         );
     }
-    let file =
-        fs::File::open(path).with_context(|| format!("open private key {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .with_context(|| format!("parse private key {}", path.display()))?
-        .with_context(|| format!("private key file {} is empty", path.display()))
+    #[cfg(target_os = "macos")]
+    if path.starts_with("/dev/fd") {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        ensure!(
+            metadata.nlink() == 0
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o077 == 0,
+            "inherited credential must be a private unlinked file"
+        );
+        // Darwin's /dev/fd shares the incoming open file offset. Read from
+        // offset zero because the controller, relay and direct path reuse it.
+        let mut bytes = vec![0; metadata.len() as usize];
+        file.read_exact_at(&mut bytes, 0)?;
+        return Ok(bytes);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "credential exceeds size limit");
+    Ok(bytes)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn protect_inherited_credentials(config: &TlsConfig) -> Result<()> {
+    for path in [&config.ca, &config.certificate, &config.private_key] {
+        if let Ok(relative) = path.strip_prefix("/dev/fd") {
+            let descriptor = relative
+                .to_str()
+                .and_then(|raw| {
+                    raw.parse::<libc::c_int>()
+                        .ok()
+                        .filter(|fd| raw == fd.to_string())
+                })
+                .filter(|&fd| fd >= 3)
+                .context("invalid inherited credential descriptor")?;
+            // SAFETY: fcntl only changes inheritance of an existing descriptor.
+            if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("protect credential descriptor");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
 fn private_key_mode_allowed(mode: u32) -> bool {
     mode & 0o027 == 0
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn darwin_inherited_credential_reads_do_not_consume_the_offset_or_leak_on_exec() {
+    use std::{
+        io::{Seek, SeekFrom, Write},
+        os::fd::AsRawFd,
+        path::PathBuf,
+    };
+
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(b"credential").unwrap();
+    let fd = file.as_raw_fd();
+    let path = PathBuf::from(format!("/dev/fd/{fd}"));
+    let config = TlsConfig {
+        certificate: path.clone(),
+        private_key: path.clone(),
+        ca: path.clone(),
+    };
+    protect_inherited_credentials(&config).unwrap();
+    assert_ne!(
+        unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+        0
+    );
+    assert_eq!(read_credential(&path, 32, true).unwrap(), b"credential");
+    assert_eq!(read_credential(&path, 32, true).unwrap(), b"credential");
+    assert_eq!(file.stream_position().unwrap(), 10);
+    file.seek(SeekFrom::Start(0)).unwrap();
+    assert!(read_credential(&path, 9, true).is_err());
 }
 
 #[cfg(all(test, unix))]

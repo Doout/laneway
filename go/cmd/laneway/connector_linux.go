@@ -21,6 +21,10 @@ import (
 
 const connectorSetupPrefix = "st1."
 
+// Set only in the Rust-backed Connector image. The Go binary remains the
+// one-shot installer and replaces itself for the long-running dataplane.
+var connectorRuntime string
+
 var connectorIdentityFiles = []string{"connector.toml", "ca.crt", "node.crt", "node.key", "wireguard.key"}
 
 type connectorSetup struct {
@@ -42,6 +46,9 @@ func runConnector(args []string) error {
 		if fs.NArg() != 0 || !filepath.IsAbs(*stateDir) {
 			return errors.New("usage: laneway connector configure [--state-dir DIR]")
 		}
+		if connectorRuntime != "" {
+			return validateConnectorRuntime(*stateDir)
+		}
 		return configureConnector(*stateDir)
 	case "run":
 		return runConnectorService(args[1:], activateConnector, execConnectorNode)
@@ -54,7 +61,7 @@ func runConnector(args []string) error {
 		if fs.NArg() != 0 || !filepath.IsAbs(*stateDir) {
 			return errors.New("usage: laneway connector validate [--state-dir DIR]")
 		}
-		return validateConnectorIdentity(*stateDir)
+		return validateConnectorRuntime(*stateDir)
 	case "activate":
 		return runConnectorActivate(args[1:])
 	case "bootstrap-seal":
@@ -160,12 +167,25 @@ func openConnectorBootstrap(key, envelope string, now time.Time) (connectorSetup
 }
 
 func execConnectorNode(args []string) error {
+	if connectorRuntime != "" {
+		return syscall.Exec(connectorRuntime, append([]string{connectorRuntime}, args...), os.Environ())
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve Connector executable: %w", err)
 	}
 	argv := append([]string{executable, "node", "run"}, args...)
 	return syscall.Exec(executable, argv, os.Environ())
+}
+
+func validateConnectorRuntime(stateDir string) error {
+	if err := validateConnectorIdentity(stateDir); err != nil {
+		return err
+	}
+	if connectorRuntime != "" {
+		return execConnectorNode([]string{"--connector-state", stateDir, "--check-config"})
+	}
+	return nil
 }
 
 func runConnectorActivate(args []string) error {
@@ -238,6 +258,12 @@ func runConnectorService(args []string, activate func(string, connectorSetup) er
 		if err := activate(*stateDir, setup); err != nil {
 			return err
 		}
+	}
+	if connectorRuntime != "" {
+		if err := validateConnectorIdentity(*stateDir); err != nil {
+			return err
+		}
+		return start([]string{"--connector-state", *stateDir})
 	}
 	if err := configureConnector(*stateDir); err != nil {
 		return err

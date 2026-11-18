@@ -20,7 +20,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.26.11"
           cache-dependency-path: go/go.sum
       - name: Test and vet
         working-directory: go
@@ -29,8 +29,11 @@ jobs:
           go vet ./...
       - name: Check scripts
         run: |
-          python3 -m unittest discover -s deploy/compose -p test_service_certificate_renewal.py
+          python3 -m unittest discover -s deploy/compose -p 'test_*.py'
+          shellcheck integration/rust-release-macos.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
+          sh integration/rust-compose-release.sh
+          sh integration/rust-go-runtime-guard.sh
       - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
@@ -50,25 +53,69 @@ jobs:
   package:
     name: ${{ matrix.os }} ${{ matrix.arch }} package
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, darwin]
-        arch: [amd64, arm64]
+        include:
+          - {os: linux, arch: amd64, runner: ubuntu-24.04}
+          - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
+          - {os: darwin, arch: amd64, runner: macos-15-intel}
+          - {os: darwin, arch: arm64, runner: macos-15}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26.x"
+          go-version: "1.26.11"
           cache-dependency-path: go/go.sum
+      - name: Build static Rust runtime candidates
+        if: matrix.os == 'linux'
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: |
+          output="$RUNNER_TEMP/laneway-rust"
+          docker buildx build --platform "linux/$PACKAGE_GOARCH" \
+            --build-arg VERSION="${GITHUB_REF_NAME#v}" --build-arg FLEET_ACTIVATION_FIXTURE=1 \
+            --file deploy/containers/Dockerfile.rust-release \
+            --target artifacts --output "type=local,dest=$output" .
+          printf 'PACKAGE_RUST_RUNTIME_DIR=%s\n' "$output" >> "$GITHUB_ENV"
+      - name: Build the native macOS Rust runtime candidate
+        if: matrix.os == 'darwin'
+        run: |
+          rustup toolchain install 1.91.1 --profile minimal
+          LANEWAY_PRODUCT_VERSION="${GITHUB_REF_NAME#v}" cargo +1.91.1 build --locked --release \
+            --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+          printf 'PACKAGE_RUST_MACOS=%s\n' "$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" >> "$GITHUB_ENV"
       - name: Build reproducible package
         env:
           PACKAGE_GOOS: ${{ matrix.os }}
           PACKAGE_GOARCH: ${{ matrix.arch }}
         run: make package VERSION="${GITHUB_REF_NAME#v}"
+      - name: Test the macOS release archive on its native architecture
+        if: matrix.os == 'darwin'
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: |
+          RUSTUP_TOOLCHAIN=1.91.1 LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
+            sh integration/rust-release-macos.sh \
+            "dist/laneway_darwin_$PACKAGE_GOARCH.tar.gz" "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
+      - name: Test the Linux release archive under systemd
+        if: matrix.os == 'linux'
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps
+          sudo modprobe tun
+          sudo modprobe wireguard
+          sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
+          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
+            "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
+          sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
+            "$PACKAGE_RUST_RUNTIME_DIR/activation-fixture"
       - name: Generate package SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -101,24 +148,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: controller
-            image: ghcr.io/doout/laneway-controller
-            dockerfile: deploy/containers/Dockerfile
-            target: controller
-          - name: relay
-            image: ghcr.io/doout/laneway-relay
-            dockerfile: deploy/containers/Dockerfile
-            target: relay
           - name: admin
             image: ghcr.io/doout/laneway-admin
             dockerfile: deploy/containers/Dockerfile
             target: admin
-          - name: connector
-            image: ghcr.io/doout/lane-edge
+          - name: rust-connector
+            image: ghcr.io/doout/lane-edge-rust
             dockerfile: deploy/containers/Dockerfile.connector
-          - name: exit-node
-            image: ghcr.io/doout/laneway-exit-node
+            target: rust-connector
+          - name: rust-controller
+            image: ghcr.io/doout/laneway-controller-rust
+            dockerfile: deploy/containers/Dockerfile.rust-relay
+            target: controller
+          - name: rust-relay
+            image: ghcr.io/doout/laneway-relay-rust
+            dockerfile: deploy/containers/Dockerfile.rust-relay
+            target: relay
+          - name: rust-node
+            image: ghcr.io/doout/laneway-node-rust
+            dockerfile: deploy/containers/Dockerfile.rust-relay
+            target: node
+          - name: rust-exit-node
+            image: ghcr.io/doout/laneway-exit-node-rust
             dockerfile: deploy/containers/Dockerfile.exit-node
+            target: rust-exit
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -230,10 +283,12 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      packages: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-tags: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: laneway-*
@@ -269,6 +324,32 @@ jobs:
       - name: Sign checksum manifest
         working-directory: dist
         run: cosign sign-blob --bundle checksums.sigstore.json checksums.txt
+      - name: Verify with the installer trust policy before publishing
+        run: |
+          set -euo pipefail
+          source deploy/ephemeral-exit/bootstrap.sh
+          verify_exit_release_signature "$(command -v cosign)" dist "$GITHUB_REF_NAME"
+          (cd dist && sha256sum --strict -c checksums.txt)
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify the complete Rust release image set before publishing
+        run: sh deploy/compose/verify-rust-release.sh --publish "$GITHUB_REF_NAME" dist >/dev/null
+      - name: Install and recover the signed Rust candidate before publishing
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age jq
+          sudo modprobe tun
+          if ! getent ahostsv4 laneway-release.localhost >/dev/null; then
+            printf '%s\n' '127.0.0.1 laneway-release.localhost' | sudo tee -a /etc/hosts >/dev/null
+          fi
+          sudo install -m 0600 /dev/null /run/.laneway-isolated-signed-release-lab
+          sudo env PATH="$PATH" DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
+            bash integration/rust-release-install.sh dist "$GITHUB_REF_NAME"
       - name: Attest release artifact provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
@@ -282,8 +363,16 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME" dist/*
-          --repo "$GITHUB_REPOSITORY"
-          --verify-tag
-          --generate-notes
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          tag_commit=$(git rev-parse --verify "$tag_ref^{commit}")
+          test "$tag_commit" = "$(git rev-parse HEAD)"
+          tag_type=$(git cat-file -t "$tag_ref")
+          tag_subject=$(git for-each-ref --format='%(contents:subject)' "$tag_ref")
+          flags=()
+          if [[ $tag_type == tag && $tag_subject == 'Laneway pinned prerelease' ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${flags[@]}"

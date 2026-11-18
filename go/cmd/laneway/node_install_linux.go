@@ -39,6 +39,15 @@ import (
 
 const managedNodeManifestVersion = 1
 
+const (
+	managedNodeManifestPath = "/etc/laneway/node-install.json"
+	managedGoUnit           = "lanewayd.service"
+	managedRustUnit         = "lanewayd-rs.service"
+	managedRustRuntime      = "rust"
+)
+
+type managedNodeOwner struct{ uid, gid int }
+
 var nodeSystemctl = func(ctx context.Context, args ...string) error {
 	command := exec.CommandContext(ctx, "systemctl", args...)
 	command.Stdout, command.Stderr = os.Stdout, os.Stderr
@@ -46,11 +55,11 @@ var nodeSystemctl = func(ctx context.Context, args ...string) error {
 }
 
 var (
-	nodeSystemctlActive = func(ctx context.Context) error {
-		return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", "lanewayd.service").Run()
+	nodeSystemctlActive = func(ctx context.Context, unit string) error {
+		return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run()
 	}
-	nodeSystemctlResetFailed = func(ctx context.Context) error {
-		return exec.CommandContext(ctx, "systemctl", "reset-failed", "lanewayd.service").Run()
+	nodeSystemctlResetFailed = func(ctx context.Context, unit string) error {
+		return exec.CommandContext(ctx, "systemctl", "reset-failed", unit).Run()
 	}
 	managedNodeActiveProbeInterval = 200 * time.Millisecond
 )
@@ -61,6 +70,14 @@ type managedNodeManifest struct {
 	NetworkID string `json:"network_id"`
 	NodeID    string `json:"node_id"`
 	Direct    bool   `json:"direct_enabled"`
+	Runtime   string `json:"runtime,omitempty"`
+}
+
+func (m managedNodeManifest) unit() string {
+	if m.Runtime == managedRustRuntime {
+		return managedRustUnit
+	}
+	return managedGoUnit
 }
 
 type managedNodeRelay struct {
@@ -94,32 +111,28 @@ func runNodeInstall(args []string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("node install must run as root (for example: sudo laneway node install ...)")
 	}
-	groupID, err := managedNodePreflight()
-	if err != nil {
-		return err
-	}
-	manifestPath := "/etc/laneway/node-install.json"
-	if _, err := os.Lstat(manifestPath); err == nil {
-		manifest, loadErr := loadManagedNodeManifest(manifestPath)
+	if _, err := os.Lstat(managedNodeManifestPath); err == nil {
+		manifest, loadErr := loadManagedNodeManifest(managedNodeManifestPath)
 		if loadErr != nil {
 			return loadErr
 		}
 		if manifest.Authority != authority || manifest.Direct != !*noDirect {
 			return errors.New("existing managed node was installed with different authority or dataplane settings")
 		}
-		if err := validateManagedNodeFiles(groupID); err != nil {
+		owner, err := managedNodePreflight(manifest)
+		if err != nil {
+			return err
+		}
+		if err := validateManagedNodeFiles(manifest, owner); err != nil {
 			return err
 		}
 		if !*noStart {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-			err = nodeSystemctl(ctx, "enable", "--now", "lanewayd.service")
-			if err == nil {
-				err = waitManagedNodeActive(ctx)
-			}
+			err = startManagedNode(ctx, manifest)
 			cancel()
 			if err != nil {
 				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-				cleanupErr := cleanupManagedNodeService(cleanupCtx)
+				cleanupErr := cleanupManagedNodeService(cleanupCtx, manifest.unit())
 				cleanupCancel()
 				return fmt.Errorf("start existing managed node: %w", errors.Join(err, cleanupErr))
 			}
@@ -129,7 +142,20 @@ func runNodeInstall(args []string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect managed node manifest: %w", err)
 	}
-	for _, path := range managedNodeFiles() {
+	manifest := managedNodeManifest{Version: managedNodeManifestVersion, Authority: authority, Direct: !*noDirect, Runtime: managedRustRuntime}
+	owner, err := managedNodePreflight(manifest)
+	if err != nil {
+		return err
+	}
+	if err := rejectOtherManagedNode(manifest); err != nil {
+		return err
+	}
+	if err := validateManagedRustState(owner, true); err != nil {
+		return err
+	}
+	// Reject all conflicting paths before consuming an invitation.
+	paths := append(managedNodeFiles(manifest), managedNodeFiles(managedNodeManifest{})...)
+	for _, path := range append(paths, managedRustExitIntent) {
 		if _, err := os.Lstat(path); err == nil {
 			return fmt.Errorf("refusing to replace unmanaged path %s", path)
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -184,6 +210,7 @@ func runNodeInstall(args []string) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 	configurationCtx, cancelConfiguration := context.WithTimeout(context.Background(), 20*time.Second)
 	initial, _, err := client.Configuration(configurationCtx, 0)
 	cancelConfiguration()
@@ -195,60 +222,72 @@ func runNodeInstall(args []string) error {
 		return err
 	}
 	managedName := connectLocalName(initial, enrollment.identity.NodeID)
-	configBytes, err := renderManagedNodeConfig(metadata, managedName, relay, !*noDirect)
+	configBytes, err := renderManagedRustNodeConfig(authority, metadata, enrollment.identity, relay, manifest.Direct)
 	if err != nil {
 		return err
 	}
-	manifest := managedNodeManifest{Version: managedNodeManifestVersion, Authority: authority, NetworkID: enrollment.identity.NetworkID.String(), NodeID: enrollment.identity.NodeID.String(), Direct: !*noDirect}
+	manifest.NetworkID, manifest.NodeID = enrollment.identity.NetworkID.String(), enrollment.identity.NodeID.String()
 	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
 	manifestBytes = append(manifestBytes, '\n')
 	contents := map[string][]byte{
-		"/etc/laneway/ca.crt":            []byte(metadata.Trust.CAPEM),
-		"/etc/laneway/node.crt":          enrollment.certificatePEM,
-		"/etc/laneway/node.key":          enrollment.privateKeyPEM,
-		"/etc/laneway/wireguard.key":     enrollment.wireGuardPrivateKey.Bytes(),
-		"/etc/laneway/laneway.toml":      configBytes,
-		"/etc/laneway/node-install.json": manifestBytes,
+		"/etc/laneway/ca.crt":   []byte(metadata.Trust.CAPEM),
+		managedRustCertificate:  enrollment.certificatePEM,
+		"/etc/laneway/node.key": enrollment.privateKeyPEM,
+		managedRustConfig:       configBytes,
+		managedNodeManifestPath: manifestBytes,
 	}
-	if err := installManagedNodeFiles(contents, groupID); err != nil {
+	if err := installManagedNodeFiles(contents, manifest, owner); err != nil {
 		return err
+	}
+	if err := validateManagedNodeFiles(manifest, owner); err != nil {
+		return errors.Join(err, removeManagedNodeFiles(manifest, false))
 	}
 	if !*noStart {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		err = nodeSystemctl(ctx, "enable", "--now", "lanewayd.service")
-		if err == nil {
-			err = waitManagedNodeActive(ctx)
-		}
+		err = startManagedNode(ctx, manifest)
 		cancel()
 		if err != nil {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 45*time.Second)
-			stopErr := cleanupManagedNodeService(cleanupCtx)
+			stopErr := cleanupManagedNodeService(cleanupCtx, manifest.unit())
 			cleanupCancel()
-			removeErr := removeManagedNodeFiles(false)
-			return fmt.Errorf("start managed node (installed credentials were removed; issue a new invite before retrying): %w", errors.Join(err, stopErr, removeErr))
+			if stopErr != nil {
+				return fmt.Errorf("failed to start managed node; credentials retained because cleanup could not stop or disable the service: %w", errors.Join(err, stopErr))
+			}
+			removeErr := removeManagedNodeFiles(manifest, false)
+			return fmt.Errorf("start managed node (a fresh invitation is required to enroll again): %w", errors.Join(err, removeErr))
 		}
 	}
-	fmt.Printf("managed node installed network=%s node=%s name=%s direct=%t\n", manifest.NetworkID, manifest.NodeID, managedName, manifest.Direct)
+	fmt.Printf("managed Rust node installed network=%s node=%s name=%s direct=%t\n", manifest.NetworkID, manifest.NodeID, managedName, manifest.Direct)
 	return nil
+}
+
+func startManagedNode(ctx context.Context, manifest managedNodeManifest) error {
+	if err := rejectOtherManagedNode(manifest); err != nil {
+		return err
+	}
+	if err := nodeSystemctl(ctx, "enable", "--now", manifest.unit()); err != nil {
+		return err
+	}
+	return waitManagedNodeActive(ctx, manifest.unit())
 }
 
 func nodeInstallUsage() error {
 	return errors.New("usage: laneway node install lane.example.com [--token-file PATH] [--name NAME] [--no-direct] [--no-start]")
 }
 
-func waitManagedNodeActive(ctx context.Context) error {
+func waitManagedNodeActive(ctx context.Context, unit string) error {
 	// Type=simple enters active state before ExecStart has proved stable. Require
 	// several consecutive observations so an immediate crash cannot be reported
 	// as a successful install.
 	for probe := 0; probe < 10; probe++ {
-		if err := nodeSystemctlActive(ctx); err != nil {
+		if err := nodeSystemctlActive(ctx, unit); err != nil {
 			return fmt.Errorf("lanewayd did not remain active after start: %w", err)
 		}
 		if probe == 9 {
-			return nil
+			break
 		}
 		timer := time.NewTimer(managedNodeActiveProbeInterval)
 		select {
@@ -258,7 +297,10 @@ func waitManagedNodeActive(ctx context.Context) error {
 		case <-timer.C:
 		}
 	}
-	panic("unreachable")
+	if unit == managedRustUnit {
+		return waitManagedRustHealth(ctx)
+	}
+	return nil
 }
 
 func runNodeUninstall(args []string) error {
@@ -273,17 +315,17 @@ func runNodeUninstall(args []string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("node uninstall requires root on Linux")
 	}
-	manifest, err := loadManagedNodeManifest("/etc/laneway/node-install.json")
+	manifest, err := loadManagedNodeManifest(managedNodeManifestPath)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	err = cleanupManagedNodeService(ctx)
+	err = cleanupManagedNodeService(ctx, manifest.unit())
 	cancel()
 	if err != nil {
 		return fmt.Errorf("gracefully stop managed node: %w", err)
 	}
-	if err := removeManagedNodeFiles(!*keepState); err != nil {
+	if err := removeManagedNodeFiles(manifest, !*keepState); err != nil {
 		return err
 	}
 	fmt.Printf("managed node uninstalled network=%s node=%s\n", manifest.NetworkID, manifest.NodeID)
@@ -301,17 +343,21 @@ func runManagedNodeRenew(args []string) error {
 	if os.Geteuid() != 0 {
 		return errors.New("node renew requires root on Linux")
 	}
-	groupID, err := managedNodePreflight()
+	manifest, err := loadManagedNodeManifest(managedNodeManifestPath)
 	if err != nil {
 		return err
 	}
-	manifest, err := loadManagedNodeManifest("/etc/laneway/node-install.json")
+	if manifest.Runtime == managedRustRuntime {
+		return errors.New("the Rust service renews node certificates automatically; check node status for renewal health")
+	}
+	owner, err := managedNodePreflight(manifest)
 	if err != nil {
 		return err
 	}
-	if err := validateManagedNodeFiles(groupID); err != nil {
+	if err := validateManagedNodeFiles(manifest, owner); err != nil {
 		return err
 	}
+	groupID := owner.gid
 	cfg, err := config.Load("/etc/laneway/laneway.toml")
 	if err != nil {
 		return err
@@ -372,7 +418,7 @@ func runManagedNodeRenew(args []string) error {
 			restartErr = nodeSystemctl(ctx, "start", "lanewayd.service")
 		}
 		if restartErr == nil && wireGuardReconcileErr == nil {
-			restartErr = waitManagedNodeActive(ctx)
+			restartErr = waitManagedNodeActive(ctx, managedGoUnit)
 		}
 		cancel()
 		return fmt.Errorf("promote renewed credential; restored previous TLS pair and retained controller-bound WireGuard key: %w", errors.Join(err, wireGuardReconcileErr, rollbackErr, restartErr))
@@ -380,7 +426,7 @@ func runManagedNodeRenew(args []string) error {
 	ctx, cancel = context.WithTimeout(context.Background(), 45*time.Second)
 	startErr := nodeSystemctl(ctx, "start", "lanewayd.service")
 	if startErr == nil {
-		startErr = waitManagedNodeActive(ctx)
+		startErr = waitManagedNodeActive(ctx, managedGoUnit)
 	}
 	cancel()
 	if startErr != nil {
@@ -392,7 +438,7 @@ func runManagedNodeRenew(args []string) error {
 		_ = nodeSystemctl(ctx, "reset-failed", "lanewayd.service")
 		restartErr := nodeSystemctl(ctx, "start", "lanewayd.service")
 		if restartErr == nil {
-			restartErr = waitManagedNodeActive(ctx)
+			restartErr = waitManagedNodeActive(ctx, managedGoUnit)
 		}
 		cancel()
 		return fmt.Errorf("renewed credential failed to start; restored previous TLS credential and retained controller-bound WireGuard key: %w", errors.Join(startErr, stopNewErr, rollbackErr, restartErr))
@@ -450,43 +496,52 @@ func replaceManagedNodeFile(path string, contents []byte, mode os.FileMode, gid 
 	return os.Rename(temporaryPath, path)
 }
 
-func cleanupManagedNodeService(ctx context.Context) error {
+func cleanupManagedNodeService(ctx context.Context, unit string) error {
 	// reset-failed is hygiene, not a prerequisite for removing the boot-time
 	// enablement link. Run it while the unit is still loaded, but do not let a
 	// non-failed state block cleanup.
-	_ = nodeSystemctlResetFailed(ctx)
-	stopErr := nodeSystemctl(ctx, "stop", "lanewayd.service")
-	disableErr := nodeSystemctl(ctx, "disable", "lanewayd.service")
+	_ = nodeSystemctlResetFailed(ctx, unit)
+	stopErr := nodeSystemctl(ctx, "stop", unit)
+	disableErr := nodeSystemctl(ctx, "disable", unit)
 	return errors.Join(stopErr, disableErr)
 }
 
-func managedNodePreflight() (int, error) {
-	for _, path := range []string{"/usr/local/bin/laneway", "/usr/local/lib/systemd/system/lanewayd.service"} {
+func managedNodePreflight(manifest managedNodeManifest) (managedNodeOwner, error) {
+	paths := []string{"/usr/local/bin/laneway", filepath.Join("/usr/local/lib/systemd/system", manifest.unit())}
+	if manifest.Runtime == managedRustRuntime {
+		paths = append(paths, managedRustBinary, managedRustHealth)
+	}
+	for _, path := range paths {
 		info, err := os.Lstat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
-			return 0, fmt.Errorf("managed node requires a root-owned, non-writable package file at %s", path)
+			return managedNodeOwner{}, fmt.Errorf("managed node requires a root-owned, non-writable package file at %s", path)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != 0 {
-			return 0, fmt.Errorf("managed node package file is not root-owned: %s", path)
+			return managedNodeOwner{}, fmt.Errorf("managed node package file is not root-owned: %s", path)
+		}
+	}
+	if manifest.Runtime == managedRustRuntime {
+		if err := checkManagedRustVersions(); err != nil {
+			return managedNodeOwner{}, err
 		}
 	}
 	account, err := user.Lookup("laneway")
 	if err != nil {
-		return 0, errors.New("laneway service account is missing; install the release package first")
+		return managedNodeOwner{}, errors.New("laneway service account is missing; install the release package first")
 	}
 	group, err := user.LookupGroup("laneway")
 	if err != nil || account.Gid != group.Gid || account.HomeDir != "/var/lib/laneway" {
-		return 0, errors.New("laneway service account does not match the hardened package account")
+		return managedNodeOwner{}, errors.New("laneway service account does not match the hardened package account")
 	}
 	uid, uidErr := strconv.Atoi(account.Uid)
 	gid, gidErr := strconv.Atoi(group.Gid)
-	if uidErr != nil || gidErr != nil || uid >= 1000 || gid >= 1000 {
-		return 0, errors.New("laneway service account must use system UID and GID values")
+	if uidErr != nil || gidErr != nil || uid <= 0 || uid >= 1000 || gid <= 0 || gid >= 1000 {
+		return managedNodeOwner{}, errors.New("laneway service account must use system UID and GID values")
 	}
 	groupIDs, err := account.GroupIds()
 	if err != nil || len(groupIDs) != 1 || groupIDs[0] != group.Gid {
-		return 0, errors.New("laneway service account has unexpected supplementary groups")
+		return managedNodeOwner{}, errors.New("laneway service account has unexpected supplementary groups")
 	}
 	lookupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	passwdRecord, passwdErr := exec.CommandContext(lookupCtx, "/usr/bin/getent", "passwd", "laneway").Output()
@@ -497,9 +552,9 @@ func managedNodePreflight() (int, error) {
 	if passwdErr != nil || groupErr != nil || len(passwdFields) != 7 || len(groupFields) != 4 ||
 		(!strings.HasSuffix(passwdFields[6], "/nologin") && !strings.HasSuffix(passwdFields[6], "/false")) ||
 		(groupFields[3] != "" && groupFields[3] != "laneway") {
-		return 0, errors.New("laneway service account is not locked or has unexpected group members")
+		return managedNodeOwner{}, errors.New("laneway service account is not locked or has unexpected group members")
 	}
-	return gid, nil
+	return managedNodeOwner{uid: uid, gid: gid}, nil
 }
 
 func enrollDurableNode(ctx context.Context, metadata bootstrap.Metadata, code, requestedName string) (connectEnrollment, error) {
@@ -689,11 +744,25 @@ func renderManagedNodeConfig(metadata bootstrap.Metadata, name string, relay man
 	return contents, nil
 }
 
-func managedNodeFiles() []string {
+func managedNodeFiles(manifest managedNodeManifest) []string {
+	if manifest.Runtime == managedRustRuntime {
+		return []string{"/etc/laneway/ca.crt", "/etc/laneway/node.key", managedRustCertificate, managedRustConfig}
+	}
 	return []string{"/etc/laneway/ca.crt", "/etc/laneway/node.crt", "/etc/laneway/node.key", "/etc/laneway/wireguard.key", "/etc/laneway/laneway.toml"}
 }
 
-func installManagedNodeFiles(contents map[string][]byte, groupID int) error {
+func managedNodeFilePermissions(path string, owner managedNodeOwner) (os.FileMode, int, int) {
+	switch path {
+	case managedNodeManifestPath:
+		return 0o600, 0, 0
+	case managedRustCertificate:
+		return 0o400, owner.uid, owner.gid
+	default:
+		return 0o640, 0, owner.gid
+	}
+}
+
+func installManagedNodeFiles(contents map[string][]byte, manifest managedNodeManifest, owner managedNodeOwner) error {
 	if err := os.MkdirAll("/etc/laneway", 0o750); err != nil {
 		return err
 	}
@@ -704,8 +773,13 @@ func installManagedNodeFiles(contents map[string][]byte, groupID int) error {
 	if err := os.Chmod("/etc/laneway", 0o750); err != nil {
 		return err
 	}
-	if err := os.Chown("/etc/laneway", 0, groupID); err != nil {
+	if err := os.Chown("/etc/laneway", 0, owner.gid); err != nil {
 		return err
+	}
+	if manifest.Runtime == managedRustRuntime {
+		if err := prepareManagedRustState(owner); err != nil {
+			return err
+		}
 	}
 	written := make([]string, 0, len(contents))
 	defer func() {
@@ -715,18 +789,14 @@ func installManagedNodeFiles(contents map[string][]byte, groupID int) error {
 			}
 		}
 	}()
-	order := append(managedNodeFiles(), "/etc/laneway/node-install.json")
+	order := append(managedNodeFiles(manifest), managedNodeManifestPath)
 	for _, path := range order {
 		data, ok := contents[path]
 		if !ok {
 			return fmt.Errorf("managed node contents omit %s", path)
 		}
-		mode := os.FileMode(0o640)
-		gid := groupID
-		if strings.HasSuffix(path, "node-install.json") {
-			mode, gid = 0o600, 0
-		}
-		if err := writeManagedNodeFile(path, data, mode, gid); err != nil {
+		mode, uid, gid := managedNodeFilePermissions(path, owner)
+		if err := writeManagedNodeFile(path, data, mode, uid, gid); err != nil {
 			return err
 		}
 		written = append(written, path)
@@ -734,7 +804,7 @@ func installManagedNodeFiles(contents map[string][]byte, groupID int) error {
 	return nil
 }
 
-func writeManagedNodeFile(path string, contents []byte, mode os.FileMode, gid int) error {
+func writeManagedNodeFile(path string, contents []byte, mode os.FileMode, uid, gid int) error {
 	temporary, err := os.CreateTemp(filepath.Dir(path), ".node-install-*")
 	if err != nil {
 		return err
@@ -745,7 +815,7 @@ func writeManagedNodeFile(path string, contents []byte, mode os.FileMode, gid in
 		temporary.Close()
 		return err
 	}
-	if err := temporary.Chown(0, gid); err != nil {
+	if err := temporary.Chown(uid, gid); err != nil {
 		temporary.Close()
 		return err
 	}
@@ -794,27 +864,57 @@ func loadManagedNodeManifest(path string) (managedNodeManifest, error) {
 	if _, err := identity.ParseNodeID(manifest.NodeID); err != nil {
 		return managedNodeManifest{}, errors.New("managed node manifest has invalid node identity")
 	}
+	if manifest.Runtime != "" && manifest.Runtime != managedRustRuntime {
+		return managedNodeManifest{}, errors.New("managed node manifest has an unknown runtime")
+	}
 	return manifest, nil
 }
 
-func validateManagedNodeFiles(groupID int) error {
-	for _, path := range managedNodeFiles() {
+func validateManagedNodeFiles(manifest managedNodeManifest, owner managedNodeOwner) error {
+	if manifest.Runtime == managedRustRuntime {
+		if err := validateManagedRustState(owner, false); err != nil {
+			return err
+		}
+	}
+	for _, path := range managedNodeFiles(manifest) {
 		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o640 {
+		mode, uid, gid := managedNodeFilePermissions(path, owner)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != mode {
 			return fmt.Errorf("managed node path is missing or unsafe: %s", path)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != 0 || int(stat.Gid) != groupID {
+		if !ok || int(stat.Uid) != uid || int(stat.Gid) != gid {
 			return fmt.Errorf("managed node path has unsafe ownership: %s", path)
 		}
+	}
+	if manifest.Runtime == managedRustRuntime {
+		return checkManagedRustConfig()
 	}
 	_, err := config.Load("/etc/laneway/laneway.toml")
 	return err
 }
 
-func removeManagedNodeFiles(removeState bool) error {
+func removeManagedNodeFiles(manifest managedNodeManifest, removeState bool) error {
+	// Do not follow a state directory symlink during privileged cleanup.
+	directories := []string{"/etc/laneway"}
+	if manifest.Runtime == managedRustRuntime {
+		directories = append(directories, managedRustState, managedRustIdentity)
+	}
+	for _, path := range directories {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.IsDir() {
+			return fmt.Errorf("refusing unsafe managed-node directory %s", path)
+		}
+	}
 	var result error
-	for _, path := range append(managedNodeFiles(), "/etc/laneway/node-install.json") {
+	paths := managedNodeFiles(manifest)
+	if manifest.Runtime == managedRustRuntime && removeState {
+		paths = append(paths, managedRustExitIntent)
+	}
+	for _, path := range paths {
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -825,7 +925,13 @@ func removeManagedNodeFiles(removeState bool) error {
 		}
 		result = errors.Join(result, os.Remove(path))
 	}
-	if removeState {
+	if result != nil {
+		return result
+	}
+	if err := os.Remove(managedNodeManifestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if removeState && manifest.Runtime != managedRustRuntime {
 		if info, err := os.Lstat("/var/lib/laneway"); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 			result = errors.Join(result, os.RemoveAll("/var/lib/laneway"))
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {

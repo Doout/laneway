@@ -1,0 +1,10 @@
+#!/bin/sh
+# Rootless Docker cannot remount sysfs as ip netns exec normally does. The
+# fixtures have no per-namespace files under /etc/netns; setns alone suffices.
+set -eu
+case "${1-}:${2-}" in
+  netns:exec) shift 2; namespace=$1; shift ;;
+  -n:*) namespace=$2; shift 2; set -- /usr/sbin/ip "$@" ;;
+  *) exec /usr/sbin/ip "$@" ;;
+esac
+exec nsenter --net="/run/netns/$namespace" -- "$@"

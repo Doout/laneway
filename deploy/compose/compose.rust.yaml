@@ -1,0 +1,63 @@
+# Opt-in cutover. The base file, services, ports and controller volume stay in place.
+services:
+  controller:
+    image: ghcr.io/doout/laneway-controller-rust:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST:?set the verified Rust controller digest}
+    labels:
+      io.laneway.control-runtime: rust
+    command:
+      - serve
+      - /var/lib/laneway-controller/controller.db
+      - 0.0.0.0:8443
+      - /run/laneway-secrets/controller.crt
+      - /run/laneway-secrets/controller.key
+      - --listen-on-network
+      - --root-token-file
+      - /run/laneway-secrets/admin.token
+      - --node-issuer
+      - /run/laneway-secrets/intermediate-chain.crt
+      - /run/laneway-secrets/intermediate.key
+      - "2592000"
+      - --node-client-ca
+      - /run/laneway-secrets/ca.crt
+      - --node-quic
+      - --bootstrap-profile
+      - /etc/laneway/bootstrap.rust.json
+      - --renew-controller-tls
+      - /var/lib/laneway-controller/rust-tls
+    volumes:
+      - type: bind
+        source: ./generated/config/bootstrap.rust.json
+        target: /etc/laneway/bootstrap.rust.json
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      control:
+        aliases:
+          - ${LANEWAY_CONTROLLER_SERVER_NAME:?set the certificate DNS name}
+  relay:
+    image: ghcr.io/doout/laneway-relay-rust:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_RELAY_IMAGE_DIGEST:?set the verified Rust relay digest}
+    labels:
+      io.laneway.control-runtime: rust
+    command: ["--config", "/etc/laneway/relay.toml"]
+    volumes:
+      - type: bind
+        source: ./generated/config/relay.rust.toml
+        target: /etc/laneway/relay.toml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./generated/rust-relay-workload
+        target: /var/lib/laneway-renewal
+        bind:
+          create_host_path: false
+  exit-node:
+    image: ghcr.io/doout/laneway-exit-node-rust:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST:?set the verified Rust exit digest}
+    labels:
+      io.laneway.control-runtime: rust
+    healthcheck:
+      test: [CMD, /usr/local/bin/lanewayd-rs, healthcheck, -unix, /run/laneway/lanewayd.sock]
+volumes:
+  controller-state:
+    name: ${LANEWAY_RUST_CONTROLLER_STATE_VOLUME:-laneway-controller-state}

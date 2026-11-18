@@ -18,6 +18,7 @@ use tracing::info;
 use crate::{
     authority::{Authority, Runner, SnapshotApplier},
     config::Config,
+    connector,
     controller::{Client as ControllerClient, ClientOptions, PollResult, Snapshot},
     diagnostics::DiagnosticsServer,
     direct::{DirectManager, try_send_direct},
@@ -34,7 +35,7 @@ use crate::{
     tun::TunDevice,
 };
 
-/// Native Linux node agent owning TUN, routing, and all packet carriers.
+/// Native node agent owning TUN, routing, and all packet carriers.
 pub struct Agent {
     config: Arc<Config>,
     network: Id,
@@ -49,21 +50,39 @@ impl Agent {
     /// a network device or socket.
     pub fn new(config: Config) -> Result<Self> {
         config.validate()?;
+        #[cfg(target_os = "macos")]
+        anyhow::ensure!(
+            !config.forwarding.subnet_router
+                && !config.forwarding.exit_gateway
+                && !config.forwarding.exit_client.authorized
+                && !config.forwarding.exit_client.enabled,
+            "macOS Rust preview supports ordinary node routes only; use the installed client for exit routing"
+        );
+        #[cfg(target_os = "macos")]
+        tls::protect_inherited_credentials(&config.tls)?;
         let (network, node) = config.ids()?;
         tls::validate_local(&config.tls, network, node)?;
         let routes = RoutingTable::compile(&config.routes)?;
         let boot = random_id()?;
         let controller_managed = config.controller.is_some();
+        let mut state = if controller_managed {
+            State::controller(routes, node)
+        } else {
+            State::new(routes)
+        };
+        if config
+            .controller
+            .as_ref()
+            .is_some_and(|c| c.topology_reporting)
+        {
+            state.topology = Some(crate::topology::Observations::default());
+        }
         Ok(Self {
             config: Arc::new(config),
             network,
             node,
             boot,
-            state: Arc::new(if controller_managed {
-                State::controller(routes, node)
-            } else {
-                State::new(routes)
-            }),
+            state: Arc::new(state),
             metrics: Arc::new(Metrics::default()),
         })
     }
@@ -79,13 +98,43 @@ impl Agent {
     where
         F: Future<Output = ()>,
     {
+        let configured = Arc::clone(&self.config);
+        tokio::pin!(shutdown);
+        loop {
+            let mut reload = None;
+            self.run_generation(shutdown.as_mut(), &mut reload).await?;
+            let Some(socket) = reload else { return Ok(()) };
+            // Quinn's endpoint driver may retain the UDP socket while draining
+            // closed connections, even after our last Endpoint was dropped.
+            tokio::select! {
+                _ = shutdown.as_mut()=>return Ok(()),
+                result=tokio::time::timeout(Duration::from_secs(15),async {
+                    while socket.strong_count()!=0 {tokio::time::sleep(Duration::from_millis(20)).await;}
+                })=>result.context("previous node generation did not release its UDP socket")?,
+            }
+            // Start from the operator config, not the last derived snapshot.
+            // Every control and packet connection must present the new leaf.
+            self = Self::new((*configured).clone())?;
+        }
+    }
+
+    async fn run_generation<F: Future<Output = ()>>(
+        mut self,
+        shutdown: F,
+        reload: &mut Option<std::sync::Weak<ProbeSocket>>,
+    ) -> Result<()> {
         let mut authority_base = (*self.config).clone();
         let certificate_presented_serial =
             hex::encode(tls::local_certificate_health(&authority_base.tls)?.serial);
         let exit_intent = Arc::new(ExitIntentStore::new(
             authority_base.exit_intent_path.clone(),
         ));
-        let intent_persisted = if authority_base.controller.is_some() {
+        let userspace = authority_base.connector.userspace;
+        let intent_persisted = if cfg!(target_os = "linux")
+            && authority_base.controller.is_some()
+            && !userspace
+            && authority_base.foreground_routes.is_none()
+        {
             let loaded = exit_intent
                 .load(&mut authority_base)
                 .context("load explicit exit selection")?;
@@ -97,7 +146,23 @@ impl Agent {
             false
         };
         let bootstrap = self.controller_bootstrap().await?;
+        let private_dns = if let Some(address) = authority_base
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.private_dns_listen)
+        {
+            Some(crate::private_dns::Server::bind(address, self.network).await?)
+        } else {
+            None
+        };
         if let Some((client, snapshot, _, _)) = &bootstrap {
+            if snapshot
+                .overlays
+                .iter()
+                .any(|address| address.addr().is_ipv6())
+            {
+                authority_base.tun.mtu = authority_base.tun.mtu.max(1280);
+            }
             authority_base
                 .forwarding
                 .exit_client
@@ -113,7 +178,7 @@ impl Agent {
                 .exit_client
                 .controller_bypass
                 .dedup();
-            let effective = controller_effective_config(&authority_base, snapshot, self.node);
+            let effective = controller_effective_config(&authority_base, snapshot, self.node)?;
             self.config = Arc::new(effective);
         }
         let mut owned = self.config.tun.addresses.clone();
@@ -123,6 +188,7 @@ impl Agent {
         let (endpoint, probe) = ProbeSocket::bind(self.config.direct.listen, server)
             .context("bind shared direct/relay UDP endpoint")?;
         let direct_address = endpoint.local_addr()?;
+        let socket_lifetime = Arc::downgrade(&probe);
         let diagnostics = if let Some(address) = self.config.diagnostics.listen {
             let server = DiagnosticsServer::bind(address, Arc::clone(&self.metrics)).await?;
             info!(address = %server.local_addr()?, "Rust node diagnostics listening");
@@ -165,8 +231,23 @@ impl Agent {
             Arc::clone(&kernel),
             Arc::clone(&dynamic_bypasses),
         )?;
-        let tun = TunDevice::open(&self.config.tun, &self.config.routes).await?;
-        let tun = Arc::new(Mutex::new(tun));
+        let tun = if userspace {
+            None
+        } else {
+            Some(Arc::new(Mutex::new(
+                TunDevice::open(
+                    &self.config.tun,
+                    &self.config.routes,
+                    &tun_transport_bypasses(&self.config),
+                )
+                .await?,
+            )))
+        };
+        let interface = match &tun {
+            Some(tun) => tun.lock().await.interface_name().to_owned(),
+            None => "userspace".to_owned(),
+        };
+        let configured_tun = tun.clone().filter(|_| self.config.tun.configure);
         let needs_kernel = self.config.forwarding.subnet_router
             || self.config.forwarding.exit_gateway
             || self.config.forwarding.exit_client.enabled;
@@ -174,7 +255,7 @@ impl Agent {
             match KernelManager::apply(Arc::clone(&self.config)) {
                 Ok(kernel) => Some(kernel),
                 Err(error) => {
-                    let tun_restore = tun.lock().await.restore().await;
+                    let tun_restore = restore_tun(&tun).await;
                     return aggregate_results([
                         ("install owned Linux forwarding state", Err(error)),
                         ("restore TUN after kernel activation failure", tun_restore),
@@ -184,27 +265,30 @@ impl Agent {
         } else {
             None
         };
-        match kernel.lock() {
-            Ok(mut slot) => *slot = initial_kernel,
-            Err(poisoned) => {
-                let kernel_restore = {
-                    let mut slot = poisoned.into_inner();
-                    *slot = initial_kernel;
-                    slot.as_mut().map_or(Ok(()), KernelManager::restore)
-                };
-                let tun_restore = tun.lock().await.restore().await;
-                return aggregate_results([
-                    (
-                        "publish initial kernel manager",
-                        Err(anyhow::anyhow!("kernel manager lock poisoned")),
-                    ),
-                    (
-                        "restore kernel after kernel publication failure",
-                        kernel_restore,
-                    ),
-                    ("restore TUN after kernel publication failure", tun_restore),
-                ]);
+        let publish_kernel_failure = match kernel.lock() {
+            Ok(mut slot) => {
+                *slot = initial_kernel;
+                None
             }
+            Err(poisoned) => {
+                let mut slot = poisoned.into_inner();
+                *slot = initial_kernel;
+                Some(slot.as_mut().map_or(Ok(()), KernelManager::restore))
+            }
+        };
+        if let Some(kernel_restore) = publish_kernel_failure {
+            let tun_restore = restore_tun(&tun).await;
+            return aggregate_results([
+                (
+                    "publish initial kernel manager",
+                    Err(anyhow::anyhow!("kernel manager lock poisoned")),
+                ),
+                (
+                    "restore kernel after kernel publication failure",
+                    kernel_restore,
+                ),
+                ("restore TUN after kernel publication failure", tun_restore),
+            ]);
         }
         Metrics::set(
             &self.metrics.exit_forwarding_ready,
@@ -217,15 +301,19 @@ impl Agent {
         let runtime_base = Arc::new(ArcSwap::from_pointee(authority_base.clone()));
         let control_lock = Arc::new(Mutex::new(()));
         let intent_persisted = Arc::new(StdMutex::new(intent_persisted));
-        let device = tun.lock().await.device();
+        let device = match &tun {
+            Some(tun) => Some(tun.lock().await.device()),
+            None => None,
+        };
         let mut tasks = JoinSet::new();
+        let mut replacement: Pin<Box<dyn Future<Output = ()> + Send>> =
+            Box::pin(std::future::pending());
 
         if let Some((client, snapshot, authority, local_certificate)) = bootstrap {
             let applier = Arc::new(RuntimeApplier {
                 state: Arc::clone(&self.state),
                 metrics: Arc::clone(&self.metrics),
-                tun: Arc::clone(&tun),
-                configure_tun: self.config.tun.configure,
+                tun: configured_tun.clone(),
                 node: self.node,
                 base_config: Arc::clone(&runtime_base),
                 kernel: Arc::clone(&kernel),
@@ -234,7 +322,7 @@ impl Agent {
             });
             if let Err(error) = applier.apply(Arc::clone(&snapshot)).await {
                 let kernel_restore = restore_kernel(&kernel);
-                let tun_restore = tun.lock().await.restore().await;
+                let tun_restore = restore_tun(&tun).await;
                 return aggregate_results([
                     ("apply initial controller snapshot", Err(error)),
                     (
@@ -247,7 +335,7 @@ impl Agent {
             if let Err(error) = authority.seed(snapshot) {
                 let fail_close = applier.fail_close().await;
                 let kernel_restore = restore_kernel(&kernel);
-                let tun_restore = tun.lock().await.restore().await;
+                let tun_restore = restore_tun(&tun).await;
                 return aggregate_results([
                     ("publish initial controller authority", Err(error)),
                     (
@@ -266,7 +354,7 @@ impl Agent {
             }
             let Some(settings) = self.config.controller.as_ref() else {
                 let kernel_restore = restore_kernel(&kernel);
-                let tun_restore = tun.lock().await.restore().await;
+                let tun_restore = restore_tun(&tun).await;
                 return aggregate_results([
                     (
                         "build controller runner",
@@ -279,6 +367,39 @@ impl Agent {
                     ("restore TUN after controller runner failure", tun_restore),
                 ]);
             };
+            let client = Arc::new(client);
+            if settings.topology_reporting {
+                tasks.spawn(crate::topology::run(
+                    Arc::clone(&client),
+                    Arc::clone(&self.state),
+                ));
+            }
+            if let Some(server) = private_dns {
+                let client = Arc::clone(&client);
+                let not_after = local_certificate.not_after;
+                tasks.spawn(async move { server.run(&client, not_after).await });
+            }
+            if !settings.disable_status_reporting {
+                let reporter = crate::status_report::Reporter {
+                    client: Arc::clone(&client),
+                    state: Arc::clone(&self.state),
+                    metrics: Arc::clone(&self.metrics),
+                    base: Arc::clone(&runtime_base),
+                    control_lock: Arc::clone(&control_lock),
+                    certificate: local_certificate.clone(),
+                };
+                tasks.spawn(reporter.run());
+            }
+            if settings.auto_renew_certificate {
+                replacement = Box::pin(crate::renewal::when_due(
+                    Arc::clone(&client),
+                    Arc::clone(&authority),
+                    self.config.tls.clone(),
+                    self.network,
+                    self.node,
+                    local_certificate.clone(),
+                ));
+            }
             let runner = match Runner::new(
                 client,
                 authority,
@@ -291,7 +412,7 @@ impl Agent {
                 Ok(runner) => runner,
                 Err(error) => {
                     let kernel_restore = restore_kernel(&kernel);
-                    let tun_restore = tun.lock().await.restore().await;
+                    let tun_restore = restore_tun(&tun).await;
                     return aggregate_results([
                         ("build controller runner", Err(error)),
                         (
@@ -303,13 +424,14 @@ impl Agent {
                 }
             };
             tasks.spawn(async move { runner.run().await });
+        } else {
+            self.state.set_gateway(&self.config.forwarding);
         }
 
         let local_control = Arc::new(RuntimeControl {
             state: Arc::clone(&self.state),
             metrics: Arc::clone(&self.metrics),
-            tun: Arc::clone(&tun),
-            configure_tun: self.config.tun.configure,
+            tun: configured_tun,
             network: self.network,
             node: self.node,
             base_config: Arc::clone(&runtime_base),
@@ -319,19 +441,28 @@ impl Agent {
             exit_intent,
             intent_persisted,
             certificate_presented_serial,
+            interface,
         });
         let snapshot_control = Arc::clone(&local_control);
         let exit_control = Arc::clone(&local_control);
         let api = local_api::Server::new(
             self.config.socket_path.clone(),
             Arc::new(move || snapshot_control.snapshot()),
-            self.config.controller.as_ref().map(|_| {
-                Arc::new(move |selection| {
-                    let control = Arc::clone(&exit_control);
-                    Box::pin(async move { control.set_exit(selection).await })
-                        as Pin<Box<dyn Future<Output = Result<()>> + Send>>
-                }) as Arc<_>
-            }),
+            self.config
+                .controller
+                .as_ref()
+                .filter(|_| {
+                    !userspace
+                        && cfg!(target_os = "linux")
+                        && self.config.foreground_routes.is_none()
+                })
+                .map(|_| {
+                    Arc::new(move |selection| {
+                        let control = Arc::clone(&exit_control);
+                        Box::pin(async move { control.set_exit(selection).await })
+                            as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                    }) as Arc<_>
+                }),
         );
         tasks.spawn(async move { api.run().await });
 
@@ -342,7 +473,7 @@ impl Agent {
         info!(
             node = %self.node,
             network = %self.network,
-            tun = %self.config.tun.name,
+            interface = %local_control.interface,
             direct = %direct_address,
             "native Rust Laneway agent started"
         );
@@ -353,26 +484,101 @@ impl Agent {
         {
             tasks.spawn(async move { direct_manager.run().await });
         }
+        let mtu = usize::from(self.config.tun.mtu);
+        let mut proxy_packets = if userspace {
+            let (reply, packets) = mpsc::channel(self.config.relay.queue_depth);
+            let state = Arc::clone(&self.state);
+            let prefixes = self.config.forwarding.owned_prefixes.clone();
+            let local = self.node;
+            let metrics = Arc::clone(&self.metrics);
+            tasks.spawn(async move {
+                connector::run(
+                    mtu,
+                    Arc::new(move |packet| state.connector_allows(local, &prefixes, packet)),
+                    metrics,
+                    inject_rx,
+                    reply,
+                )
+                .await
+            });
+            Some(packets)
+        } else {
+            let device = Arc::clone(device.as_ref().expect("kernel dataplane has a device"));
+            let metrics = Arc::clone(&self.metrics);
+            let state = Arc::clone(&self.state);
+            let owned = Arc::clone(&owned);
+            let local = self.node;
+            tasks.spawn(async move {
+                while let Some(packet) = inject_rx.recv().await {
+                    metrics.set_inject_queue_depth(
+                        inject_rx
+                            .max_capacity()
+                            .saturating_sub(inject_rx.capacity()),
+                    );
+                    let Ok(meta) = packet_meta(&packet.bytes) else {
+                        continue;
+                    };
+                    let gateway = !state.owns(&owned, meta.destination);
+                    if gateway
+                        && !(state.gateway_allows(meta.source)
+                            && state.allows(packet.peer, local, &packet.bytes)
+                            && state
+                                .routes
+                                .load()
+                                .authorizes_source(packet.peer, meta.source))
+                    {
+                        Metrics::increment(&metrics.auth_drops);
+                        continue;
+                    }
+                    device
+                        .send_all(&packet.bytes)
+                        .await
+                        .context("inject TUN packet")?;
+                    Metrics::increment(&metrics.injected_packets);
+                    Metrics::increment(&metrics.packets_received_total);
+                    Metrics::add(&metrics.bytes_received_total, packet.bytes.len());
+                    if gateway {
+                        Metrics::increment(&metrics.exit_forwarded_packets_total);
+                        Metrics::add(&metrics.exit_forwarded_bytes_total, packet.bytes.len());
+                    }
+                }
+                anyhow::bail!("TUN injection queue closed")
+            });
+            None
+        };
         {
-            let device = Arc::clone(&device);
             let state = Arc::clone(&self.state);
             let metrics = Arc::clone(&self.metrics);
             let owned = Arc::clone(&owned);
-            let mtu = usize::from(self.config.tun.mtu);
-            let exit_gateway = self.config.forwarding.exit_gateway;
             let local_node = self.node;
             let packet_pool = packet_pool.clone();
+            let prefixes = self.config.forwarding.owned_prefixes.clone();
             tasks.spawn(async move {
                 let mut buffer = vec![0_u8; mtu];
                 loop {
-                    let size = device.recv(&mut buffer).await.context("read TUN packet")?;
-                    let packet = &buffer[..size];
+                    let reply;
+                    let (packet, reply_peer): (&[u8], Option<Id>) =
+                        if let Some(proxy) = &mut proxy_packets {
+                            reply = proxy
+                                .recv()
+                                .await
+                                .context("connector output queue closed")?;
+                            if !state.connector_allows(local_node, &prefixes, &reply.trigger) {
+                                continue;
+                            }
+                            (&reply.bytes, Some(reply.trigger.peer))
+                        } else {
+                            let device = device.as_ref().expect("kernel dataplane has a device");
+                            let size = device.recv(&mut buffer).await.context("read TUN packet")?;
+                            (&buffer[..size], None)
+                        };
                     let Ok(meta) = packet_meta(packet) else {
                         Metrics::increment(&metrics.invalid_drops);
                         Metrics::increment(&metrics.malformed_drops);
                         continue;
                     };
-                    if !state.owns(&owned, meta.source) && !exit_gateway {
+                    let gateway = !state.owns(&owned, meta.source);
+                    if gateway && !state.gateway_allows(meta.destination) {
                         Metrics::increment(&metrics.invalid_drops);
                         Metrics::increment(&metrics.auth_drops);
                         continue;
@@ -383,10 +589,15 @@ impl Agent {
                         continue;
                     };
                     let peer = route.via;
-                    Metrics::increment(&metrics.tun_packets);
+                    if reply_peer.is_some_and(|reply_peer| reply_peer != peer) {
+                        continue;
+                    }
+                    if !userspace {
+                        Metrics::increment(&metrics.tun_packets);
+                    }
                     Metrics::increment(&metrics.packets_sent_total);
                     Metrics::add(&metrics.bytes_sent_total, packet.len());
-                    if exit_gateway {
+                    if gateway {
                         Metrics::increment(&metrics.exit_forwarded_packets_total);
                         Metrics::add(&metrics.exit_forwarded_bytes_total, packet.len());
                     }
@@ -414,36 +625,21 @@ impl Agent {
             let metrics = Arc::clone(&self.metrics);
             tasks.spawn(async move { monitor_selected_exit(state, kernel, metrics).await });
         }
-        {
-            let device = Arc::clone(&device);
-            let metrics = Arc::clone(&self.metrics);
-            let exit_gateway = self.config.forwarding.exit_gateway;
+        #[cfg(target_os = "macos")]
+        if let Some(tun) = &tun {
+            let tun = Arc::clone(tun);
             tasks.spawn(async move {
-                while let Some(packet) = inject_rx.recv().await {
-                    metrics.set_inject_queue_depth(
-                        inject_rx
-                            .max_capacity()
-                            .saturating_sub(inject_rx.capacity()),
-                    );
-                    device
-                        .send_all(&packet)
-                        .await
-                        .context("inject TUN packet")?;
-                    Metrics::increment(&metrics.injected_packets);
-                    Metrics::increment(&metrics.packets_received_total);
-                    Metrics::add(&metrics.bytes_received_total, packet.len());
-                    if exit_gateway {
-                        Metrics::increment(&metrics.exit_forwarded_packets_total);
-                        Metrics::add(&metrics.exit_forwarded_bytes_total, packet.len());
-                    }
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tun.lock().await.ensure_helper_running()?;
                 }
-                anyhow::bail!("TUN injection queue closed")
             });
         }
-
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
+            biased;
             _ = &mut shutdown => Ok(()),
+            _ = &mut replacement => { *reload=Some(socket_lifetime); Ok(()) },
             completed = tasks.join_next() => match completed {
                 Some(Ok(result)) => result,
                 Some(Err(error)) => Err(error.into()),
@@ -454,7 +650,7 @@ impl Agent {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         let kernel_restore = restore_kernel(&kernel);
-        let tun_restore = tun.lock().await.restore().await;
+        let tun_restore = restore_tun(&tun).await;
         if self.config.forwarding.exit_gateway {
             if kernel_restore.is_err() {
                 Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
@@ -497,6 +693,7 @@ impl Agent {
             private_key: self.config.tls.private_key.clone(),
             ca: self.config.tls.ca.clone(),
             timeout: settings.timeout,
+            exit_generation: None,
         })
         .await?;
         let PollResult::Modified(configuration) = client.poll(0).await? else {
@@ -510,6 +707,11 @@ impl Agent {
         ensure!(
             !snapshot.local_certificate_revoked,
             "local node certificate is revoked"
+        );
+        ensure!(
+            !self.config.forwarding.exit_gateway_controller_sources
+                || snapshot.identity_lease_expires_at == 0,
+            "controller-managed exit forwarding requires a non-ephemeral identity"
         );
         validate_controller_relay(&self.config, &snapshot)?;
         Ok(Some((
@@ -605,8 +807,7 @@ impl PathHysteresis {
 struct RuntimeControl {
     state: Arc<State>,
     metrics: Arc<Metrics>,
-    tun: Arc<Mutex<TunDevice>>,
-    configure_tun: bool,
+    tun: Option<Arc<Mutex<TunDevice>>>,
     network: Id,
     node: Id,
     base_config: Arc<ArcSwap<Config>>,
@@ -616,6 +817,7 @@ struct RuntimeControl {
     exit_intent: Arc<ExitIntentStore>,
     intent_persisted: Arc<StdMutex<bool>>,
     certificate_presented_serial: String,
+    interface: String,
 }
 
 impl RuntimeControl {
@@ -624,7 +826,7 @@ impl RuntimeControl {
         let authority = self.state.authority_snapshot();
         let effective = authority
             .as_ref()
-            .map(|snapshot| controller_effective_config(&base, snapshot, self.node))
+            .and_then(|snapshot| controller_effective_config(&base, snapshot, self.node).ok())
             .unwrap_or_else(|| {
                 if base.controller.is_some() {
                     controller_disabled_config(&base)
@@ -690,8 +892,15 @@ impl RuntimeControl {
             daemon_instance_id: String::new(),
             api_revision: 0,
             running: true,
-            actor: if serving_exit { "exit-node" } else { "node" }.to_owned(),
-            product_version: "1.0.0".to_owned(),
+            actor: if base.foreground_routes.is_some() {
+                "user"
+            } else if serving_exit {
+                "exit-node"
+            } else {
+                "node"
+            }
+            .to_owned(),
+            product_version: crate::product_version().to_owned(),
             control_version: "1.0".to_owned(),
             packet_version: 1,
             capabilities: capability_names(advertised_capabilities(&effective)),
@@ -701,7 +910,7 @@ impl RuntimeControl {
             name: local_name,
             overlay_addresses,
             selected_routes,
-            interface: effective.tun.name.clone(),
+            interface: self.interface.clone(),
             relay: effective
                 .relay
                 .address
@@ -835,13 +1044,14 @@ impl RuntimeControl {
         ensure!(!snapshot.expired(), "controller authority is expired");
         let previous = self.base_config.load_full();
         let next = prepare_exit_base(&previous, &snapshot, self.node, &selection)?;
-        let effective = Arc::new(controller_effective_config(&next, &snapshot, self.node));
+        let effective = Arc::new(controller_effective_config(&next, &snapshot, self.node)?);
         ensure!(
             !selection.enabled || effective.forwarding.exit_client.enabled,
             "selected exit has no usable controller route"
         );
-        let previous_effective =
-            Arc::new(controller_effective_config(&previous, &snapshot, self.node));
+        let previous_effective = Arc::new(controller_effective_config(
+            &previous, &snapshot, self.node,
+        )?);
         let was_persisted = *self
             .intent_persisted
             .lock()
@@ -894,13 +1104,17 @@ impl RuntimeControl {
         snapshot: &Snapshot,
     ) -> Result<()> {
         let compiled = RoutingTable::compile(&next.routes)?;
+        self.state.suspend_gateway();
         reconcile_kernel(&self.kernel, &self.dynamic_bypasses, Arc::clone(&next))?;
-        if self.configure_tun
-            && let Err(error) = self
-                .tun
+        if let Some(tun) = &self.tun
+            && let Err(error) = tun
                 .lock()
                 .await
-                .apply_controller(&snapshot.overlays, &next.routes)
+                .apply_controller(
+                    &snapshot.overlays,
+                    &next.routes,
+                    &tun_transport_bypasses(&next),
+                )
                 .await
         {
             let rollback_result = reconcile_kernel(&self.kernel, &self.dynamic_bypasses, rollback);
@@ -910,6 +1124,7 @@ impl RuntimeControl {
             });
         }
         self.state.routes.store(Arc::new(compiled));
+        self.state.set_gateway(&next.forwarding);
         Ok(())
     }
 }
@@ -967,6 +1182,7 @@ fn advertised_capabilities(config: &Config) -> u64 {
         capabilities |= v1::Capability::LanewayDirectPeerV1 as u64;
     }
     if config.controller.is_some()
+        || config.connector.userspace
         || config.forwarding.subnet_router
         || config
             .routes
@@ -975,12 +1191,13 @@ fn advertised_capabilities(config: &Config) -> u64 {
     {
         capabilities |= v1::Capability::LanewaySubnetRouterV1 as u64;
     }
-    if config.controller.is_some()
-        || config.forwarding.exit_gateway
-        || config
-            .routes
-            .iter()
-            .any(|route| route.kind == crate::config::RouteKind::Exit)
+    if !config.connector.userspace
+        && (config.controller.is_some()
+            || config.forwarding.exit_gateway
+            || config
+                .routes
+                .iter()
+                .any(|route| route.kind == crate::config::RouteKind::Exit))
     {
         capabilities |= v1::Capability::LanewayExitNodeV1 as u64;
     }
@@ -1034,13 +1251,34 @@ fn capability_names(value: u64) -> String {
 struct RuntimeApplier {
     state: Arc<State>,
     metrics: Arc<Metrics>,
-    tun: Arc<Mutex<TunDevice>>,
-    configure_tun: bool,
+    tun: Option<Arc<Mutex<TunDevice>>>,
     node: Id,
     base_config: Arc<ArcSwap<Config>>,
     kernel: Arc<StdMutex<Option<KernelManager>>>,
     dynamic_bypasses: Arc<StdMutex<BTreeMap<std::net::IpAddr, usize>>>,
     control_lock: Arc<Mutex<()>>,
+}
+
+impl RuntimeApplier {
+    async fn withdraw(&self, base: &Config) -> Result<()> {
+        self.state.fail_close();
+        Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
+        Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
+        Metrics::set(&self.metrics.exit_forwarding_ready, false);
+        Metrics::set(&self.metrics.exit_nat_ready, false);
+        if let Err(error) = reconcile_kernel(
+            &self.kernel,
+            &self.dynamic_bypasses,
+            Arc::new(controller_disabled_config(base)),
+        ) {
+            Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
+            return Err(error.context("fail close controller-owned kernel state"));
+        }
+        if let Some(tun) = &self.tun {
+            tun.lock().await.apply_controller(&[], &[], &[]).await?;
+        }
+        Ok(())
+    }
 }
 
 impl SnapshotApplier for RuntimeApplier {
@@ -1056,41 +1294,39 @@ impl SnapshotApplier for RuntimeApplier {
             );
             let base = self.base_config.load_full();
             if let Err(error) = validate_controller_relay(&base, &snapshot) {
-                self.state.fail_close();
-                Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
-                Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
-                Metrics::set(&self.metrics.exit_forwarding_ready, false);
-                Metrics::set(&self.metrics.exit_nat_ready, false);
-                if let Err(cleanup) = reconcile_kernel(
-                    &self.kernel,
-                    &self.dynamic_bypasses,
-                    Arc::new(controller_disabled_config(&base)),
-                ) {
-                    Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
-                    return Err(cleanup.context("fail close withdrawn relay authority"));
-                }
-                if self.configure_tun {
-                    self.tun.lock().await.apply_controller(&[], &[]).await?;
-                }
+                self.withdraw(&base).await?;
                 return Err(error.context("controller withdrew configured relay authority"));
             }
-            let effective = Arc::new(controller_effective_config(&base, &snapshot, self.node));
+            let effective = match controller_effective_config(&base, &snapshot, self.node) {
+                Ok(effective) => Arc::new(effective),
+                Err(error) => {
+                    self.withdraw(&base).await?;
+                    return Err(error);
+                }
+            };
             let rollback_config = self
                 .state
                 .authority_snapshot()
-                .map(|previous| Arc::new(controller_effective_config(&base, &previous, self.node)))
+                .and_then(|previous| controller_effective_config(&base, &previous, self.node).ok())
+                .map(Arc::new)
                 .unwrap_or_else(|| Arc::new(controller_disabled_config(&base)));
             let routes = effective.routes.clone();
             let compiled = RoutingTable::compile(&routes)?;
+            self.state.suspend_gateway();
             reconcile_kernel(&self.kernel, &self.dynamic_bypasses, Arc::clone(&effective))?;
-            if self.configure_tun
-                && let Err(error) = self
-                    .tun
+            if let Some(tun) = &self.tun
+                && let Err(error) = tun
                     .lock()
                     .await
-                    .apply_controller(&snapshot.overlays, &routes)
+                    .apply_controller(
+                        &snapshot.overlays,
+                        &routes,
+                        &tun_transport_bypasses(&effective),
+                    )
                     .await
             {
+                #[cfg(target_os = "macos")]
+                self.state.fail_close();
                 let rollback =
                     reconcile_kernel(&self.kernel, &self.dynamic_bypasses, rollback_config);
                 return Err(match rollback {
@@ -1109,6 +1345,7 @@ impl SnapshotApplier for RuntimeApplier {
             );
             publish_controller_metrics(&self.metrics, &snapshot);
             self.state.publish_authority(snapshot);
+            self.state.set_gateway(&effective.forwarding);
             Ok(())
         })
     }
@@ -1116,24 +1353,8 @@ impl SnapshotApplier for RuntimeApplier {
     fn fail_close<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let _guard = self.control_lock.lock().await;
-            self.state.fail_close();
-            Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
-            Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
-            Metrics::set(&self.metrics.exit_forwarding_ready, false);
-            Metrics::set(&self.metrics.exit_nat_ready, false);
             let base = self.base_config.load_full();
-            if let Err(error) = reconcile_kernel(
-                &self.kernel,
-                &self.dynamic_bypasses,
-                Arc::new(controller_disabled_config(&base)),
-            ) {
-                Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
-                return Err(error.context("fail close controller-owned kernel state"));
-            }
-            if self.configure_tun {
-                self.tun.lock().await.apply_controller(&[], &[]).await?;
-            }
-            Ok(())
+            self.withdraw(&base).await
         })
     }
 
@@ -1147,11 +1368,33 @@ impl SnapshotApplier for RuntimeApplier {
                 !snapshot.expired(),
                 "controller renewed an expired snapshot"
             );
+            ensure!(
+                self.state.authority_snapshot().is_some(),
+                "controller must reapply routes before restoring withdrawn authority"
+            );
             publish_controller_metrics(&self.metrics, &snapshot);
             self.state.publish_authority(snapshot);
             Ok(())
         })
     }
+}
+
+fn tun_transport_bypasses(config: &Config) -> Vec<std::net::IpAddr> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    let mut bypasses = config.forwarding.exit_client.controller_bypass.clone();
+    bypasses.extend(config.relay.address.map(|address| address.ip()));
+    bypasses.extend(config.tcp_fallback.as_ref().and_then(|fallback| {
+        fallback
+            .address
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|address| address.ip())
+    }));
+    bypasses.sort_unstable();
+    bypasses.dedup();
+    bypasses
 }
 
 fn reconcile_kernel(
@@ -1207,6 +1450,13 @@ fn reconcile_kernel(
             }
             Err(error)
         }
+    }
+}
+
+async fn restore_tun(tun: &Option<Arc<Mutex<TunDevice>>>) -> Result<()> {
+    match tun {
+        Some(tun) => tun.lock().await.restore().await,
+        None => Ok(()),
     }
 }
 
@@ -1280,10 +1530,40 @@ fn publish_controller_metrics(metrics: &Metrics, snapshot: &Snapshot) {
     Metrics::set(&metrics.controller_certificate_renewal_forced, false);
 }
 
-fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) -> Config {
+fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) -> Result<Config> {
     let mut effective = base.clone();
     effective.tun.addresses = snapshot.overlays.clone();
-    effective.routes = route_configs(snapshot, local);
+    effective.routes = match &base.foreground_routes {
+        Some(scope) => {
+            let mut routes = crate::foreground_routes::select(scope, snapshot, local)?;
+            let exit = &base.forwarding.exit_client;
+            if exit.enabled {
+                let selected: Id = exit
+                    .selected_node
+                    .as_deref()
+                    .context("foreground exit selection missing")?
+                    .parse()?;
+                ensure!(
+                    selected != local && snapshot.authorized_exits.contains(&selected),
+                    "selected exit is no longer controller-authorized"
+                );
+                let split_routes = routes.len();
+                routes.extend(
+                    snapshot
+                        .routes
+                        .iter()
+                        .filter(|route| route.kind == v1::RouteKind::Exit && route.via == selected)
+                        .cloned(),
+                );
+                ensure!(
+                    routes.len() > split_routes,
+                    "selected exit has no approved default route"
+                );
+            }
+            route_configs(&routes, local)
+        }
+        None => route_configs(&snapshot.routes, local),
+    };
     effective.forwarding.exit_client.controller_bypass.extend(
         snapshot
             .relays
@@ -1322,13 +1602,48 @@ fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) ->
 
     let exit_capability =
         snapshot.enabled_capabilities & v1::Capability::LanewayExitNodeV1 as u64 != 0;
-    let exit_advertised = snapshot
-        .routes
-        .iter()
-        .any(|route| route.via == local && route.kind == v1::RouteKind::Exit);
-    effective.forwarding.exit_gateway =
-        base.forwarding.exit_gateway && exit_capability && exit_advertised;
-    if !effective.forwarding.exit_gateway {
+    let (mut exit_v4, mut exit_v6) = (false, false);
+    for route in &snapshot.routes {
+        if route.via == local
+            && route.kind == v1::RouteKind::Exit
+            && route.mode == v1::RouteAdvertisementMode::Nat
+        {
+            if route.destination.addr().is_ipv4() {
+                exit_v4 = true;
+            } else {
+                exit_v6 = true;
+            }
+        }
+    }
+    let authorized_family = |prefix: &ipnet::IpNet| {
+        if prefix.addr().is_ipv4() {
+            exit_v4
+        } else {
+            exit_v6
+        }
+    };
+    effective.forwarding.exit_gateway = base.forwarding.exit_gateway
+        && (!base.forwarding.exit_gateway_controller_sources
+            || snapshot.identity_lease_expires_at == 0)
+        && exit_capability
+        && (exit_v4 || exit_v6);
+    if effective.forwarding.exit_gateway {
+        let sources = &mut effective.forwarding.exit_gateway_sources;
+        if base.forwarding.exit_gateway_controller_sources {
+            *sources = snapshot
+                .routes
+                .iter()
+                .filter(|route| route.kind == v1::RouteKind::Overlay && route.via != local)
+                .map(|route| route.destination)
+                .filter(authorized_family)
+                .collect();
+            sources.sort_unstable();
+            sources.dedup();
+        } else {
+            sources.retain(authorized_family);
+        }
+        effective.forwarding.exit_gateway = !sources.is_empty();
+    } else {
         effective.forwarding.exit_gateway_sources.clear();
     }
 
@@ -1358,12 +1673,14 @@ fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) ->
             .routes
             .retain(|route| route.kind != crate::config::RouteKind::Exit);
     }
-    effective
+    Ok(effective)
 }
 
-fn route_configs(snapshot: &Snapshot, local: Id) -> Vec<crate::config::RouteConfig> {
-    snapshot
-        .routes
+fn route_configs(
+    routes: &[crate::controller::Route],
+    local: Id,
+) -> Vec<crate::config::RouteConfig> {
+    routes
         .iter()
         .filter(|route| route.via != local)
         .map(|route| crate::config::RouteConfig {
@@ -1380,7 +1697,7 @@ fn route_configs(snapshot: &Snapshot, local: Id) -> Vec<crate::config::RouteConf
         .collect()
 }
 
-fn random_id() -> Result<Id> {
+pub(crate) fn random_id() -> Result<Id> {
     loop {
         let mut value = [0_u8; 16];
         getrandom::fill(&mut value).context("generate boot ID")?;
@@ -1507,6 +1824,7 @@ mod tests {
                 .as_secs()
                 + 60,
             identity_lease_expires_at: 0,
+            ephemeral_exit: None,
             overlays: vec!["100.96.0.1/32".parse().unwrap()],
             peers: HashMap::from([
                 (
@@ -1515,6 +1833,7 @@ mod tests {
                         node: local,
                         name: "local".into(),
                         overlays: vec!["100.96.0.1".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
                 (
@@ -1523,6 +1842,7 @@ mod tests {
                         node: selected,
                         name: "selected".into(),
                         overlays: vec!["100.96.0.2".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
                 (
@@ -1531,6 +1851,7 @@ mod tests {
                         node: other,
                         name: "other".into(),
                         overlays: vec!["100.96.0.3".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
             ]),
@@ -1579,7 +1900,7 @@ mod tests {
             certificate_renew_after: u64::MAX - 1,
             certificate_not_after: u64::MAX,
         };
-        let effective = controller_effective_config(&base, &snapshot, local);
+        let effective = controller_effective_config(&base, &snapshot, local).unwrap();
         assert!(effective.forwarding.subnet_router);
         assert!(effective.forwarding.exit_gateway);
         assert!(
@@ -1595,6 +1916,86 @@ mod tests {
                 .iter()
                 .any(|route| route.kind == crate::config::RouteKind::Exit
                     && route.via_node == other.to_string())
+        );
+
+        let mut foreground = base.clone();
+        foreground.forwarding.subnet_router = false;
+        foreground.forwarding.exit_gateway = false;
+        foreground.foreground_routes = Some(crate::config::ForegroundRoutes {
+            policy_private: false,
+            requested: Vec::new(),
+        });
+        let selected_only = controller_effective_config(&foreground, &snapshot, local).unwrap();
+        assert!(selected_only.forwarding.exit_client.enabled);
+        assert_eq!(selected_only.routes.len(), 1);
+        assert_eq!(selected_only.routes[0].via_node, selected.to_string());
+        let mut unauthorized = snapshot.clone();
+        unauthorized.authorized_exits.remove(&selected);
+        assert!(controller_effective_config(&foreground, &unauthorized, local).is_err());
+        let mut missing_default = snapshot.clone();
+        missing_default.routes.retain(|route| route.via != selected);
+        assert!(controller_effective_config(&foreground, &missing_default, local).is_err());
+        foreground.forwarding.exit_client = Default::default();
+        let split = controller_effective_config(&foreground, &snapshot, local).unwrap();
+        assert!(split.routes.is_empty());
+
+        let mut dynamic = base.clone();
+        dynamic.forwarding.exit_gateway_sources.clear();
+        dynamic.forwarding.exit_gateway_controller_sources = true;
+        let mut scoped = snapshot.clone();
+        scoped.routes.extend([
+            route(
+                5,
+                "100.96.0.1/32".parse().unwrap(),
+                local,
+                v1::RouteKind::Overlay,
+                v1::RouteAdvertisementMode::Unspecified,
+            ),
+            route(
+                6,
+                "100.96.0.2/32".parse().unwrap(),
+                selected,
+                v1::RouteKind::Overlay,
+                v1::RouteAdvertisementMode::Unspecified,
+            ),
+            route(
+                7,
+                "fd00::3/128".parse().unwrap(),
+                other,
+                v1::RouteKind::Overlay,
+                v1::RouteAdvertisementMode::Unspecified,
+            ),
+            route(
+                8,
+                "::/0".parse().unwrap(),
+                local,
+                v1::RouteKind::Exit,
+                v1::RouteAdvertisementMode::Routed,
+            ),
+        ]);
+        let effective = controller_effective_config(&dynamic, &scoped, local).unwrap();
+        assert!(effective.forwarding.exit_gateway);
+        assert_eq!(
+            effective.forwarding.exit_gateway_sources,
+            ["100.96.0.2/32".parse::<IpNet>().unwrap()]
+        );
+        scoped.routes.last_mut().unwrap().mode = v1::RouteAdvertisementMode::Nat;
+        let effective = controller_effective_config(&dynamic, &scoped, local).unwrap();
+        assert_eq!(
+            effective.forwarding.exit_gateway_sources,
+            [
+                "100.96.0.2/32".parse::<IpNet>().unwrap(),
+                "fd00::3/128".parse::<IpNet>().unwrap()
+            ]
+        );
+        scoped
+            .routes
+            .retain(|route| route.kind != v1::RouteKind::Exit);
+        assert!(
+            !controller_effective_config(&dynamic, &scoped, local)
+                .unwrap()
+                .forwarding
+                .exit_gateway
         );
 
         let switched = prepare_exit_base(
@@ -1642,7 +2043,7 @@ mod tests {
         let mut withdrawn = snapshot;
         withdrawn.enabled_capabilities = 0;
         withdrawn.routes.clear();
-        let effective = controller_effective_config(&base, &withdrawn, local);
+        let effective = controller_effective_config(&base, &withdrawn, local).unwrap();
         assert!(!effective.forwarding.subnet_router);
         assert!(effective.forwarding.subnet_routes.is_empty());
         assert!(!effective.forwarding.exit_gateway);

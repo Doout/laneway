@@ -11,6 +11,17 @@ static ALLOCATOR: laneway_relay::allocator::CountingAllocator =
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if matches!(
+        env::args_os().nth(1).as_deref().and_then(|s| s.to_str()),
+        Some("--version" | "-version")
+    ) && env::args_os().nth(2).is_none()
+    {
+        println!(
+            "{}",
+            option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        );
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

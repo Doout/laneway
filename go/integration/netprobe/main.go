@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -30,11 +32,12 @@ import (
 
 	"github.com/Doout/laneway/go/internal/exitnode"
 	"github.com/Doout/laneway/go/internal/identity"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: netprobe <udp-server|udp-client|udp-echo-server|udp-bench-client|tcp-server|tcp-client|metric|certificate-info|exit-client|exit-gateway> [flags]")
+		fatal("usage: netprobe <udp-server|udp-client|udp-echo-server|udp-bench-client|tcp-server|tcp-client|metric|dns|certificate-info|endpoint-health|enroll-exit|exit-client|exit-gateway> [flags]")
 	}
 	var err error
 	switch os.Args[1] {
@@ -52,8 +55,14 @@ func main() {
 		err = tcpClient(os.Args[2:])
 	case "metric":
 		err = metric(os.Args[2:])
+	case "dns":
+		err = dnsProbe(os.Args[2:])
 	case "certificate-info":
 		err = certificateInfo(os.Args[2:])
+	case "endpoint-health":
+		err = endpointHealth(os.Args[2:])
+	case "enroll-exit":
+		err = enrollExit(os.Args[2:])
 	case "exit-client":
 		err = exitClient(os.Args[2:])
 	case "exit-gateway":
@@ -64,6 +73,43 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
+}
+
+// endpointHealth verifies what the controller durably received from a live
+// agent, without minting another credential or a separate report.
+func endpointHealth(args []string) error {
+	fs := flag.NewFlagSet("endpoint-health", flag.ContinueOnError)
+	path := fs.String("database", "", "temporary controller database")
+	node := fs.String("node-id", "", "reporting node identity")
+	ip := fs.String("public-ip", "", "expected node transport address")
+	location := fs.String("location", "", "expected automatic location label")
+	version := fs.String("product-version", "", "expected node runtime version")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := identity.ParseNodeID(*node)
+	if err != nil || fs.NArg() != 0 || *path == "" {
+		return errors.New("endpoint-health requires -database and -node-id")
+	}
+	dsn := (&url.URL{Scheme: "file", Path: *path, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var carrier string
+	if err := db.QueryRow(`SELECT s.carrier_state FROM endpoint_status_latest s
+		JOIN node_locations l ON l.node_id=s.node_id
+		WHERE s.node_id=? AND s.platform='linux' AND s.configuration_state='current'
+		  AND s.route_state='ready' AND s.expires_at>unixepoch() AND l.observed_at>unixepoch()-30
+		  AND (?='' OR l.public_ip=?)
+		  AND (?='' OR json_extract(l.automatic_json,'$.label')=?)
+		  AND (?='' OR s.product_version=?)`,
+		id[:], *ip, *ip, *location, *location, *version, *version).Scan(&carrier); err != nil {
+		return err
+	}
+	fmt.Println(carrier)
+	return nil
 }
 
 func certificateInfo(args []string) error {
@@ -103,11 +149,15 @@ func udpServer(args []string) error {
 	fs := flag.NewFlagSet("udp-server", flag.ContinueOnError)
 	listen := fs.String("listen", "", "UDP listen address")
 	maxPackets := fs.Int("max-packets", 1, "maximum packets to echo before exiting")
+	timeout := fs.Duration("timeout", 20*time.Second, "overall probe deadline")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *maxPackets <= 0 {
 		return fmt.Errorf("max-packets must be positive")
+	}
+	if *timeout <= 0 || *timeout > 5*time.Minute {
+		return errors.New("UDP server deadline must be between zero and five minutes")
 	}
 	address, err := net.ResolveUDPAddr("udp", *listen)
 	if err != nil {
@@ -119,7 +169,7 @@ func udpServer(args []string) error {
 	}
 	defer conn.Close()
 	fmt.Println("ready=udp-server")
-	if err := conn.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(*timeout)); err != nil {
 		return err
 	}
 	buffer := make([]byte, 2048)
@@ -142,6 +192,7 @@ func udpClient(args []string) error {
 	message := fs.String("message", "laneway-netprobe", "payload to exchange")
 	timeout := fs.Duration("timeout", 12*time.Second, "overall retry timeout")
 	once := fs.Bool("once", false, "send only once")
+	sourcePort := fs.Int("source-port", 0, "reuse a local test port across probes")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -149,7 +200,10 @@ func udpClient(args []string) error {
 	if err != nil {
 		return err
 	}
-	conn, err := net.ListenUDP("udp", nil)
+	if *sourcePort < 0 || *sourcePort > 65535 {
+		return errors.New("invalid UDP source port")
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: *sourcePort})
 	if err != nil {
 		return err
 	}
