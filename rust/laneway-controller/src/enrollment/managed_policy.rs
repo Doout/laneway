@@ -91,20 +91,32 @@ pub(super) fn apply(
             .cmp(&b.priority)
             .then_with(|| a.rule_id.cmp(&b.rule_id))
     });
-    // Re-rank rather than offsetting; adding two would collapse priorities at
-    // the upper bound and let the ID tiebreaker change the configured order.
-    policy.rules.sort_unstable_by(|a, b| {
-        a.priority
-            .cmp(&b.priority)
-            .then_with(|| a.rule_id.cmp(&b.rule_id))
-    });
-    for (index, row) in policy.rules.iter_mut().enumerate() {
-        row.priority = u32::try_from(index)? + 2;
-    }
+    manual_priorities(&mut policy.rules, crate::schema::is_fleet(tx)?)?;
     grants.rules.append(&mut policy.rules);
     policy.rules = grants.rules;
     CompiledPolicy::compile(policy.clone(), net, policy.configuration_epoch)?;
     Ok(exits)
+}
+
+fn manual_priorities(rules: &mut [PolicyRule], fleet: bool) -> Result<()> {
+    if fleet {
+        // Fleet schema re-ranks rather than offsetting so distinct manual
+        // priorities at the upper bound cannot collapse to the same value.
+        rules.sort_unstable_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.rule_id.cmp(&b.rule_id))
+        });
+        for (index, row) in rules.iter_mut().enumerate() {
+            row.priority = u32::try_from(index)? + 2;
+        }
+    } else {
+        // Preserve the public Go controller's emitted priorities on schema 18.
+        for row in rules {
+            row.priority = row.priority.saturating_add(2);
+        }
+    }
+    Ok(())
 }
 
 impl Grants<'_> {
@@ -218,4 +230,28 @@ fn network_targets(peers: &[NodePeer], routes: &[Route]) -> (Vec<Vec<u8>>, Vec<I
         }
     }
     (ids.into_iter().collect(), prefixes)
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    #[test]
+    fn managed_priorities_follow_the_source_schema_contract() -> Result<()> {
+        let rule = |id: u8, priority| PolicyRule {
+            rule_id: vec![id; 16],
+            priority,
+            ..Default::default()
+        };
+        let mut public = [rule(9, 0), rule(8, u32::MAX - 1), rule(7, u32::MAX)];
+        let mut fleet = public.clone();
+        manual_priorities(&mut public, false)?;
+        assert_eq!(public.map(|r| r.priority), [2, u32::MAX, u32::MAX]);
+        manual_priorities(&mut fleet, true)?;
+        assert_eq!(
+            fleet.map(|r| (r.rule_id[0], r.priority)),
+            [(9, 2), (8, 3), (7, 4)]
+        );
+        Ok(())
+    }
 }
