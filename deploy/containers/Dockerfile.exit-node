@@ -10,6 +10,8 @@ COPY go/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway ./cmd/laneway
+
+FROM build AS go-healthcheck
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
@@ -21,7 +23,8 @@ WORKDIR /src
 COPY rust/ ./rust/
 COPY api/ ./api/
 RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
-    cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs -p laneway-healthcheck
+    cargo build --locked --release --manifest-path rust/Cargo.toml \
+      -p lanewayd-rs --bin lanewayd-rs -p laneway-healthcheck --bin laneway-healthcheck
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS base
 RUN apk add --no-cache \
@@ -42,14 +45,14 @@ RUN apk add --no-cache --virtual .cap-tools libcap-setcap=2.78-r0 \
     && apk del .cap-tools
 USER 65532:65532
 
+FROM base AS go-exit
+COPY --from=go-healthcheck /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
+CMD ["-config", "/etc/laneway/exit-node.toml"]
+
 FROM base AS rust-exit
 COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
 COPY --from=rust-runtime /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --chmod=0755 deploy/containers/run-rust-exit /usr/local/bin/run-rust-exit
 ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/run-rust-exit"]
-CMD ["-config", "/etc/laneway/exit-node.toml"]
-
-FROM base AS go-exit
-COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
-ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]

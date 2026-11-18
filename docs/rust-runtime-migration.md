@@ -4,6 +4,9 @@ Public source baseline: `acac2047329dd4331e60d7f1f21de6fa67247df3`.
 Target a fresh installation that runs Rust services from the start. Upgrading
 or rolling back to the old Go runtime is not a release requirement. The Go
 operator CLI and lab tools can still be used without running a Go server.
+Direct Docker builds of the Connector and Exit Node select Rust by default.
+The shared Go Dockerfile defaults to the one-shot operator CLI, with its Go
+controller and relay available only as explicit targets.
 
 ## Release handoff
 
@@ -816,7 +819,7 @@ Historical Go-to-Rust cutover experiments are not release requirements. The
 following gate checks the legacy NAT profile and its existing state layout:
 
 ```sh
-docker build -f deploy/containers/Dockerfile.exit-node --build-arg VERSION=go-exit-lab \
+docker build -f deploy/containers/Dockerfile.exit-node --target go-exit --build-arg VERSION=go-exit-lab \
   -t laneway-go-exit:migration-lab .
 docker build -f deploy/containers/Dockerfile.exit-node --target rust-exit \
   --build-arg VERSION=rust-exit-lab -t laneway-rust-exit:migration-lab .

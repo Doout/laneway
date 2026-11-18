@@ -273,13 +273,21 @@ if [ "$console_copy_stage" != controller ]; then
   echo "console assets must be copied exactly once and only by the controller target" >&2
   exit 1
 fi
-if [ "$(awk '/^FROM / { stage = $NF } END { print stage }' "$dockerfile")" != relay ]; then
-  echo "the shared Dockerfile default target must preserve the historical relay image" >&2
-  exit 1
-fi
+require_default_target() {
+  actual=$(awk '/^FROM / { stage = $NF } END { print stage }' "$1")
+  if [ "$actual" != "$2" ]; then
+    echo "$1 selects default Docker target ${actual:-none}, want $2" >&2
+    exit 1
+  fi
+}
+
+require_default_target "$dockerfile" admin
+require_default_target "$connector_dockerfile" rust-connector
+require_default_target "$exit_dockerfile" rust-exit
 require_compose_target controller controller
 require_compose_target relay relay
 require_compose_target admin admin
+require_compose_target exit-node go-exit
 if grep -F 'BINARY:' "$compose_dev_file" >/dev/null ||
   grep -F -- '--build-arg BINARY=' "$docker_exit_integration" >/dev/null ||
   grep -F -- '--build-arg BINARY=' "$ci_workflow" >/dev/null; then
@@ -289,6 +297,7 @@ fi
 require '--target controller' "$docker_exit_integration"
 require '--target relay' "$docker_exit_integration"
 require '--target admin' "$docker_exit_integration"
+require '--target go-exit' "$docker_exit_integration"
 require '"dev": "vite --mode demo"' "$web_package"
 require '"build": "vite build"' "$web_package"
 require '"build:live": "tsc -b && vite build --mode live"' "$web_package"
@@ -343,11 +352,11 @@ require '--target relay --build-arg VERSION=ci' "$ci_workflow"
 require '--target admin --build-arg VERSION=ci' "$ci_workflow"
 require 'docker run --rm --network none laneway-controller:ci -version' "$ci_workflow"
 require 'docker run --rm --network none laneway-relay:ci -version' "$ci_workflow"
-require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci' "$ci_workflow"
-require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then' "$ci_workflow"
-require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
-require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
-require 'bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci' "$ci_workflow"
+require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge-rust:ci laneway-exit-node:ci' "$ci_workflow"
+require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true; then' "$ci_workflow"
+require './integration/connector-bootstrap.sh lane-edge-rust:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci tcp-fallback' "$ci_workflow"
 require './integration/connector-updater.sh' "$ci_workflow"
 require './integration/administrator-lifecycle.sh' "$ci_workflow"
 if ! grep -Eq '^[[:space:]]+\./integration/administrator-lifecycle\.sh[[:space:]]*$' "$ci_workflow" ||

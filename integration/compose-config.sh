@@ -78,6 +78,7 @@ jq -e '
   (.services.controller.build.target == "controller") and
   (.services.relay.build.target == "relay") and
   (.services.admin.build.target == "admin") and
+  (.services["exit-node"].build.target == "go-exit") and
   (.services.controller.command == ["-config", "/etc/laneway/controller.toml", "-console-dir", "/usr/share/laneway-console"]) and
   ([.services.controller.volumes[] | .target != "/usr/share/laneway-console"] | all)
 ' >/dev/null

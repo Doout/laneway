@@ -1,3 +1,5 @@
+# Historical development fixture for the Go controller and packet tests.
+# Fresh deployments use the Rust Compose overlay and installer.
 services:
   controller:
     image: laneway-controller:dev
@@ -22,3 +24,4 @@ services:
     build:
       context: ../..
       dockerfile: deploy/containers/Dockerfile.exit-node
+      target: go-exit
