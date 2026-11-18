@@ -5,7 +5,8 @@ use lanewayd_rs::{Agent, Config};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<ExitCode> {
-    if env::args_os().nth(1).is_some_and(|flag| flag == "healthcheck") {
+    let command = env::args_os().nth(1);
+    if command.is_some_and(|flag| flag == "healthcheck") {
         return Ok(laneway_healthcheck::run(
             "lanewayd-rs healthcheck",
             env::args().skip(2),
