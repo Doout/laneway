@@ -21,6 +21,11 @@ mime = "0.3"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rustls.workspace = true
+rcgen = { version = "0.14.8", default-features = false, features = ["ring","x509-parser","zeroize"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["ring","std"] }
+time = "0.3"
+x509-parser.workspace = true
+yasna = "0.6"
 rustls-pemfile.workspace = true
 tokio.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }

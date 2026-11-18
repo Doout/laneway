@@ -184,6 +184,14 @@ together. The mixed HTTPS test redeems Rust-issued tokens at the Go controller
 and verifies their certificates, node names, network and user binding,
 capabilities, ephemeral exit lease and replay rejection.
 
-Next: port the receiving half (`POST /v1/enroll`), including CSR verification,
-CA signing, address allocation and atomic one-time consumption. Until then
-nodes must still redeem their tokens at Go.
+The Rust signer verifies a PKCS#10 request and takes only its public key. The
+controller supplies the network and node IDs; the request cannot choose its
+identity, add names or grant CA privileges. Expiry is bounded by the configured
+lifetime, issuer chain and node lease. `make rust-controller-interop` uses
+throwaway Go-generated CAs and five CSR signature variants to verify the
+resulting Rust certificates with Go, including issuance through an intermediate.
+
+Redemption still goes to Go. The next step is to wire this signer into
+`POST /v1/enroll` and commit address allocation, node identity, certificate,
+token consumption, audit and network epoch together. Do not enable the Rust
+controller for node enrollment until mixed-client redemption and rollback pass.
