@@ -593,13 +593,22 @@ impl RelayClient {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         }
-        if !packet_capabilities_allow(
-            &self.config,
-            &self.state.routes.load(),
-            meta,
-            negotiated_capabilities,
-            false,
-        ) {
+        let forwards_exit = !self.state.owns(&self.owned, meta.source);
+        let routes = self.state.routes.load();
+        if (forwards_exit
+            && !(self.state.gateway_allows(meta.destination)
+                && routes
+                    .lookup(meta.destination)
+                    .is_some_and(|r| r.via == outbound.peer)))
+            || !packet_capabilities_allow(
+                &self.config,
+                &routes,
+                meta,
+                negotiated_capabilities,
+                false,
+                forwards_exit,
+            )
+        {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         }
@@ -651,14 +660,21 @@ impl RelayClient {
             return;
         }
         let routes = self.state.routes.load();
-        if !packet_capabilities_allow(&self.config, &routes, meta, negotiated_capabilities, true) {
+        let forwards_exit = !self.state.owns(&self.owned, meta.destination);
+        if !packet_capabilities_allow(
+            &self.config,
+            &routes,
+            meta,
+            negotiated_capabilities,
+            true,
+            forwards_exit,
+        ) {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.policy_drops);
             return;
         }
         if !routes.authorizes_source(peer, meta.source)
-            || (!self.state.owns(&self.owned, meta.destination)
-                && !self.config.forwarding.exit_gateway)
+            || (forwards_exit && !self.state.gateway_allows(meta.source))
         {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.auth_drops);
@@ -797,6 +813,7 @@ fn packet_capabilities_allow(
     meta: crate::routing::PacketMeta,
     capabilities: u64,
     inbound: bool,
+    forwards_exit: bool,
 ) -> bool {
     if meta.source.is_ipv6() && capabilities & Capability::LanewayIpv6V1 as u64 == 0 {
         return false;
@@ -823,15 +840,7 @@ fn packet_capabilities_allow(
     {
         return false;
     }
-    if inbound
-        && config.forwarding.exit_gateway
-        && !locally_owned(&config.tun.addresses, meta.destination)
-        && !locally_owned(&config.forwarding.owned_prefixes, meta.destination)
-        && capabilities & Capability::LanewayExitNodeV1 as u64 == 0
-    {
-        return false;
-    }
-    true
+    !forwards_exit || capabilities & Capability::LanewayExitNodeV1 as u64 != 0
 }
 
 fn validate_welcome(
@@ -1031,6 +1040,7 @@ mod tests {
             ipv6,
             REQUIRED_CAPABILITIES,
             false,
+            false,
         ));
 
         config.forwarding.subnet_router = true;
@@ -1048,12 +1058,14 @@ mod tests {
             subnet,
             REQUIRED_CAPABILITIES,
             false,
+            false,
         ));
         assert!(packet_capabilities_allow(
             &config,
             &routes,
             subnet,
             REQUIRED_CAPABILITIES | Capability::LanewaySubnetRouterV1 as u64,
+            false,
             false,
         ));
     }

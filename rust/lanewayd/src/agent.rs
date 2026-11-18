@@ -366,6 +366,8 @@ impl Agent {
                 }
             };
             tasks.spawn(async move { runner.run().await });
+        } else {
+            self.state.set_gateway(&self.config.forwarding);
         }
 
         let local_control = Arc::new(RuntimeControl {
@@ -440,7 +442,9 @@ impl Agent {
         } else {
             let device = Arc::clone(device.as_ref().expect("kernel dataplane has a device"));
             let metrics = Arc::clone(&self.metrics);
-            let exit_gateway = self.config.forwarding.exit_gateway;
+            let state = Arc::clone(&self.state);
+            let owned = Arc::clone(&owned);
+            let local = self.node;
             tasks.spawn(async move {
                 while let Some(packet) = inject_rx.recv().await {
                     metrics.set_inject_queue_depth(
@@ -448,6 +452,21 @@ impl Agent {
                             .max_capacity()
                             .saturating_sub(inject_rx.capacity()),
                     );
+                    let Ok(meta) = packet_meta(&packet.bytes) else {
+                        continue;
+                    };
+                    let gateway = !state.owns(&owned, meta.destination);
+                    if gateway
+                        && !(state.gateway_allows(meta.source)
+                            && state.allows(packet.peer, local, &packet.bytes)
+                            && state
+                                .routes
+                                .load()
+                                .authorizes_source(packet.peer, meta.source))
+                    {
+                        Metrics::increment(&metrics.auth_drops);
+                        continue;
+                    }
                     device
                         .send_all(&packet.bytes)
                         .await
@@ -455,7 +474,7 @@ impl Agent {
                     Metrics::increment(&metrics.injected_packets);
                     Metrics::increment(&metrics.packets_received_total);
                     Metrics::add(&metrics.bytes_received_total, packet.bytes.len());
-                    if exit_gateway {
+                    if gateway {
                         Metrics::increment(&metrics.exit_forwarded_packets_total);
                         Metrics::add(&metrics.exit_forwarded_bytes_total, packet.bytes.len());
                     }
@@ -468,7 +487,6 @@ impl Agent {
             let state = Arc::clone(&self.state);
             let metrics = Arc::clone(&self.metrics);
             let owned = Arc::clone(&owned);
-            let exit_gateway = self.config.forwarding.exit_gateway;
             let local_node = self.node;
             let packet_pool = packet_pool.clone();
             let prefixes = self.config.forwarding.owned_prefixes.clone();
@@ -496,7 +514,8 @@ impl Agent {
                         Metrics::increment(&metrics.malformed_drops);
                         continue;
                     };
-                    if !state.owns(&owned, meta.source) && !exit_gateway {
+                    let gateway = !state.owns(&owned, meta.source);
+                    if gateway && !state.gateway_allows(meta.destination) {
                         Metrics::increment(&metrics.invalid_drops);
                         Metrics::increment(&metrics.auth_drops);
                         continue;
@@ -515,7 +534,7 @@ impl Agent {
                     }
                     Metrics::increment(&metrics.packets_sent_total);
                     Metrics::add(&metrics.bytes_sent_total, packet.len());
-                    if exit_gateway {
+                    if gateway {
                         Metrics::increment(&metrics.exit_forwarded_packets_total);
                         Metrics::add(&metrics.exit_forwarded_bytes_total, packet.len());
                     }
@@ -1001,6 +1020,7 @@ impl RuntimeControl {
         snapshot: &Snapshot,
     ) -> Result<()> {
         let compiled = RoutingTable::compile(&next.routes)?;
+        self.state.suspend_gateway();
         reconcile_kernel(&self.kernel, &self.dynamic_bypasses, Arc::clone(&next))?;
         if let Some(tun) = &self.tun
             && let Err(error) = tun
@@ -1016,6 +1036,7 @@ impl RuntimeControl {
             });
         }
         self.state.routes.store(Arc::new(compiled));
+        self.state.set_gateway(&next.forwarding);
         Ok(())
     }
 }
@@ -1189,6 +1210,7 @@ impl SnapshotApplier for RuntimeApplier {
                 .unwrap_or_else(|| Arc::new(controller_disabled_config(&base)));
             let routes = effective.routes.clone();
             let compiled = RoutingTable::compile(&routes)?;
+            self.state.suspend_gateway();
             reconcile_kernel(&self.kernel, &self.dynamic_bypasses, Arc::clone(&effective))?;
             if let Some(tun) = &self.tun
                 && let Err(error) = tun
@@ -1215,6 +1237,7 @@ impl SnapshotApplier for RuntimeApplier {
             );
             publish_controller_metrics(&self.metrics, &snapshot);
             self.state.publish_authority(snapshot);
+            self.state.set_gateway(&effective.forwarding);
             Ok(())
         })
     }
@@ -1435,13 +1458,45 @@ fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) ->
 
     let exit_capability =
         snapshot.enabled_capabilities & v1::Capability::LanewayExitNodeV1 as u64 != 0;
-    let exit_advertised = snapshot
-        .routes
-        .iter()
-        .any(|route| route.via == local && route.kind == v1::RouteKind::Exit);
+    let (mut exit_v4, mut exit_v6) = (false, false);
+    for route in &snapshot.routes {
+        if route.via == local
+            && route.kind == v1::RouteKind::Exit
+            && route.mode == v1::RouteAdvertisementMode::Nat
+        {
+            if route.destination.addr().is_ipv4() {
+                exit_v4 = true;
+            } else {
+                exit_v6 = true;
+            }
+        }
+    }
+    let authorized_family = |prefix: &ipnet::IpNet| {
+        if prefix.addr().is_ipv4() {
+            exit_v4
+        } else {
+            exit_v6
+        }
+    };
     effective.forwarding.exit_gateway =
-        base.forwarding.exit_gateway && exit_capability && exit_advertised;
-    if !effective.forwarding.exit_gateway {
+        base.forwarding.exit_gateway && exit_capability && (exit_v4 || exit_v6);
+    if effective.forwarding.exit_gateway {
+        let sources = &mut effective.forwarding.exit_gateway_sources;
+        if base.forwarding.exit_gateway_controller_sources {
+            *sources = snapshot
+                .routes
+                .iter()
+                .filter(|route| route.kind == v1::RouteKind::Overlay && route.via != local)
+                .map(|route| route.destination)
+                .filter(authorized_family)
+                .collect();
+            sources.sort_unstable();
+            sources.dedup();
+        } else {
+            sources.retain(authorized_family);
+        }
+        effective.forwarding.exit_gateway = !sources.is_empty();
+    } else {
         effective.forwarding.exit_gateway_sources.clear();
     }
 
@@ -1708,6 +1763,64 @@ mod tests {
                 .iter()
                 .any(|route| route.kind == crate::config::RouteKind::Exit
                     && route.via_node == other.to_string())
+        );
+
+        let mut dynamic = base.clone();
+        dynamic.forwarding.exit_gateway_sources.clear();
+        dynamic.forwarding.exit_gateway_controller_sources = true;
+        let mut scoped = snapshot.clone();
+        scoped.routes.extend([
+            route(
+                5,
+                "100.96.0.1/32".parse().unwrap(),
+                local,
+                v1::RouteKind::Overlay,
+                v1::RouteAdvertisementMode::Unspecified,
+            ),
+            route(
+                6,
+                "100.96.0.2/32".parse().unwrap(),
+                selected,
+                v1::RouteKind::Overlay,
+                v1::RouteAdvertisementMode::Unspecified,
+            ),
+            route(
+                7,
+                "fd00::3/128".parse().unwrap(),
+                other,
+                v1::RouteKind::Overlay,
+                v1::RouteAdvertisementMode::Unspecified,
+            ),
+            route(
+                8,
+                "::/0".parse().unwrap(),
+                local,
+                v1::RouteKind::Exit,
+                v1::RouteAdvertisementMode::Routed,
+            ),
+        ]);
+        let effective = controller_effective_config(&dynamic, &scoped, local);
+        assert!(effective.forwarding.exit_gateway);
+        assert_eq!(
+            effective.forwarding.exit_gateway_sources,
+            ["100.96.0.2/32".parse::<IpNet>().unwrap()]
+        );
+        scoped.routes.last_mut().unwrap().mode = v1::RouteAdvertisementMode::Nat;
+        let effective = controller_effective_config(&dynamic, &scoped, local);
+        assert_eq!(
+            effective.forwarding.exit_gateway_sources,
+            [
+                "100.96.0.2/32".parse::<IpNet>().unwrap(),
+                "fd00::3/128".parse::<IpNet>().unwrap()
+            ]
+        );
+        scoped
+            .routes
+            .retain(|route| route.kind != v1::RouteKind::Exit);
+        assert!(
+            !controller_effective_config(&dynamic, &scoped, local)
+                .forwarding
+                .exit_gateway
         );
 
         let switched = prepare_exit_base(

@@ -51,6 +51,7 @@ pub struct State {
     /// Current authenticated direct connections keyed by peer.
     pub direct: ArcSwap<HashMap<Id, DirectPath>>,
     authority: ArcSwapOption<Snapshot>,
+    exit_sources: ArcSwapOption<Vec<ipnet::IpNet>>,
     controller_managed: bool,
     local_node: Option<Id>,
 }
@@ -76,6 +77,7 @@ impl State {
             handles: ArcSwap::from_pointee(Handles::default()),
             direct: ArcSwap::from_pointee(HashMap::new()),
             authority: ArcSwapOption::empty(),
+            exit_sources: ArcSwapOption::empty(),
             controller_managed,
             local_node,
         }
@@ -173,6 +175,7 @@ impl State {
 
     /// Removes all dynamic authority, routes, relay handles, and direct paths.
     pub(crate) fn fail_close(&self) {
+        self.suspend_gateway();
         self.authority.store(None);
         self.routes.store(Arc::new(
             RoutingTable::compile(&[]).expect("empty routes compile"),
@@ -182,6 +185,27 @@ impl State {
             path.connection
                 .close(0_u32.into(), b"controller authority expired");
         }
+    }
+
+    pub(crate) fn suspend_gateway(&self) {
+        self.exit_sources.store(None);
+    }
+
+    pub(crate) fn set_gateway(&self, config: &crate::config::ForwardingConfig) {
+        self.exit_sources.store(
+            config
+                .exit_gateway
+                .then(|| Arc::new(config.exit_gateway_sources.clone())),
+        );
+    }
+
+    pub(crate) fn gateway_allows(&self, client_overlay: std::net::IpAddr) -> bool {
+        let scopes = self.exit_sources.load();
+        scopes.as_ref().is_some_and(|scopes| {
+            (!self.controller_managed
+                || self.authority.load().as_ref().is_some_and(|s| !s.expired()))
+                && crate::routing::locally_owned(scopes, client_overlay)
+        })
     }
 
     /// Checks the active controller ACL. Static configurations retain their

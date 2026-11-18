@@ -242,6 +242,38 @@ and the bytes of every rollback file across both image swaps. It checks
 QUIC and forced TCP fallback separately and verifies that local status
 reports the running image's build version.
 
+### Durable Linux exit gateway
+
+On an already enrolled Rust Linux node with a dedicated TUN and a known
+uplink, opt in by adding this section to the controller-managed config:
+
+```toml
+[forwarding]
+exit_gateway = true
+exit_gateway_controller_sources = true
+exit_output_interface = "eth0" # use the actual egress interface
+```
+
+Request an exit capability and a NAT default route through the controller.
+The gateway starts as an ordinary node and forwards only after the route is
+approved. It uses the controller's peer overlay host addresses, only in the
+approved IP families; the network ACL still applies. Withdrawing the route
+removes its forwarding rules without a daemon restart. Do not configure static
+exit source ranges alongside controller-derived sources.
+
+Run the dedicated packet gate on an isolated Linux lab with root, TUN and
+nftables. Use `LANEWAY_NODE_TEST_CONTROLLER=rust` to repeat it with the Rust
+controller and relay:
+
+```sh
+sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_DURABLE_EXIT=1 \
+  ./integration/rust-controller-node-netns.sh
+```
+
+This is a pre-enrolled durable native gateway. The packaged Go exit image,
+routed exit mode, and the shared-host ephemeral WireGuard exit are not part
+of this gate.
+
 ### Verified on the local ARM64 Linux VM
 
 - Direct and relayed IPv4/IPv6 packets between the Go and Rust node binaries,

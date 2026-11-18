@@ -514,6 +514,10 @@ pub struct ForwardingConfig {
     /// Exact overlay sources permitted to use this exit gateway.
     #[serde(default)]
     pub exit_gateway_sources: Vec<IpNet>,
+    /// Derive Exit NAT sources from the current controller-approved overlay
+    /// host routes, instead of maintaining a static source allowlist.
+    #[serde(default)]
+    pub exit_gateway_controller_sources: bool,
     /// Native public interface for exit NAT/NAT66.
     #[serde(default)]
     pub exit_output_interface: Option<String>,
@@ -549,6 +553,16 @@ pub struct ForwardingConfig {
     pub dns_state_file: PathBuf,
 }
 
+impl ForwardingConfig {
+    pub(crate) fn rule_count(&self) -> usize {
+        let subnet = self.subnet_routes.len().saturating_mul(3);
+        let exit = self.exit_gateway_sources.len().saturating_mul(3);
+        subnet
+            .saturating_add(exit)
+            .saturating_add(if self.exit_gateway { 2 } else { 0 })
+    }
+}
+
 impl Default for ForwardingConfig {
     fn default() -> Self {
         Self {
@@ -557,6 +571,7 @@ impl Default for ForwardingConfig {
             owned_prefixes: Vec::new(),
             subnet_routes: Vec::new(),
             exit_gateway_sources: Vec::new(),
+            exit_gateway_controller_sources: false,
             exit_output_interface: None,
             exit_client: ExitClientConfig::default(),
             max_rules: default_max_kernel_rules(),
@@ -897,9 +912,18 @@ impl Config {
                 "forwarding.exit_gateway_sources[{index}] is duplicate"
             );
         }
+        if forwarding.exit_gateway_controller_sources {
+            ensure!(
+                self.controller.is_some()
+                    && forwarding.exit_gateway
+                    && forwarding.exit_gateway_sources.is_empty(),
+                "controller Exit sources require a managed gateway without static sources"
+            );
+        }
         if forwarding.exit_gateway {
             ensure!(
-                !forwarding.exit_gateway_sources.is_empty(),
+                !forwarding.exit_gateway_sources.is_empty()
+                    || forwarding.exit_gateway_controller_sources,
                 "exit_gateway requires forwarding.exit_gateway_sources"
             );
             let interface = forwarding
@@ -988,10 +1012,8 @@ impl Config {
                 "exit routes require explicit forwarding.exit_client.enabled"
             );
         }
-        let subnet_rules = forwarding.subnet_routes.len().saturating_mul(3);
-        let exit_rules = forwarding.exit_gateway_sources.len().saturating_mul(3);
         ensure!(
-            subnet_rules.saturating_add(exit_rules) <= forwarding.max_rules,
+            forwarding.rule_count() <= forwarding.max_rules,
             "forwarding rules exceed max_rules"
         );
         Ok(())

@@ -448,7 +448,7 @@ impl DirectManager {
             let routes = self.state.routes.load();
             if !routes.authorizes_source(peer, meta.source)
                 || (!self.state.owns(&self.owned, meta.destination)
-                    && !self.config.forwarding.exit_gateway)
+                    && !self.state.gateway_allows(meta.source))
             {
                 Metrics::increment(&self.metrics.invalid_drops);
                 Metrics::increment(&self.metrics.auth_drops);

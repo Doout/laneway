@@ -34,6 +34,7 @@ declare -A active_processes=()
 last_pid=""
 link_index=0
 node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
+test_durable_exit="${LANEWAY_NODE_TEST_DURABLE_EXIT:-0}"
 case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 
 cleanup() {
@@ -317,6 +318,8 @@ fi
 node_endpoint="${controller_endpoint}"
 node_quic_endpoint="${controller_quic_endpoint}"
 node_server_name="10.254.0.1"
+gateway_endpoint="${node_endpoint}"
+gateway_server_name="${node_server_name}"
 native_controller_pid=""
 relay_metrics=""
 management_connection=("${admin_connection[@]}")
@@ -341,6 +344,14 @@ if [[ "${node_controller}" == "rust" ]]; then
     '{ type nat hook prerouting priority dstnat; policy accept; }'
   ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
     iifname eth0 ip saddr "${location_node_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
+  if [[ "${test_durable_exit}" == "1" ]]; then
+    gateway_location_ip="81.2.69.139"
+    ip -n "${gateway_ns}" address add "${gateway_location_ip}/28" dev eth0
+    ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
+      iifname eth0 ip saddr "${gateway_location_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
+    gateway_endpoint="${node_endpoint}"
+    gateway_server_name="${node_server_name}"
+  fi
   start_process "${controller_ns}" "${work_dir}/native-controller.log" \
     "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
     "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
@@ -467,6 +478,9 @@ reconnect_max = "500ms"
 quic_recovery_interval = "5s"
 [direct]
 listen = "0.0.0.0:4434"
+[forwarding.exit_client]
+authorized = true
+failure_mode = "closed"
 EOF
 
 echo "==> Rust node bootstraps and renews its certificate at the ${node_controller} controller"
@@ -524,6 +538,119 @@ else
 fi
 relay_pid="${last_pid}"
 wait_log "${relay_pid}" "${work_dir}/relay.log" "listening"
+if [[ "${test_durable_exit}" == "1" ]]; then
+  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
+    --node-id "${gateway_id}" --exit-node "${management_connection[@]}" >"${work_dir}/exit-capability.json"
+  cat >"${work_dir}/rust-gateway.toml" <<EOF
+mode = "node"
+socket_path = "${work_dir}/rust-gateway.sock"
+[identity]
+network_id = "${network_id}"
+node_id = "${gateway_id}"
+[tls]
+certificate = "${work_dir}/pki/gateway.crt"
+private_key = "${work_dir}/pki/gateway.key"
+ca = "${work_dir}/pki/ca.crt"
+[controller]
+endpoint = "${gateway_endpoint}"
+quic_endpoint = "${node_quic_endpoint}"
+server_name = "${gateway_server_name}"
+service_id = "${controller_service}"
+poll_interval = "100ms"
+timeout = "3s"
+[tun]
+name = "lane0"
+mtu = 1280
+configure = true
+[relay]
+address = "10.254.0.2:4433"
+server_name = "10.254.0.2"
+service_id = "${relay_service}"
+[forwarding]
+exit_gateway = true
+exit_gateway_controller_sources = true
+exit_output_interface = "lan1"
+EOF
+  echo "==> Rust durable exit boots before approval and leaves the host unchanged"
+  start_process "${gateway_ns}" "${work_dir}/rust-gateway.log" env RUST_LOG=info \
+    "${work_dir}/rust-node" --config "${work_dir}/rust-gateway.toml"
+  gateway_pid="${last_pid}"
+  wait_log "${gateway_pid}" "${work_dir}/rust-gateway.log" "native Rust Laneway agent started"
+  wait_relay_sessions 2
+  gateway_table() {
+    ip netns exec "${gateway_ns}" nft list table inet laneway_rs_exit
+  }
+  gateway_forwarding() {
+    ip netns exec "${gateway_ns}" sysctl -n net.ipv4.ip_forward
+  }
+  assert_gateway_inactive() {
+    if gateway_table >/dev/null 2>&1 || [[ "$(gateway_forwarding)" != "0" ]]; then
+      echo "ERROR: inactive exit left forwarding state installed" >&2
+      return 1
+    fi
+  }
+  gateway_connection=(
+    --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt"
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
+    --cert "${work_dir}/pki/gateway.crt" --key "${work_dir}/pki/gateway.key"
+  )
+  approve_exit() {
+    local response
+    response="$(ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" route advertise 0.0.0.0/0 \
+      --kind exit --mode nat "${gateway_connection[@]}")"
+    exit_route_id="$(printf '%s\n' "${response}" | json_string_field route_id)"
+    [[ "${exit_route_id}" =~ ^[0-9a-f]{32}$ ]]
+    ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route approve \
+      --route-id "${exit_route_id}" "${management_connection[@]}" >"${work_dir}/exit-approval.json"
+    for _ in $(seq 1 200); do
+      if gateway_table 2>/dev/null | grep -Fq "ip saddr ${rust_address}"; then
+        break
+      fi
+      sleep 0.05
+    done
+    gateway_table | grep -Fq "ip saddr ${rust_address}"
+    gateway_table | grep -Fq 'laneway-rust-exit-denied'
+    [[ "$(gateway_forwarding)" == "1" ]]
+  }
+  assert_gateway_inactive
+  if "${work_dir}/laneway" exit use "${gateway_id}" --socket "${work_dir}/rust.sock" >/dev/null 2>&1; then
+    echo "ERROR: an unapproved exit was selected" >&2
+    exit 1
+  fi
+  echo "==> approval installs a scoped NAT exit and forwards real overlay traffic"
+  approve_exit
+  for _ in $(seq 1 120); do
+    if "${work_dir}/laneway" exit use "${gateway_id}" --socket "${work_dir}/rust.sock" >"${work_dir}/exit-selection.log" 2>&1; then
+      break
+    fi
+    sleep 0.05
+  done
+  grep -q 'selected exit node' "${work_dir}/exit-selection.log"
+  udp_success 9721 rust-exit-approved
+  echo "==> withdrawal removes outgoing NAT and restores the host forwarding baseline"
+  ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
+    --route-id "${exit_route_id}" "${gateway_connection[@]}" >"${work_dir}/exit-withdrawal.json"
+  for _ in $(seq 1 200); do
+    if ! gateway_table >/dev/null 2>&1 && [[ "$(gateway_forwarding)" == "0" ]]; then
+      break
+    fi
+    sleep 0.05
+  done
+  assert_gateway_inactive
+  udp_denied 9722 rust-exit-withdrawn
+  echo "==> re-approval restores forwarding without restarting either Rust process"
+  approve_exit
+  udp_success 9723 rust-exit-restored
+  kill -0 "${rust_pid}" "${gateway_pid}"
+  stop_process "${gateway_pid}"
+  assert_gateway_inactive
+  if ip -n "${gateway_ns}" link show lane0 >/dev/null 2>&1; then
+    echo "ERROR: gateway left a TUN device after shutdown" >&2
+    exit 1
+  fi
+  echo "PASS: durable Rust exit forwards only while approved by the ${node_controller} controller"
+  exit 0
+fi
 start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/lanewayd" \
   -config "${work_dir}/gateway.toml" -diagnostics 127.0.0.1:6061
 gateway_pid="${last_pid}"

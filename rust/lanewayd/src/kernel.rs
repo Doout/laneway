@@ -16,7 +16,8 @@ use crate::{
     config::{Config, ExitFailureMode, ForwardMode, RouteKind, SubnetForwardConfig},
     dns::DnsManager,
     nft_state::{
-        self, Chain, Rule, Shape, accept, masquerade, match_ct_states, match_meta, match_prefix,
+        self, Chain, Rule, Shape, accept, drop_packet, masquerade, match_ct_states, match_meta,
+        match_prefix,
     },
 };
 
@@ -945,6 +946,10 @@ fn forwarding_keys(config: &Config) -> BTreeSet<&'static str> {
 }
 
 fn table_plans(config: &Config, session: &str) -> Result<Vec<TablePlan>> {
+    ensure!(
+        config.forwarding.rule_count() <= config.forwarding.max_rules,
+        "forwarding rules exceed max_rules"
+    );
     let mut plans = Vec::new();
     if config.forwarding.subnet_router {
         plans.push(subnet_table(config, session)?);
@@ -1064,7 +1069,20 @@ fn exit_table(config: &Config, session: &str) -> Result<TablePlan> {
         .forwarding
         .exit_gateway_sources
         .iter()
-        .flat_map(|prefix| exit_rules(config, output, *prefix));
+        .flat_map(|prefix| exit_rules(config, output, *prefix))
+        .chain(
+            [(&*config.tun.name, output), (output, &*config.tun.name)].map(|(input, output)| {
+                Rule {
+                    chain: FORWARD_CHAIN.to_owned(),
+                    comment: "laneway-rust-exit-denied".to_owned(),
+                    expressions: vec![
+                        match_meta("iifname", input),
+                        match_meta("oifname", output),
+                        drop_packet(),
+                    ],
+                }
+            }),
+        );
     build_table(&config.forwarding.exit_table, marker, session, true, rules)
 }
 
@@ -1167,6 +1185,8 @@ fn rule_command(table: &str, rule: &Rule) -> Result<String> {
     for expression in &rule.expressions {
         if expression == &accept() {
             parts.push("accept".to_owned());
+        } else if expression == &drop_packet() {
+            parts.push("drop".to_owned());
         } else if expression == &masquerade() {
             parts.push("masquerade".to_owned());
         } else if expression == &match_ct_states() {
@@ -1186,9 +1206,24 @@ fn rule_command(table: &str, rule: &Rule) -> Result<String> {
                     right.as_str().unwrap_or_default()
                 ));
             } else if let Some(payload) = left.get("payload") {
-                let prefix = right.get("prefix").context("prefix match missing")?;
+                let destination = if let Some(address) = right.as_str() {
+                    address.to_owned()
+                } else {
+                    let prefix = right.get("prefix").context("prefix match missing")?;
+                    format!(
+                        "{}/{}",
+                        prefix
+                            .get("addr")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default(),
+                        prefix
+                            .get("len")
+                            .and_then(|value| value.as_u64())
+                            .unwrap_or_default()
+                    )
+                };
                 parts.push(format!(
-                    "{} {} {}/{}",
+                    "{} {} {destination}",
                     payload
                         .get("protocol")
                         .and_then(|value| value.as_str())
@@ -1196,14 +1231,6 @@ fn rule_command(table: &str, rule: &Rule) -> Result<String> {
                     payload
                         .get("field")
                         .and_then(|value| value.as_str())
-                        .unwrap_or_default(),
-                    prefix
-                        .get("addr")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or_default(),
-                    prefix
-                        .get("len")
-                        .and_then(|value| value.as_u64())
                         .unwrap_or_default()
                 ));
             } else {
