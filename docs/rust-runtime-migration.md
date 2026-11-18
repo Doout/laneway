@@ -71,6 +71,11 @@ the service but protected from writes under `/etc/laneway`. Check it with
 node before starting `lanewayd-rs.service`; both use the same local socket and
 must not run together. Roll back by stopping the Rust unit before starting
 `lanewayd.service` with its unchanged Go configuration.
+For a controller-managed standalone relay, base `/etc/laneway/relay-rust.toml`
+on the packaged `relay-controller.toml` example. For native workload
+renewal, add `renewal_dir = "/var/lib/laneway-relay/workload"` to its TLS
+table when using a Rust controller. The relay keeps its read-only seed files
+under `/etc/laneway` and writes the new credential into private runtime state.
 
 To build and verify an unsigned preview on a Linux lab host, set `arch` to its
 native architecture:
@@ -107,12 +112,18 @@ The release builds run `integration/rust-release-systemd.sh` on native AMD64
 and ARM64 runners. It extracts the actual archive binaries and runs the
 isolated systemd packet gate against both the Go and Rust controller/relay.
 It also stages the package with its installer and runs the ordinary
-`lanewayd-rs.service` with its packaged sandbox and service account. The
-ordinary-node test requires certificate renewal, traffic to a Go peer,
-an authenticated local health probe, and socket and tunnel cleanup.
-The packaged ordinary-node unit passed on both native Linux architectures
-with unsigned lab archives and left no service account or credentials behind.
-It also redeems a real one-use invitation through Rust HTTPS discovery and
+`lanewayd-rs.service` against both controller implementations. The installed
+node must renew its certificate, exchange traffic with a Go peer, pass a
+local health probe, and remove the socket and tunnel on shutdown. With the Rust
+controller, the test also runs `laneway-relay-rs.service`, checks its private
+renewal cache, and verifies a fresh authenticated TLS connection receives the
+replacement leaf while the seed files remain unchanged.
+Both installed units passed on native Linux AMD64 and ARM64 with unsigned
+lab builds and left no service account or credentials behind. AMD64 used
+the `0.0.9102` archive for all Rust services; ARM64 paired the packaged node
+and relay with a newer `0.0.9100` Rust controller.
+
+The release gate also redeems a real one-use invitation through Rust HTTPS discovery and
 enrollment, rejects a replay, and forwards traffic using the configuration
 and protected credentials produced by the packaged Go enrollment CLI. It
 checks that the archived bootstrap matches the one exercised by the test.

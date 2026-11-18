@@ -5,8 +5,12 @@ packaged_node_owned=false
 packaged_node_user=false
 packaged_node_group=false
 packaged_node_started=false
+packaged_relay_started=false
 packaged_node_unit=/run/systemd/system/lanewayd-rs.service
 packaged_node_dropin=/run/systemd/system/lanewayd-rs.service.d
+packaged_relay_unit=/run/systemd/system/laneway-relay-rs.service
+packaged_relay_dropin=/run/systemd/system/laneway-relay-rs.service.d
+packaged_relay_log=/run/laneway-relay-fixture.log
 
 cleanup_packaged_node() {
   [[ $packaged_node_owned == true ]] || return 0
@@ -18,6 +22,20 @@ cleanup_packaged_node() {
     packaged_node_started=false
   fi
   systemctl reset-failed lanewayd-rs.service 2>/dev/null || true
+  if [[ $packaged_relay_started == true ]]; then
+    systemctl stop laneway-relay-rs.service || {
+      echo 'Cannot stop the fixture relay; retain its files for lab inspection' >&2
+      return 1
+    }
+    packaged_relay_started=false
+  fi
+  if [[ $packaged_relay == 1 ]]; then
+    systemctl reset-failed laneway-relay-rs.service 2>/dev/null || true
+    for path in "$packaged_relay_unit" "$packaged_relay_dropin" "$packaged_relay_log" \
+      /usr/local/sbin/laneway-relay-rs /var/lib/laneway-relay /run/laneway-relay; do
+      if [[ -e "$path" ]]; then find "$path" -depth -delete; fi
+    done
+  fi
   for path in "$packaged_node_unit" "$packaged_node_dropin" /usr/local/sbin/lanewayd-rs \
     /etc/laneway /run/laneway /var/lib/laneway; do
     if [[ -e "$path" ]]; then find "$path" -depth -delete; fi
@@ -26,6 +44,56 @@ cleanup_packaged_node() {
   if [[ $packaged_node_user == true ]]; then userdel laneway; fi
   if [[ $packaged_node_group == true ]] && getent group laneway >/dev/null; then groupdel laneway; fi
   packaged_node_owned=false
+}
+
+start_packaged_relay() {
+  local installed="$packaged_node/usr/local" seed="$work_dir/relay-seed" pid hashes old_leaf relay_leaf
+  local log="$packaged_relay_log" renewed=/var/lib/laneway-relay/workload/relay-service.pem
+  "$work_dir/laneway" pki relay --ca-cert "$work_dir/pki/ca.crt" --ca-key "$work_dir/pki/ca.key" \
+    --network-id "$network_id" --service-id "$relay_service" --ip 10.254.0.2 --validity 39s \
+    --out-cert "$seed.crt" --out-key "$seed.key" >/dev/null
+  install -m 0440 -o root -g laneway "$seed.crt" /etc/laneway/relay.crt
+  install -m 0440 -o root -g laneway "$seed.key" /etc/laneway/relay.key
+  hashes=$(sha256sum /etc/laneway/relay.{crt,key})
+  old_leaf=$(openssl x509 -noout -serial -in /etc/laneway/relay.crt)
+  install -m 0755 "$installed/sbin/laneway-relay-rs" /usr/local/sbin/laneway-relay-rs
+  install -m 0644 "$installed/lib/systemd/system/laneway-relay-rs.service" "$packaged_relay_unit"
+  mkdir "$packaged_relay_dropin"
+  sed -e "s@$work_dir/relay-state@/var/lib/laneway-relay@" -e "s@$work_dir/relay.sock@/run/laneway-relay/relay.sock@" \
+    -e "s@$work_dir/pki/relay.crt@/etc/laneway/relay.crt@" -e "s@$work_dir/pki/relay.key@/etc/laneway/relay.key@" \
+    -e "s@$work_dir/pki/ca.crt@/etc/laneway/ca.crt@" \
+    -e '/^\[tls\]/a renewal_dir = "/var/lib/laneway-relay/workload"' \
+    "$work_dir/relay.toml" >"$work_dir/installed-relay.toml"
+  printf '\n[tcp_fallback]\nlisten = "10.254.0.2:8444"\n' >>"$work_dir/installed-relay.toml"
+  install -m 0440 -o root -g laneway "$work_dir/installed-relay.toml" /etc/laneway/relay-rust.toml
+  cat >"$packaged_relay_dropin/fixture.conf" <<EOF
+[Service]
+NetworkNamespacePath=/run/netns/$relay_ns
+Environment=RUST_LOG=info
+StandardOutput=append:$log
+StandardError=inherit
+EOF
+  systemctl daemon-reload
+  packaged_relay_started=true
+  systemctl start laneway-relay-rs.service
+  pid=$(systemctl show --property=MainPID --value laneway-relay-rs.service)
+  [[ $pid =~ ^[1-9][0-9]*$ ]]
+  wait_log "$pid" "$log" 'renewed internal relay TLS certificate'
+  [[ $(readlink "/proc/$pid/exe") == /usr/local/sbin/laneway-relay-rs &&
+    $(awk '/^Uid:/ {print $3}' "/proc/$pid/status") == "$(id -u laneway)" ]]
+  [[ $(sha256sum /etc/laneway/relay.{crt,key}) == "$hashes" &&
+    $(stat -c '%u:%g:%a' "$renewed") == "$(id -u laneway):$(id -g laneway):600" ]]
+  relay_leaf=$(openssl x509 -noout -serial -in "$renewed")
+  [[ $relay_leaf != "$old_leaf" ]]
+  # A client with a signed node certificate must receive that same replacement
+  # leaf on a fresh connection; do not accept an on-disk-only renewal.
+  ip netns exec "$gateway_ns" timeout 5 openssl s_client \
+    -connect 10.254.0.2:8444 -alpn laneway-fallback/1 -verify_ip 10.254.0.2 -verify_return_error \
+    -CAfile "$work_dir/pki/ca.crt" -cert "$work_dir/pki/gateway.crt" -key "$work_dir/pki/gateway.key" \
+    </dev/null >"$work_dir/relay-handshake.log" 2>&1 ||
+    { tail -30 "$work_dir/relay-handshake.log" >&2; return 1; }
+  [[ $(openssl x509 -noout -serial -in "$work_dir/relay-handshake.log") == "$relay_leaf" ]]
+  echo 'PASS: packaged systemd relay renewed its private workload bundle and served the replacement TLS leaf.'
 }
 
 check_packaged_node() {
@@ -46,6 +114,15 @@ check_packaged_node() {
   fi
   [[ -x "$installed/sbin/lanewayd-rs" && -x "$installed/sbin/laneway-healthcheck-rs" &&
     -f "$installed/lib/systemd/system/lanewayd-rs.service" ]] || return 1
+  if [[ $packaged_relay == 1 ]]; then
+    [[ $(systemctl show --property=LoadState --value laneway-relay-rs.service) == not-found &&
+      $(systemctl show --property=LoadState --value laneway-relay.service) == not-found ]] || return 1
+    for path in "$packaged_relay_unit" "$packaged_relay_dropin" "$packaged_relay_log" \
+      /usr/local/sbin/laneway-relay-rs /var/lib/laneway-relay /run/laneway-relay; do
+      [[ ! -e "$path" && ! -L "$path" ]] || { echo "refusing to replace $path" >&2; return 1; }
+    done
+    [[ -x "$installed/sbin/laneway-relay-rs" && -f "$installed/lib/systemd/system/laneway-relay-rs.service" ]] || return 1
+  fi
 
   packaged_node_owned=true
   groupadd --system laneway
@@ -74,8 +151,12 @@ StandardError=inherit
 EOF
   systemctl daemon-reload
 
-  start_process "$relay_ns" "$work_dir/relay.log" "$work_dir/laneway-relay" -config "$work_dir/relay.toml"
-  wait_log "$last_pid" "$work_dir/relay.log" listening
+  if [[ $packaged_relay == 1 ]]; then
+    start_packaged_relay
+  else
+    start_process "$relay_ns" "$work_dir/relay.log" "$work_dir/laneway-relay" -config "$work_dir/relay.toml"
+    wait_log "$last_pid" "$work_dir/relay.log" listening
+  fi
   start_process "$gateway_ns" "$work_dir/gateway.log" "$work_dir/lanewayd" -config "$work_dir/gateway.toml"
   wait_log "$last_pid" "$work_dir/gateway.log" interface=lane0
   before=$("$work_dir/netprobe" certificate-info -cert "$cert")

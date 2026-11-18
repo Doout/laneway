@@ -66,14 +66,17 @@ run_packet_gate go 1 0
 run_packet_gate rust 1 0
 run_packet_gate rust 0 1
 
-# Run the packaged ordinary-node unit, not the transient WireGuard exit unit,
-# under the service account shipped in the installer. Only the lab network and
-# log location will be overridden.
+# Run the packaged ordinary-node and relay units, not the transient WireGuard
+# exit unit. Only the lab network and log location will be overridden.
 tar -xzf "$archive" -C "$probe_dir"
 DESTDIR="$probe_dir/installed" PREFIX=/usr/local sh "$probe_dir/laneway/install.sh" --rust-preview
-env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_CONTROLLER=go LANEWAY_NODE_TEST_WIREGUARD=0 \
-  LANEWAY_NODE_WIREGUARD_DRAIN=0 LANEWAY_NODE_WIREGUARD_CREDENTIALS=0 \
-  LANEWAY_NODE_WIREGUARD_SYSTEMD=0 LANEWAY_NODE_WIREGUARD_INVITATION=0 \
-  LANEWAY_NODE_TEST_PACKAGED_INSTALL="$probe_dir/installed" \
-  LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$probe_dir/go" LANEWAY_NODE_TEST_RUST_RUNTIME_DIR="$probe_dir/rust" \
-  bash "$root/integration/rust-controller-node-netns.sh"
+run_installed_gate() {
+  env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_CONTROLLER="$1" LANEWAY_NODE_TEST_WIREGUARD=0 \
+    LANEWAY_NODE_WIREGUARD_DRAIN=0 LANEWAY_NODE_WIREGUARD_CREDENTIALS=0 \
+    LANEWAY_NODE_WIREGUARD_SYSTEMD=0 LANEWAY_NODE_WIREGUARD_INVITATION=0 \
+    LANEWAY_NODE_TEST_PACKAGED_INSTALL="$probe_dir/installed" LANEWAY_NODE_TEST_PACKAGED_RELAY="$2" \
+    LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$probe_dir/go" LANEWAY_NODE_TEST_RUST_RUNTIME_DIR="$probe_dir/rust" \
+    bash "$root/integration/rust-controller-node-netns.sh"
+}
+run_installed_gate go 0
+run_installed_gate rust 1

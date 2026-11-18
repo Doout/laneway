@@ -48,14 +48,19 @@ test_credentials="${LANEWAY_NODE_WIREGUARD_CREDENTIALS:-0}"
 test_systemd="${LANEWAY_NODE_WIREGUARD_SYSTEMD:-0}"
 test_invitation="${LANEWAY_NODE_WIREGUARD_INVITATION:-0}"
 packaged_node="${LANEWAY_NODE_TEST_PACKAGED_INSTALL:-}"
+packaged_relay="${LANEWAY_NODE_TEST_PACKAGED_RELAY:-0}"
 if [[ -n "${packaged_node}" ]]; then
-  [[ "${packaged_node}" == /* && "${node_controller}:${test_wireguard}:${test_durable_exit}" == go:0:0 &&
+  [[ "${packaged_node}" == /* && "${test_wireguard}:${test_durable_exit}" == 0:0 &&
+     ( "${node_controller}:${packaged_relay}" == go:0 || "${node_controller}:${packaged_relay}" == rust:1 ) &&
      "$(cat /proc/1/comm)" == systemd &&
      -f /run/.laneway-isolated-systemd-lab && ! -L /run/.laneway-isolated-systemd-lab &&
      "$(stat -c '%u:%a' /run/.laneway-isolated-systemd-lab)" == 0:600 ]] ||
-    { echo "Packaged node gate requires a marked disposable systemd VM and the Go compatibility fixture" >&2; exit 1; }
+    { echo "Packaged services require a marked disposable systemd VM and a supported controller fixture" >&2; exit 1; }
   # shellcheck source=integration/rust-lab/packaged-node.sh
   source "${repo_root}/integration/rust-lab/packaged-node.sh"
+elif [[ "${packaged_relay}" != 0 ]]; then
+  echo 'Packaged relay mode requires an installed package fixture' >&2
+  exit 1
 fi
 if [[ "${test_dns}" == "1" ]]; then
   [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
@@ -110,6 +115,10 @@ cleanup() {
   if [[ -n "${packaged_node}" ]]; then
     if [[ $result != 0 && $packaged_node_owned == true ]]; then
       tail -n 40 /var/lib/laneway/fixture.log 2>/dev/null || true
+      if [[ $packaged_relay == 1 ]]; then
+        tail -n 40 "$packaged_relay_log" 2>/dev/null || true
+        systemctl status --no-pager laneway-relay-rs.service >&2 || true
+      fi
       systemctl status --no-pager lanewayd-rs.service >&2 || true
     fi
     cleanup_packaged_node || true
@@ -488,13 +497,21 @@ if [[ "${node_controller}" == "rust" ]]; then
     '{ type nat hook prerouting priority dstnat; policy accept; }'
   ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
     iifname eth0 ip saddr "${location_node_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
-  if [[ "${test_durable_exit}" == "1" || "${test_invitation}" == "1" || "${test_topology}" == "1" ]]; then
+  if [[ "${test_durable_exit}" == "1" || "${test_invitation}" == "1" || "${test_topology}" == "1" ||
+        "${packaged_relay}" == "1" ]]; then
     gateway_location_ip="81.2.69.139"
     ip -n "${gateway_ns}" address add "${gateway_location_ip}/28" dev eth0
     ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
       iifname eth0 ip saddr "${gateway_location_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
     gateway_endpoint="${node_endpoint}"
     gateway_server_name="${node_server_name}"
+  fi
+  if [[ "${packaged_relay}" == "1" ]]; then
+    stop_process "${controller_pid}"
+    gateway_config_endpoint="${node_endpoint}"
+    gateway_quic_endpoint="${node_quic_endpoint}"
+    ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
+      iifname eth0 ip saddr 81.2.69.140 ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
   fi
   discovery_args=()
   if [[ "${test_invitation}" == "1" ]]; then
