@@ -235,6 +235,17 @@ dependent records while retaining audit history and disabled service
 identities. The HTTPS lab verifies both the Go and Rust views, including
 rollback when an audit write fails.
 
+The node-installer endpoint issues ten-minute, single-use enrollment tokens
+bound to the selected network, node name, and node, connector, or exit
+capability. It returns the existing systemd installer command; the lab
+redeems a Rust-issued connector token at the Go controller.
+
+The private bootstrap endpoints stage encrypted wrapper payloads in memory,
+publish after the issuance audit commits, and let an enabled relay fetch each
+bundle once over mTLS. The payload is never written to SQLite; expiry or a
+controller restart discards it. Serving the public bootstrap path and
+console through the Rust relay is a separate migration step.
+
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly
 granted `network.create`. The Rust transaction creates the IPv4 or dual-stack

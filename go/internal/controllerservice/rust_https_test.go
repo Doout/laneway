@@ -317,6 +317,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	t.Run("relay-management", func(t *testing.T) { testRustRelayManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("audit", func(t *testing.T) { testRustAudit(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("enrollment-issuance", func(t *testing.T) { testRustEnrollmentIssuance(t, f, client, goServer.URL, rustURL, cookie, csrf) })
+	t.Run("provisioning", func(t *testing.T) { testRustProvisioning(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("enrollment-redemption", func(t *testing.T) { testRustRedemption(t, f, client, rustURL, goServer.URL) })
 	t.Run("node-renewal", func(t *testing.T) { testRustRenewal(t, f, client, rustURL, goServer.URL) })
 	if err := f.store.LogoutAdministratorSession(t.Context(), adminauth.SessionSubject(session.PrincipalID, session.ID)); err != nil {

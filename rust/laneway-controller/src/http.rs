@@ -18,6 +18,7 @@ mod administrators;
 mod applications;
 mod audit;
 mod automation;
+mod bootstrap_bundles;
 mod endpoint_status;
 mod enroll;
 mod form;
@@ -25,6 +26,7 @@ mod login;
 mod management;
 mod mutations;
 mod node_configuration;
+mod node_installer;
 mod node_proto;
 mod node_routes;
 mod recovery;
@@ -53,6 +55,7 @@ pub struct State {
     enrollments: Arc<std::sync::Mutex<enroll::Limiter>>,
     applications: Arc<std::sync::Mutex<enroll::Limiter>>,
     allow_loopback_callbacks: bool,
+    bootstrap_bundles: Arc<bootstrap_bundles::Bundles>,
 }
 impl State {
     pub fn new(
@@ -73,6 +76,7 @@ impl State {
             enrollments: Default::default(),
             applications: Default::default(),
             allow_loopback_callbacks,
+            bootstrap_bundles: Default::default(),
             queries: Arc::new(Semaphore::new(8)),
             root: root.map(Arc::new),
             discovery: Default::default(),
@@ -300,6 +304,18 @@ async fn dispatch(
         return Err(malformed("administrator path must be canonical"));
     }
     let pieces: Vec<_> = path.split('/').collect();
+    match pieces.as_slice() {
+        ["", "v1", "admin", "networks", network, "node-installers"] => {
+            return node_installer::handle(req, state, id, network).await;
+        }
+        ["", "v1", "admin", "bootstrap-bundles"] => {
+            return bootstrap_bundles::create(req, state, id).await;
+        }
+        ["", "v1", "bootstrap-bundles", bundle] => {
+            return bootstrap_bundles::fetch(req, state, id, bundle).await;
+        }
+        _ => {}
+    }
     if state.workload_mtls_enabled {
         match pieces.as_slice() {
             ["", "v1", "routes"] => return node_routes::handle(req, state, id, None).await,

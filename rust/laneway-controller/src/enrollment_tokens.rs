@@ -91,6 +91,23 @@ pub struct IssuedEnrollmentToken {
     enabled_capabilities: Option<u64>,
 }
 
+impl IssuedEnrollmentToken {
+    pub fn installer_fields(&self) -> (&str, &str, i64) {
+        (
+            &self.token_id,
+            &self.enrollment_token,
+            self.expires_at_unix_seconds,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum InstallerKind {
+    Node,
+    Connector,
+    Exit,
+}
+
 fn serialize_secret<S: Serializer>(
     s: &Zeroizing<String>,
     serializer: S,
@@ -224,6 +241,41 @@ impl IssueEnrollmentToken {
 }
 
 impl SessionStore {
+    pub fn issue_node_installer(
+        &mut self,
+        token: &str,
+        csrf: Option<&str>,
+        network: Id,
+        name: String,
+        kind: InstallerKind,
+    ) -> Result<SessionReply<IssuedEnrollmentToken>> {
+        self.browser_write(
+            token,
+            csrf,
+            BrowserWrite::IssueEnrollment,
+            |tx, actor, all, now| {
+                if !all {
+                    check_network(tx, actor, network)?;
+                }
+                installer(tx, network, name, kind, "administrator", actor, now)
+            },
+        )
+    }
+
+    pub fn bearer_issue_node_installer(
+        &mut self,
+        header: &str,
+        root: Option<&RootCredential>,
+        network: Id,
+        name: String,
+        kind: InstallerKind,
+    ) -> Result<IssuedEnrollmentToken> {
+        self.bearer_write(header, root, |tx, actor, now| {
+            actor.authorize(tx, "enrollment.issue", Some(network))?;
+            installer(tx, network, name, kind, "service_principal", actor.id, now)
+        })
+    }
+
     pub fn issue_enrollment(
         &mut self,
         token: &str,
@@ -257,4 +309,27 @@ impl SessionStore {
             form.issue(tx, target, "service_principal", actor.id, now)
         })
     }
+}
+
+fn installer(
+    tx: &Transaction<'_>,
+    network: Id,
+    name: String,
+    kind: InstallerKind,
+    actor_kind: &str,
+    actor: Id,
+    now: i64,
+) -> Result<IssuedEnrollmentToken> {
+    let form = IssueEnrollmentToken {
+        requested_name: name,
+        label: String::from("node installer"),
+        expires_at_unix_seconds: now + 600,
+        enabled_capabilities: match kind {
+            InstallerKind::Node => 0,
+            InstallerKind::Connector => ROUTER,
+            InstallerKind::Exit => EXIT,
+        },
+        ..Default::default()
+    };
+    form.issue(tx, (network, None), actor_kind, actor, now)
 }
