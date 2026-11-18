@@ -180,6 +180,7 @@ func controlCommand() *cobra.Command {
 		{"status", "Show service health, active enrollments, and forwarding"},
 		{"update", "Update to the latest stable release"},
 		{"production-check", "Run fail-closed production checks"},
+		{"readiness", "Verify the running Rust release and public discovery"},
 		{"backup", "Create an encrypted recovery bundle"},
 		{"restore", "Restore an encrypted recovery bundle"},
 		{"upgrade", "Upgrade using a prepared release environment"},

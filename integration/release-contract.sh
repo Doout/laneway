@@ -115,7 +115,8 @@ for value in \
   'invite) acquire_lock; run_invite "$@" ;;' \
   'route) acquire_lock; run_route "$@" ;;' \
   'status) run_status "$@" ;;' \
-  'production-check) acquire_lock; run_production_check "$@" ;;'
+  'run_production_check "$@"' \
+  'use laneway-control readiness for Rust deployments'
 do
   require "$value" "$lane_workflow"
 done
@@ -125,7 +126,7 @@ done
 for value in 'age --encrypt' 'age --decrypt' 'unexpected recovery archive entry' 'generated/recovery' 'chown 0:0'; do
   require "$value" "$recovery_workflow"
 done
-for value in 'Release tag' 'image-digests.txt' 'production signature verification failed' 'PRODUCTION-CHECKLIST.md' 'LANEWAY_INSTALL_PROFILE' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup' 'control-plane.answers' 'save_answers'; do
+for value in 'Release tag' 'image-digests.txt' 'Rust release signature verification failed' 'PRODUCTION-CHECKLIST.md' 'LANEWAY_INSTALL_PROFILE' 'does not edit the host' 'prepare-control-plane.sh' 'initial encrypted backup' 'control-plane.answers' 'save_answers' 'LANEWAY_CONTROL_RUNTIME=rust' 'bootstrap.sh --rust'; do
   require "$value" "$installer"
 done
 for value in '/dev/shm' 'offline-root.tar.age' 'control-plane-input' 'pki verify-authority' 'Never copy laneway-recovery.identity'; do
@@ -150,7 +151,8 @@ require 'ephemeral-exit-bootstrap.sh' "$workflow"
 require 'ephemeral-exit' "$package_workflow"
 require 'verify-rust-release-runtime.sh' "$package_workflow"
 require 'verify-rust-release.sh' "$package_workflow"
-require 'sh deploy/compose/verify-rust-release.sh --prepare "$GITHUB_REF_NAME" dist' "$workflow"
+require 'sh deploy/compose/verify-rust-release.sh --install "$GITHUB_REF_NAME" dist' "$workflow"
+require 'set -- --control-tools' "$client_installer"
 require 'sh integration/rust-compose-release.sh' "$ci_workflow"
 require 'verified release does not contain the Rust Exit runtime' "$ephemeral_exit_bootstrap"
 require 'mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"' "$ephemeral_exit_bootstrap"

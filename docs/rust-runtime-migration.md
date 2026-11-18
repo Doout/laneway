@@ -7,8 +7,8 @@ operator CLI and lab tools can still be used without running a Go server.
 
 ## Release handoff
 
-The current tagged installer does not select Rust by default. Before shipping
-a Rust-first installer, verify the following on the candidate:
+This branch's fresh control-plane installer selects Rust. Before publishing
+or deploying it, verify the following on the signed candidate:
 
 1. Run the native release matrix on the release commit, including the Linux
    systemd packet tests and the installed macOS helper on Intel and Apple
@@ -20,6 +20,12 @@ a Rust-first installer, verify the following on the candidate:
    lab volume. Keep one controller writing to each database.
 3. Test one isolated workload before promoting. Verify the recovery procedure
    with the same Rust images that will serve the deployment.
+
+The isolated ARM64 installer rehearsal used fixture signatures and local
+images. The packaged host-tools install left no daemon or systemd units; the
+installer created an empty Rust deployment, verified authenticated inventory,
+generated a Rust shared-host exit invitation, and wrote an encrypted backup.
+Run `bash integration/rust-lab/installer-fresh.sh` on the marked lab to repeat.
 
 | Component | Starting point | Acceptance before switching the default |
 | --- | --- | --- |
@@ -34,9 +40,8 @@ The tagged release workflow builds Rust images alongside the legacy images:
 `ghcr.io/doout/laneway-node-rust`, `ghcr.io/doout/laneway-exit-node-rust`,
 and `ghcr.io/doout/lane-edge-rust`. Each release job targets AMD64 and ARM64,
 scans its build, signs its immutable digest, and adds it to the signed image
-manifest. This configuration does not switch the default deployment or make
-a local build a signed release. Pin the verified digests when staging a lab
-deployment, and keep the prior images and database backup for rollback.
+manifest. Existing installations are not changed by this workflow. A local
+build is not a signed release.
 The local ARM64 lab built all four new image targets and verified that
 their non-root Rust binaries reported the pinned build version. The tagged
 AMD64 build, signing, and publication were not exercised locally.

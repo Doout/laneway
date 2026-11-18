@@ -1,14 +1,14 @@
 # Control-plane deployment
 
-The Compose deployment runs the controller and relay as separate non-root
-containers. State and public relay certificates survive container replacement;
+The Compose deployment runs the Rust controller and relay as separate non-root
+containers. The Go operator CLI is a host tool, not a service. State and public relay certificates survive container replacement;
 the offline root CA key does not remain on the server.
 
 ## Requirements
 
 - Linux on AMD64 or ARM64
 - Docker Engine 26+ with Compose v2
-- `age`, `age-keygen`, `curl`, `getent`, `jq`, and `ss`
+- Python 3.11+, OpenSSL, `age`, `age-keygen`, `curl`, `getent`, `jq`, and `ss`
 - public DNS for the control-plane host
 - inbound TCP+UDP `8443`, UDP `4433`, and TCP `443`
 
@@ -20,48 +20,38 @@ Prepare DNS and firewall rules, replace the domain, then run:
 export LANEWAY_DOMAIN=lane.example.com; curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install.sh | sudo env LANEWAY_DOMAIN="$LANEWAY_DOMAIN" bash
 ```
 
-The installer verifies a stable release and pinned images, creates the PKI and
-configuration, starts the stack, and prints a recovery-kit path. Copy that
-directory off the server and remove the server copy after verifying it.
+The installer requires a signed release and verifies immutable image digests.
+It creates the PKI and configuration, starts Rust on an empty deployment, and
+prints the path to the initial encrypted backup and recovery kit. Copy them
+off the server and remove the on-host recovery kit after verifying the copy.
 
 Before production traffic:
 
 ```sh
-sudo laneway control production-check
-sudo laneway control status
+sudo laneway-control readiness
+sudo laneway-control status
 ```
 
 The first command is fail-closed. The installer does not change host DNS,
 firewall rules, routes, interfaces, or sysctls.
 
-For a Rust cutover rehearsal, download `checksums.txt`,
-`checksums.sigstore.json`, `image-digests.txt`, and `bootstrap-artifacts.toml`
-from the same stable tag.
-Run `sh verify-rust-release.sh vVERSION METADATA_DIRECTORY` with Cosign
-installed. The command verifies the release and all three Compose image
-signatures before printing the Rust settings. It does not pull or deploy images.
-Use the [Rust cutover checklist](../../docs/rust-runtime-migration.md#compose-cutover-rehearsal)
-to apply those settings on a disposable deployment first.
-After starting the Rust stack, run
-`sudo laneway-control --rust readiness METADATA_DIRECTORY` to check the
-running image digests, health, authenticated inventory, and discovery.
-Rehearse backup, restore, and rollback separately.
-On a running Rust stack, use `laneway-control --rust backup`. The updated
-wrapper and packaged Go upgrader refuse legacy lifecycle operations while a
-Rust controller, relay, or exit is active in the same Compose project.
+Readiness checks the running Rust image digests, health, authenticated
+inventory, and signed bootstrap artifacts served over public HTTPS. Allow
+time for the relay to obtain its first public certificate. The installer
+keeps the release metadata under `/opt/laneway/release-metadata`.
 
 ## Administrator access
 
 Create the first owner from a terminal on the control-plane host:
 
 ```sh
-sudo laneway control administrator bootstrap --username owner
+sudo laneway-control administrator bootstrap --username owner
 ```
 
 To recover an existing owner, supply its exact canonical username:
 
 ```sh
-sudo laneway control administrator recover --username owner
+sudo laneway-control administrator recover --username owner
 ```
 
 Both commands require root and a controlling terminal. They read the new
@@ -71,20 +61,6 @@ argv or environment variables and are not printed. Neither command creates a
 browser session; sign in normally after it succeeds. Recovery atomically
 replaces the password, re-enables the owner, and revokes its prior sessions and
 all outstanding administrator recovery grants.
-
-Rotate the static root credential with:
-
-```sh
-sudo laneway control administrator root-token rotate
-```
-
-The command atomically replaces
-`generated/secrets/admin.token` below the deployment directory (normally
-`/opt/laneway`), recreates the controller, and
-verifies that the new credential is accepted and the old credential is
-rejected. Existing file-based automation continues to use the same
-`--admin-token-file` path. See the operations guide for interrupted-rotation
-recovery.
 
 The browser console supports password-backed administrator sessions only.
 OIDC/SAML SSO and SCIM are unavailable and must remain disabled. Never expose
@@ -96,35 +72,18 @@ administrator API requests to the controller over its authenticated internal
 connection. TCP+UDP `8443` is the private controller transport for Laneway
 identities; ordinary browsers must not connect to it directly.
 
-## Update
-
-```sh
-sudo laneway control update
-```
-
-The updater verifies the release, takes an encrypted backup and a root-only
-database snapshot after quiescing the controller, then replaces the containers
-with health checks.
-If candidate startup fails after a database migration, it restores the prior
-image and configuration, replaces only the managed controller-state volume,
-and restores the snapshot through the prior controller image before restarting
-the stack. After a verified start, the snapshot is retained with the prior
-image and configuration as one checksummed release generation under the
-root-only lifecycle directory. A later explicit rollback restores that
-point-in-time database and therefore discards management changes made after the
-upgrade. An incomplete automatic recovery retains its protected source
-snapshot and reports the path. Deployment identity, PKI, endpoints, and host
-networking remain unchanged.
+Do not use the legacy `update`, `upgrade`, or `rollback` commands on a Rust
+deployment. They target the Go runtime and refuse to operate here.
 
 ## Docker Connector
 
 ```sh
-sudo laneway control invite --name office --docker --connector --bootstrap
+sudo laneway-control invite --name office --docker --connector --bootstrap
 ```
 
 Run the generated command within ten minutes. Its rate-limited URL is consumed
 by the first download; later requests return `404`. A one-shot container enrolls
-the digest-pinned scratch `lane-edge` image, then a clean runtime container starts
+the digest-pinned `lane-edge-rust` image, then a clean runtime container starts
 without the setup token, bootstrap key, or temporary mount.
 
 ## Backup and restore
@@ -132,7 +91,7 @@ without the setup token, bootstrap key, or temporary mount.
 Create a recovery bundle and copy it off-host:
 
 ```sh
-sudo laneway control backup
+sudo laneway-control backup
 sudo ls -l /opt/laneway/generated/recovery/
 ```
 
@@ -145,18 +104,24 @@ release, copy its packaged Compose directory to an empty `/opt/laneway`, then
 run:
 
 ```sh
-sudo /opt/laneway/laneway-control restore /trusted/recovery.age \
+sudo /opt/laneway/laneway-control --rust restore /trusted/recovery.age \
   --identity /trusted/laneway-recovery.identity
-sudo /opt/laneway/laneway-control init
+cd /opt/laneway
+sudo sh ./verify-rust-release.sh --install vVERSION /trusted/release-metadata
+```
+
+Compare the verified pins with the restored `.env` before starting. Then:
+
+```sh
+sudo docker compose --env-file .env -f compose.yaml -f compose.rust.yaml up -d --wait controller relay
+sudo ./laneway-control --rust readiness /trusted/release-metadata
 ```
 
 Transfer the bundle and age identity through separate trusted channels. Restore
 refuses existing deployment state, malformed archives, checksum failures, and a
 running controller. A bundle restores the root bearer captured when it was
-created. Immediately rotate that bearer after every restore, then create and
-store a fresh encrypted bundle. If suspected credential compromise prompted a
-rotation, quarantine and retire every pre-rotation bundle under the applicable
-retention policy. Test this procedure before relying on the deployment.
+created. Do not restore a bundle containing credentials you suspect were
+compromised. Test recovery on a separate host before relying on the deployment.
 
 ## Prepare keys on another host
 

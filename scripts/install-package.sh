@@ -30,10 +30,12 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 
 rust_preview=false
+control_tools=false
 case "$#:${1:-}" in
   0:) ;;
   1:--rust-preview) rust_preview=true ;;
-  *) echo "usage: sh install.sh [--rust-preview]" >&2; exit 2 ;;
+  1:--control-tools) control_tools=true ;;
+  *) echo "usage: sh install.sh [--rust-preview | --control-tools]" >&2; exit 2 ;;
 esac
 
 if [ -z "$destination_root" ] && [ "$(id -u)" -ne 0 ]; then
@@ -43,6 +45,21 @@ fi
 if [ "$prefix" != /usr/local ]; then
   echo "PREFIX must be /usr/local because the packaged systemd units use that path" >&2
   exit 1
+fi
+
+if [ "$control_tools" = true ]; then
+  for member in bin/laneway VERSION deploy/compose/install-control-plane.sh deploy/compose/compose.rust.yaml \
+    deploy/compose/prepare-rust.py deploy/compose/verify-rust-release.sh; do
+    [ -f "$script_dir/$member" ] && [ ! -L "$script_dir/$member" ] ||
+      { echo "control-plane tools missing packaged $member" >&2; exit 1; }
+  done
+  install -d -m 0755 "$bindir" "$sharedir/deploy/compose"
+  install -m 0755 "$script_dir/bin/laneway" "$bindir/laneway"
+  ln -sfn laneway "$bindir/lane"
+  install -m 0644 "$script_dir/VERSION" "$sharedir/VERSION"
+  cp -R "$script_dir/deploy/compose/." "$sharedir/deploy/compose/"
+  echo "Laneway $(cat "$script_dir/VERSION") control-plane tools installed; no host daemon or service unit installed."
+  exit 0
 fi
 
 rust_commands='laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs'

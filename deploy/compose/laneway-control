@@ -37,8 +37,8 @@ usage() {
   cat >&2 <<'EOF'
 usage: laneway-control [--rust] <init|user-token|invite|route|status|readiness|administrator|update|production-check|backup|restore|upgrade|rollback> [options]
 
-  --rust is supported with status, backup, restore and readiness.
-  laneway-control --rust readiness RELEASE_METADATA_DIRECTORY
+  New installations select Rust automatically. --rust selects a manually staged Rust stack.
+  readiness [RELEASE_METADATA_DIRECTORY]
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
@@ -1205,6 +1205,7 @@ run_administrator() {
       ;;
     'root-token rotate')
       [ "$#" -eq 2 ] || die "administrator root-token rotate accepts no arguments"
+      [ "$runtime" != rust ] || die "root-token rotation is not yet available for the Rust control plane"
       run_root_token_rotation
       ;;
     *) die "administrator requires bootstrap --username USERNAME, recover --username USERNAME, or root-token rotate" ;;
@@ -1283,6 +1284,13 @@ run_status() {
 
 connector_image_reference() {
   version=$(read_setting "$env_file" LANEWAY_VERSION)
+  if [ "$runtime" = rust ]; then
+    version=$(read_setting "$env_file" LANEWAY_RUST_VERSION) || return 1
+    connector_digest=$(read_setting "$env_file" LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST) || return 1
+    printf '%s\n' "$connector_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "invalid Rust connector image digest"
+    printf 'ghcr.io/doout/lane-edge-rust:%s@%s' "$version" "$connector_digest"
+    return
+  fi
 	if ! connector_digest=$(optional_setting "$env_file" LANEWAY_CONNECTOR_IMAGE_DIGEST); then
 		connector_digest=$(read_setting "$env_file" LANEWAY_EXIT_NODE_IMAGE_DIGEST)
 	fi
@@ -1541,9 +1549,11 @@ run_invite() {
     enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
     [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
     version=$(read_setting "$env_file" LANEWAY_VERSION)
+    exit_runtime=''
+    [ "$runtime" != rust ] || exit_runtime=' --runtime rust'
     printf '%s\n' "Run this immutable, RAM-only bootstrap on the shared Linux host; it prompts for the invitation:" >&2
-    printf "curl --fail --location --proto '=https' --proto-redir '=https' 'https://github.com/Doout/laneway/releases/download/v%s/ephemeral-exit-bootstrap.sh' | sudo env -i PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' /bin/bash -p -s -- --version 'v%s' --authority '%s' --name '%s' --max-runtime '%s'\n" \
-      "$version" "$version" "$server_name" "$name" "$session" >&2
+    printf "curl --fail --location --proto '=https' --proto-redir '=https' 'https://github.com/Doout/laneway/releases/download/v%s/ephemeral-exit-bootstrap.sh' | sudo env -i PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' /bin/bash -p -s -- --version 'v%s' --authority '%s' --name '%s' --max-runtime '%s'%s\n" \
+      "$version" "$version" "$server_name" "$name" "$session" "$exit_runtime" >&2
     printf '%s\n' "$enrollment_token"
     return
   fi
@@ -1928,6 +1938,14 @@ run_init() {
   "$base_dir/bootstrap.sh"
 }
 
+if [ -f "$env_file" ] && [ ! -L "$env_file" ]; then
+  installed_runtime=$(sed -n 's/^LANEWAY_CONTROL_RUNTIME=//p' "$env_file")
+  case "$installed_runtime" in
+    '') ;;
+    rust) runtime=rust ;;
+    *) die "invalid LANEWAY_CONTROL_RUNTIME in .env" ;;
+  esac
+fi
 if [ "${1:-}" = --rust ]; then
   runtime=rust
   shift
@@ -1935,8 +1953,8 @@ fi
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 if [ "$runtime" = rust ]; then
   case "$command" in
-    status|backup|restore|readiness|help|-h|--help) ;;
-    *) die "--rust supports status, backup, restore and readiness; refusing the Go lifecycle workflow" ;;
+    status|backup|restore|readiness|production-check|administrator|invite|user-token|api-token|route|help|-h|--help) ;;
+    *) die "refusing the Go lifecycle workflow on a Rust deployment" ;;
   esac
 fi
 case "$command" in
@@ -1950,11 +1968,12 @@ case "$command" in
     require_go_runtime "$1"
     ;;
   readiness)
-    [ "$runtime" = rust ] && [ "$#" -eq 1 ] || die "use --rust readiness RELEASE_METADATA_DIRECTORY"
+    [ "$runtime" = rust ] && [ "$#" -le 1 ] || die "use --rust readiness [RELEASE_METADATA_DIRECTORY]"
     [ "$(id -u)" -eq 0 ] || die "readiness must run as root"
-    python3 "$base_dir/prepare-rust.py" --readiness "$1"
+    cosign_command=$(cosign_verifier)
+    LANEWAY_COSIGN_BIN="$cosign_command" python3 "$base_dir/prepare-rust.py" --readiness "${1:-$base_dir/release-metadata}"
     run_status
-    echo "laneway-control: Rust readiness checks passed; verify recovery and rollback separately"
+    echo "laneway-control: Rust readiness checks passed; verify a recovery restore separately"
     ;;
   administrator)
     [ "$(id -u)" -eq 0 ] || die "administrator lifecycle commands must run as root"
@@ -1962,7 +1981,11 @@ case "$command" in
     run_administrator "$@"
     ;;
   update) run_update "$@" ;;
-  production-check) acquire_lock; run_production_check "$@" ;;
+  production-check)
+    if [ "$runtime" = rust ]; then die "use laneway-control readiness for Rust deployments"; fi
+    acquire_lock
+    run_production_check "$@"
+    ;;
   backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "$env_file" "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
   restore)
     acquire_lock

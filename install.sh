@@ -181,6 +181,11 @@ if [ "$install_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; t
     fi
   fi
 fi
+if [ "$install_control_plane" = true ]; then
+  if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import tomllib' >/dev/null 2>&1; then
+    add_missing "Python 3.11 or newer"
+  fi
+fi
 if [ -n "$missing" ]; then
   echo "Laneway pre-check found missing or incompatible prerequisites:" >&2
   printf '%s\n' "$missing" | while IFS= read -r item; do printf '  - %s\n' "$item" >&2; done
@@ -232,8 +237,8 @@ download_dir=$(mktemp -d)
 trap 'find "$download_dir" -depth -delete' EXIT HUP INT TERM
 
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
-  if ! select_cosign && [ "$production_mode" = true ]; then
-    echo "Laneway production install requires a working pinned signature verifier." >&2
+  if ! select_cosign && { [ "$install_control_plane" = true ] || [ "$production_mode" = true ]; }; then
+    echo "Laneway control-plane install requires a working pinned signature verifier." >&2
     exit 1
   fi
 fi
@@ -262,8 +267,8 @@ if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] ||
       --certificate-oidc-issuer https://token.actions.githubusercontent.com \
       "$download_dir/checksums.txt" >/dev/null; then
     checksum_signature_verified=true
-  elif [ "$production_mode" = true ]; then
-    echo "Laneway production install: release checksum signature verification failed." >&2
+  elif [ "$install_control_plane" = true ] || [ "$production_mode" = true ]; then
+    echo "Laneway control-plane install: release checksum signature verification failed." >&2
     exit 1
   else
     echo "WARNING: checksum signature could not be verified; archive checksum validation will still run." >&2
@@ -321,6 +326,7 @@ if [ "$operating_system" = darwin ]; then
 fi
 
 set --
+if [ "$install_control_plane" = true ]; then set -- --control-tools; fi
 if [ "$rust_preview" = true ]; then
   if [ ! -x "$download_dir/laneway/sbin/lanewayd-rs" ] ||
      [ ! -f "$download_dir/laneway/VERSION" ] ||
@@ -348,14 +354,14 @@ if [ "$install_control_plane" = true ]; then
     control_noninteractive=true
     control_confirmation=deploy
   fi
-  exec env LANEWAY_VERSION="${release#v}" LANEWAY_COSIGN_BIN="$cosign_bin" \
-    LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$download_dir/bootstrap-artifacts.toml" \
+  env LANEWAY_VERSION="${release#v}" LANEWAY_COSIGN_BIN="$cosign_bin" \
     LANEWAY_PRODUCTION_MODE="$production_mode" \
     LANEWAY_CHECKSUM_SIGNATURE_VERIFIED="${checksum_signature_verified:-false}" \
     LANEWAY_NONINTERACTIVE="$control_noninteractive" \
     LANEWAY_CONFIRM="$control_confirmation" \
     LANEWAY_DOMAIN="${LANEWAY_DOMAIN:-}" \
     sh /usr/local/share/laneway/deploy/compose/install-control-plane.sh
+  exit 0
 fi
 if [ "$prepare_control_plane" = true ]; then
   output=${LANEWAY_RECOVERY_KIT_DIR:-/root/laneway-recovery-kit-$(date -u +%Y%m%dT%H%M%SZ)}

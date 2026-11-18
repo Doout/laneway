@@ -49,6 +49,15 @@ done
 # configuration, daemon, or updater is touched.
 tar -xzf "$archive" -C "$probe_dir"
 package=$probe_dir/laneway
+control_root=$probe_dir/control-tool-install
+DESTDIR="$control_root" PREFIX=/usr/local sh "$package/install.sh" --control-tools >/dev/null
+cmp "$package/bin/laneway" "$control_root/usr/local/bin/laneway"
+test -x "$control_root/usr/local/share/laneway/deploy/compose/install-control-plane.sh"
+test -f "$control_root/usr/local/share/laneway/deploy/compose/compose.rust.yaml"
+test ! -e "$control_root/usr/local/sbin"
+test ! -e "$control_root/usr/local/lib/systemd"
+test ! -e "$control_root/etc/laneway"
+
 destination=$probe_dir/installed
 DESTDIR="$destination" PREFIX=/usr/local sh "$package/install.sh" >/dev/null
 installed=$destination/usr/local
@@ -76,5 +85,5 @@ if DESTDIR="$probe_dir/rejected" PREFIX=/usr/local sh "$package/install.sh" --ru
 fi
 grep -F 'requires a packaged lanewayd-rs' "$probe_dir/rejected.log" >/dev/null
 test ! -e "$probe_dir/rejected"
-printf 'Verified all five static Rust %s runtimes at version %s and the opt-in installer; Go remains the default.\n' \
+printf 'Verified five static Rust %s runtimes at %s, preview installation, and daemon-free control-plane tools.\n' \
   "$architecture" "$expected_version"

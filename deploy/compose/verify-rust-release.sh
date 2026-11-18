@@ -4,8 +4,11 @@ set -eu
 
 die() { printf 'Rust Compose release: %s\n' "$*" >&2; exit 1; }
 mode=settings
-if [ "${1:-}" = --prepare ]; then mode=prepare; shift; fi
-[ "$#" -eq 2 ] || die "usage: sh verify-rust-release.sh [--prepare] vVERSION RELEASE_METADATA_DIRECTORY"
+case "${1:-}" in
+  --prepare) mode=prepare; shift ;;
+  --install) mode=install; shift ;;
+esac
+[ "$#" -eq 2 ] || die "usage: sh verify-rust-release.sh [--prepare | --install] vVERSION RELEASE_METADATA_DIRECTORY"
 tag=$1
 directory=$2
 case "$tag" in *[!v0-9.]*) die "expected a stable release tag";; esac
@@ -29,7 +32,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 set -- checksums.txt checksums.sigstore.json image-digests.txt
-if [ "$mode" = prepare ]; then set -- "$@" bootstrap-artifacts.toml; fi
+if [ "$mode" != settings ]; then set -- "$@" bootstrap-artifacts.toml; fi
 for asset; do
   source_file=$directory/$asset
   [ -f "$source_file" ] && [ ! -L "$source_file" ] && [ -s "$source_file" ] ||
@@ -58,7 +61,7 @@ verify_asset() {
   [ "${actual%% *}" = "$expected" ] || die "$asset differs from its signed checksum"
 }
 verify_asset image-digests.txt
-if [ "$mode" = prepare ]; then verify_asset bootstrap-artifacts.toml; fi
+if [ "$mode" != settings ]; then verify_asset bootstrap-artifacts.toml; fi
 
 verified_digest() {
   image=$1
@@ -83,6 +86,13 @@ verified_digest() {
 controller=$(verified_digest ghcr.io/doout/laneway-controller-rust) || exit 1
 relay=$(verified_digest ghcr.io/doout/laneway-relay-rust) || exit 1
 exit_node=$(verified_digest ghcr.io/doout/laneway-exit-node-rust) || exit 1
+if [ "$mode" = install ]; then
+  admin=$(verified_digest ghcr.io/doout/laneway-admin) || exit 1
+  connector=$(verified_digest ghcr.io/doout/lane-edge-rust) || exit 1
+fi
 printf 'LANEWAY_RUST_VERSION=%s\nLANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=%s\nLANEWAY_RUST_RELAY_IMAGE_DIGEST=%s\nLANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=%s\n' \
   "${tag#v}" "$controller" "$relay" "$exit_node"
+if [ "$mode" = install ]; then
+  printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\nLANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=%s\n' "$admin" "$connector"
+fi
 if [ "$mode" = prepare ]; then cat "$work/bootstrap-artifacts.toml"; fi

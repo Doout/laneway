@@ -3,9 +3,12 @@ set -eu
 
 base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 env_file=$base_dir/.env
-dev=false
-[ "${1:-}" != --dev ] || { dev=true; shift; }
-[ "$#" -eq 0 ] || { echo "usage: preflight.sh [--dev]" >&2; exit 1; }
+mode=standard
+case "${1:-}" in
+  --dev) mode=dev; shift ;;
+  --rust) mode=rust; shift ;;
+esac
+[ "$#" -eq 0 ] || { echo "usage: preflight.sh [--dev | --rust]" >&2; exit 1; }
 
 die() { echo "Laneway preflight: $*" >&2; exit 1; }
 read_setting() {
@@ -18,6 +21,7 @@ read_setting() {
   printf '%s' "$value"
 }
 compose() {
+  if [ "$mode" = rust ]; then set -- -f "$base_dir/compose.rust.yaml" "$@"; fi
   docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
 }
 
@@ -28,7 +32,7 @@ server_major=${server_version%%.*}
 case "$server_major" in ''|*[!0-9]*) die "cannot parse Docker Engine version: $server_version" ;; esac
 [ "$server_major" -ge 26 ] || die "Docker Engine 26 or newer is required (found $server_version)"
 
-if [ "$dev" = false ]; then
+if [ "$mode" != dev ]; then
   command -v age >/dev/null 2>&1 || die "age is required for encrypted recovery bundles"
   command -v getent >/dev/null 2>&1 || die "getent is required for DNS validation"
   for hostname in "$(read_setting LANEWAY_CONTROLLER_SERVER_NAME)" "$(read_setting LANEWAY_RELAY_PUBLIC_ENDPOINT)"; do
