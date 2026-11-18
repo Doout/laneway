@@ -148,6 +148,10 @@ compose() {
   fi
   docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
 }
+local_docker_engine() {
+  [ -z "${DOCKER_HOST:-}" ] &&
+    [ "$(docker context inspect --format '{{.Endpoints.docker.Host}}')" = unix:///var/run/docker.sock ]
+}
 compose_with_env() {
   compose_env_path=$1; shift
   docker compose --project-directory "$base_dir" --env-file "$compose_env_path" -f "$base_dir/compose.yaml" "$@"
@@ -1000,8 +1004,43 @@ publish_root_token_copy() {
   fi
 }
 
+require_rust_root_token_controller() (
+  [ "$(read_setting "$env_file" LANEWAY_CONTROL_RUNTIME)" = rust ] || return 1
+  version=$(read_setting "$env_file" LANEWAY_RUST_VERSION)
+  digest=$(read_setting "$env_file" LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST)
+  printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || return 1
+  printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
+  [ "$digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || return 1
+  expected=ghcr.io/doout/laneway-controller-rust:$version@$digest
+  token_source=$base_dir/generated/secrets/admin.token
+  plan=$(compose --profile tools config --format json) || return 1
+  printf '%s\n' "$plan" | jq -e --arg image "$expected" --arg token "$token_source" '
+    .services.controller |
+    .image == $image and .labels["io.laneway.control-runtime"] == "rust" and
+    (any(.volumes[]; .type == "bind" and .source == $token and
+      .target == "/run/laneway-secrets/admin.token" and .read_only == true)) and
+    (.command | .[0] == "serve" and
+      (index("--root-token-file") as $i |
+        $i != null and .[$i + 1] == "/run/laneway-secrets/admin.token"))
+  ' >/dev/null || return 1
+  id=$(compose ps --status running -q controller) || return 1
+  # An interrupted transaction may need to recreate a stopped controller.
+  [ -z "$id" ] && return 0
+  docker inspect --type container "$id" | jq -e --arg image "$expected" --arg token "$token_source" '
+    length == 1 and .[0].Config.Image == $image and .[0].Config.Labels["io.laneway.control-runtime"] == "rust" and
+    (any(.[0].Mounts[]; .Type == "bind" and .Source == $token and
+      .Destination == "/run/laneway-secrets/admin.token" and .RW == false))
+  ' >/dev/null
+)
+
 recreate_controller_for_root_token() {
-  compose up -d --wait --force-recreate --no-deps controller
+  if [ "$runtime" = rust ]; then
+    require_rust_root_token_controller || return 1
+    set -- --pull never --wait-timeout 100
+  else
+    set --
+  fi
+  compose up -d --wait "$@" --force-recreate --no-deps controller
 }
 
 remove_root_token_rotation() {
@@ -1205,7 +1244,11 @@ run_administrator() {
       ;;
     'root-token rotate')
       [ "$#" -eq 2 ] || die "administrator root-token rotate accepts no arguments"
-      [ "$runtime" != rust ] || die "root-token rotation is not yet available for the Rust control plane"
+      if [ "$runtime" = rust ]; then
+        command -v jq >/dev/null 2>&1 || die "Rust administrator root-token rotation requires jq"
+        local_docker_engine || die "Rust administrator root-token rotation requires the local Docker Engine on its standard Unix socket"
+        require_rust_root_token_controller || die "rotation requires the installed, pinned Rust controller and its protected token mount"
+      fi
       run_root_token_rotation
       ;;
     *) die "administrator requires bootstrap --username USERNAME, recover --username USERNAME, or root-token rotate" ;;
@@ -1719,8 +1762,7 @@ run_rust_update() {
   for dependency in age cp curl docker jq openssl python3 realpath sync; do
     command -v "$dependency" >/dev/null 2>&1 || die "update requires $dependency"
   done
-  [ "${DOCKER_HOST:-}" = "" ] &&
-    [ "$(docker context inspect --format '{{.Endpoints.docker.Host}}')" = unix:///var/run/docker.sock ] ||
+  local_docker_engine ||
     die "Rust updates require a local Docker Engine on the standard Unix socket"
   acquire_lock
   [ "$(stat -c '%a:%u:%g' "$state_dir")" = 700:0:0 ] ||

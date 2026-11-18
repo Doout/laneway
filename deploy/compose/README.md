@@ -66,6 +66,13 @@ The browser console supports password-backed administrator sessions only.
 OIDC/SAML SSO and SCIM are unavailable and must remain disabled. Never expose
 the static root bearer to a browser.
 
+To rotate that bearer on the Rust control plane, run
+`sudo laneway-control administrator root-token rotate`. The command recreates
+only the controller and verifies that the new token works and the old one is
+rejected. If interrupted, rerun the same command to resume. See the
+[operations runbook](../../docs/operations.md#root-bearer-automation-and-rotation)
+for recovery bundle handling.
+
 Open the console at `https://lane.example.com/` with no port suffix. The relay
 terminates public Web-PKI HTTPS on TCP `443` and carries console and
 administrator API requests to the controller over its authenticated internal

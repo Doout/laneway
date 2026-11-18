@@ -31,6 +31,9 @@ Run `bash integration/rust-lab/installer-fresh.sh` on the marked lab to repeat.
 The same test updates the real lab services to a fixture release, checks
 that existing invitations survive, then starts a deliberately incompatible
 candidate and verifies that the previous controller state is available again.
+It also rotates the administrator root token on Rust, verifies rollback of a
+failed credential check, and resumes after an interrupted completion. The
+relay keeps serving discovery over lab HTTPS without being replaced.
 It exercises real Compose and encrypted recovery, but does not exercise live
 release signing and registry infrastructure.
 

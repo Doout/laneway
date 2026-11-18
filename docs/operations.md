@@ -123,7 +123,8 @@ sudo laneway control administrator root-token rotate
 Rotation uses the same shared lifecycle lock as backup, restore, update,
 upgrade, rollback, bootstrap, and recovery. It atomically publishes the
 replacement at the existing token path and force-recreates only the controller.
-Expect a brief control-plane interruption.
+On Rust, it checks the selected image digest and the read-only credential mount
+before changing the token. Expect a brief control-plane interruption.
 
 Protected progress and credential copies are kept under:
 

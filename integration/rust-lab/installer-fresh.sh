@@ -2,6 +2,7 @@
 # Run the actual packaged initializer with real Docker and recovery on a lab.
 # Only release download/signature verification and public DNS are fixtures.
 set -euo pipefail
+trap 'printf "fresh installer test failed at line %s\n" "$LINENO" >&2' ERR
 marker=/run/.laneway-isolated-compose-lab
 if [[ $(id -u) != 0 || ! -f "$marker" || -L "$marker" ||
       $(stat -c '%u:%a' "$marker") != 0:600 || -n ${DOCKER_HOST:-} || -n ${DOCKER_CONTEXT:-} ]]; then
@@ -185,6 +186,18 @@ docker_fixture=$(docker volume inspect --format '{{.Mountpoint}}' "$fixture_sour
 # verification is part of this fixture.
 compose down
 sed -i '/^    internal: true$/d' "$destination/compose.yaml"
+# Use a temporary local certificate, not ACME, to check the relay's HTTPS
+# connection through a controller restart.
+openssl req -quiet -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+  -subj /CN=installer.fresh.test -addext subjectAltName=DNS:installer.fresh.test \
+  -keyout "$destination/generated/pki/public.key" -out "$destination/generated/pki/public.crt"
+chown 65532:65532 "$destination/generated/pki/public.key"
+chmod 0400 "$destination/generated/pki/public.key"
+sed -i '/^cache_dir = "\/var\/lib\/laneway-public"$/d' "$destination/generated/config/relay.rust.toml"
+printf '\ncertificate = "/run/laneway-secrets/public.crt"\nprivate_key = "/run/laneway-secrets/public.key"\n' \
+  >> "$destination/generated/config/relay.rust.toml"
+sed -i '/^  relay:$/,/^  exit-node:$/ { /    volumes:$/a\      - ./generated/pki/public.crt:/run/laneway-secrets/public.crt:ro\n      - ./generated/pki/public.key:/run/laneway-secrets/public.key:ro
+}' "$destination/compose.rust.yaml"
 compose up --detach --wait controller relay
 
 export LANEWAY_UPDATE_TEST_PROJECT="$project" LANEWAY_UPDATE_TEST_DEPLOY="$destination"
@@ -203,11 +216,12 @@ done
 version=$(sed -n 's/^LANEWAY_RUST_VERSION=//p' "$envfile")
 digest="sha256:$(printf '%064d' 1)"
 if [[ $1 == compose && $action == config && " $* " == *' --profile tools '* && " $* " == *' --format json '* ]]; then
-  /usr/bin/docker "$@" | jq --arg v "$version" --arg d "$digest" '
+  /usr/bin/docker "$@" | jq --arg v "$version" --arg d "$digest" --arg bad "${LANEWAY_ROTATION_TEST_WRONG_PLAN:-}" '
     .services.controller.image = ("ghcr.io/doout/laneway-controller-rust:" + $v + "@" + $d) |
     .services.relay.image = ("ghcr.io/doout/laneway-relay-rust:" + $v + "@" + $d) |
     .services["exit-node"].image = ("ghcr.io/doout/laneway-exit-node-rust:" + $v + "@" + $d) |
-    .services.admin.image = ("ghcr.io/doout/laneway-admin:" + $v + "@" + $d)'
+    .services.admin.image = ("ghcr.io/doout/laneway-admin:" + $v + "@" + $d) |
+    if $bad == "1" then .services.controller.image = "unexpected-image" else . end'
 elif [[ $1 == compose && $action == pull ]]; then
   /usr/bin/docker image inspect laneway-rust-controller:fresh-init-lab laneway-rust-relay:0.0.9100-lab \
     laneway-go-admin:compose-cutover-lab >/dev/null
@@ -265,3 +279,110 @@ grep -Fxq controller=healthy "$work/restored-status"
 if "$control_link" update v0.0.9104 > "$work/downgrade" 2>&1; then exit 1; fi
 grep -Fq 'would downgrade' "$work/downgrade"
 echo 'PASS: signed-release fixture updated the real Rust services, preserved state, and recovered from a broken candidate.'
+
+export LANEWAY_ROTATION_TEST_CLI="$LANEWAY_COMMAND"
+cat > "$work/bin/rotation-operator" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${LANEWAY_ROTATION_TEST_FAILURE:-}: $* " in
+  new-auth:*' root-token authentication-check --expect accepted '*'/new.token ') exit 1 ;;
+  complete:*' root-token rotation-complete '*) exit 1 ;;
+esac
+exec "$LANEWAY_ROTATION_TEST_CLI" "$@"
+EOF
+bash -n "$work/bin/rotation-operator"
+chmod 0700 "$work/bin/rotation-operator"
+rotation_dir=$destination/generated/lifecycle/administrator-root-token-rotation
+root_credential=$destination/generated/secrets/admin.token
+install -m 0600 "$root_credential" "$work/previous.token"
+previous_controller=$(compose ps -q controller)
+previous_relay=$(compose ps -q relay)
+network_id=$(sed -n 's/^LANEWAY_NETWORK_ID=//p' "$destination/.env")
+controller_id=$(sed -n 's/^LANEWAY_CONTROLLER_SERVICE_ID=//p' "$destination/.env")
+relay_port=$(sed -n 's/^LANEWAY_RELAY_TCP_PORT=//p' "$destination/.env")
+verify_root() {
+  "$LANEWAY_ROTATION_TEST_CLI" controller administrator root-token authentication-check \
+    --expect "$1" --admin-token-file "$2" --controller "https://127.0.0.1:$controller_port" \
+    --ca "$destination/generated/pki/ca.crt" --server-name installer.fresh.test \
+    --controller-network-id "$network_id" --controller-service-id "$controller_id"
+}
+verify_relay() {
+  /usr/bin/curl --noproxy '*' --fail --silent --show-error --max-time 5 \
+    --resolve "installer.fresh.test:$relay_port:127.0.0.1" --cacert "$destination/generated/pki/public.crt" \
+    "https://installer.fresh.test:$relay_port/.well-known/laneway/bootstrap.json" |
+    jq -e --arg network "$network_id" --arg controller "$controller_id" \
+      '.network_id == $network and .controller.service_id == $controller' >/dev/null
+}
+verify_root accepted "$work/previous.token"
+verify_relay
+if LANEWAY_ROTATION_TEST_WRONG_PLAN=1 "$control_link" administrator root-token rotate >"$work/rotation-invalid" 2>&1; then
+  echo 'rotation accepted an unpinned Compose controller' >&2
+  exit 1
+fi
+grep -Fq 'rotation requires the installed, pinned Rust controller' "$work/rotation-invalid"
+cmp -s "$work/previous.token" "$root_credential"
+test ! -e "$rotation_dir"
+test "$(compose ps -q controller)" = "$previous_controller"
+
+if ! "$control_link" administrator root-token rotate >"$work/rotation-success" 2>&1; then
+  grep -E '^(laneway-control:|Error:) ' "$work/rotation-success" >&2 || true
+  echo 'initial Rust root-token rotation did not complete' >&2
+  exit 1
+fi
+grep -Fq 'Administrator root token rotated' "$work/rotation-success"
+if cmp -s "$work/previous.token" "$root_credential"; then
+  echo 'rotation did not replace the root credential' >&2
+  exit 1
+fi
+test "$(compose ps -q controller)" != "$previous_controller"
+test "$(compose ps -q relay)" = "$previous_relay"
+verify_root rejected "$work/previous.token"
+verify_root accepted "$root_credential"
+verify_relay
+test ! -e "$rotation_dir"
+install -m 0600 "$root_credential" "$work/current.token"
+
+if LANEWAY_COMMAND="$work/bin/rotation-operator" LANEWAY_ROTATION_TEST_FAILURE=new-auth \
+  "$control_link" administrator root-token rotate >"$work/rotation-rolled-back" 2>&1; then
+  echo 'rotation accepted without proving the replacement credential' >&2
+  exit 1
+fi
+grep -Fq 'the prior credential was restored and verified' "$work/rotation-rolled-back"
+cmp -s "$work/current.token" "$root_credential"
+verify_root accepted "$root_credential"
+verify_relay
+test ! -e "$rotation_dir"
+
+if LANEWAY_COMMAND="$work/bin/rotation-operator" LANEWAY_ROTATION_TEST_FAILURE=complete \
+  "$control_link" administrator root-token rotate >"$work/rotation-pending" 2>&1; then
+  echo 'rotation reported success while completion was unconfirmed' >&2
+  exit 1
+fi
+grep -Fxq 'phase=committed_pending_complete' "$rotation_dir/state"
+verify_root rejected "$work/current.token"
+verify_root accepted "$root_credential"
+install -m 0600 "$root_credential" "$work/committed.token"
+"$control_link" administrator root-token rotate >"$work/rotation-resumed" 2>&1
+grep -Fq 'Administrator root token rotated' "$work/rotation-resumed"
+cmp -s "$work/committed.token" "$root_credential"
+verify_relay
+test "$(compose ps -q relay)" = "$previous_relay"
+test "$(count_invitations "$active_database")" = "$invitations"
+test ! -e "$rotation_dir"
+python3 - "$active_database/controller.db" <<'PY'
+import sqlite3
+import sys
+
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+markers = db.execute("SELECT count(*), count(completed_at) FROM administrator_root_token_rotations").fetchone()
+assert markers == (3, 2), markers
+events = dict(db.execute("SELECT action, count(*) FROM audit_events WHERE action LIKE 'administrator.root_token.rotate.%' GROUP BY action"))
+assert events == {"administrator.root_token.rotate.begin": 3, "administrator.root_token.rotate.complete": 2}, events
+PY
+for secret in "$work/previous.token" "$work/current.token" "$work/committed.token"; do
+  if grep -Fqf "$secret" "$work/rotation-"*; then
+    echo 'rotation logged protected credential material' >&2
+    exit 1
+  fi
+done
+echo 'PASS: the Rust controller rotated its root token, rolled back a failed proof, and resumed a committed rotation without replacing the relay.'
