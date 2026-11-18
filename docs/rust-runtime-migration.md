@@ -246,6 +246,28 @@ bundle once over mTLS. The payload is never written to SQLite; expiry or a
 controller restart discards it. Serving the public bootstrap path and
 console through the Rust relay is a separate migration step.
 
+The controller serves `GET /v1/health` with the Go readiness response.
+To enable `GET /.well-known/laneway/bootstrap.json` on the same listener,
+pass `--bootstrap-profile PROFILE_JSON` and configure `--node-client-ca`.
+The profile identifies the advertised enrollment origin, QUIC endpoint, and
+controller DNS name; optionally list immutable artifacts by platform,
+digest, and size:
+
+```json
+{
+  "enrollment_endpoint": "https://relay.example.test",
+  "quic_endpoint": "controller.example.test:8443",
+  "server_name": "controller.example.test",
+  "artifacts": []
+}
+```
+
+Startup verifies the controller certificate against the advertised name and
+CA. The network and service IDs come from that certificate. Each response
+includes only enabled relays on the pinned network and expires in five
+minutes. The endpoint returns 503 when there are no usable relays, and the
+Rust relay's public HTTPS forwarding remains separate.
+
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly
 granted `network.create`. The Rust transaction creates the IPv4 or dual-stack

@@ -17,6 +17,7 @@ pub mod audit;
 pub mod automation;
 mod bearer;
 pub mod bootstrap_bundles;
+pub mod bootstrap_discovery;
 mod browser;
 pub use bearer::{RootCredential, bearer_inventory, bearer_network};
 pub use browser::auth_state;

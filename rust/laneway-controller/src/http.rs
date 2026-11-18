@@ -19,6 +19,7 @@ mod applications;
 mod audit;
 mod automation;
 mod bootstrap_bundles;
+mod bootstrap_discovery;
 mod endpoint_status;
 mod enroll;
 mod form;
@@ -56,6 +57,7 @@ pub struct State {
     applications: Arc<std::sync::Mutex<enroll::Limiter>>,
     allow_loopback_callbacks: bool,
     bootstrap_bundles: Arc<bootstrap_bundles::Bundles>,
+    pub(crate) bootstrap_discovery: Option<Arc<laneway_controller::bootstrap_discovery::Discovery>>,
 }
 impl State {
     pub fn new(
@@ -77,6 +79,7 @@ impl State {
             applications: Default::default(),
             allow_loopback_callbacks,
             bootstrap_bundles: Default::default(),
+            bootstrap_discovery: None,
             queries: Arc::new(Semaphore::new(8)),
             root: root.map(Arc::new),
             discovery: Default::default(),
@@ -279,6 +282,25 @@ async fn dispatch(
 ) -> Result<Reply, Failure> {
     let uri = req.uri().clone();
     let path = uri.path();
+    if path == "/v1/health" {
+        if head || req.method() == Method::GET {
+            return Ok(response(
+                StatusCode::OK,
+                id,
+                br#"{"status":"ok"}"#.to_vec(),
+                head,
+            ));
+        }
+        return Err(Failure(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "ERROR_CODE_MALFORMED",
+            "method not allowed",
+            false,
+        ));
+    }
+    if path == laneway_controller::bootstrap_discovery::PATH {
+        return Ok(bootstrap_discovery::handle(req, state, id).await);
+    }
     if path == "/v1/renew" && state.workload_mtls_enabled {
         return Ok(renew::handle(req, state, id).await);
     }

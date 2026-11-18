@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON]";
 
 struct QuicListener {
     config: quinn::ServerConfig,
@@ -45,6 +45,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut snapshot_validity = None;
     let mut location_database = None;
     let mut allow_loopback_callbacks = false;
+    let mut bootstrap_profile = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -77,6 +78,8 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             location_database = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--allow-insecure-application-callbacks" && !allow_loopback_callbacks {
             allow_loopback_callbacks = true;
+        } else if flag == "--bootstrap-profile" && bootstrap_profile.is_none() {
+            bootstrap_profile = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--quic-listen" && quic_listen.is_none() {
             quic_listen = Some(
                 args.next()
@@ -122,6 +125,26 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         None
     };
     laneway_controller::SessionStore::check_database(&database)?;
+    let discovery = if let Some(profile) = bootstrap_profile {
+        let ca = client_ca
+            .as_ref()
+            .context("--bootstrap-profile requires --node-client-ca")?;
+        let profile = pem(&profile, false)
+            .context("read bootstrap profile")?
+            .into_inner();
+        let chain =
+            rustls_pemfile::certs(&mut pem(&cert, false)?).collect::<std::io::Result<Vec<_>>>()?;
+        Some(Arc::new(
+            laneway_controller::bootstrap_discovery::Discovery::load(
+                &database,
+                &profile,
+                &chain,
+                &mut pem(ca, false)?,
+            )?,
+        ))
+    } else {
+        None
+    };
     let location_database =
         location_database.and_then(
             |path| match laneway_controller::node_location::Database::open(&path) {
@@ -132,23 +155,20 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
                 }
             },
         );
+    let mut state = super::http::State::new(
+        database,
+        root,
+        issuer,
+        client_ca.is_some(),
+        snapshot_validity.unwrap_or(300),
+        location_database,
+        allow_loopback_callbacks,
+    )?;
+    state.bootstrap_discovery = discovery;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(serve(
-            super::http::State::new(
-                database,
-                root,
-                issuer,
-                client_ca.is_some(),
-                snapshot_validity.unwrap_or(300),
-                location_database,
-                allow_loopback_callbacks,
-            )?,
-            address,
-            config,
-            quic,
-        ))
+        .block_on(serve(state, address, config, quic))
 }
 
 fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>> {
