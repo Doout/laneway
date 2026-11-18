@@ -176,6 +176,22 @@ impl Client {
         self.options.exit_generation
     }
 
+    pub(crate) fn begin_quic_shutdown(&self) {
+        if let Some(control) = &self.quic {
+            control
+                .endpoint
+                .close(0_u32.into(), b"node control shutdown");
+        }
+    }
+
+    pub(crate) async fn close_quic(&self) {
+        self.begin_quic_shutdown();
+        if let Some(control) = &self.quic {
+            let _ =
+                tokio::time::timeout(Duration::from_secs(2), control.endpoint.wait_idle()).await;
+        }
+    }
+
     pub(crate) async fn report_status(
         &self,
         report: &laneway_protocol::endpoint_status::Report,
@@ -710,6 +726,7 @@ pub(crate) struct Peer {
     pub(crate) node: Id,
     pub(crate) name: String,
     pub(crate) overlays: Vec<IpAddr>,
+    pub(crate) wireguard_key: Option<[u8; 32]>,
 }
 
 /// One fully validated controller route.
@@ -950,6 +967,7 @@ impl Snapshot {
         let mut peers = HashMap::with_capacity(configuration.peers.len());
         let mut names = HashSet::with_capacity(configuration.peers.len());
         let mut overlay_owners = HashMap::new();
+        let mut wireguard_keys = HashSet::new();
         for (index, input) in configuration.peers.into_iter().enumerate() {
             let node = Id::from_slice(&input.node_id)
                 .with_context(|| format!("controller peer {index} node ID"))?;
@@ -975,6 +993,20 @@ impl Snapshot {
                     "controller overlay address has multiple owners"
                 );
             }
+            let wireguard_key = if input.wireguard_public_key.is_empty() {
+                None
+            } else {
+                let key: [u8; 32] = input
+                    .wireguard_public_key
+                    .as_slice()
+                    .try_into()
+                    .context("controller WireGuard public key has the wrong length")?;
+                ensure!(
+                    key != [0; 32] && wireguard_keys.insert(key),
+                    "controller WireGuard public key is zero or has multiple owners"
+                );
+                Some(key)
+            };
             ensure!(
                 peers
                     .insert(
@@ -983,6 +1015,7 @@ impl Snapshot {
                             node,
                             name: input.name,
                             overlays: peer_overlays,
+                            wireguard_key,
                         },
                     )
                     .is_none(),

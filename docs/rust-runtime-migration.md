@@ -307,10 +307,23 @@ It checks that a same-epoch heartbeat extends only the lease, and that revocatio
 retires the authority without waiting for a timeout. The unit gate also checks
 terminal expiry while a request is stalled.
 
-This is a control-plane gate only. It does not launch a WireGuard device,
-install routes, or replace the existing ephemeral exit launcher. Keep using the
-existing encrypted runtime until Rust also passes packet, drain, and credential
-cleanup gates.
+The separate kernel packet gate requires `wireguard-tools`, a WireGuard-capable
+Linux kernel and isolated network namespaces:
+
+```sh
+sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_WIREGUARD=1 \
+  ./integration/rust-controller-node-netns.sh
+# Repeat with LANEWAY_NODE_TEST_CONTROLLER=rust for the Rust controller and relay.
+```
+
+The test provisions a disposable ephemeral identity and sends kernel WireGuard
+packets to a Go peer through the Rust carrier. It exercises negotiated QUIC and
+forced TLS/TCP, including ciphertext larger than the legacy raw-IP ceiling.
+It also revokes the live identity and verifies that traffic stops. The carrier
+checks live peer keys and never falls back to raw IP. The fixture
+configures the kernel device and verifies overlay traffic only: it does not
+exercise Internet forwarding, connection draining, or shutdown of the shared-host
+credential sandbox. Keep using the existing launcher until those gates pass.
 
 ### Verified on the local ARM64 Linux VM
 

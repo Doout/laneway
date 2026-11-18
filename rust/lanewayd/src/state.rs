@@ -106,6 +106,23 @@ impl State {
         self.authority.load_full()
     }
 
+    pub(crate) fn wireguard_peer_key(
+        &self,
+        local: Id,
+        peer: Id,
+        local_key: &[u8; 32],
+    ) -> Option<[u8; 32]> {
+        let snapshot = self.authority.load_full()?;
+        if local == peer
+            || snapshot.expired()
+            || snapshot.local_certificate_revoked
+            || snapshot.peers.get(&local)?.wireguard_key.as_ref() != Some(local_key)
+        {
+            return None;
+        }
+        snapshot.peers.get(&peer)?.wireguard_key
+    }
+
     /// Returns the live candidate-exchange ceiling. Static mode has no
     /// controller ceiling; controller-managed mode fails closed while absent.
     pub(crate) fn candidate_exchange_authority(&self) -> Option<CandidateExchangeAuthority> {
@@ -468,6 +485,7 @@ mod tests {
                         node: local,
                         name: "local".into(),
                         overlays: vec!["100.96.0.1".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
                 (
@@ -476,6 +494,7 @@ mod tests {
                         node: peer,
                         name: "peer".into(),
                         overlays: vec!["100.96.0.2".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
             ]),

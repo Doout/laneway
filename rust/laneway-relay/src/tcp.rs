@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use laneway_protocol::{
-    AuthenticatedIdentity, TcpRecordKind, decode_packet, decode_tcp_record_prefix,
+    AuthenticatedIdentity, TcpRecordKind, decode_frame, decode_tcp_record_prefix,
     encode_tcp_record_prefix,
 };
 use rustls::ProtocolVersion;
@@ -169,8 +169,9 @@ async fn reader_loop(
                     .try_send(payload)
                     .context("TCP fallback control receive queue full")?,
                 Record::Packet(payload) => {
-                    decode_packet(payload.as_ref())
-                        .context("invalid TCP fallback packet record")?;
+                    // The shared registry authorizes both endpoint credentials
+                    // and their negotiated E2E capability before forwarding.
+                    decode_frame(payload.as_ref()).context("invalid TCP fallback packet record")?;
                     packets
                         .try_send(payload)
                         .context("TCP fallback packet receive queue full")?;

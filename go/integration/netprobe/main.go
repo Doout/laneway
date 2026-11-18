@@ -37,7 +37,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: netprobe <udp-server|udp-client|udp-echo-server|udp-bench-client|tcp-server|tcp-client|metric|certificate-info|endpoint-health|exit-client|exit-gateway> [flags]")
+		fatal("usage: netprobe <udp-server|udp-client|udp-echo-server|udp-bench-client|tcp-server|tcp-client|metric|certificate-info|endpoint-health|enroll-exit|exit-client|exit-gateway> [flags]")
 	}
 	var err error
 	switch os.Args[1] {
@@ -59,6 +59,8 @@ func main() {
 		err = certificateInfo(os.Args[2:])
 	case "endpoint-health":
 		err = endpointHealth(os.Args[2:])
+	case "enroll-exit":
+		err = enrollExit(os.Args[2:])
 	case "exit-client":
 		err = exitClient(os.Args[2:])
 	case "exit-gateway":

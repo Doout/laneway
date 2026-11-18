@@ -3,7 +3,8 @@ use std::{net::SocketAddr, str::FromStr, sync::Arc};
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use laneway_protocol::{
-    Id, TcpRecordKind, decode_packet, decode_tcp_record_prefix, encode_tcp_record_prefix,
+    Id, TcpRecordKind, decode_frame, decode_packet, decode_tcp_record_prefix,
+    encode_tcp_record_prefix,
 };
 use rustls::{ProtocolVersion, pki_types::ServerName};
 use tokio::{
@@ -15,7 +16,7 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
-use crate::{config::Config, packet_pool::PacketPool, tls};
+use crate::{config::Config, packet_pool::PacketPool, tls, wireguard::MAX_WIREGUARD_DATAGRAM};
 
 const MAX_CONTROL: usize = 1 << 20;
 const MAX_PACKET: usize = 5 + 1280;
@@ -71,6 +72,7 @@ impl Session {
 pub(crate) async fn connect(
     config: &Config,
     network: Id,
+    wireguard: bool,
     permitted: impl Fn(SocketAddr) -> bool,
 ) -> Result<Session> {
     let fallback = config
@@ -122,18 +124,27 @@ pub(crate) async fn connect(
     let mut read_done = done.clone();
     let idle = fallback.idle_timeout;
     let pong = write_tx.clone();
-    let read_pool = PacketPool::prewarmed(fallback.queue_depth, MAX_PACKET);
+    let max_packet = if wireguard {
+        5 + MAX_WIREGUARD_DATAGRAM
+    } else {
+        MAX_PACKET
+    };
+    let read_pool = PacketPool::prewarmed(fallback.queue_depth, max_packet);
     tasks.spawn(async move {
         let result: Result<()> = async {
             loop {
                 let record = tokio::select! {
-                    result = timeout(idle, read_record(&mut read, &read_pool)) => result.context("TCP fallback idle timeout")??,
+                    result = timeout(idle, read_record(&mut read, &read_pool, max_packet)) => result.context("TCP fallback idle timeout")??,
                     reason = wait_done(&mut read_done) => bail!("stopped: {reason}"),
                 };
                 match record {
                     Record::Control(value) => control_tx.try_send(value).context("control receive queue full")?,
                     Record::Packet(value) => {
-                        decode_packet(&value).context("invalid packet record")?;
+                        if wireguard {
+                            decode_frame(&value).context("invalid packet record")?;
+                        } else {
+                            decode_packet(&value).context("invalid packet record")?;
+                        }
                         packet_tx.try_send(value).context("packet receive queue full")?;
                     }
                     Record::Ping => pong.try_send(Record::Pong).context("write queue full")?,
@@ -162,7 +173,7 @@ pub(crate) async fn connect(
                     }
                     reason = wait_done(&mut write_done) => bail!("stopped: {reason}"),
                 };
-                timeout(write_timeout, write_record(&mut write, &record))
+                timeout(write_timeout, write_record(&mut write, &record, max_packet))
                     .await
                     .context("TCP fallback write timed out")??;
                 last = Instant::now();
@@ -222,12 +233,16 @@ pub(crate) async fn wait_done(done: &mut watch::Receiver<Option<Arc<str>>>) -> A
     }
 }
 
-async fn read_record<R: AsyncRead + Unpin>(read: &mut R, pool: &PacketPool) -> Result<Record> {
+async fn read_record<R: AsyncRead + Unpin>(
+    read: &mut R,
+    pool: &PacketPool,
+    max_packet: usize,
+) -> Result<Record> {
     let mut prefix = [0_u8; 5];
     read.read_exact(&mut prefix)
         .await
         .context("read record prefix")?;
-    let header = decode_tcp_record_prefix(&prefix, MAX_CONTROL, MAX_PACKET)
+    let header = decode_tcp_record_prefix(&prefix, MAX_CONTROL, max_packet)
         .context("invalid TCP fallback record prefix")?;
     Ok(match header.kind {
         TcpRecordKind::Control => {
@@ -250,14 +265,18 @@ async fn read_record<R: AsyncRead + Unpin>(read: &mut R, pool: &PacketPool) -> R
     })
 }
 
-async fn write_record<W: AsyncWrite + Unpin>(write: &mut W, record: &Record) -> Result<()> {
+async fn write_record<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    record: &Record,
+    max_packet: usize,
+) -> Result<()> {
     let (kind, payload) = match record {
         Record::Control(value) => (TcpRecordKind::Control, value.as_slice()),
         Record::Packet(value) => (TcpRecordKind::Packet, value.as_ref()),
         Record::Ping => (TcpRecordKind::Ping, &[][..]),
         Record::Pong => (TcpRecordKind::Pong, &[][..]),
     };
-    let prefix = encode_tcp_record_prefix(kind, payload.len(), MAX_CONTROL, MAX_PACKET)
+    let prefix = encode_tcp_record_prefix(kind, payload.len(), MAX_CONTROL, max_packet)
         .context("invalid TCP fallback record")?;
     write.write_all(&prefix).await?;
     write.write_all(payload).await?;
@@ -282,13 +301,21 @@ mod tests {
     #[tokio::test]
     async fn stable_record_layout_and_bounds() {
         let mut wire = Vec::new();
-        write_record(&mut wire, &Record::Packet(Bytes::from_static(&[1, 2])))
-            .await
-            .unwrap();
+        write_record(
+            &mut wire,
+            &Record::Packet(Bytes::from_static(&[1, 2])),
+            MAX_PACKET,
+        )
+        .await
+        .unwrap();
         assert_eq!(wire, [0, 0, 0, 3, TcpRecordKind::Packet.as_u8(), 1, 2]);
         let oversized_wire = [0, 0, 5, 7, TcpRecordKind::Packet.as_u8()];
         let mut oversized = oversized_wire.as_slice();
         let pool = PacketPool::prewarmed(1, MAX_PACKET);
-        assert!(read_record(&mut oversized, &pool).await.is_err());
+        assert!(
+            read_record(&mut oversized, &pool, MAX_PACKET)
+                .await
+                .is_err()
+        );
     }
 }

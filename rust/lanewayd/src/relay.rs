@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use laneway_protocol::{
-    Id, PacketHeader, Role, decode_packet,
+    Id, PACKET_FLAG_E2E_ENCRYPTED, PacketHeader, Role, decode_frame, decode_packet,
     v1::{
         Capability, ControlEnvelope, EndpointCandidate, EndpointTransport, Hello, RelayEnvelope,
         RelayRegister, Welcome, control_envelope, relay_envelope,
@@ -36,10 +36,12 @@ use crate::{
     routing::{locally_owned, packet_meta},
     state::{Handle, State},
     tcp_fallback, tls,
+    wireguard::{MAX_WIREGUARD_DATAGRAM, WireGuardDatagram},
 };
 
 const CONTROL_PREFACE: &[u8] = b"LWC1";
 const RAW_IP_CARRIER_LIMIT: u32 = 1280;
+const E2E: u64 = Capability::LanewayE2ePacketV1 as u64;
 const REQUIRED_CAPABILITIES: u64 =
     Capability::LanewayRelayV1 as u64 | Capability::LanewayQuicDatagramV1 as u64;
 const REQUIRED_TCP_CAPABILITIES: u64 =
@@ -52,13 +54,14 @@ const KNOWN_CAPABILITIES: u64 = REQUIRED_CAPABILITIES
     | Capability::LanewayIpv6V1 as u64
     | Capability::LanewayE2ePacketV1 as u64;
 
-/// One packet queued from the TUN reader toward the relay.
+/// One packet queued from the local device toward the relay.
 #[derive(Debug)]
 pub(crate) struct OutboundPacket {
     /// Authenticated next-hop node selected by the route snapshot.
     pub peer: Id,
-    /// Complete raw IP packet.
+    /// Complete IP packet or opaque WireGuard UDP datagram.
     packet: PooledPacket,
+    wireguard_key: Option<[u8; 32]>,
 }
 
 impl OutboundPacket {
@@ -68,12 +71,32 @@ impl OutboundPacket {
         Self {
             peer,
             packet: PooledPacket::unpooled(packet),
+            wireguard_key: None,
         }
     }
 
     pub(crate) fn pooled(peer: Id, packet: &[u8], pool: &PacketPool) -> (Self, bool) {
         let (packet, miss) = pool.copy(packet);
-        (Self { peer, packet }, miss)
+        (
+            Self {
+                peer,
+                packet,
+                wireguard_key: None,
+            },
+            miss,
+        )
+    }
+
+    pub(crate) fn wireguard(datagram: WireGuardDatagram, pool: &PacketPool) -> (Self, bool) {
+        let (packet, miss) = pool.copy(datagram.payload());
+        (
+            Self {
+                peer: datagram.peer(),
+                packet,
+                wireguard_key: Some(datagram.peer_key()),
+            },
+            miss,
+        )
     }
 }
 
@@ -98,7 +121,13 @@ pub struct RelayClient {
     owned: Arc<Vec<ipnet::IpNet>>,
     inject: mpsc::Sender<InboundPacket>,
     candidates: mpsc::Sender<EndpointCandidate>,
+    wireguard: Option<WireGuardPlane>,
     relay_cursor: AtomicUsize,
+}
+
+struct WireGuardPlane {
+    local_key: [u8; 32],
+    receive: mpsc::Sender<WireGuardDatagram>,
 }
 
 struct QuicSession {
@@ -147,7 +176,29 @@ impl RelayClient {
             owned,
             inject,
             candidates,
+            wireguard: None,
             relay_cursor: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn require_wireguard(
+        mut self,
+        local_key: [u8; 32],
+        receive: mpsc::Sender<WireGuardDatagram>,
+    ) -> Self {
+        self.wireguard = Some(WireGuardPlane { local_key, receive });
+        self
+    }
+
+    fn carrier_capabilities(&self, required: u64) -> (u64, u64) {
+        let offered = hello_capabilities_for(&self.config, required);
+        if self.wireguard.is_some() {
+            (
+                (offered & !(Capability::LanewayDirectPeerV1 as u64)) | E2E,
+                required | E2E,
+            )
+        } else {
+            (offered, required)
         }
     }
 
@@ -224,7 +275,7 @@ impl RelayClient {
     async fn prepare_quic(&self) -> Result<QuicSession> {
         let (connection, relay_service, relay_address) = self.connect().await?;
         let result = timeout(self.config.relay.handshake_timeout, async {
-            let offered = hello_capabilities_for(&self.config, REQUIRED_CAPABILITIES);
+            let (offered, required) = self.carrier_capabilities(REQUIRED_CAPABILITIES);
             let (mut send, mut receive) = connection
                 .open_bi()
                 .await
@@ -241,8 +292,7 @@ impl RelayClient {
             )
             .await?;
             let welcome: ControlEnvelope = read_message(&mut receive, MAX_CONTROL_PAYLOAD).await?;
-            let (welcome, negotiated) =
-                validate_control_welcome(welcome, offered, REQUIRED_CAPABILITIES)?;
+            let (welcome, negotiated) = validate_control_welcome(welcome, offered, required)?;
             write_message(
                 &mut send,
                 &RelayEnvelope {
@@ -284,11 +334,14 @@ impl RelayClient {
 
     async fn prepare_tcp(&self) -> Result<TcpSession> {
         let service = Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
-        let mut connection = tcp_fallback::connect(&self.config, self.network, |address| {
-            self.state.relay_authorized_ip(service, address.ip())
-        })
+        let mut connection = tcp_fallback::connect(
+            &self.config,
+            self.network,
+            self.wireguard.is_some(),
+            |address| self.state.relay_authorized_ip(service, address.ip()),
+        )
         .await?;
-        let offered = hello_capabilities_for(&self.config, REQUIRED_TCP_CAPABILITIES);
+        let (offered, required) = self.carrier_capabilities(REQUIRED_TCP_CAPABILITIES);
         let hello = ControlEnvelope {
             schema_version: SCHEMA_VERSION,
             sequence: 1,
@@ -310,8 +363,7 @@ impl RelayClient {
         .context("TCP fallback Welcome timed out")?
         .context("TCP fallback control queue closed")?;
         let welcome: ControlEnvelope = decode_message(&payload)?;
-        let (welcome, negotiated) =
-            validate_control_welcome(welcome, offered, REQUIRED_TCP_CAPABILITIES)?;
+        let (welcome, negotiated) = validate_control_welcome(welcome, offered, required)?;
         connection
             .writer
             .control(encode_message(
@@ -572,6 +624,14 @@ impl RelayClient {
         let Some(frame) = self.frame_packet(outbound, negotiated_capabilities)? else {
             return Ok(());
         };
+        if self.wireguard.is_some()
+            && connection
+                .max_datagram_size()
+                .is_none_or(|limit| frame.len() > limit)
+        {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return Ok(());
+        }
         connection
             .send_datagram(Bytes::from_owner(frame))
             .context("send relay datagram")?;
@@ -583,6 +643,23 @@ impl RelayClient {
         outbound: OutboundPacket,
         negotiated_capabilities: u64,
     ) -> Result<Option<PooledPacket>> {
+        if let Some(wireguard) = &self.wireguard {
+            let live_key =
+                self.state
+                    .wireguard_peer_key(self.node, outbound.peer, &wireguard.local_key);
+            if negotiated_capabilities & E2E == 0
+                || live_key.is_none()
+                || outbound.wireguard_key != live_key
+            {
+                Metrics::increment(&self.metrics.auth_drops);
+                return Ok(None);
+            }
+            return self.frame_for_handle(outbound, PACKET_FLAG_E2E_ENCRYPTED);
+        }
+        if outbound.wireguard_key.is_some() {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return Ok(None);
+        }
         let Ok(meta) = packet_meta(&outbound.packet) else {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
@@ -613,6 +690,14 @@ impl RelayClient {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         }
+        self.frame_for_handle(outbound, 0)
+    }
+
+    fn frame_for_handle(
+        &self,
+        outbound: OutboundPacket,
+        flags: u8,
+    ) -> Result<Option<PooledPacket>> {
         let handles = self.state.handles.load();
         let Some(handle) = handles.outbound.get(&outbound.peer) else {
             Metrics::increment(&self.metrics.no_path_drops);
@@ -630,7 +715,7 @@ impl RelayClient {
         frame[..5].copy_from_slice(
             &PacketHeader {
                 version: 1,
-                flags: 0,
+                flags,
                 route_handle: handle.value,
             }
             .encode()?,
@@ -640,6 +725,10 @@ impl RelayClient {
     }
 
     async fn receive_packet(&self, frame: Bytes, negotiated_capabilities: u64) {
+        if let Some(wireguard) = &self.wireguard {
+            self.receive_wireguard(wireguard, frame, negotiated_capabilities);
+            return;
+        }
         let Ok((header, packet)) = decode_packet(&frame) else {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.malformed_drops);
@@ -701,23 +790,69 @@ impl RelayClient {
         }
     }
 
+    fn receive_wireguard(&self, wireguard: &WireGuardPlane, frame: Bytes, negotiated: u64) {
+        let Ok((header, packet)) = decode_frame(&frame) else {
+            Metrics::increment(&self.metrics.malformed_drops);
+            return;
+        };
+        if header.flags != PACKET_FLAG_E2E_ENCRYPTED
+            || negotiated & E2E == 0
+            || packet.len() > MAX_WIREGUARD_DATAGRAM
+        {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return;
+        }
+        let handles = self.state.handles.load();
+        let Some(&peer) = handles.inbound.get(&header.route_handle) else {
+            Metrics::increment(&self.metrics.no_path_drops);
+            return;
+        };
+        let Some(key) = self
+            .state
+            .wireguard_peer_key(self.node, peer, &wireguard.local_key)
+        else {
+            Metrics::increment(&self.metrics.auth_drops);
+            return;
+        };
+        let offset = frame.len() - packet.len();
+        if wireguard
+            .receive
+            .try_send(WireGuardDatagram::checked(peer, key, frame.slice(offset..)))
+            .is_err()
+        {
+            Metrics::increment(&self.metrics.queue_drops);
+        }
+    }
+
     fn control(&self, envelope: RelayEnvelope, negotiated_capabilities: u64) -> Result<()> {
         match envelope.body {
             Some(relay_envelope::Body::RouteHandleBinding(binding)) => {
                 ensure!(binding.route_handle != 0, "relay bound zero handle");
                 let peer = Id::from_slice(&binding.peer_node_id).context("binding peer ID")?;
                 ensure!(peer != self.node, "relay bound local node as peer");
-                let max_payload =
-                    local_packet_limit(binding.max_packet_payload, self.config.tun.mtu)?;
-                ensure!(
+                let max_payload = if self.wireguard.is_some() {
+                    let limit = binding.max_packet_payload as usize;
+                    ensure!(
+                        (576..=MAX_WIREGUARD_DATAGRAM).contains(&limit),
+                        "invalid encrypted binding packet limit"
+                    );
+                    limit
+                } else {
+                    local_packet_limit(binding.max_packet_payload, self.config.tun.mtu)?
+                };
+                let known_peer = if self.wireguard.is_some() {
+                    self.state
+                        .authority_snapshot()
+                        .is_some_and(|snapshot| snapshot.peers.contains_key(&peer))
+                } else {
                     self.state
                         .routes
                         .load()
                         .routes()
                         .iter()
-                        .any(|route| route.via == peer),
-                    "relay bound an unconfigured peer"
-                );
+                        .any(|route| route.via == peer)
+                };
+                ensure!(known_peer, "relay bound an unconfigured peer");
                 self.state.bind(
                     peer,
                     Handle {
@@ -1000,6 +1135,135 @@ mod tests {
         assert_eq!(local_packet_limit(1000, 1200).unwrap(), 1000);
         assert!(local_packet_limit(575, 1200).is_err());
         assert!(local_packet_limit(1281, 1200).is_err());
+    }
+
+    #[tokio::test]
+    async fn wireguard_relay_is_ciphertext_only_and_fences_rotated_peers() {
+        use crate::controller::{
+            Snapshot,
+            tests::{EXIT_TEST_GENERATION, ephemeral_configuration, id, local_certificate},
+        };
+        use std::num::NonZeroU64;
+        let compile = |wire| {
+            Arc::new(
+                Snapshot::compile_for(
+                    wire,
+                    id(1),
+                    id(2),
+                    &local_certificate(),
+                    NonZeroU64::new(EXIT_TEST_GENERATION),
+                )
+                .unwrap(),
+            )
+        };
+        let local = id(2);
+        let peer = id(3);
+        let local_key = [1; 32];
+        let remote_key = [2; 32];
+        let state = Arc::new(State::controller(
+            RoutingTable::compile(&[]).unwrap(),
+            local,
+        ));
+        state.publish_authority(compile(ephemeral_configuration()));
+        state.bind(
+            peer,
+            Handle {
+                value: 7,
+                max_payload: MAX_WIREGUARD_DATAGRAM,
+            },
+        );
+        let config = toml::from_str(include_str!(
+            "../../../deploy/examples/node-rust-controller.toml"
+        ))
+        .unwrap();
+        let (raw, mut raw_rx) = mpsc::channel(2);
+        let (candidates, _candidates) = mpsc::channel(2);
+        let (encrypted, mut encrypted_rx) = mpsc::channel(2);
+        let client = RelayClient::new(
+            Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap(),
+            Arc::new(config),
+            Arc::clone(&state),
+            Arc::new(Metrics::default()),
+            id(1),
+            local,
+            id(4),
+            Arc::new(Vec::new()),
+            raw,
+            candidates,
+        )
+        .require_wireguard(local_key, encrypted);
+        let (offered, required) = client.carrier_capabilities(REQUIRED_CAPABILITIES);
+        assert_eq!(required & E2E, E2E);
+        assert_eq!(offered & Capability::LanewayDirectPeerV1 as u64, 0);
+        let welcome = Welcome {
+            session_id: vec![1; 16],
+            capabilities: REQUIRED_CAPABILITIES,
+            max_control_payload: 1024,
+            max_packet_payload: 2048,
+            ..Default::default()
+        };
+        assert!(validate_welcome(&welcome, offered, required).is_err());
+
+        let raw = ipv4([100, 96, 0, 2], [100, 96, 0, 1]);
+        assert!(
+            client
+                .frame_packet(OutboundPacket::new(peer, raw.clone()), offered)
+                .unwrap()
+                .is_none()
+        );
+        let mut plaintext = Vec::new();
+        laneway_protocol::encode_packet(
+            PacketHeader {
+                version: 1,
+                flags: 0,
+                route_handle: 7,
+            },
+            &raw,
+            &mut plaintext,
+        )
+        .unwrap();
+        client.receive_packet(Bytes::from(plaintext), offered).await;
+        assert!(raw_rx.try_recv().is_err());
+        assert!(encrypted_rx.try_recv().is_err());
+
+        let mut ciphertext = vec![0; 148];
+        ciphertext[0] = 1;
+        let pool = PacketPool::prewarmed(2, MAX_WIREGUARD_DATAGRAM + 5);
+        let packet = || {
+            OutboundPacket::wireguard(
+                WireGuardDatagram::new(peer, remote_key, Bytes::copy_from_slice(&ciphertext))
+                    .unwrap(),
+                &pool,
+            )
+            .0
+        };
+        assert!(
+            client
+                .frame_packet(packet(), REQUIRED_CAPABILITIES)
+                .unwrap()
+                .is_none()
+        );
+        let framed = client.frame_packet(packet(), offered).unwrap().unwrap();
+        let (header, payload) = decode_frame(&framed).unwrap();
+        assert_eq!(header.flags, PACKET_FLAG_E2E_ENCRYPTED);
+        assert_eq!(payload, ciphertext);
+        client
+            .receive_packet(Bytes::from_owner(framed), offered)
+            .await;
+        let delivered = encrypted_rx.try_recv().unwrap();
+        assert_eq!(delivered.peer(), peer);
+        assert_eq!(delivered.peer_key(), remote_key);
+        assert_eq!(delivered.payload(), ciphertext);
+
+        let mut rotated = ephemeral_configuration();
+        rotated.configuration_epoch = 8;
+        rotated.routes.as_mut().unwrap().configuration_epoch = 8;
+        rotated.policy.as_mut().unwrap().configuration_epoch = 8;
+        rotated.peers[1].wireguard_public_key.fill(3);
+        state.publish_authority(compile(rotated));
+        assert!(client.frame_packet(packet(), offered).unwrap().is_none());
+        state.fail_close();
+        assert!(client.frame_packet(packet(), offered).unwrap().is_none());
     }
 
     #[test]

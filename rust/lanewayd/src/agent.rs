@@ -1564,7 +1564,7 @@ fn route_configs(snapshot: &Snapshot, local: Id) -> Vec<crate::config::RouteConf
         .collect()
 }
 
-fn random_id() -> Result<Id> {
+pub(crate) fn random_id() -> Result<Id> {
     loop {
         let mut value = [0_u8; 16];
         getrandom::fill(&mut value).context("generate boot ID")?;
@@ -1700,6 +1700,7 @@ mod tests {
                         node: local,
                         name: "local".into(),
                         overlays: vec!["100.96.0.1".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
                 (
@@ -1708,6 +1709,7 @@ mod tests {
                         node: selected,
                         name: "selected".into(),
                         overlays: vec!["100.96.0.2".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
                 (
@@ -1716,6 +1718,7 @@ mod tests {
                         node: other,
                         name: "other".into(),
                         overlays: vec!["100.96.0.3".parse().unwrap()],
+                        wireguard_key: None,
                     },
                 ),
             ]),

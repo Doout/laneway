@@ -35,6 +35,7 @@ last_pid=""
 link_index=0
 node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
 test_durable_exit="${LANEWAY_NODE_TEST_DURABLE_EXIT:-0}"
+test_wireguard="${LANEWAY_NODE_TEST_WIREGUARD:-0}"
 case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 
 cleanup() {
@@ -263,8 +264,10 @@ controller_command=(
   -admin-token-file "${work_dir}/admin.token"
   -snapshot-validity 2s
   -initial-node-delay 1500ms
-  -first-enrollment-validity 30s
 )
+if [[ "${test_wireguard}" != "1" ]]; then
+  controller_command+=(-first-enrollment-validity 30s)
+fi
 start_process "${controller_ns}" "${work_dir}/controller.log" "${controller_command[@]}"
 controller_pid="${last_pid}"
 wait_log "${controller_pid}" "${work_dir}/controller.log" "test controller listening"
@@ -279,8 +282,12 @@ admin_connection=(
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller network create \
   --network-id "${network_id}" --name rust-node-live --ipv4-pool 100.115.0.0/24 \
   "${admin_connection[@]}" >"${work_dir}/network.json"
+rust_role=()
+if [[ "${test_wireguard}" == "1" ]]; then
+  rust_role=(--class ephemeral --session-lifetime 10m --exit-node --requested-name rust-controller-node)
+fi
 rust_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
-  --network-id "${network_id}" --label rust-node --expires-in 10m "${admin_connection[@]}")"
+  --network-id "${network_id}" --label rust-node --expires-in 10m "${rust_role[@]}" "${admin_connection[@]}")"
 gateway_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
   --network-id "${network_id}" --label gateway --expires-in 10m "${admin_connection[@]}")"
 rust_token="$(printf '%s\n' "${rust_token_json}" | json_string_field enrollment_token)"
@@ -293,11 +300,18 @@ printf '%s\n' "${rust_token}" >"${work_dir}/rust.token"
 printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token"
 chmod 0600 "${work_dir}/rust.token" "${work_dir}/gateway.token"
 
-rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/rust.token" \
-  --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
-  --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-  --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key" \
-  --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
+if [[ "${test_wireguard}" == "1" ]]; then
+  rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/netprobe" enroll-exit --token-file "${work_dir}/rust.token" \
+    --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+    --network-id "${network_id}" --service-id "${controller_service}" \
+    --name rust-controller-node --out-prefix "${work_dir}/pki/rust")"
+else
+  rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/rust.token" \
+    --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+    --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key" \
+    --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
+fi
 gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/gateway.token" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
@@ -482,6 +496,108 @@ listen = "0.0.0.0:4434"
 authorized = true
 failure_mode = "closed"
 EOF
+
+if [[ "${test_wireguard}" == "1" ]]; then
+  command -v wg >/dev/null || { echo "ERROR: wireguard-tools is required" >&2; exit 1; }
+  fixture_binary="$(cargo test --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+    -p lanewayd-rs --test wireguard_packet_lab --no-run --message-format=json |
+    jq -ser '[.[] | select(.target.name=="wireguard_packet_lab" and .executable!=null) | .executable]
+      | if length==1 then .[0] else error("expected one WireGuard test executable") end')"
+  cat >>"${work_dir}/relay.toml" <<'EOF'
+[tcp_fallback]
+listen = "10.254.0.2:4435"
+EOF
+  if [[ "${node_controller}" == "rust" ]]; then
+    start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/rust-relay" --config "${work_dir}/relay.toml"
+    relay_ready="listening"
+  else
+    start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/laneway-relay" \
+      -config "${work_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+    relay_ready="TCP-fallback="
+  fi
+  wait_log "${last_pid}" "${work_dir}/relay.log" "${relay_ready}"
+  sed '/^advertise = /d' "${work_dir}/gateway.toml" >"${work_dir}/wg-go.toml"
+  cat >>"${work_dir}/wg-go.toml" <<EOF
+[wireguard]
+enabled = true
+private_key = "${work_dir}/pki/gateway.wireguard.key"
+interface = "lane0"
+mtu = 1280
+EOF
+  start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/lanewayd" \
+    -config "${work_dir}/wg-go.toml"
+  wait_log "${last_pid}" "${work_dir}/gateway.log" "interface=lane0"
+
+  rust_key="$(base64 -w0 <"${work_dir}/pki/rust.wireguard.key" | wg pubkey)"
+  gateway_key="$(base64 -w0 <"${work_dir}/pki/gateway.wireguard.key" | wg pubkey)"
+  rust_generation="$(sed -n 's/.* generation=\([0-9]\+\)$/\1/p' <<<"${rust_join}")"
+  [[ "${rust_generation}" =~ ^[1-9][0-9]*$ ]]
+  ip -n "${rust_ns}" link add dev lane0 type wireguard
+  base64 -w0 <"${work_dir}/pki/rust.wireguard.key" | ip netns exec "${rust_ns}" wg set lane0 \
+    private-key /dev/stdin listen-port 57001 peer "${gateway_key}" \
+    allowed-ips "${gateway_overlay}" endpoint 127.0.0.1:57002
+  ip -n "${rust_ns}" addr add "${rust_overlay}" dev lane0
+  ip -n "${rust_ns}" link set dev lane0 mtu 1280 up
+  ip -n "${rust_ns}" route add "${gateway_overlay}" dev lane0
+  cat >>"${work_dir}/rust.toml" <<'EOF'
+[tcp_fallback]
+address = "10.254.0.2:4435"
+EOF
+
+  for transport in quic tcp; do
+    if [[ "${transport}" == tcp ]]; then
+      ip netns exec "${rust_ns}" nft add table inet lab_block_relay
+      ip netns exec "${rust_ns}" nft add chain inet lab_block_relay output '{ type filter hook output priority 0; policy accept; }'
+      ip netns exec "${rust_ns}" nft add rule inet lab_block_relay output udp dport 4433 drop
+      connected="Rust agent relay TCP fallback connected"
+    else
+      connected="Rust agent relay connected"
+    fi
+    echo "==> kernel WireGuard packets cross the ${node_controller} relay over ${transport}"
+    start_process "${rust_ns}" "${work_dir}/wg-rust-${transport}.log" env RUST_LOG=info \
+      LANEWAY_WG_CONFIG="${work_dir}/rust.toml" LANEWAY_WG_LOCAL_PUBLIC="${rust_key}" \
+      LANEWAY_WG_PEER_PUBLIC="${gateway_key}" LANEWAY_WG_PEER_ID="${gateway_id}" \
+      LANEWAY_WG_EXIT_GENERATION="${rust_generation}" \
+      "${fixture_binary}" --ignored --exact --nocapture kernel_relay_bridge
+    bridge_pid="${last_pid}"
+    wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "${connected}"
+    wait_relay_sessions 2
+    start_process "${gateway_ns}" "${work_dir}/wg-probe-${transport}.log" \
+      "${work_dir}/netprobe" udp-echo-server -listen "${gateway_address}:9791"
+    echo_pid="${last_pid}"
+    wait_log "${echo_pid}" "${work_dir}/wg-probe-${transport}.log" "ready=udp-echo-server"
+    for _ in $(seq 1 12); do
+      if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+        -target "${gateway_address}:9791" -message "wireguard-${transport}" -timeout 1s; then break; fi
+    done
+    ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+      -target "${gateway_address}:9791" -message "wireguard-${transport}-verified" -timeout 5s
+    if [[ "${transport}" == tcp ]]; then
+      # A 1280-byte inner IPv4 packet produces 1312 bytes of ciphertext,
+      # which must not hit the legacy 1280-byte raw-IP record ceiling.
+      printf -v full_payload '%01252d' 0
+      ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+        -target "${gateway_address}:9791" -message "${full_payload}" -timeout 5s >/dev/null
+      echo "verified full-MTU WireGuard ciphertext over TCP"
+      ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node revoke \
+        --node-id "${rust_id}" --reason wireguard-transport-lab "${management_connection[@]}" >/dev/null
+      wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "controller rejected node authority"
+      if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+        -target "${gateway_address}:9791" -message revoked-wireguard -timeout 2s; then
+        echo "ERROR: revoked ephemeral identity still exchanged kernel packets" >&2
+        exit 1
+      fi
+    fi
+    ip netns exec "${rust_ns}" wg show lane0 latest-handshakes | awk '$2 > 0 { found = 1 } END { exit !found }'
+    stop_process "${echo_pid}"
+    stop_process "${bridge_pid}"
+    if [[ "${transport}" == quic ]]; then
+      grep -Fq 'test kernel_relay_bridge ... ok' "${work_dir}/wg-rust-${transport}.log"
+    fi
+  done
+  echo "PASS: the ephemeral Rust peer and durable Go peer exchange encrypted kernel traffic across the ${node_controller} relay"
+  exit 0
+fi
 
 echo "==> Rust node bootstraps and renews its certificate at the ${node_controller} controller"
 old_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/rust.crt")"

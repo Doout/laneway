@@ -29,6 +29,7 @@ mod status_report;
 mod tcp_fallback;
 mod tls;
 mod tun;
+mod wireguard;
 
 pub use agent::Agent;
 pub use config::{
@@ -38,6 +39,7 @@ pub use config::{
 };
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};
+pub use wireguard::{WireGuardDatagram, WireGuardRelay};
 
 fn product_version() -> &'static str {
     option_env!("LANEWAY_PRODUCT_VERSION")
