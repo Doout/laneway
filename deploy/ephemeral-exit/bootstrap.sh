@@ -1,7 +1,15 @@
 #!/bin/bash
 
-# Keep the real service definition reusable by the disposable systemd gate.
+# Keep the release verifier and unit reusable by the release gates.
 # Sourcing this file defines only these helpers; executing it runs bootstrap.
+verify_exit_release_signature() {
+	local cosign=$1 assets=$2 version=$3
+	[[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || return 2
+	"$cosign" verify-blob --bundle "$assets/checksums.sigstore.json" \
+		--certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$version" \
+		--certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$assets/checksums.txt"
+}
+
 stage_exit_entrypoint() {
 	local runtime_dir=$1 runtime=$2 command
 	case "$runtime" in
@@ -219,9 +227,7 @@ printf '%s  %s\n' "$cosign_sha" "$cosign" | sha256sum -c - >/dev/null || die 'pi
 chmod 0500 "$cosign"
 cosign_version=$($cosign version --json 2>/dev/null | sed -n 's/.*"gitVersion":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
 [[ $cosign_version == v3.1.3 ]] || die 'pinned Cosign reported an unexpected version'
-"$cosign" verify-blob --bundle "$work/checksums.sigstore.json" \
-	--certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$version" \
-	--certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$work/checksums.txt" >/dev/null 2>&1 || die 'release checksum signature verification failed'
+verify_exit_release_signature "$cosign" "$work" "$version" >/dev/null 2>&1 || die 'release checksum signature verification failed'
 (
 	cd "$work"
 	grep -E "  ${archive}$" checksums.txt > selected-checksum

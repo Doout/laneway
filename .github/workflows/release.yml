@@ -82,12 +82,18 @@ jobs:
           PACKAGE_GOOS: ${{ matrix.os }}
           PACKAGE_GOARCH: ${{ matrix.arch }}
         run: make package VERSION="${GITHUB_REF_NAME#v}"
-      - name: Verify the packaged Rust binaries and the compatibility link
+      - name: Test the Linux release archive under systemd
         if: matrix.os == 'linux'
         env:
           PACKAGE_GOARCH: ${{ matrix.arch }}
         run: |
-          sh integration/rust-release-package.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends binutils iproute2 nftables wireguard-tools jq iputils-ping procps
+          sudo modprobe tun
+          sudo modprobe wireguard
+          sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
+          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
             "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
       - name: Generate package SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
@@ -289,6 +295,12 @@ jobs:
       - name: Sign checksum manifest
         working-directory: dist
         run: cosign sign-blob --bundle checksums.sigstore.json checksums.txt
+      - name: Verify with the installer trust policy before publishing
+        run: |
+          set -euo pipefail
+          source deploy/ephemeral-exit/bootstrap.sh
+          verify_exit_release_signature "$(command -v cosign)" dist "$GITHUB_REF_NAME"
+          (cd dist && sha256sum --strict -c checksums.txt)
       - name: Attest release artifact provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:

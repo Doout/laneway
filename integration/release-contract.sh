@@ -169,7 +169,7 @@ for value in \
   'os: darwin, arch: amd64, runner: ubuntu-24.04' \
   'os: darwin, arch: arm64, runner: ubuntu-24.04' \
   'PACKAGE_RUST_RUNTIME_DIR=' \
-  'integration/rust-release-package.sh' \
+  'integration/rust-release-systemd.sh' \
 	"dist/laneway_\${{ matrix.os }}_\${{ matrix.arch }}" \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \
 	'install.sh' \
@@ -179,6 +179,8 @@ for value in \
   'sbom: true' \
   'cosign sign' \
   'cosign sign-blob' \
+  'verify_exit_release_signature "$(command -v cosign)" dist "$GITHUB_REF_NAME"' \
+  'sha256sum --strict -c checksums.txt' \
   'actions/attest-build-provenance@' \
   'aquasecurity/trivy-action@' \
   'Extract OCI layout for vulnerability scanning' \

@@ -45,6 +45,15 @@ a disposable directory and point `LANEWAY_NODE_TEST_RUST_RUNTIME_DIR` at that
 directory when running `integration/rust-controller-node-netns.sh` on the
 isolated host. The package alone does not satisfy the systemd or cutover gates.
 
+The release builds run `integration/rust-release-systemd.sh` on native AMD64
+and ARM64 runners. It extracts the actual archive binaries and runs the
+isolated systemd packet gate against both the Go and Rust controller/relay.
+The unsigned AMD64 CI preview uses the same gate. After signing a tagged
+release, the publish job checks the manifest using the bootstrap's exact
+workflow, tag, and OIDC issuer policy and checks the hashes of the release
+assets. Those are separate gates; neither claims the published bootstrap has
+been installed with a real invitation on the dedicated host.
+
 ## First Linux lab run
 
 Use a separate CA and network on a disposable Linux host. Install Rust 1.91

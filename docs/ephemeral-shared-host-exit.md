@@ -26,8 +26,9 @@ with WireGuard support, but does not require a `wg` executable or a TUN device.
 ## Runtime and failure semantics
 
 The bootstrap verifies the signed release manifest, creates a bounded executable
-tmpfs beneath `/run` (without changing `/run`'s own mount policy), extracts only
-the Laneway binary there, and enrolls with a fresh Ed25519 key and WireGuard key.
+tmpfs beneath `/run` (without changing `/run`'s own mount policy), extracts the
+Laneway enrollment CLI and, when selected, the Rust runtime, and enrolls with a
+fresh Ed25519 key and WireGuard key.
 It starts a collected transient systemd unit with `DynamicUser`,
 `PrivateNetwork`, a strict capability and device allowlist, no application
 stdout/stderr, no core dumps, locked memory, and an absolute runtime limit.
@@ -37,10 +38,10 @@ files and executable are unlinked after startup.
 The private namespace receives an anonymous veth carrier. The bootstrap creates
 only a randomly named, ownership-marked host veth and nftables table; cleanup
 removes exactly those objects. It refuses conflicting state and does not change
-global forwarding settings. IPv4 forwarding and `/dev/net/tun` must already be
-available. The host must expose at least one non-loopback IPv4 resolver (the
-systemd-resolved upstream resolver file is preferred); a private read-only copy
-is mounted into the runtime namespace.
+global forwarding settings. IPv4 forwarding must already be enabled. The Go
+runtime also needs `/dev/net/tun`. The host must expose at least one non-loopback
+IPv4 resolver (the systemd-resolved upstream resolver file is preferred); a
+private read-only copy is mounted into the runtime namespace.
 
 The controller accepts one active control session for the identity. A
 configuration request is also its 10-second heartbeat. After 20 seconds without
