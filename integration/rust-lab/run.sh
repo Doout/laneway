@@ -20,4 +20,5 @@ docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
     export PATH=/opt/rootless-lab:$PATH
     ./integration/rust-kernel-netns.sh
     ./integration/rust-node-interop.sh
-    ./integration/rust-controller-node-netns.sh'
+    ./integration/rust-controller-node-netns.sh
+    LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh'

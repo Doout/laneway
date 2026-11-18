@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic] [--snapshot-validity SECONDS]";
 
 pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let database = PathBuf::from(args.next().context(USAGE)?);
@@ -35,6 +35,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut issuer = None;
     let mut client_ca = None;
     let mut node_quic = false;
+    let mut snapshot_validity = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -63,6 +64,18 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             client_ca = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--node-quic" && !node_quic {
             node_quic = true;
+        } else if flag == "--snapshot-validity" && snapshot_validity.is_none() {
+            let seconds = args
+                .next()
+                .context(USAGE)?
+                .to_str()
+                .context(USAGE)?
+                .parse()?;
+            ensure!(
+                (1..=86400).contains(&seconds),
+                "snapshot validity must be in [1,86400] seconds"
+            );
+            snapshot_validity = Some(seconds);
         } else {
             anyhow::bail!(USAGE)
         }
@@ -87,7 +100,13 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         .enable_all()
         .build()?
         .block_on(serve(
-            super::http::State::new(database, root, issuer, client_ca.is_some())?,
+            super::http::State::new(
+                database,
+                root,
+                issuer,
+                client_ca.is_some(),
+                snapshot_validity.unwrap_or(300),
+            )?,
             address,
             config,
             quic,

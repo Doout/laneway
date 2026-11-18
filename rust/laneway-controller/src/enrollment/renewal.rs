@@ -13,16 +13,16 @@ use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::json;
 
 pub struct NodeCredential {
-    net: Id,
-    node: Id,
-    serial: Vec<u8>,
-    der: Vec<u8>,
+    pub(super) net: Id,
+    pub(super) node: Id,
+    pub(super) serial: Vec<u8>,
+    pub(super) der: Vec<u8>,
 }
 
-struct Binding {
-    lease: Option<i64>,
+pub(super) struct Binding {
+    pub(super) lease: Option<i64>,
     key: Option<[u8; 32]>,
-    capabilities: i64,
+    pub(super) capabilities: i64,
 }
 #[derive(Clone, Copy)]
 pub enum RenewalTransport {
@@ -43,7 +43,7 @@ impl NodeCredential {
             der: der.to_vec(),
         })
     }
-    fn binding(&self, tx: &Transaction<'_>, now: i64) -> Result<Binding> {
+    pub(super) fn binding(&self, tx: &Transaction<'_>, now: i64) -> Result<Binding> {
         // Match exact certificate bytes as well as serial and identity. The DB
         // decides whether a previously authenticated TLS peer is still allowed.
         let binding=tx.query_row("SELECT n.lease_expires_at,n.wireguard_public_key,n.enabled_capabilities

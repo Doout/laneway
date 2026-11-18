@@ -116,7 +116,7 @@ impl Authority {
     }
 }
 
-/// Polls the Go controller while independently enforcing the last lease
+/// Polls the controller while independently enforcing the last lease
 /// deadline. Startup cannot return until a complete snapshot has been applied.
 pub(crate) struct Runner<S, A> {
     client: S,

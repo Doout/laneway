@@ -1,8 +1,10 @@
 //! Redeem one invitation, with authorization derived only from the stored grant.
 mod addresses;
+pub mod configuration;
 mod exit;
 mod maintenance;
 pub mod renewal;
+mod snapshot_policy;
 
 use crate::enrollment_tokens::{EXIT, ROUTER};
 use crate::{

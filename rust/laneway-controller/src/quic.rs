@@ -4,7 +4,11 @@ use crate::http::State;
 use anyhow::{Context, Result, ensure};
 use laneway_controller::{
     SessionStore,
-    enrollment::{EnrollError, renewal::NodeCredential},
+    enrollment::{
+        EnrollError,
+        configuration::ConfigurationError,
+        renewal::{NodeCredential, RenewalTransport},
+    },
 };
 use laneway_protocol::{
     DEFAULT_MAX_CONTROL_PAYLOAD, Id, Role, identity_from_certificate_der,
@@ -149,10 +153,16 @@ async fn request(
         envelope.schema_version == 1 && envelope.request_id != 0,
         "invalid control envelope"
     );
-    let Some(Body::RenewalRequest(req)) = envelope.body else {
-        anyhow::bail!("unsupported control operation")
-    };
+    let operation = envelope.body.context("missing control operation")?;
+    ensure!(
+        matches!(
+            operation,
+            Body::RenewalRequest(_) | Body::ConfigurationRequest(_)
+        ),
+        "unsupported control operation"
+    );
     let issuer = state.issuer.clone().context("node issuer unavailable")?;
+    let validity = state.snapshot_validity;
     let body = if let Ok(permit) = state.queries.clone().try_acquire_owned() {
         let db = state.database.clone();
         let conn = conn.clone();
@@ -160,30 +170,53 @@ async fn request(
         match tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut store = SessionStore::open(&db)?;
-            store.node_control_admission(&peer)?;
-            store.renew_certificate(
-                &peer,
-                req,
-                &issuer,
-                laneway_controller::enrollment::renewal::RenewalTransport::Quic {
-                    holds_exit_claim,
-                },
-                || cancel.is_closed() || conn.close_reason().is_some(),
-            )
+            let cancelled = || cancel.is_closed() || conn.close_reason().is_some();
+            match operation {
+                Body::RenewalRequest(req) => {
+                    store.node_control_admission(&peer)?;
+                    store
+                        .renew_certificate(
+                            &peer,
+                            req,
+                            &issuer,
+                            RenewalTransport::Quic { holds_exit_claim },
+                            cancelled,
+                        )
+                        .map(Body::RenewalResponse)
+                }
+                Body::ConfigurationRequest(req) => {
+                    store.node_configuration(&peer, req, holds_exit_claim, validity, cancelled)
+                }
+                _ => anyhow::bail!("unsupported operation"),
+            }
         })
         .await?
         {
-            Ok(r) => Body::RenewalResponse(r),
+            Ok(r) => r,
             Err(e) => {
                 let (code, detail, retry) = match e.downcast_ref::<EnrollError>() {
                     Some(EnrollError::Invalid | EnrollError::Expired) => {
                         (ErrorCode::Unauthenticated, "invalid credential", false)
                     }
                     Some(EnrollError::Malformed(_)) => {
-                        (ErrorCode::Malformed, "malformed renewal request", false)
+                        (ErrorCode::Malformed, "malformed node request", false)
                     }
                     Some(EnrollError::Denied | EnrollError::Conflict) => {
-                        (ErrorCode::PermissionDenied, "renewal denied", false)
+                        (ErrorCode::PermissionDenied, "node request denied", false)
+                    }
+                    _ if e.is::<ConfigurationError>() => {
+                        match e.downcast_ref::<ConfigurationError>().unwrap() {
+                            ConfigurationError::StaleEpoch => (
+                                ErrorCode::StaleEpoch,
+                                "known epoch is ahead of controller",
+                                false,
+                            ),
+                            ConfigurationError::ManagedAccess => (
+                                ErrorCode::PermissionDenied,
+                                "managed access requires the Go controller",
+                                false,
+                            ),
+                        }
                     }
                     _ => (ErrorCode::Internal, "internal controller error", true),
                 };

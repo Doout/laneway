@@ -36,6 +36,7 @@ pub struct State {
     logins: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     passwords: Arc<laneway_controller::password::PasswordVerifier>,
     pub(crate) issuer: Option<Arc<laneway_controller::node_pki::NodeIssuer>>,
+    pub(crate) snapshot_validity: u64,
     enrollments: Arc<std::sync::Mutex<enroll::Limiter>>,
 }
 impl State {
@@ -44,8 +45,10 @@ impl State {
         root: Option<RootCredential>,
         issuer: Option<laneway_controller::node_pki::NodeIssuer>,
         renewal_enabled: bool,
+        snapshot_validity: u64,
     ) -> anyhow::Result<Self> {
         Ok(Self {
+            snapshot_validity,
             renewal_enabled,
             database: Arc::new(database),
             issuer: issuer.map(Arc::new),

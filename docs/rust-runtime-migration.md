@@ -233,10 +233,22 @@ The Go node client can now renew at Rust using the existing
 requires mutual TLS and only accepts nodes from its own network. Certificate
 revocation takes effect on established connections; an ephemeral exit cannot
 use a second connection to displace a healthy session. Renewal does not extend
-the heartbeat lease. The listener does not yet serve configuration snapshots,
-heartbeats, or relay operations. Keep Go serving production.
+the heartbeat lease.
 
-### Renew a Rust node at a Go controller (lab only)
+The Rust listener also serves authenticated node configuration and conditional
+leases. A snapshot includes dual-stack addresses, peers, approved routes,
+default-deny traffic rules, relay endpoints, and certificate health and
+revocations. The server bounds leases by upcoming authorization expiry and
+advances the epoch when it durably expires a route or ephemeral identity.
+An ephemeral exit configuration request must carry its live lease generation
+on the owning connection to refresh its heartbeat. Configure the upper bound
+with `--snapshot-validity SECONDS` (default 300).
+
+Managed user/team and named-resource grants are not yet compiled by Rust;
+user-bound nodes fail closed. Relay configuration and other Go control operations
+also still require Go. Keep Go serving production.
+
+### Renew a Rust node at a Go or Rust controller (lab only)
 
 Set `auto_renew_certificate = true` in the node's `[controller]` section.
 Leave it off (the default) for read-only mounts or externally managed certificates.
@@ -256,3 +268,6 @@ Successful replacement briefly interrupts traffic: the same process releases
 its old connections and interface, then bootstraps again using the new leaf.
 `integration/rust-controller-node-netns.sh` exercises this handoff, revokes
 the superseded certificate, and sends real traffic through the renewed node.
+Run it with `LANEWAY_NODE_TEST_CONTROLLER=rust` to test native Rust configuration,
+renewal, route and ACL updates, certificate revocation, and lease expiry. In
+that fixture Go still supplies the admin mutations and the relay's control API.

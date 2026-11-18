@@ -2,11 +2,11 @@
 set -euo pipefail
 
 if [[ "${LANEWAY_RUN_PRIVILEGED:-0}" != "1" ]]; then
-  echo "SKIP: set LANEWAY_RUN_PRIVILEGED=1 to run the Go-controller/Rust-node gate"
+  echo "SKIP: set LANEWAY_RUN_PRIVILEGED=1 to run the controller/Rust-node gate"
   exit 0
 fi
 if [[ "$(id -u)" != "0" ]]; then
-  echo "ERROR: the Go-controller/Rust-node gate requires root" >&2
+  echo "ERROR: the controller/Rust-node gate requires root" >&2
   exit 1
 fi
 for command in cargo go ip nft grep sed; do
@@ -33,6 +33,8 @@ declare -a namespaces=()
 declare -A active_processes=()
 last_pid=""
 link_index=0
+node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
+case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 
 cleanup() {
   for pid in "${!active_processes[@]}"; do
@@ -197,6 +199,10 @@ echo "==> building the real controller service fixture, product binaries, and Ru
 )
 cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-healthcheck
 cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
+if [[ "${node_controller}" == "rust" ]]; then
+  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p laneway-controller
+  cp "${repo_root}/rust/target/debug/laneway-controller" "${work_dir}/rust-controller"
+fi
 
 network_id="21000000000000000000000000000001"
 controller_service="21000000000000000000000000000002"
@@ -319,6 +325,29 @@ if [[ ! "${acl_id}" =~ ^[0-9a-f]{32}$ ]]; then
   exit 1
 fi
 
+node_endpoint="${controller_endpoint}"
+node_quic_endpoint="${controller_quic_endpoint}"
+node_server_name="10.254.0.1"
+native_controller_pid=""
+if [[ "${node_controller}" == "rust" ]]; then
+  node_endpoint="https://127.0.0.1:9443"
+  node_quic_endpoint="127.0.0.1:9443"
+  node_server_name="127.0.0.1"
+  "${work_dir}/laneway" pki controller \
+    -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
+    -network-id "${network_id}" -service-id "${controller_service}" -ip "${node_server_name}" \
+    -out-cert "${work_dir}/pki/native-controller.crt" -out-key "${work_dir}/pki/native-controller.key"
+  # Keep the native HTTPS listener loopback-only. Go owns the admin and relay
+  # requests; only the Rust controller answers configuration/renewal for lane0.
+  start_process "${rust_ns}" "${work_dir}/native-controller.log" \
+    "${work_dir}/rust-controller" serve "${work_dir}/controller.db" "${node_quic_endpoint}" \
+    "${work_dir}/pki/native-controller.crt" "${work_dir}/pki/native-controller.key" \
+    --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
+    --node-quic --snapshot-validity 2
+  native_controller_pid="${last_pid}"
+  wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening ${node_endpoint}"
+fi
+
 cat >"${work_dir}/relay.toml" <<EOF
 mode = "relay"
 state_dir = "${work_dir}/relay-state"
@@ -377,9 +406,9 @@ private_key = "${work_dir}/pki/rust.key"
 ca = "${work_dir}/pki/ca.crt"
 [controller]
 auto_renew_certificate = true
-endpoint = "${controller_endpoint}"
-quic_endpoint = "${controller_quic_endpoint}"
-server_name = "10.254.0.1"
+endpoint = "${node_endpoint}"
+quic_endpoint = "${node_quic_endpoint}"
+server_name = "${node_server_name}"
 service_id = "${controller_service}"
 poll_interval = "100ms"
 timeout = "3s"
@@ -403,7 +432,7 @@ quic_recovery_interval = "5s"
 listen = "0.0.0.0:4434"
 EOF
 
-echo "==> bootstrap is held before TUN creation, then the controller assignment is applied"
+echo "==> Rust node bootstraps and renews its certificate at the ${node_controller} controller"
 old_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/rust.crt")"
 old_serial="${old_info##* serial=}"
 [[ "${old_serial}" =~ ^[0-9a-f]{2,64}$ ]]
@@ -411,12 +440,14 @@ initial_key_hash="$(sha256sum "${work_dir}/pki/rust.key")"
 start_process "${rust_ns}" "${work_dir}/rust.log" env RUST_LOG=info \
   "${work_dir}/rust-node" --config "${work_dir}/rust.toml"
 rust_pid="${last_pid}"
-wait_log "${controller_pid}" "${work_dir}/controller.log" "holding initial node configuration request"
-if ip -n "${rust_ns}" link show lane0 >/dev/null 2>&1; then
-  echo "ERROR: Rust node created lane0 before its initial NodeConfiguration" >&2
-  exit 1
+if [[ "${node_controller}" == "go" ]]; then
+  wait_log "${controller_pid}" "${work_dir}/controller.log" "holding initial node configuration request"
+  if ip -n "${rust_ns}" link show lane0 >/dev/null 2>&1; then
+    echo "ERROR: Rust node created lane0 before its initial NodeConfiguration" >&2
+    exit 1
+  fi
+  wait_log "${controller_pid}" "${work_dir}/controller.log" "node configuration response status=200"
 fi
-wait_log "${controller_pid}" "${work_dir}/controller.log" "node configuration response status=200"
 wait_log "${rust_pid}" "${work_dir}/rust.log" "native Rust Laneway agent started"
 wait_log "${rust_pid}" "${work_dir}/rust.log" "renewed node certificate; restarting authenticated connections"
 for _ in $(seq 1 160); do
@@ -520,17 +551,20 @@ ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q 'dev lane0'
 udp_denied 9704 rust-revoked-path
 
 echo "==> controller outage expires the last bounded lease and removes native authority"
-# ip netns exec may retain a parent wrapper on some iproute2 versions. Signal
-# only processes proven to belong to this disposable controller namespace so
-# the outage cannot affect the runner host or another test namespace.
-while read -r namespace_pid; do
-  if [[ -n "${namespace_pid}" ]]; then
-    kill -KILL "${namespace_pid}" >/dev/null 2>&1 || true
-  fi
-done < <(ip netns pids "${controller_ns}")
-kill -KILL "${controller_pid}" >/dev/null 2>&1 || true
-wait "${controller_pid}" >/dev/null 2>&1 || true
-unset "active_processes[${controller_pid}]"
+if [[ -n "${native_controller_pid}" ]]; then
+  stop_process "${native_controller_pid}"
+else
+  # ip netns exec may retain a parent wrapper on some iproute2 versions.
+  # Signal only processes in this disposable controller namespace.
+  while read -r namespace_pid; do
+    if [[ -n "${namespace_pid}" ]]; then
+      kill -KILL "${namespace_pid}" >/dev/null 2>&1 || true
+    fi
+  done < <(ip netns pids "${controller_ns}")
+  kill -KILL "${controller_pid}" >/dev/null 2>&1 || true
+  wait "${controller_pid}" >/dev/null 2>&1 || true
+  unset "active_processes[${controller_pid}]"
+fi
 for _ in $(seq 1 160); do
   address_present=0
   route_present=0
@@ -563,4 +597,4 @@ grep -q 'authority expired' "${work_dir}/rust.log"
 stop_process "${gateway_pid}"
 stop_process "${relay_pid}"
 stop_process "${rust_pid}"
-echo "PASS: real Go controller drove Rust-node bootstrap, route/ACL mutation, revocation, and outage expiry"
+echo "PASS: ${node_controller} controller drove Rust-node bootstrap, route/ACL mutation, revocation, and outage expiry"

@@ -23,6 +23,7 @@ import (
 	v1 "github.com/Doout/laneway/go/api/laneway/v1"
 	"github.com/Doout/laneway/go/internal/controller"
 	"github.com/Doout/laneway/go/internal/controllerclient"
+	"github.com/Doout/laneway/go/internal/controllerservice"
 	"github.com/Doout/laneway/go/internal/identity"
 	"github.com/Doout/laneway/go/internal/pki"
 	"github.com/Doout/laneway/go/internal/protocol"
@@ -39,7 +40,7 @@ func TestRustControllerQUIC(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	net1, err := store.CreateNetwork(ctx, "quic", netip.MustParsePrefix("10.77.0.0/24"))
+	net1, err := store.CreateNetworkDualStack(ctx, "quic", netip.MustParsePrefix("10.77.0.0/24"), netip.MustParsePrefix("fd12:b584:14c0::/64"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,17 +102,18 @@ func TestRustControllerQUIC(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("controller startup timeout")
 	}
-	newClient := func(name string, m pki.Material) *controllerclient.Client {
+	clientFor := func(name string, m pki.Material, address string, generation uint64) *controllerclient.Client {
 		t.Helper()
 		cert, key := pair(name, m)
 		// Deliberately unreachable HTTPS: this test only passes over UDP.
-		cl, err := controllerclient.New(controllerclient.Options{Endpoint: "https://127.0.0.1:1", QUICEndpoint: endpoint, CAFile: root, CertificateFile: cert, PrivateKeyFile: key, ExpectedNetworkID: net1.ID, ExpectedServiceID: sid, Timeout: 2 * time.Second})
+		cl, err := controllerclient.New(controllerclient.Options{Endpoint: "https://127.0.0.1:1", QUICEndpoint: address, CAFile: root, CertificateFile: cert, PrivateKeyFile: key, ExpectedNetworkID: net1.ID, ExpectedServiceID: sid, Timeout: 2 * time.Second, EphemeralExitLeaseGeneration: generation})
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = cl.Close() })
 		return cl
 	}
+	newClient := func(name string, m pki.Material) *controllerclient.Client { return clientFor(name, m, endpoint, 0) }
 	enroll := func(network identity.NetworkID, name string, exit bool) (pki.Material, *x509.Certificate) {
 		t.Helper()
 		opts := controller.EnrollmentTokenOptions{Class: controller.EnrollmentClassDurable}
@@ -179,6 +181,118 @@ func TestRustControllerQUIC(t *testing.T) {
 	if _, err := renewed.Renew(ctx, csr, nil); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("node configuration", func(t *testing.T) {
+		connector, connectorLeaf := enroll(net1.ID, "connector", false)
+		cid, err := identity.IdentityFromCertificate(connectorLeaf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = store.SetNodeCapabilities(ctx, cid.NodeID, protocol.CapabilitySubnetRouterV1); err != nil {
+			t.Fatal(err)
+		}
+		exp := time.Now().Add(5 * time.Second).Truncate(time.Second)
+		subnet, err := store.AdvertiseRoute(ctx, cid.NodeID, netip.MustParsePrefix("172.21.0.0/16"), controller.RouteKindSubnet, controller.RouteModeNAT, 10, &exp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = store.ApproveRoute(ctx, subnet.ID); err != nil {
+			t.Fatal(err)
+		}
+		selector := `{"ip_protocol":"IP_PROTOCOL_TCP","destination_prefixes":[{"address":"rBUAAA==","prefix_length":16}],"destination_ports":[{"first":443,"last":443}]}`
+		rule, _, err := store.AddACLRule(ctx, net1.ID, 50, controller.ACLActionAccept, selector, "Allow HTTPS only")
+		if err != nil {
+			t.Fatal(err)
+		}
+		relayID, err := identity.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = store.RegisterRelay(ctx, net1.ID, relayID, nil, "relay", "127.0.0.1:4433"); err != nil {
+			t.Fatal(err)
+		}
+		goService, err := controllerservice.New(controllerservice.Options{Store: store, CACertificate: ca, CAKey: signer.PrivateKey, LeafValidity: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pool := x509.NewCertPool()
+		pool.AddCert(ca)
+		goServer, err := goService.ListenQUIC("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{server.CertificateDER}, PrivateKey: server.PrivateKey}}, ClientCAs: pool})
+		if err != nil {
+			t.Fatal(err)
+		}
+		serve := make(chan error, 1)
+		go func() { serve <- goServer.Serve(ctx) }()
+		defer func() { _ = goServer.Close(); <-serve }()
+		m := pki.Material{CertificateDER: der[0], PrivateKey: keyPriv}
+		reference := clientFor("reference", m, goServer.Addr().String(), 0)
+		oracle, unchanged, err := reference.Configuration(ctx, 0)
+		if err != nil || unchanged {
+			t.Fatalf("Go snapshot: unchanged=%t err=%v", unchanged, err)
+		}
+		rust, unchanged, err := renewed.Configuration(ctx, 0)
+		if err != nil || unchanged {
+			t.Fatalf("Rust snapshot: unchanged=%t err=%v", unchanged, err)
+		}
+		if len(rust.OverlayAddresses) != 2 || len(rust.Routes.Routes) != 5 || len(rust.Policy.Rules) != 1 || len(rust.RevokedCertificateSerials) != 1 || len(rust.Relays) != 1 {
+			t.Fatalf("fixture did not exercise dual-stack peers, route, ACL, revocation and relay: %v", rust)
+		}
+		if rust.ValidUntilUnixSeconds != uint64(exp.Unix()) || rust.ValidUntilUnixSeconds > oracle.ValidUntilUnixSeconds {
+			t.Fatalf("invalid route-clamped lease: %v", rust.ValidUntilUnixSeconds)
+		}
+		oracle.ValidUntilUnixSeconds = rust.ValidUntilUnixSeconds
+		if !proto.Equal(oracle, rust) {
+			t.Fatalf("snapshot mismatch\nGo: %v\nRust: %v", oracle, rust)
+		}
+		epoch := rust.ConfigurationEpoch
+		lease, unchanged, err := renewed.Configuration(ctx, epoch)
+		if err != nil || !unchanged || lease.ValidUntilUnixSeconds != rust.ValidUntilUnixSeconds {
+			t.Fatalf("conditional lease: %v %t %v", lease, unchanged, err)
+		}
+		if _, _, err := renewed.Configuration(ctx, epoch+100); err == nil || !strings.Contains(err.Error(), "ERROR_CODE_STALE_EPOCH") {
+			t.Fatalf("future epoch: %v", err)
+		}
+		if _, err = store.DeleteACLRule(ctx, rule.ID); err != nil {
+			t.Fatal(err)
+		}
+		noRule, unchanged, err := renewed.Configuration(ctx, epoch)
+		if err != nil || unchanged || len(noRule.GetPolicy().GetRules()) != 0 || noRule.GetPolicy().GetDefaultAction() != v1.PolicyAction_POLICY_ACTION_DENY {
+			t.Fatalf("ACL removal: %v %t %v", noRule, unchanged, err)
+		}
+		raw, err := sql.Open("sqlite", db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer raw.Close()
+		time.Sleep(time.Until(exp) + 100*time.Millisecond)
+		after, unchanged, err := renewed.Configuration(ctx, noRule.ConfigurationEpoch)
+		if err != nil || unchanged || after.ConfigurationEpoch != noRule.ConfigurationEpoch+1 || len(after.GetRoutes().GetRoutes()) != 4 {
+			t.Fatalf("route expiry: %v %t %v", after, unchanged, err)
+		}
+		var state string
+		if err = raw.QueryRow("SELECT state FROM routes WHERE id=?", subnet.ID[:]).Scan(&state); err != nil || state != "withdrawn" {
+			t.Fatalf("route expiry was not durable: %s %v", state, err)
+		}
+		time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)) + 100*time.Millisecond)
+		fresh, unchanged, err := renewed.Configuration(ctx, after.ConfigurationEpoch)
+		if err != nil || !unchanged || fresh.GetConfigurationEpoch() != after.ConfigurationEpoch || fresh.GetValidUntilUnixSeconds() <= after.GetValidUntilUnixSeconds() {
+			t.Fatalf("lease did not advance without an epoch change: %v %t %v", fresh, unchanged, err)
+		}
+		// Bind the connector to a managed user and prove the ordinary ACL
+		// snapshot path cannot bypass unported managed grants.
+		user, err := identity.NewID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = raw.Exec("INSERT INTO access_users(id,network_id,name,enabled,created_at,updated_at) VALUES(?,?,?,1,unixepoch(),unixepoch())", user[:], net1.ID[:], "managed"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = raw.Exec("UPDATE nodes SET user_id=? WHERE id=?", user[:], cid.NodeID[:]); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = newClient("managed", connector).Configuration(ctx, after.ConfigurationEpoch); err == nil || !strings.Contains(err.Error(), "ERROR_CODE_PERMISSION_DENIED") {
+			t.Fatalf("managed node was not denied: %v", err)
+		}
+	})
 	outsider, _ := enroll(net2.ID, "foreign", false)
 	if _, err := newClient("foreign", outsider).Renew(ctx, csr, nil); err == nil {
 		t.Fatal("registered node from another network renewed")
@@ -257,8 +371,23 @@ func TestRustControllerQUIC(t *testing.T) {
 	})
 	t.Run("ephemeral exit session", func(t *testing.T) {
 		m, l := enroll(net1.ID, "lab-exit", true)
-		a := newClient("exit-a", m)
-		b := newClient("exit-b", m)
+		id, err := identity.IdentityFromCertificate(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, err := store.EphemeralExitSession(ctx, id.NodeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := clientFor("exit-a", m, endpoint, session.Generation)
+		b := clientFor("exit-b", m, endpoint, session.Generation)
+		conf, unchanged, err := a.Configuration(ctx, 0)
+		if err != nil || unchanged || conf.GetEphemeralExitLeaseGeneration() != session.Generation || conf.GetEphemeralExitSuspectAtUnixSeconds() != conf.GetValidUntilUnixSeconds() || conf.GetEphemeralExitRevokeAtUnixSeconds() < conf.GetValidUntilUnixSeconds() {
+			t.Fatalf("ephemeral Exit heartbeat: %v %t %v", conf, unchanged, err)
+		}
+		if conf, unchanged, err = a.Configuration(ctx, conf.ConfigurationEpoch); err != nil || unchanged || conf.GetEphemeralExitLeaseGeneration() != session.Generation {
+			t.Fatalf("ephemeral Exit did not get a fresh heartbeat: %v %t %v", conf, unchanged, err)
+		}
 		if _, err := a.Renew(ctx, csr, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -283,10 +412,6 @@ func TestRustControllerQUIC(t *testing.T) {
 		}
 		// A terminated heartbeat lease is independent of the client leaf's
 		// absolute expiry and must be rechecked on the established session.
-		id, err := identity.IdentityFromCertificate(l)
-		if err != nil {
-			t.Fatal(err)
-		}
 		raw, err := sql.Open("sqlite", db)
 		if err != nil {
 			t.Fatal(err)
