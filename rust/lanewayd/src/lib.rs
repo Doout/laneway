@@ -40,6 +40,8 @@ pub use config::{
     TcpFallbackConfig, TlsConfig, TunConfig,
 };
 pub use metrics::{Metrics, MetricsSnapshot};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use renewal::recover_node_credential;
 pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};
 #[cfg(target_os = "linux")]
 pub use wireguard::{SharedHostExit, WireGuardNode};

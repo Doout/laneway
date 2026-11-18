@@ -52,6 +52,14 @@ fn verify_signed_der(der: &[u8], spki: &[u8]) -> Result<()> {
 
 impl VerifiedCsr {
     pub fn parse(der: &[u8]) -> Result<Self> {
+        Self::parse_inner(der, None).map(|(key, _)| key)
+    }
+
+    pub(crate) fn for_recovery<'a>(der: &'a [u8], binding: &str) -> Result<(Self, &'a [u8])> {
+        Self::parse_inner(der, Some(binding))
+    }
+
+    fn parse_inner<'a>(der: &'a [u8], binding: Option<&str>) -> Result<(Self, &'a [u8])> {
         ensure!(
             !der.is_empty() && der.len() <= MAX_DER,
             "PKCS#10 CSR must be 1..65536 bytes"
@@ -63,11 +71,18 @@ impl VerifiedCsr {
             rest.is_empty() && info.version.0 == 0,
             "invalid PKCS#10 CSR"
         );
+        if let Some(binding) = binding {
+            let mut names = info.subject.iter_common_name();
+            ensure!(
+                names.next().and_then(|attr| attr.as_str().ok()) == Some(binding)
+                    && names.next().is_none(),
+                "invalid recovery proof binding"
+            );
+        }
         let spki = info.subject_pki.raw;
         verify_signed_der(der, spki).context("invalid PKCS#10 CSR signature")?;
-        Ok(Self(
-            SubjectPublicKeyInfo::from_der(spki).context("unsupported CSR public key")?,
-        ))
+        let key = SubjectPublicKeyInfo::from_der(spki).context("unsupported CSR public key")?;
+        Ok((Self(key), spki))
     }
 }
 

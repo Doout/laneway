@@ -115,6 +115,103 @@ async fn replace(
     staged.commit()
 }
 
+/// Repair an expired persistent node, with the service stopped, using the
+/// operator-delivered approval. Only the certificate file is replaced.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub async fn recover_node_credential(config: &crate::Config, token_file: &Path) -> Result<()> {
+    use rcgen::{DistinguishedName, DnType};
+    use sha2::{Digest, Sha256};
+
+    let controller = config
+        .controller
+        .as_ref()
+        .context("recovery requires a controller-managed node")?;
+    let (network, node) = config.ids()?;
+    let identity = AuthenticatedIdentity {
+        network_id: network,
+        role: Role::Node,
+        subject_id: node,
+    };
+    let tls = &config.tls;
+    let old = tls::local_certificate_health(tls)?;
+    ensure!(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() >= old.not_after,
+        "certificate has not expired; use ordinary renewal"
+    );
+    let chain = tls::load_certificates(&tls.certificate)?;
+    ensure!(
+        identity_from_certificate_der(chain[0].as_ref())? == identity,
+        "expired certificate does not match configured node identity"
+    );
+    let key = KeyPair::try_from(&tls::load_private_key(&tls.private_key)?)?;
+    let old_leaf = parse_x509_certificate(chain[0].as_ref())
+        .map_err(|_| anyhow::anyhow!("invalid expired certificate"))?
+        .1;
+    ensure!(
+        old_leaf.public_key().raw == key.subject_public_key_info(),
+        "expired certificate and existing private key do not match"
+    );
+    // Exercise staging and file permissions before spending the approval.
+    let mut staged = Staged::open(&tls.certificate, &old)?;
+    let roots = tls::root_store(&tls.ca)?;
+    let token = recovery_token(token_file)?;
+    let token = token.trim();
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params.distinguished_name = DistinguishedName::new();
+    params.distinguished_name.push(
+        DnType::CommonName,
+        format!(
+            "laneway-recovery:{}",
+            hex::encode(Sha256::digest(token.as_bytes()))
+        ),
+    );
+    let csr = params.serialize_request(&key)?;
+    let certificates_der =
+        crate::controller::recover_certificate(controller, &tls.ca, network, token, csr.der())
+            .await?;
+    (|| -> Result<()> {
+        let (_, leaf) = parse_x509_certificate(&certificates_der[0]).map_err(|_| anyhow::anyhow!("invalid recovered certificate"))?;
+        let expiry = leaf.validity().not_after.timestamp().try_into()?;
+        let chain = CertificateChain { certificates_der, not_after_unix_seconds: expiry };
+        let pem = validate(&chain, &key, identity, &old, 0, &roots)?;
+        let still_current = KeyPair::try_from(&tls::load_private_key(&tls.private_key)?)?;
+        ensure!(still_current.subject_public_key_info() == key.subject_public_key_info(),
+            "existing private key changed during recovery");
+        staged.write(&pem)?;
+        staged.commit()
+    })().context("recovery was approved but the certificate was not installed; request another approval after fixing the problem")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recovery_token(path: &Path) -> Result<zeroize::Zeroizing<String>> {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use std::{
+        io::Read,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .context("open private recovery token file")?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= 128 && metadata.permissions().mode() & 0o077 == 0,
+        "recovery token file must be private, regular, and at most 128 bytes"
+    );
+    let mut token = zeroize::Zeroizing::new(String::new());
+    file.take(129).read_to_string(&mut token)?;
+    let mut decoded = zeroize::Zeroizing::new([0u8; 32]);
+    ensure!(
+        token.len() <= 128
+            && token.trim().len() == 43
+            && URL_SAFE_NO_PAD.decode_slice(token.trim(), &mut *decoded) == Ok(32),
+        "invalid recovery token"
+    );
+    Ok(token)
+}
+
 fn validate(
     chain: &CertificateChain,
     key: &KeyPair,

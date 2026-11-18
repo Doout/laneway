@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZeroU64,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -104,51 +104,17 @@ struct QuicControl {
 impl Client {
     pub(crate) async fn new(options: ClientOptions) -> Result<Self> {
         ensure!(
-            !options.timeout.is_zero() && options.timeout <= Duration::from_secs(300),
-            "controller timeout must be in (0,5m]"
-        );
-        ensure!(
             options.exit_generation.is_none() || options.quic_endpoint.is_some(),
             "ephemeral Exit authority requires controller QUIC"
         );
-        let (url, http_origin) = controller_origins(&options.endpoint, &options.server_name)?;
-        let host = origin_host(&url);
-        let port = url
-            .port_or_known_default()
-            .context("controller endpoint port is unknown")?;
-        let mut resolved: Vec<SocketAddr> = if let Ok(address) = host.parse::<IpAddr>() {
-            vec![SocketAddr::new(address, port)]
-        } else {
-            tokio::time::timeout(options.timeout, tokio::net::lookup_host((host, port)))
-                .await
-                .context("controller DNS resolution timed out")?
-                .context("resolve controller endpoint")?
-                .take(17)
-                .collect()
-        };
-        resolved.sort_unstable();
-        resolved.dedup();
-        ensure!(
-            !resolved.is_empty() && resolved.len() <= 16,
-            "controller endpoint resolved outside the bounded 1..=16 address set"
-        );
         let expected = expected_controller(options.network, options.service);
-        let mut https = controller_tls(&options, expected)?;
-        https.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        let mut builder = reqwest::Client::builder()
-            .https_only(true)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .use_preconfigured_tls(https)
-            .timeout(options.timeout)
-            .tls_info(true);
-        let tls_host = origin_host(&http_origin);
-        if tls_host.parse::<IpAddr>().is_err() {
-            builder = builder.resolve_to_addrs(tls_host, &resolved);
-        }
-        let http = builder
-            .build()
-            .context("build node controller HTTP client")?;
+        let (http, http_origin, mut resolved) = https_transport(
+            &options.endpoint,
+            &options.server_name,
+            options.timeout,
+            controller_tls(&options, expected)?,
+        )
+        .await?;
         let quic = if let Some(endpoint) = options.quic_endpoint.as_deref() {
             Some(QuicControl::new(endpoint, &options, expected).await?)
         } else {
@@ -340,6 +306,114 @@ impl Client {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn recover_certificate(
+    config: &crate::config::ControllerConfig,
+    roots: &Path,
+    network: Id,
+    token: &str,
+    csr: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    let expected = expected_controller(network, config.service_id.parse()?);
+    let tls = pinned_controller(roots, expected)?.with_no_client_auth();
+    let (http, origin, _) =
+        https_transport(&config.endpoint, &config.server_name, config.timeout, tls).await?;
+    let body = serde_json::to_vec(&serde_json::json!({
+        "recovery_token": token,
+        "pkcs10_csr_der": STANDARD.encode(csr),
+    }))?;
+    let response = http
+        .post(origin.join("/v1/node-credential-recovery")?)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .context("request node credential recovery")?;
+    ensure!(
+        response.status() == StatusCode::OK,
+        "controller refused node recovery: {}",
+        response.status()
+    );
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RecoveryReply {
+        certificates_der: Vec<String>,
+    }
+    let reply: RecoveryReply = serde_json::from_slice(&read_response(response).await?)?;
+    ensure!(
+        (1..=9).contains(&reply.certificates_der.len()),
+        "invalid recovery chain length"
+    );
+    reply
+        .certificates_der
+        .iter()
+        .map(|der| {
+            let bytes = STANDARD
+                .decode(der)
+                .context("invalid recovery certificate encoding")?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() <= 65536,
+                "invalid recovery certificate size"
+            );
+            Ok(bytes)
+        })
+        .collect()
+}
+
+async fn https_transport(
+    endpoint: &str,
+    server_name: &str,
+    timeout: Duration,
+    mut tls: rustls::ClientConfig,
+) -> Result<(reqwest::Client, reqwest::Url, Vec<SocketAddr>)> {
+    ensure!(
+        !timeout.is_zero() && timeout <= Duration::from_secs(300),
+        "controller timeout must be in (0,5m]"
+    );
+    let (dial, http_origin) = controller_origins(endpoint, server_name)?;
+    let host = origin_host(&dial);
+    let port = dial
+        .port_or_known_default()
+        .context("controller endpoint port is unknown")?;
+    let mut resolved: Vec<SocketAddr> = if let Ok(address) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(address, port)]
+    } else {
+        tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)))
+            .await
+            .context("controller DNS resolution timed out")?
+            .context("resolve controller endpoint")?
+            .take(17)
+            .collect()
+    };
+    resolved.sort_unstable();
+    resolved.dedup();
+    ensure!(
+        !resolved.is_empty() && resolved.len() <= 16,
+        "controller endpoint resolved outside the bounded 1..=16 address set"
+    );
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let mut builder = reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .use_preconfigured_tls(tls)
+        .timeout(timeout)
+        .tls_info(true);
+    let tls_host = origin_host(&http_origin);
+    if tls_host.parse::<IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(tls_host, &resolved);
+    }
+    Ok((
+        builder
+            .build()
+            .context("build node controller HTTP client")?,
+        http_origin,
+        resolved,
+    ))
+}
+
 async fn read_response(mut response: reqwest::Response) -> Result<Vec<u8>> {
     let capacity = response.content_length().unwrap_or(0);
     ensure!(
@@ -470,20 +544,27 @@ fn controller_tls(
 ) -> Result<rustls::ClientConfig> {
     let certificates = crate::tls::load_certificates(&options.certificate)?;
     let key = crate::tls::load_private_key(&options.private_key)?;
-    let roots = crate::tls::root_store(&options.ca)?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
-        .build()?;
-    let mut config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinnedController { expected, web }))
+    let mut config = pinned_controller(&options.ca, expected)?
         .with_client_auth_cert(certificates, key)
         .context("load node controller identity")?;
     if options.exit_generation.is_some() {
         config.resumption = rustls::client::Resumption::disabled();
     }
     Ok(config)
+}
+
+fn pinned_controller(
+    ca: &Path,
+    expected: AuthenticatedIdentity,
+) -> Result<rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>> {
+    let roots = crate::tls::root_store(ca)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+        .build()?;
+    Ok(rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedController { expected, web })))
 }
 
 impl QuicControl {

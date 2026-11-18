@@ -9,8 +9,9 @@ use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
     SessionError, SessionStore,
     access_admin::{
-        AccessError, AclRule, AclSelector, BrowserAccess, Diagnostics, Port, Preview,
-        Request as Action, ResourceTarget, RouteMode, RouteSpec, ServiceProtocol, Subject, Target,
+        AccessError, AclRule, AclSelector, BrowserAccess, Diagnostics, NodeRecoveryApproval, Port,
+        Preview, Request as Action, ResourceTarget, RouteMode, RouteSpec, ServiceProtocol, Subject,
+        Target,
     },
     node_location::Location,
 };
@@ -30,6 +31,7 @@ pub(super) enum Route<'a> {
     Certificates(&'a str),
     RevokeCertificate(&'a str, &'a str),
     RevokeNode(&'a str),
+    IssueNodeRecovery(&'a str),
     NodeCapabilities(&'a str),
     RelayCollection(&'a str),
     RelayUpdate(&'a str),
@@ -78,6 +80,7 @@ impl<'a> Route<'a> {
                 "revoke",
             ] => RevokeCertificate(id, serial),
             ["", "v1", "admin", "nodes", id, "revoke"] => RevokeNode(id),
+            ["", "v1", "admin", "nodes", id, "credential-recovery-grants"] => IssueNodeRecovery(id),
             ["", "v1", "admin", "nodes", id, "capabilities"] => NodeCapabilities(id),
             ["", "v1", "admin", "networks", id, "relays"] => RelayCollection(id),
             ["", "v1", "admin", "relays", id] => RelayUpdate(id),
@@ -134,6 +137,7 @@ impl<'a> Route<'a> {
             | Self::WithdrawAdvertisement(_)
             | Self::RevokeCertificate(..)
             | Self::RevokeNode(_)
+            | Self::IssueNodeRecovery(_)
             | Self::RelayDisable(_)
             | Self::PolicyPreview(_)
             | Self::Diagnostics(_)
@@ -173,6 +177,12 @@ struct CapabilitiesForm {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RevocationForm {
+    reason: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeRecoveryForm {
+    certificate_serial: String,
     reason: String,
 }
 #[derive(Deserialize)]
@@ -304,6 +314,7 @@ pub(super) async fn handle(
         && matches!(
             route,
             Route::AclRules(_)
+                | Route::IssueNodeRecovery(_)
                 | Route::RelayCollection(_)
                 | Route::UserCreate(_)
                 | Route::TeamCreate(_)
@@ -366,6 +377,20 @@ async fn decode(
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
         Route::PrivateDns(net) => Action::PrivateDns(parse(net)?),
+        Route::IssueNodeRecovery(id) => Action::IssueNodeRecovery(
+            parse(id)?,
+            required_json_form::<NodeRecoveryForm>(req)
+                .await
+                .and_then(|form| {
+                    let certificate_serial = hex::decode(&form.certificate_serial)
+                        .map_err(|_| malformed("invalid certificate serial"))?;
+                    Ok(NodeRecoveryApproval {
+                        certificate_serial,
+                        reason: form.reason,
+                    })
+                })
+                .map_err(Into::into),
+        ),
         // Keep the target even when decoding fails so the route's read
         // permission and network scope take precedence over body errors.
         Route::PolicyPreview(net) => Action::PolicyPreview(

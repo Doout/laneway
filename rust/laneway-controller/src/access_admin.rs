@@ -47,6 +47,7 @@ pub enum Request {
     ListCertificates(Id, usize),
     RevokeCertificate(Id, Vec<u8>, String),
     RevokeNode(Id, String),
+    IssueNodeRecovery(Id, Result<NodeRecoveryApproval>),
     SetNodeCapabilities(Id, u64),
     ListRelays(Id, usize),
     RegisterRelay {
@@ -87,6 +88,11 @@ pub enum Request {
         service: Id,
     },
     DeleteResourceGrant(Id),
+}
+
+pub struct NodeRecoveryApproval {
+    pub certificate_serial: Vec<u8>,
+    pub reason: String,
 }
 
 #[derive(Clone, Copy)]
@@ -163,9 +169,10 @@ impl Request {
                 "relay.manage"
             }
             Self::RevokeCertificate(..) => "certificate.revoke",
-            Self::RevokeNode(..) | Self::SetNodeCapabilities(..) | Self::SetNodeLocation(..) => {
-                "node.manage"
-            }
+            Self::RevokeNode(..)
+            | Self::IssueNodeRecovery(..)
+            | Self::SetNodeCapabilities(..)
+            | Self::SetNodeLocation(..) => "node.manage",
             Self::AssignRoute(..) | Self::ApproveRoute(_) | Self::WithdrawRoute(_) => {
                 "route.manage"
             }
@@ -206,6 +213,7 @@ impl Request {
             Self::SetMember(id, _, _) => ("SELECT network_id FROM access_teams WHERE id=?", id),
             Self::DeleteGrant(id) => ("SELECT network_id FROM access_grants WHERE id=?", id),
             Self::RevokeNode(id, _)
+            | Self::IssueNodeRecovery(id, _)
             | Self::SetNodeCapabilities(id, _)
             | Self::SetNodeLocation(id, _) => ("SELECT network_id FROM nodes WHERE id=?", id),
             Self::UpdateRelay(id, ..) | Self::DisableRelay(id) => {
@@ -281,6 +289,31 @@ impl Request {
                 editor.revoke_certificate(&serial, &reason).map(epoch_reply)
             }
             Self::RevokeNode(id, reason) => editor.revoke_node(id, &reason).map(epoch_reply),
+            Self::IssueNodeRecovery(node, form) => {
+                let form = form?;
+                let reason = &form.reason;
+                ensure!(
+                    !reason.is_empty() && reason == reason.trim() && reason.len() <= 1024,
+                    AccessError::Invalid("invalid approval reason")
+                );
+                let (token, expires) = crate::enrollment::credential_recovery::approve(
+                    tx,
+                    net,
+                    node,
+                    now,
+                    &form.certificate_serial,
+                )?;
+                audit(
+                    tx,
+                    net,
+                    &editor.actor,
+                    now,
+                    "node.credential_recovery.approve",
+                    ("node", node),
+                    json!({"reason": reason}),
+                )?;
+                Ok(json!({"recovery_token": token.as_str(), "expires_at_unix_seconds": expires}))
+            }
             Self::SetNodeCapabilities(id, capabilities) => editor
                 .set_node_capabilities(id, capabilities)
                 .map(epoch_reply),

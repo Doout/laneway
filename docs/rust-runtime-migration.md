@@ -1037,6 +1037,28 @@ gate uses the existing Go CLI against the Rust ACL API to prove that removing
 the allow rule blocks a real routed packet and adding it back restores traffic.
 The fixture still uses Go for route administration.
 
+### Recover an expired Rust node credential (lab only)
+
+On schema 19, a scoped `node.manage` administrator can request a 10-minute
+approval at `POST /v1/admin/nodes/{node_id}/credential-recovery-grants` with
+the expired certificate's hex serial and a reason. The token is shown once
+and must be delivered separately in a private file. Stop the node first.
+For a native Rust node configuration, run this as the owner of the writable
+certificate directory, with access to the existing private key:
+
+```sh
+lanewayd-rs recover --config /path/to/node.toml --recovery-token-file /path/to/private/approval
+```
+
+The command connects to the configured, identity-pinned controller HTTPS
+origin without offering the expired leaf. The controller issues a certificate
+only after verifying the approval and a signed CSR for the same key. The node
+checks the returned CA chain and identity, then replaces only the certificate.
+The flow rejects revoked credentials, leased ephemeral nodes, and disabled
+managed users. It does not change the read-only imported Connector or Exit
+profiles. A failed install after issuance requires another approval. Restart
+the node and verify its normal connection.
+
 ### Renew a Rust node at a Go or Rust controller (lab only)
 
 Set `auto_renew_certificate = true` in the node's `[controller]` section.

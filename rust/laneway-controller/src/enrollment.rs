@@ -1,6 +1,7 @@
 //! Redeem one invitation, with authorization derived only from the stored grant.
 mod addresses;
 pub mod configuration;
+pub mod credential_recovery;
 pub(crate) mod diagnostics;
 mod exit;
 mod maintenance;

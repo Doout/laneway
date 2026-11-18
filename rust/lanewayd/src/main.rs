@@ -5,6 +5,14 @@ use lanewayd_rs::{Agent, Config};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if env::args_os()
+        .nth(1)
+        .as_deref()
+        .is_some_and(|flag| flag == "recover")
+    {
+        return recover();
+    }
     #[cfg(target_os = "macos")]
     if env::args_os()
         .nth(1)
@@ -34,6 +42,31 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?
         .block_on(run(arguments))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recover() -> Result<()> {
+    let mut args = env::args_os().skip(2);
+    let (mut config, mut token) = (None, None);
+    const USAGE: &str = "usage: lanewayd-rs recover --config PATH --recovery-token-file PATH";
+    while let Some(flag) = args.next() {
+        let target = match flag.to_str() {
+            Some("--config") if config.is_none() => &mut config,
+            Some("--recovery-token-file") if token.is_none() => &mut token,
+            _ => bail!(USAGE),
+        };
+        *target = Some(PathBuf::from(args.next().context(USAGE)?));
+    }
+    let config = Config::load(config.context(USAGE)?)?;
+    let token = token.context(USAGE)?;
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(lanewayd_rs::recover_node_credential(&config, &token))?;
+    println!(
+        "Node certificate recovered with the existing identity. Start the node service to reconnect."
+    );
+    Ok(())
 }
 
 async fn run(arguments: Arguments) -> Result<()> {

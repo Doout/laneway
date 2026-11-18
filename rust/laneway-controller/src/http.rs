@@ -28,6 +28,7 @@ mod login;
 mod management;
 mod mutations;
 mod node_configuration;
+mod node_credential_recovery;
 mod node_installer;
 mod node_private_dns;
 mod node_proto;
@@ -336,6 +337,9 @@ async fn dispatch(
     }
     if path == "/v1/enroll" && state.issuer.is_some() {
         return Ok(enroll::handle(req, state, id, peer).await);
+    }
+    if path == "/v1/node-credential-recovery" && state.issuer.is_some() {
+        return node_credential_recovery::handle(req, state, id, peer).await;
     }
     let network_collection = path == "/v1/admin/networks";
     let create_network = network_collection && req.method() == Method::POST;

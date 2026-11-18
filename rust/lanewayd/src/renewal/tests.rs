@@ -1,6 +1,25 @@
 use super::*;
 use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose as Usage, IsCa, Issuer, SanType};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn recovery_token_requires_a_private_regular_file() -> Result<()> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("approval");
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8; 32]);
+    fs::write(&path, format!("{token}\n"))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    assert!(recovery_token(&path)?.trim() == token);
+    let alias = dir.path().join("alias");
+    symlink(&path, &alias)?;
+    assert!(recovery_token(&alias).is_err());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
+    assert!(recovery_token(&path).is_err());
+    Ok(())
+}
+
 struct Fixture {
     key: KeyPair,
     identity: AuthenticatedIdentity,
