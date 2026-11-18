@@ -217,11 +217,14 @@ assets while running with its non-root UID and no network.
 
 ## macOS endpoint preview
 
-`lanewayd-rs` can run an ordinary macOS tunnel with the existing privileged
-helper. It receives a verified `utun` file descriptor over the inherited Unix
-socket, reads and writes IPv4/IPv6 packets in Rust, and asks the helper to
-replace and restore only ordinary routes. Node credentials stay in the Rust
-process after onboarding. The release workflow builds the native binary for
+`lanewayd-rs` runs the ordinary macOS tunnel and its privileged helper as
+separate processes from the same installed Rust binary. The helper creates
+the `utun`, passes a descriptor over an inherited Unix socket, and manages
+only routes it owns on that tunnel. The unprivileged runtime verifies the
+descriptor, handles IPv4/IPv6 packets, and keeps credentials out of the helper.
+Closing either process ends the tunnel: the helper withdraws routes when the
+client closes its socket, and the client stops if the privileged child exits.
+The release workflow builds the native binary for
 Apple Silicon and Intel and includes `bin/lanewayd-rs` in each macOS archive
 covered by the release's signed checksums. The standalone Go download and
 default runtime stay the same.
@@ -254,20 +257,19 @@ policy from the controller, and loss of a requested route withdraws the
 session's route authority. The wrapper waits for tunnel cleanup before it
 rotates a remembered credential and reconnects.
 
-On an isolated Mac with the existing Laneway helper installed at
-`/Library/PrivilegedHelperTools/laneway-network-helper`, use a native node
+On an isolated Mac with the Rust preview installed, use a native node
 configuration with `[tun]` set to `name = "utun"` and `configure = true`.
-Set `socket_path` to a path in a private user-owned directory. Run the separately
-built Rust binary as the regular user. Exit routing and DNS switching remain
-with the existing client. A changed overlay address requires reconnecting;
-losing controller authority withdraws the ordinary routes.
+Set `socket_path` to a path in a private user-owned directory. Run the Rust
+binary as a regular user. The preview is split-tunnel only; it does not
+configure an exit or change host DNS. A changed overlay address requires
+reconnecting, and losing controller authority withdraws the ordinary routes.
 
 The native CI matrix runs the unprivileged stream-framing and credential
-handoff tests on Apple Silicon and Intel. It also installs the existing helper
-on disposable runners and exercises a real `utun` with a benchmark-only IPv4
-route, a packet, authority withdrawal, and cleanup. The release package gate
-checks both binaries, preserves the standalone Go artifact, and stages and
-verifies the installed sidecar on disposable native runners. Release checksum
+handoff tests on Apple Silicon and Intel. On disposable runners it removes
+the compatibility Go helper before exercising the Rust helper with a real
+`utun`, benchmark-only IPv4 routes, a conflicting route, traffic, and cleanup.
+The release package gate checks both binaries, preserves the standalone Go
+artifact, and verifies the installed runtime on disposable native runners. Release checksum
 signing is separate from Apple Developer ID signing or notarization.
 
 ## Linux node image

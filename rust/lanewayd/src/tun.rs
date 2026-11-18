@@ -6,4 +6,4 @@ pub(crate) use linux::TunDevice;
 #[cfg(target_os = "macos")]
 mod darwin;
 #[cfg(target_os = "macos")]
-pub(crate) use darwin::TunDevice;
+pub(crate) use darwin::{TunDevice, serve_inherited};

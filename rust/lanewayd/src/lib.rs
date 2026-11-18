@@ -44,6 +44,13 @@ pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};
 pub use wireguard::{SharedHostExit, WireGuardNode};
 pub use wireguard::{WireGuardDatagram, WireGuardRelay};
 
+/// Run the privileged macOS network helper with the inherited control socket.
+/// No node configuration or credentials are loaded in this process.
+#[cfg(target_os = "macos")]
+pub fn macos_network_helper() -> anyhow::Result<()> {
+    tun::serve_inherited()
+}
+
 fn product_version() -> &'static str {
     option_env!("LANEWAY_PRODUCT_VERSION")
         .filter(|value| {

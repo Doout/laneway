@@ -1,4 +1,6 @@
-//! Client for the installed, credential-free macOS network helper.
+//! Framed socket protocol shared with the credential-free macOS network helper.
+mod service;
+pub(crate) use service::serve_inherited;
 use std::{
     fs,
     io::{self, ErrorKind, Read, Write},
@@ -10,18 +12,19 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use wait_timeout::ChildExt;
 
-const HELPER: &str = "/Library/PrivilegedHelperTools/laneway-network-helper";
+const HELPER: &str = "/Library/Application Support/Laneway/lanewayd-rs";
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_FRAME: usize = 64 << 10;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Setup {
     pub name: String,
     pub mtu: u16,
@@ -29,16 +32,20 @@ pub(super) struct Setup {
     pub routes: RoutePlan,
 }
 
-#[derive(Serialize, Default)]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub(super) struct RoutePlan {
+    #[serde(default)]
     pub routes: Vec<Route>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bypasses: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Route {
     pub prefix: String,
+    #[serde(default)]
     pub metric: u32,
 }
 
@@ -53,14 +60,17 @@ struct Request<'a> {
     routes: Option<&'a RoutePlan>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Reply {
     version: u8,
     id: u64,
     ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     helper_pid: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     interface_name: Option<String>,
 }
 
@@ -85,7 +95,7 @@ impl Session {
         let keep: OwnedFd = inherited.try_clone()?.into();
         let transfer: OwnedFd = inherited.into();
         command
-            .args(["_network-helper", "--control-fd=0"])
+            .arg("--network-helper")
             .env_clear()
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .stdin(transfer)
@@ -170,6 +180,19 @@ impl Session {
         self.call("apply-routes", None, Some(routes)).map(|_| ())
     }
 
+    pub fn ensure_running(&mut self) -> Result<()> {
+        if let Some(status) = self
+            .child
+            .as_mut()
+            .context("network helper is not running")?
+            .try_wait()?
+        {
+            self.child = None;
+            anyhow::bail!("macOS network helper stopped: {status}");
+        }
+        Ok(())
+    }
+
     pub fn close(mut self) -> Result<()> {
         let reply = self.call("close", None, None).map(|_| ());
         let _ = self.socket.shutdown(Shutdown::Both);
@@ -224,6 +247,13 @@ fn trusted_executable(path: &Path) -> Result<PathBuf> {
 // macOS uses stream framing but transmits the descriptor alongside the first
 // bytes of the 4-byte length. recvmsg must run before any ordinary read.
 fn read_reply(socket: &mut UnixStream) -> Result<(Reply, Vec<OwnedFd>)> {
+    let Frame(bytes, rights) = read_frame(socket)?.context("network helper closed the channel")?;
+    Ok((serde_json::from_slice(&bytes)?, rights))
+}
+
+struct Frame(Vec<u8>, Vec<OwnedFd>);
+
+fn read_frame(socket: &mut UnixStream) -> Result<Option<Frame>> {
     #[repr(align(8))]
     struct Aligned([u8; 128]);
     let mut control = Aligned([0; 128]);
@@ -285,21 +315,109 @@ fn read_reply(socket: &mut UnixStream) -> Result<(Reply, Vec<OwnedFd>)> {
         }
     }
     ensure!(
-        !unsupported
-            && msg.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) == 0
-            && n != 0
-            && n <= 4,
-        "invalid or truncated network helper response"
+        !unsupported && msg.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) == 0 && n <= 4,
+        "invalid or truncated network helper frame"
     );
-    socket.read_exact(&mut length[n..])?;
+    if n == 0 {
+        ensure!(rights.is_empty(), "descriptor without a helper frame");
+        return Ok(None);
+    }
+    // A healthy helper can idle between frames, but a partially sent frame
+    // cannot hold the privileged connection open indefinitely.
+    let deadline = Instant::now() + TIMEOUT;
+    read_body(socket, &mut length[n..], deadline)?;
     let length = u32::from_be_bytes(length) as usize;
     ensure!(
         (1..=MAX_FRAME).contains(&length),
         "invalid network helper frame length"
     );
     let mut bytes = vec![0; length];
-    socket.read_exact(&mut bytes)?;
-    Ok((serde_json::from_slice(&bytes)?, rights))
+    read_body(socket, &mut bytes, deadline)?;
+    Ok(Some(Frame(bytes, rights)))
+}
+
+fn read_body(socket: &mut UnixStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
+    while !bytes.is_empty() {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        ensure!(
+            !timeout.is_zero(),
+            "network helper frame exceeded its deadline"
+        );
+        let mut descriptor = libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let milliseconds = timeout.as_millis().clamp(1, libc::c_int::MAX as u128) as libc::c_int;
+        // SAFETY: poll may write only to the one live pollfd on the stack.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, milliseconds) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error.into());
+        }
+        ensure!(ready != 0, "network helper frame exceeded its deadline");
+        match socket.read(bytes) {
+            Ok(0) => anyhow::bail!("network helper closed an incomplete frame"),
+            Ok(count) => bytes = &mut bytes[count..],
+            Err(error) if error.kind() == ErrorKind::Interrupted => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn send_reply(socket: &mut UnixStream, reply: &Reply, fd: Option<&OwnedFd>) -> Result<()> {
+    let bytes = serde_json::to_vec(reply)?;
+    ensure!(
+        bytes.len() <= MAX_FRAME,
+        "helper response exceeds frame limit"
+    );
+    let mut length = (bytes.len() as u32).to_be_bytes();
+    let written = if let Some(fd) = fd {
+        #[repr(align(8))]
+        struct Aligned([u8; 64]);
+        let mut data = Aligned([0; 64]);
+        let mut iov = libc::iovec {
+            iov_base: length.as_mut_ptr().cast(),
+            iov_len: length.len(),
+        };
+        // SAFETY: the stack buffers remain live and correctly aligned for the
+        // one descriptor and four payload bytes passed to sendmsg.
+        unsafe {
+            let mut msg: libc::msghdr = mem::zeroed();
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = data.0.as_mut_ptr().cast();
+            let size = mem::size_of::<libc::c_int>() as libc::c_uint;
+            msg.msg_controllen = libc::CMSG_SPACE(size);
+            let header = libc::CMSG_FIRSTHDR(&msg);
+            (*header).cmsg_len = libc::CMSG_LEN(size);
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            libc::CMSG_DATA(header)
+                .cast::<libc::c_int>()
+                .write_unaligned(fd.as_raw_fd());
+            loop {
+                let n = libc::sendmsg(socket.as_raw_fd(), &msg, 0);
+                if n > 0 {
+                    break n as usize;
+                }
+                ensure!(n < 0, "helper descriptor transfer wrote no bytes");
+                let error = io::Error::last_os_error();
+                if error.kind() != ErrorKind::Interrupted {
+                    return Err(error.into());
+                }
+            }
+        }
+    } else {
+        0
+    };
+    socket.write_all(&length[written..])?;
+    socket.write_all(&bytes)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -307,6 +425,27 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::os::unix::net::UnixDatagram;
+
+    #[test]
+    fn parent_detects_an_exited_helper() -> Result<()> {
+        let (socket, _peer) = UnixStream::pair()?;
+        let mut child = Command::new("/usr/bin/true").spawn()?;
+        assert!(child.wait()?.success());
+        let mut session = Session {
+            socket,
+            child: Some(child),
+            last_id: 0,
+        };
+        assert!(
+            session
+                .ensure_running()
+                .unwrap_err()
+                .to_string()
+                .contains("helper stopped")
+        );
+        assert!(session.child.is_none());
+        Ok(())
+    }
 
     fn read_request(socket: &mut UnixStream) -> Result<Value> {
         let mut length = [0; 4];

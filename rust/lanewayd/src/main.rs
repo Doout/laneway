@@ -5,6 +5,15 @@ use lanewayd_rs::{Agent, Config};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if env::args_os()
+        .nth(1)
+        .as_deref()
+        .is_some_and(|flag| flag == "--network-helper")
+        && env::args_os().nth(2).is_none()
+    {
+        return lanewayd_rs::macos_network_helper();
+    }
     if matches!(
         env::args_os().nth(1).as_deref().and_then(|s| s.to_str()),
         Some("--version" | "-version")

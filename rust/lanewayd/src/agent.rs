@@ -597,6 +597,16 @@ impl Agent {
             let metrics = Arc::clone(&self.metrics);
             tasks.spawn(async move { monitor_selected_exit(state, kernel, metrics).await });
         }
+        #[cfg(target_os = "macos")]
+        if let Some(tun) = &tun {
+            let tun = Arc::clone(tun);
+            tasks.spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tun.lock().await.ensure_helper_running()?;
+                }
+            });
+        }
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
             biased;

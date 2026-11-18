@@ -1,6 +1,6 @@
-//! macOS uses the installed helper only for privileged interface operations;
-//! packet IO stays in the Rust process.
+//! The same installed Rust binary has separate packet and privileged helper modes.
 mod helper;
+pub(crate) use helper::serve_inherited;
 
 use std::{
     collections::BTreeMap,
@@ -19,7 +19,6 @@ use tokio::io::unix::AsyncFd;
 use crate::config::{RouteConfig, RouteKind, TunConfig};
 use helper::{Route, RoutePlan, Session, Setup};
 
-const UTUN_OPT_IFNAME: libc::c_int = 2;
 const PACKET_HEADER: usize = 4;
 const SIOCGIFMTU: libc::c_ulong = 0xc000_0000
     | ((mem::size_of::<libc::ifreq>() as libc::c_ulong) << 16)
@@ -79,6 +78,15 @@ impl TunDevice {
 
     pub fn interface_name(&self) -> &str {
         &self.interface
+    }
+
+    pub fn ensure_helper_running(&self) -> Result<()> {
+        self.session
+            .lock()
+            .map_err(|_| anyhow::anyhow!("macOS helper lock poisoned"))?
+            .as_mut()
+            .context("macOS network helper session is closed")?
+            .ensure_running()
     }
 
     pub async fn apply_controller(
@@ -172,8 +180,7 @@ fn darwin_control_socket(family: libc::c_int, protocol: libc::c_int) -> io::Resu
     Ok(fd)
 }
 
-fn verify_utun(fd: &OwnedFd, name: &str, mtu: u16) -> Result<()> {
-    let control = darwin_control_socket(libc::AF_SYSTEM, libc::SYSPROTO_CONTROL)?;
+fn control_id(control: &OwnedFd) -> Result<u32> {
     // SAFETY: these C structures allow zero initialization. Each operation
     // receives a live descriptor and the appropriately sized output buffer.
     unsafe {
@@ -187,6 +194,43 @@ fn verify_utun(fd: &OwnedFd, name: &str, mtu: u16) -> Result<()> {
             &mut info,
         ))
         .context("look up utun control")?;
+        Ok(info.ctl_id)
+    }
+}
+
+fn utun_name(fd: &OwnedFd) -> Result<String> {
+    let mut actual = [0u8; libc::IFNAMSIZ];
+    let mut length = actual.len() as libc::socklen_t;
+    // SAFETY: getsockopt receives a live descriptor and sized output buffer.
+    cvt(unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SYSPROTO_CONTROL,
+            libc::UTUN_OPT_IFNAME,
+            actual.as_mut_ptr().cast(),
+            &mut length,
+        )
+    })
+    .context("read kernel utun name")?;
+    let name = actual
+        .get(..length as usize)
+        .and_then(|raw| CStr::from_bytes_until_nul(raw).ok())
+        .context("unterminated utun name")?
+        .to_str()?;
+    ensure!(numbered_utun(name), "kernel returned an invalid utun name");
+    Ok(name.to_owned())
+}
+
+fn verify_utun(fd: &OwnedFd, name: &str, mtu: u16) -> Result<()> {
+    let control = darwin_control_socket(libc::AF_SYSTEM, libc::SYSPROTO_CONTROL)?;
+    let id = control_id(&control)?;
+    ensure!(
+        utun_name(fd)? == name,
+        "helper tunnel name differs from the kernel"
+    );
+    // SAFETY: these C structures allow zero initialization and all kernel
+    // calls use live FDs with appropriately sized pointers.
+    unsafe {
         let mut peer: libc::sockaddr_ctl = mem::zeroed();
         let mut length = mem::size_of_val(&peer) as libc::socklen_t;
         cvt(libc::getpeername(
@@ -199,28 +243,11 @@ fn verify_utun(fd: &OwnedFd, name: &str, mtu: u16) -> Result<()> {
             length as usize == mem::size_of_val(&peer)
                 && i32::from(peer.sc_family) == libc::AF_SYSTEM
                 && i32::from(peer.ss_sysaddr) == libc::AF_SYS_CONTROL
-                && peer.sc_id == info.ctl_id
+                && peer.sc_id == id
                 && peer.sc_unit != 0,
             "transferred descriptor is not a connected utun controller socket"
         );
 
-        let mut actual = [0u8; libc::IFNAMSIZ];
-        let mut length = actual.len() as libc::socklen_t;
-        cvt(libc::getsockopt(
-            fd.as_raw_fd(),
-            libc::SYSPROTO_CONTROL,
-            UTUN_OPT_IFNAME,
-            actual.as_mut_ptr().cast(),
-            &mut length,
-        ))
-        .context("read kernel utun name")?;
-        ensure!(
-            actual
-                .get(..length as usize)
-                .and_then(|bytes| CStr::from_bytes_until_nul(bytes).ok())
-                .is_some_and(|value| value.to_bytes() == name.as_bytes()),
-            "helper tunnel name differs from the kernel"
-        );
         let query = darwin_control_socket(libc::AF_INET, 0)?;
         let mut request: libc::ifreq = mem::zeroed();
         for (dst, src) in request.ifr_name.iter_mut().zip(name.bytes()) {
@@ -453,6 +480,14 @@ mod tests {
                     .any(|(key, value)| key.trim() == "interface" && value.trim() == name))
         };
         let socket = UdpSocket::bind((local, 0)).await?;
+        assert!(routes_via_tunnel(first)?);
+        let mut competing = config.clone();
+        competing.addresses = vec![IpNet::from(IpAddr::V4(Ipv4Addr::new(198, 18, 78, 15)))];
+        assert!(
+            TunDevice::open(&competing, &[route(first)], &[])
+                .await
+                .is_err()
+        );
         assert!(routes_via_tunnel(first)?);
         tunnel
             .apply_controller(&config.addresses, &[route(second)], &[])

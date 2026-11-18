@@ -62,6 +62,9 @@ if [ "${LANEWAY_MACOS_ARCHIVE_INSTALL:-0}" = 1 ]; then
   [ "$(readlink "$alias_path")" = laneway ]
   cmp -s "$package/bin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
   if [ "${LANEWAY_MACOS_UTUN_TEST:-0}" = 1 ]; then
+    # The default Go client retains its own helper. The Rust gate must run
+    # without that compatibility helper after verifying the package install.
+    sudo -n rm -f "$helper"
     cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs --lib \
       darwin_installed_helper_routes_and_restores_real_utun -- --ignored
   fi
