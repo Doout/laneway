@@ -61,7 +61,7 @@ jobs:
 
   desktop:
     name: Desktop foundation (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -144,7 +144,7 @@ jobs:
 
   macos-client:
     name: macOS client and privileged-helper protocol
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

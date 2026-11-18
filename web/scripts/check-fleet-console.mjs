@@ -1,3 +1,6 @@
+import console from 'node:console'
+import process from 'node:process'
+import { URL } from 'node:url'
 import { chromium, expect } from '@playwright/test'
 
 const origin = new URL(process.env.LANEWAY_FLEET_LAB_ORIGIN)
