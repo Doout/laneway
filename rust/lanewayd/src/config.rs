@@ -734,16 +734,17 @@ impl Config {
             Id::from_str(&controller.service_id).context("controller.service_id")?;
         }
         if let Some(scope) = &self.foreground_routes {
+            let exit = &self.forwarding.exit_client;
             ensure!(
                 self.controller.is_some()
                     && !self.connector.userspace
                     && !self.forwarding.subnet_router
                     && !self.forwarding.exit_gateway
-                    && !self.forwarding.exit_client.authorized
-                    && !self.forwarding.exit_client.enabled
+                    && ((!exit.authorized && !exit.enabled)
+                        || (cfg!(target_os = "linux") && exit.authorized && exit.enabled))
                     && (!scope.policy_private || scope.requested.is_empty())
                     && scope.requested.len() <= MAX_FOREGROUND_ROUTES,
-                "foreground route scope needs a controller-backed split-tunnel endpoint"
+                "foreground route scope needs an authorized controller-backed endpoint (explicit exit selection requires Linux)"
             );
             let mut seen = HashSet::new();
             for prefix in &scope.requested {

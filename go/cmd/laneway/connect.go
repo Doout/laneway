@@ -115,6 +115,15 @@ func runConnect(args []string) error {
 	if *remembered && *ephemeral {
 		return connectUsage()
 	}
+	if options.failureMode != "closed" && options.failureMode != "open" {
+		return errors.New("--failure-mode must be closed or open")
+	}
+	if options.exitSelector == "" && (len(options.dns) != 0 || len(options.localLAN) != 0 || flagProvided(args, "failure-mode")) {
+		return errors.New("--dns, --local-lan, and --failure-mode require --exit")
+	}
+	if err := connectPlatformPreflight(); err != nil {
+		return err
+	}
 	if authority == "" {
 		var err error
 		authority, err = defaultUserProfileAuthority()
@@ -124,15 +133,6 @@ func runConnect(args []string) error {
 		if err != nil {
 			return err
 		}
-	}
-	if options.failureMode != "closed" && options.failureMode != "open" {
-		return errors.New("--failure-mode must be closed or open")
-	}
-	if options.exitSelector == "" && (len(options.dns) != 0 || len(options.localLAN) != 0 || flagProvided(args, "failure-mode")) {
-		return errors.New("--dns, --local-lan, and --failure-mode require --exit")
-	}
-	if err := connectPlatformPreflight(); err != nil {
-		return err
 	}
 	var rustRuntime string
 	if options.rust {
@@ -279,6 +279,21 @@ func runConnect(args []string) error {
 		return nil
 	}
 	if rustRuntime != "" {
+		selection := rustConnectSelection{
+			authority: authority, routes: routes, remembered: usingSavedLogin,
+			failureMode: options.failureMode, dns: dns, localLAN: localLAN,
+		}
+		if options.exitSelector != "" {
+			initial, err := connectInitialConfiguration(ctx, metadata, caPath, certPath, keyPath)
+			if err != nil {
+				return err
+			}
+			// Keep the exact node identity across saved-credential renewal.
+			selection.exit, err = resolveConnectExit(initial, options.exitSelector, enrollment.identity.NodeID)
+			if err != nil {
+				return err
+			}
+		}
 		for {
 			sessionCtx := ctx
 			cancelSession := func() {}
@@ -288,16 +303,18 @@ func runConnect(args []string) error {
 					return err
 				}
 				sessionCtx, cancelSession = context.WithDeadline(ctx, renewAt)
+			} else if !enrollment.leaseExpiresAt.IsZero() {
+				sessionCtx, cancelSession = context.WithDeadline(ctx, enrollment.leaseExpiresAt)
 			}
 			credentialPaths := rustConnectCredentials{caPath, certPath, keyPath}
 			var inherited []*os.File
 			if !usingSavedLogin {
 				// ExtraFiles are renumbered consecutively from 3 by os/exec.
-				// The WireGuard key is not used by this split-tunnel runtime.
+				// The native Rust packet runtime does not use the WireGuard key.
 				inherited = credentials.files
-				credentialPaths = rustConnectCredentials{"/dev/fd/3", "/dev/fd/4", "/dev/fd/5"}
+				credentialPaths = rustConnectCredentials{credentialDescriptorDirectory + "/3", credentialDescriptorDirectory + "/4", credentialDescriptorDirectory + "/5"}
 			}
-			runErr := runRustConnect(sessionCtx, rustRuntime, runtimeDir, metadata, enrollment.identity, credentialPaths, inherited, routes, usingSavedLogin)
+			runErr := runRustConnect(sessionCtx, rustRuntime, runtimeDir, metadata, enrollment.identity, credentialPaths, inherited, selection)
 			cancelSession()
 			if runErr != nil {
 				return runErr
@@ -311,21 +328,9 @@ func runConnect(args []string) error {
 			}
 		}
 	}
-	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
-	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
-	configurationClient, err := controllerclient.New(controllerclient.Options{
-		Endpoint: metadata.Controller.EnrollmentEndpoint, QUICEndpoint: metadata.Controller.QUICEndpoint,
-		CAFile: caPath, CertificateFile: certPath, PrivateKeyFile: keyPath, ServerName: metadata.Controller.ServerName,
-		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedController,
-	})
+	initial, err := connectInitialConfiguration(ctx, metadata, caPath, certPath, keyPath)
 	if err != nil {
 		return err
-	}
-	configurationCtx, cancelConfiguration := context.WithTimeout(ctx, 20*time.Second)
-	initial, _, err := configurationClient.Configuration(configurationCtx, 0)
-	cancelConfiguration()
-	if err != nil {
-		return fmt.Errorf("fetch temporary session configuration: %w", err)
 	}
 	name := connectLocalName(initial, enrollment.identity.NodeID)
 	selectedExit, err := resolveConnectExit(initial, options.exitSelector, enrollment.identity.NodeID)
@@ -418,6 +423,27 @@ func runConnect(args []string) error {
 		}
 		lastPath = ""
 	}
+}
+
+func connectInitialConfiguration(ctx context.Context, metadata bootstrap.Metadata, caPath, certPath, keyPath string) (*lanewayv1.NodeConfiguration, error) {
+	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
+	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
+	client, err := controllerclient.New(controllerclient.Options{
+		Endpoint: metadata.Controller.EnrollmentEndpoint, QUICEndpoint: metadata.Controller.QUICEndpoint,
+		CAFile: caPath, CertificateFile: certPath, PrivateKeyFile: keyPath, ServerName: metadata.Controller.ServerName,
+		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedController,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+	configurationCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	initial, _, err := client.Configuration(configurationCtx, 0)
+	if err != nil {
+		return nil, fmt.Errorf("fetch temporary session configuration: %w", err)
+	}
+	return initial, nil
 }
 
 func connectPrefixList(prefixes []netip.Prefix) string {

@@ -73,6 +73,22 @@ its private key and CA are protected from daemon writes under `/etc/laneway`.
 The installer refuses to overwrite an unmanaged configuration or to start
 alongside another node service. It does not migrate old installations.
 
+For a foreground connection, use `sudo laneway login DOMAIN` to save a
+login, then `sudo laneway connect DOMAIN`, or use
+`sudo laneway connect DOMAIN --ephemeral` for a one-time session. This path
+also runs the packaged Rust daemon. It uses a separate interface and leaves
+no service enabled. Remembered logins use policy-derived private routes;
+ephemeral logins default to overlay routes. `--route` accepts only prefixes
+advertised by the controller. Full-tunnel routing still requires `--exit`
+and an approved exit. An explicit `--dns` uses systemd-resolved on Linux;
+omitting it leaves native DNS alone.
+
+The ARM64 systemd lab verified this with unsigned binaries: an ephemeral
+session, a remembered login, and a session through a controller-approved
+Rust Exit all carried UDP traffic. The exit test checked NAT at the receiver,
+native routing for relay traffic, and removal of the temporary interface,
+policy rule, and route table on disconnect.
+
 For a controller-managed standalone relay, base `/etc/laneway/relay-rust.toml`
 on the packaged `relay-controller.toml` example. For native workload
 renewal, add `renewal_dir = "/var/lib/laneway-relay/workload"` to its TLS

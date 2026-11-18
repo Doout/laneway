@@ -114,8 +114,131 @@ run_managed_node_installer() {
   ' bash "$work_dir/managed-node.hosts" "$work_dir/pki/ca.crt" /usr/local/bin/laneway "$@"
 }
 
+start_foreground_exit_gateway() {
+  local approved response
+  ip netns exec "$controller_ns" "$work_dir/laneway" controller node capabilities \
+    --node-id "$gateway_id" --exit-node "${management_connection[@]}" >/dev/null
+  response=$(ip netns exec "$advertiser_namespace" "$work_dir/laneway" route advertise 0.0.0.0/0 \
+    --kind exit --mode nat --controller "$advertiser_endpoint" --ca "$work_dir/pki/ca.crt" \
+    --controller-network-id "$network_id" --controller-service-id "$controller_service" \
+    --cert "$work_dir/pki/gateway.crt" --key "$work_dir/pki/gateway.key")
+  approved=$(printf '%s\n' "$response" | json_string_field route_id)
+  [[ $approved =~ ^[0-9a-f]{32}$ ]]
+  ip netns exec "$controller_ns" "$work_dir/laneway" controller route approve \
+    --route-id "$approved" "${management_connection[@]}" >/dev/null
+  cat >"$work_dir/foreground-gateway.toml" <<EOF
+mode = "node"
+socket_path = "$work_dir/foreground-gateway.sock"
+exit_intent_path = "$work_dir/foreground-gateway-exit.json"
+[identity]
+network_id = "$network_id"
+node_id = "$gateway_id"
+[tls]
+certificate = "$work_dir/pki/gateway.crt"
+private_key = "$work_dir/pki/gateway.key"
+ca = "$work_dir/pki/ca.crt"
+[controller]
+endpoint = "$node_endpoint"
+quic_endpoint = "$node_quic_endpoint"
+server_name = "$node_server_name"
+service_id = "$controller_service"
+poll_interval = "100ms"
+auto_renew_certificate = true
+[tun]
+name = "lane0"
+mtu = 1280
+configure = true
+[relay]
+server_name = "10.254.0.2"
+service_id = "$relay_service"
+[forwarding]
+exit_gateway = true
+exit_gateway_controller_sources = true
+exit_output_interface = "lan1"
+EOF
+  start_process "$gateway_ns" "$work_dir/foreground-gateway.log" \
+    /usr/local/sbin/lanewayd-rs --config "$work_dir/foreground-gateway.toml"
+  wait_log "$last_pid" "$work_dir/foreground-gateway.log" 'Rust agent relay connected'
+}
+
+check_foreground_packaged_node() {
+  local role=$1 peer_ns=$2 address=$3
+  shift 3
+  local installed="$packaged_node/usr/local" directory="$work_dir/foreground-$role"
+  local token="$work_dir/foreground-$role-invitation" pid peer_pid runtime_pid interface
+  local log="$work_dir/foreground-$role.log" peer_log="$work_dir/foreground-$role-udp.log"
+  local enrollment=(--class ephemeral --session-lifetime 5m)
+  local session=(--ephemeral --token-file "$token")
+  if [[ $role == remembered ]]; then enrollment=(--class remembered); session=(); fi
+  mkdir -m 0700 "$directory"
+  (umask 077
+    ip netns exec "$controller_ns" "$work_dir/laneway" controller enrollment-token issue \
+      --network-id "$network_id" --label "foreground-$role" --expires-in 5m \
+      "${enrollment[@]}" --requested-name "foreground-$role" "${management_connection[@]}" |
+      jq -jer '.enrollment_token | select(type=="string" and length>0)' >"$token"
+  )
+  # The mount namespace supplies fixture DNS and Web PKI only to the client.
+  # shellcheck disable=SC2016
+  local client=(unshare --mount --propagation private bash -eu -c '
+    mount --bind "$1" /etc/hosts
+    exec env -i PATH="$PATH" SSL_CERT_FILE="$2" SSL_CERT_DIR=/nonexistent \
+      TMPDIR="$3" LANEWAY_PROFILE_DIR="$3/profiles" "${@:4}"
+  ' bash "$work_dir/managed-node.hosts" "$work_dir/pki/ca.crt" "$directory" /usr/local/bin/laneway)
+  if [[ $role == remembered ]]; then
+    ip netns exec "$rust_ns" "${client[@]}" login "$discovery_name:9443" --token-file "$token"
+    rm -- "$token"
+  fi
+  start_process "$rust_ns" "$log" "${client[@]}" connect "$discovery_name:9443" "${session[@]}" "$@"
+  pid=$last_pid
+  wait_log "$pid" "$log" 'native Rust Laneway agent started'
+  runtime_pid=$(pgrep -P "$pid" -x lanewayd-rs)
+  [[ $runtime_pid =~ ^[1-9][0-9]*$ && $(readlink "/proc/$runtime_pid/exe") == /usr/local/sbin/lanewayd-rs ]]
+  interface=$(ip -n "$rust_ns" route show "$gateway_address" | awk '$2 == "dev" {print $3}')
+  [[ $interface =~ ^lwc[0-9a-f]{12}$ && -z $(ip -n "$rust_ns" route show default) ]]
+  wait_log "$pid" "$log" 'Rust agent relay connected'
+  local sockets=("$directory"/laneway-connect-*/laneway.sock)
+  "$installed/sbin/laneway-healthcheck-rs" -unix "${sockets[0]}"
+  if [[ $role == exit ]]; then
+    local local_ip
+    ip -n "$rust_ns" route get "$address" | grep -Fq "dev $interface"
+    ip -n "$rust_ns" route get 10.254.0.2 | grep -Fq 'dev eth0'
+    local_ip=$(ip -n "$rust_ns" -o -4 address show dev "$interface" | awk '{split($4, a, "/"); print a[1]}')
+    [[ -n $local_ip ]]
+    for _ in $(seq 1 160); do
+      if ip netns exec "$gateway_ns" nft list table inet laneway_rs_exit 2>/dev/null | grep -Fq "ip saddr $local_ip"; then
+        break
+      fi
+      sleep 0.05
+    done
+    ip netns exec "$gateway_ns" nft list table inet laneway_rs_exit | grep -Fq "ip saddr $local_ip"
+  else
+    ! ip -n "$rust_ns" rule show | grep -q 'lookup 51820'
+  fi
+
+  start_process "$peer_ns" "$peer_log" "$work_dir/netprobe" udp-server -listen "$address:9777"
+  peer_pid=$last_pid
+  wait_log "$peer_pid" "$peer_log" ready=udp-server
+  ip netns exec "$rust_ns" "$work_dir/netprobe" udp-client -target "$address:9777" -message "foreground-$role" -timeout 15s
+  wait "$peer_pid"
+  unset "active_processes[$peer_pid]"
+  if [[ $role == exit ]]; then grep -Fq 'remote=192.168.77.1:' "$peer_log"; fi
+  kill -TERM "$pid"
+  wait "$pid"
+  unset "active_processes[$pid]"
+  ! ip -n "$rust_ns" link show "$interface" >/dev/null 2>&1
+  ! ip -n "$rust_ns" rule show | grep -q 'lookup 51820'
+  [[ -z $(ip -n "$rust_ns" route show table 51820 2>/dev/null || true) ]]
+  [[ ! -e "/proc/$runtime_pid" && -z $(find "$directory" -mindepth 1 -maxdepth 1 ! -name profiles -print -quit) ]]
+  if [[ $role == remembered ]]; then
+    [[ -d "$directory/profiles" ]]
+  else
+    [[ ! -e "$directory/profiles" ]]
+  fi
+  echo "PASS: foreground Linux CLI enrolled, ran Rust, exchanged $role traffic and removed temporary networking."
+}
+
 check_invited_packaged_node() {
-  local installed="$packaged_node/usr/local" token="$work_dir/managed-invitation" pid peer_pid node
+  local installed="$packaged_node/usr/local" token="$work_dir/managed-invitation" pid peer_pid node gateway_pid
   local cert=/var/lib/laneway/identity/node.crt
   install -m 0755 "$installed/bin/laneway" /usr/local/bin/laneway
   install -m 0755 "$installed/sbin/laneway-healthcheck-rs" /usr/local/sbin/laneway-healthcheck-rs
@@ -132,6 +255,7 @@ EOF
   systemctl daemon-reload
   start_packaged_relay
   start_process "$gateway_ns" "$work_dir/gateway.log" "$work_dir/lanewayd" -config "$work_dir/gateway.toml"
+  gateway_pid=$last_pid
   wait_log "$last_pid" "$work_dir/gateway.log" interface=lane0
   printf '%s %s\n' "$location_controller_ip" "$discovery_name" >"$work_dir/managed-node.hosts"
   (umask 077
@@ -171,6 +295,11 @@ EOF
   [[ ! -e "$cert" && ! -e /etc/laneway/node.key && ! -e /etc/laneway/node-install.json &&
      ! -e /run/laneway/lanewayd.sock && -f /var/lib/laneway/fixture-marker ]]
   ! ip -n "$rust_ns" link show lane0 >/dev/null 2>&1
+  check_foreground_packaged_node overlay "$gateway_ns" "$gateway_address"
+  check_foreground_packaged_node remembered "$gateway_ns" "$gateway_address"
+  stop_process "$gateway_pid"
+  start_foreground_exit_gateway
+  check_foreground_packaged_node exit "$lan_ns" 192.168.77.2 --exit "$gateway_id" --local-lan 10.254.0.0/24
   cleanup_packaged_node
   echo 'PASS: default managed CLI redeemed a real invitation, started Rust as laneway, exchanged packets, and uninstalled safely.'
 }

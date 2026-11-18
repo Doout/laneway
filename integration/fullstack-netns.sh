@@ -1272,6 +1272,13 @@ EOF
 }
 
 run_controller_connect_flow() {
+  # This Go foreground test is a legacy comparison. The current CLI
+  # is tested with the Rust runtime by rust-release-systemd.sh.
+  local connect_cli=${LANEWAY_GO_CONNECT_FIXTURE:-}
+  if [[ $connect_cli != /* || ! -x $connect_cli ]]; then
+    echo 'ERROR: set LANEWAY_GO_CONNECT_FIXTURE to the absolute path of a pre-Rust Go CLI' >&2
+    return 1
+  fi
   local case_dir="${work_dir}/controller-connect"
   local switch="${prefix}us" controller="${prefix}uc" relay="${prefix}ur"
   local user="${prefix}uu"
@@ -1583,7 +1590,7 @@ EOF
       --ephemeral --session-lifetime 5m >"${invite_file}" 2>"${case_dir}/invite.log"
   )
   start_process "${user}" "${connect_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
-    "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${invite_file}"
+    "$connect_cli" connect "${bootstrap_authority}" --ephemeral --token-file "${invite_file}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${connect_log}" "path=relay-quic"
   rm -f -- "${invite_file}"
@@ -1630,7 +1637,7 @@ EOF
       --ephemeral --session-lifetime 5m >"${crash_token}" 2>"${case_dir}/invite-crash.log"
   )
   start_process "${user}" "${crash_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
-    "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${crash_token}"
+    "$connect_cli" connect "${bootstrap_authority}" --ephemeral --token-file "${crash_token}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${crash_log}" "path=relay-quic"
   rm -f -- "${crash_token}"
@@ -1646,7 +1653,7 @@ EOF
       --ephemeral --session-lifetime 5m >"${recovery_token}" 2>"${case_dir}/invite-recovery.log"
   )
   start_process "${user}" "${recovery_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
-    "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${recovery_token}"
+    "$connect_cli" connect "${bootstrap_authority}" --ephemeral --token-file "${recovery_token}"
   connect_pid="${last_pid}"
   wait_log "${connect_pid}" "${recovery_log}" "path=relay-quic"
   rm -f -- "${recovery_token}"
@@ -1683,7 +1690,7 @@ EOF
   start_process "${user}" "${exit_log}" env SSL_CERT_FILE="${case_dir}/bootstrap-ca.crt" \
     PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${resolver_state_dir}" \
     LANEWAY_TEST_RESOLVECTL="${case_dir}/resolvectl" \
-    "${case_dir}/connect-resolver-wrapper" "${work_dir}/laneway" connect "${bootstrap_authority}" --ephemeral --token-file "${exit_token}" \
+    "${case_dir}/connect-resolver-wrapper" "$connect_cli" connect "${bootstrap_authority}" --ephemeral --token-file "${exit_token}" \
     --exit connect-node --failure-mode closed --dns 1.1.1.1 --local-lan 10.252.0.0/24
   exit_pid="${last_pid}"
   wait_log "${exit_pid}" "${exit_log}" "path=relay-quic"
@@ -2537,7 +2544,7 @@ case "${LANEWAY_INTEGRATION_CASE:-all}" in
     run_exit_flow
     run_direct_nat_flow
     run_controller_wireguard_carriers
-    run_controller_connect_flow
+    if [[ -n ${LANEWAY_GO_CONNECT_FIXTURE:-} ]]; then run_controller_connect_flow; fi
     run_controller_subnet_flow
     ;;
   overlay-subnet) run_overlay_and_subnet ;;

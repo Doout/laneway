@@ -66,7 +66,7 @@ func TestRustForegroundSessionConfigAndCredentialHandoff(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	credentials := rustConnectCredentials{"/dev/fd/3", "/dev/fd/4", "/dev/fd/5"}
-	path, err := writeRustConnectConfig(directory, metadata, node, credentials, nil, false)
+	path, err := writeRustConnectConfig(directory, metadata, node, credentials, rustConnectSelection{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestRustForegroundSessionConfigAndCredentialHandoff(t *testing.T) {
 		t.Fatalf("unexpected ephemeral session: %+v", session)
 	}
 
-	remembered, err := writeRustConnectConfig(directory, metadata, node, credentials, nil, true)
+	remembered, err := writeRustConnectConfig(directory, metadata, node, credentials, rustConnectSelection{remembered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestRustForegroundSessionConfigAndCredentialHandoff(t *testing.T) {
 	if !session.Routes.PolicyPrivate || len(session.Routes.Requested) != 0 {
 		t.Fatalf("unexpected remembered session: %+v", session)
 	}
-	explicit, err := writeRustConnectConfig(directory, metadata, node, credentials, []netip.Prefix{netip.MustParsePrefix("10.20.0.0/16")}, true)
+	explicit, err := writeRustConnectConfig(directory, metadata, node, credentials, rustConnectSelection{routes: []netip.Prefix{netip.MustParsePrefix("10.20.0.0/16")}, remembered: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ while :; do sleep 0.1; done
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- runRustConnect(ctx, program, directory, metadata, node, rustConnectCredentials{}, nil, nil, false)
+		done <- runRustConnect(ctx, program, directory, metadata, node, rustConnectCredentials{}, nil, rustConnectSelection{})
 	}()
 	for {
 		if _, err := os.Stat(ready); err == nil {

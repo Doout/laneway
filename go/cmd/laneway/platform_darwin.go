@@ -22,6 +22,10 @@ import (
 const credentialDescriptorDirectory = "/dev/fd"
 const macRustRuntimePath = "/Library/Application Support/Laneway/lanewayd-rs"
 
+func foregroundTunName(string) string { return "utun" }
+
+func prepareRustForegroundProcess(*exec.Cmd) func() { return func() {} }
+
 func connectPlatformPreflight() error {
 	source, err := currentExecutable()
 	if err != nil {

@@ -1534,10 +1534,34 @@ fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) ->
     let mut effective = base.clone();
     effective.tun.addresses = snapshot.overlays.clone();
     effective.routes = match &base.foreground_routes {
-        Some(scope) => route_configs(
-            &crate::foreground_routes::select(scope, snapshot, local)?,
-            local,
-        ),
+        Some(scope) => {
+            let mut routes = crate::foreground_routes::select(scope, snapshot, local)?;
+            let exit = &base.forwarding.exit_client;
+            if exit.enabled {
+                let selected: Id = exit
+                    .selected_node
+                    .as_deref()
+                    .context("foreground exit selection missing")?
+                    .parse()?;
+                ensure!(
+                    selected != local && snapshot.authorized_exits.contains(&selected),
+                    "selected exit is no longer controller-authorized"
+                );
+                let split_routes = routes.len();
+                routes.extend(
+                    snapshot
+                        .routes
+                        .iter()
+                        .filter(|route| route.kind == v1::RouteKind::Exit && route.via == selected)
+                        .cloned(),
+                );
+                ensure!(
+                    routes.len() > split_routes,
+                    "selected exit has no approved default route"
+                );
+            }
+            route_configs(&routes, local)
+        }
         None => route_configs(&snapshot.routes, local),
     };
     effective.forwarding.exit_client.controller_bypass.extend(
@@ -1893,6 +1917,27 @@ mod tests {
                 .any(|route| route.kind == crate::config::RouteKind::Exit
                     && route.via_node == other.to_string())
         );
+
+        let mut foreground = base.clone();
+        foreground.forwarding.subnet_router = false;
+        foreground.forwarding.exit_gateway = false;
+        foreground.foreground_routes = Some(crate::config::ForegroundRoutes {
+            policy_private: false,
+            requested: Vec::new(),
+        });
+        let selected_only = controller_effective_config(&foreground, &snapshot, local).unwrap();
+        assert!(selected_only.forwarding.exit_client.enabled);
+        assert_eq!(selected_only.routes.len(), 1);
+        assert_eq!(selected_only.routes[0].via_node, selected.to_string());
+        let mut unauthorized = snapshot.clone();
+        unauthorized.authorized_exits.remove(&selected);
+        assert!(controller_effective_config(&foreground, &unauthorized, local).is_err());
+        let mut missing_default = snapshot.clone();
+        missing_default.routes.retain(|route| route.via != selected);
+        assert!(controller_effective_config(&foreground, &missing_default, local).is_err());
+        foreground.forwarding.exit_client = Default::default();
+        let split = controller_effective_config(&foreground, &snapshot, local).unwrap();
+        assert!(split.routes.is_empty());
 
         let mut dynamic = base.clone();
         dynamic.forwarding.exit_gateway_sources.clear();

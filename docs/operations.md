@@ -135,16 +135,20 @@ rotation. Successful completion removes the protected rotation directory.
 ## Client lifecycle
 
 With one saved login, `laneway connect` remembers its domain. With several,
-specify it:
+specify it. On Linux, run the Rust foreground client with `sudo` to create a
+TUN interface and manage routes. Use `sudo laneway login` for the saved login
+in that case. On macOS, continue to run `laneway login` and `laneway connect`
+as your normal user.
 
 ```sh
-laneway connect lane.example.com
+sudo laneway login lane.example.com
+sudo laneway connect lane.example.com
 ```
 
 Use an ephemeral session when no identity should be saved:
 
 ```sh
-laneway connect lane.example.com --ephemeral
+sudo laneway connect lane.example.com --ephemeral
 ```
 
 To borrow a systemd Linux host as a RAM-only Exit, use
@@ -194,7 +198,7 @@ refuse to remove files they do not own.
 After a package update:
 
 ```sh
-sudo systemctl restart lanewayd
+sudo systemctl restart lanewayd-rs
 sudo laneway node status
 ```
 
@@ -276,7 +280,7 @@ Stop Nodes normally so they can restore routes, DNS, nftables, sysctls, and TUN
 state:
 
 ```sh
-sudo systemctl stop lanewayd
+sudo systemctl stop lanewayd-rs
 ```
 
 After a crash, Laneway reclaims only exact state carrying its ownership markers.
