@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,13 @@ import (
 	"github.com/Doout/laneway/go/internal/localapi"
 	"github.com/Doout/laneway/go/internal/pki"
 )
+
+func requireLinuxHostCLI(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		t.Skip("the packaged host command tree is Linux-only")
+	}
+}
 
 func TestWritePairExclusiveAndPermissions(t *testing.T) {
 	dir := t.TempDir()
@@ -39,6 +47,7 @@ func TestWritePairExclusiveAndPermissions(t *testing.T) {
 }
 
 func TestJoinTokenFileMustBeProtectedAndExclusive(t *testing.T) {
+	requireLinuxHostCLI(t)
 	tokenPath := filepath.Join(t.TempDir(), "join.token")
 	if err := os.WriteFile(tokenPath, []byte("one-time-token\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -64,6 +73,7 @@ func TestJoinTokenFileMustBeProtectedAndExclusive(t *testing.T) {
 }
 
 func TestNodeRunCommandSurface(t *testing.T) {
+	requireLinuxHostCLI(t)
 	if err := run([]string{"node"}); err != nil {
 		t.Fatalf("node help: %v", err)
 	}
@@ -79,6 +89,7 @@ func TestNodeRunCommandSurface(t *testing.T) {
 }
 
 func TestPKICommands(t *testing.T) {
+	requireLinuxHostCLI(t)
 	dir := t.TempDir()
 	if err := run([]string{"pki", "init", "--out-dir", dir, "--validity", "48h"}); err != nil {
 		t.Fatal(err)
@@ -172,6 +183,7 @@ func TestPKICommands(t *testing.T) {
 }
 
 func TestExitCommandValidation(t *testing.T) {
+	requireLinuxHostCLI(t)
 	if err := run([]string{"exit", "use", "bad-id"}); err == nil {
 		t.Fatal("invalid exit node ID accepted")
 	}
@@ -262,6 +274,7 @@ func TestResolveExitSelectorExactUniqueName(t *testing.T) {
 }
 
 func TestExitUseResolvesNameThenSubmitsNodeID(t *testing.T) {
+	requireLinuxHostCLI(t)
 	dir := t.TempDir()
 	socket := filepath.Join(dir, "lanewayd.sock")
 	configPath := filepath.Join(dir, "laneway.toml")

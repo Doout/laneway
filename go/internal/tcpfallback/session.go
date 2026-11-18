@@ -298,7 +298,14 @@ func (s *Session) terminate(err error) {
 		s.err = err
 		s.errMu.Unlock()
 		s.cancel()
-		_ = s.conn.Close()
+		if errors.Is(err, ErrClosed) || errors.Is(err, io.EOF) {
+			_ = s.conn.Close()
+		} else {
+			// A failed session cannot send another frame reliably. TLS Close
+			// resets the write deadline while sending close_notify, which can
+			// stall a caller on the same blocked peer that just timed out.
+			_ = s.conn.NetConn().Close()
+		}
 		close(s.done)
 	})
 }
