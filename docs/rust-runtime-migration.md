@@ -6,6 +6,25 @@ canary, capture the installed image digests, matching source, service configurat
 and database schema, and rehearse restoring a backup on the isolated lab host.
 Keep one controller writing to each database.
 
+## Release handoff
+
+The Rust runtime is opt-in. Keep Go as the production default until these
+checks pass on the candidate you intend to deploy:
+
+1. Run the native release matrix, including Linux AMD64 systemd packet tests
+   and the installed macOS helper on Intel and Apple Silicon. Verify the
+   published archive checksums and image signatures, then install and roll
+   back the signed candidate on the lab host. The unsigned lab builds do
+   not establish this.
+2. Record the actual production image digests, schema and configuration.
+   Restore an encrypted backup into a separate lab volume and rehearse the
+   cutover with those inputs. Verify HTTPS, Dispatch authorization, node
+   connectivity, routes, certificate renewal, and the Go rollback before
+   scheduling a canary.
+3. Canary one isolated workload first. Do not enable fleet updates or replace
+   the production controller until the canary can be rolled back using the
+   verified Go images and a compatible backup.
+
 | Component | Starting point | Acceptance before switching the default |
 | --- | --- | --- |
 | Relay | Rust QUIC and TLS/TCP data relay, controller snapshots, TCP readiness probe | Mixed Go/Rust peers exchange packets, enforce revocation, and reconnect after restart. Exercise public HTTPS, ACME renewal, bootstrap discovery, console, and Dispatch OAuth on the shared port. |
@@ -114,6 +133,10 @@ stop the Rust services, then start with the base file. Do not remove volumes.
 If a schema upgrade was applied, restore the prior backup before restarting
 a Go controller that cannot read that schema. Confirm the Go seeds are
 still valid and restore its renewal timer.
+If the optional `exit-node` is running, stop it first with its profile
+enabled. Start it after the replacement controller and relay are healthy,
+using the same configuration and state volume. Use the same order on
+rollback, and check a client packet round trip before reopening traffic.
 
 The existing Go installer does not select this overlay. For an active Rust
 stack, use `laneway-control --rust status` and `sudo laneway-control --rust
@@ -138,11 +161,24 @@ lab images, not a published signed release.
 The ARM64 run used the actual Compose files and the same SQLite volume. It
 replaced Go with Rust, used the Go admin CLI to write another network,
 checked the console and bootstrap discovery over HTTPS, and then confirmed
-that Go could read both networks after rollback. It did not start the
-optional exit service or change the database schema.
+that Go could read both networks after rollback. The run did not change the
+database schema.
 With recovery enabled on ARM64, the gate verified authenticated status,
 rejected an image mismatch, and restored both networks and the refreshed TLS
 seeds into a new project. The original volume was still usable for Go rollback.
+
+For the optional exit packet gate, add `LANEWAY_TEST_COMPOSE_EXIT=1` and set
+`LANEWAY_TEST_COMPOSE_NETPROBE` to an absolute path to a native static
+`netprobe` binary (`CGO_ENABLED=0 go -C go build -o /tmp/netprobe ./integration/netprobe`).
+Load `alpine:3.22` and build the `go-exit` target from
+`deploy/containers/Dockerfile.exit-node` as
+`laneway-go-exit:compose-cutover-lab` with version `0.0.9100`. The fixture
+places the UDP target on a separate internal bridge so a Go client can reach
+it only through the approved exit. It checks the NAT source address and
+keeps the exit's identity, credentials, configuration, and volume constant
+across Go, Rust, and rollback. It does not route to the Internet or test DNS.
+On ARM64 the client received a UDP reply with the expected NAT source in all
+three stages, without re-enrolling or changing its selected exit.
 
 ## First Linux lab run
 

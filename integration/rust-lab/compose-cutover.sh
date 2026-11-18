@@ -91,12 +91,13 @@ LANEWAY_RELAY_SERVICE_ID=$relay
 LANEWAY_RELAY_PUBLIC_ENDPOINT=$name:4433
 EOF
 base_compose() {
-  docker compose --project-name "$project" --env-file "$base/.env" -f compose.yaml -f lab.yaml "$@"
+  docker compose --project-name "$project" --env-file "$base/.env" -f compose.yaml -f lab.yaml "${exit_overlay[@]}" "$@"
 }
 rust_compose() {
   docker compose --project-name "$project" --env-file "$base/.env" \
-    -f compose.yaml -f lab.yaml -f compose.rust.yaml -f rust-lab.yaml "$@"
+    -f compose.yaml -f lab.yaml "${exit_overlay[@]}" -f compose.rust.yaml -f rust-lab.yaml "$@"
 }
+exit_overlay=()
 cleanup() {
   result=$?
   if [[ -n ${recovery_project_dir:-} ]]; then
@@ -107,7 +108,8 @@ cleanup() {
   if (( result != 0 )); then
     rust_compose logs --no-color --tail=30 controller relay >&2 || true
   fi
-  base_compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  if (( ${#exit_overlay[@]} )); then clean_compose_exit "$result"; fi
+  base_compose --profile exit-node down --volumes --remove-orphans >/dev/null 2>&1 || true
   if [[ ${LANEWAY_KEEP_INTEGRATION_WORK:-0} == 1 ]]; then
     echo "Compose fixture retained in $work" >&2
   else
@@ -115,6 +117,10 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+if [[ ${LANEWAY_TEST_COMPOSE_EXIT:-0} == 1 ]]; then
+  source "$root/integration/rust-lab/compose-exit.sh"
+  prepare_compose_exit
+fi
 
 laneway pki init --out-dir "$work/offline" >/dev/null
 laneway pki intermediate --ca-cert "$work/offline/ca.crt" --ca-key "$work/offline/ca.key" \
@@ -129,6 +135,10 @@ LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$work/bootstrap-artifacts.toml" bash prepare.s
 # Rust side will require the database to exist and will not reinitialize it.
 printf '\n[controller.initial_network]\nnetwork_id = "%s"\nname = "baseline"\nipv4_pool = "100.115.18.0/24"\n' \
   "$network" >> generated/config/controller.toml
+if (( ${#exit_overlay[@]} )); then
+  # Publish fixture enrollments to the Go relay before packet assertions.
+  sed -i 's/^poll_interval = "30s"$/poll_interval = "1s"/' generated/config/relay.toml
+fi
 python3 prepare-rust.py
 if python3 prepare-rust.py >"$work/second-prepare.out" 2>&1; then
   echo "prepare replaced existing inputs" >&2
@@ -156,9 +166,16 @@ assert_network() {
 
 echo '==> seed a Go controller and relay'
 base_compose up --pull never -d controller --wait --wait-timeout 30
-admin relay register --network-id "$network" --service-id "$relay" --name relay --endpoint "$name:4433" >/dev/null
+relay_endpoint="$name:4433"
+if (( ${#exit_overlay[@]} )); then relay_endpoint=relay:4433; fi
+admin relay register --network-id "$network" --service-id "$relay" --name relay --endpoint "$relay_endpoint" >/dev/null
 base_compose up --pull never -d relay --wait --wait-timeout 40
 assert_network "$network" baseline
+if (( ${#exit_overlay[@]} )); then
+  enroll_compose_exit
+  test_compose_exit base_compose go-baseline 27701
+  base_compose --profile exit-node stop exit-node >/dev/null
+fi
 base_compose stop relay controller >/dev/null
 
 echo '==> check that TCP and UDP network listeners are opt-in'
@@ -199,6 +216,11 @@ public=(curl --noproxy '*' --fail --silent --show-error --max-time 5 --cacert ge
   jq -e --arg id "$network" '.. | objects | select(.network_id? == $id)' >/dev/null
 "${public[@]}" "https://$name:$port/overview" | grep -Fq '<title>Laneway</title>'
 
+if (( ${#exit_overlay[@]} )); then
+  test_compose_exit rust_compose rust-cutover 27702
+  rust_compose --profile exit-node stop exit-node >/dev/null
+fi
+
 if [[ ${LANEWAY_TEST_RUST_RECOVERY:-0} == 1 ]]; then
   source "$root/integration/rust-lab/compose-recovery.sh"
   check_compose_recovery
@@ -210,4 +232,5 @@ base_compose up --pull never -d controller relay --wait --wait-timeout 40
 test "$(base_compose exec -T controller /usr/local/bin/laneway -version)" = 0.0.9100
 assert_network "$network" baseline
 assert_network "$added" added-in-rust
+if (( ${#exit_overlay[@]} )); then test_compose_exit base_compose go-rollback 27703; fi
 echo 'PASS: Compose kept the existing data, Rust served public HTTPS discovery and console, and Go read the Rust write after rollback.'
