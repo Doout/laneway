@@ -317,7 +317,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	t.Run("connection-diagnostics", func(t *testing.T) { testRustConnectionDiagnostics(t, f, client, rustURL, cookie, csrf) })
 	t.Run("fleet-schema", func(t *testing.T) { testRustFleetPolicyHistory(t, client, cert, key, rootFile) })
 	t.Run("operational-alerts", func(t *testing.T) { testRustOperationalAlerts(t, client, cert, key, rootFile) })
-	t.Run("database-backup", func(t *testing.T) { testRustBackupRestore(t, client, cert, key, rootFile) })
+	t.Run("database-backup", func(t *testing.T) { testRustBackupRestore(t, rootFile) })
 	t.Run("route-management", func(t *testing.T) { testRustRouteManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("device-management", func(t *testing.T) { testRustDeviceManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("relay-management", func(t *testing.T) { testRustRelayManagement(t, f, client, goServer.URL, rustURL) })

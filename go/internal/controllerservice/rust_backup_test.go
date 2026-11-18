@@ -4,8 +4,11 @@ package controllerservice
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,11 +23,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func testRustBackupRestore(t *testing.T, client *http.Client, cert, key, rootFile string) {
+func testRustBackupRestore(t *testing.T, rootFile string) {
 	f := newFixture(t, 0, nil)
 	ctx := t.Context()
 	root := labCredentials{bearer: testRootBearer}
-	send := labManagementHTTP(t, client)
 	_, token, csrf, _ := bootstrapAdministratorSessionForHTTPTest(t, f, "backup-owner", "backup fixture owner password")
 	original, err := f.store.AdministratorAuthState(ctx)
 	if err != nil {
@@ -39,6 +41,30 @@ func testRustBackupRestore(t *testing.T, client *http.Client, cert, key, rootFil
 	if _, created, err := f.store.EnsureControllerInitialNetwork(ctx, configured, authenticated); err != nil || created {
 		t.Fatalf("bind existing controller identity: created=%t err=%v", created, err)
 	}
+	tlsMaterial, _, err := pki.IssueService(f.service.ca, f.service.caKey, pki.ServiceIdentity{
+		NetworkID: f.network.ID, ServiceID: serviceID, Role: pki.RoleController,
+	}, nil, []net.IP{net.IPv4(127, 0, 0, 1)}, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "controller.crt")
+	key := filepath.Join(dir, "controller.key")
+	keyPEM, err := pki.PrivateKeyPEM(tlsMaterial.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cert, pki.CertificatePEM(tlsMaterial.CertificateDER), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, keyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(f.service.ca)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}, Timeout: 5 * time.Second}
+	defer client.CloseIdleConnections()
+	send := labManagementHTTP(t, client)
 	nodeToken, err := f.store.IssueEnrollmentToken(ctx, f.network.ID, "backup node", time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +125,6 @@ func testRustBackupRestore(t *testing.T, client *http.Client, cert, key, rootFil
 			t.Fatalf("%s: %v; wanted failure %q; output %s", args[0], err, failure, out)
 		}
 	}
-	dir := t.TempDir()
 	rustBackup := filepath.Join(dir, "rust-backup.db")
 	goBackup := filepath.Join(dir, "go-backup.db")
 	restored := filepath.Join(dir, "rust-restored.db")

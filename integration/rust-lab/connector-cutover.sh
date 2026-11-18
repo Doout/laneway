@@ -153,7 +153,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-lab="$(docker run -d --network none -v "$root:/src:ro" \
+# The fixture runs inside a container with a differently owned, read-only checkout.
+lab="$(docker run -d --network none -e GOFLAGS=-buildvcs=false -v "$root:/src:ro" \
   -v "$original:/original" -v "$fresh:/fresh" \
   -v laneway-rust-lab-gomod:/go/pkg/mod -v laneway-rust-lab-gobuild:/gobuild \
   "$lab_image" bash /src/integration/rust-lab/connector-cutover.sh --fixture "$carrier")"

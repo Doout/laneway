@@ -2,11 +2,8 @@
 
 package controllerservice
 
-import (
-	"net/http"
-	"testing"
-)
+import "testing"
 
-func testRustBackupRestore(t *testing.T, _ *http.Client, _, _, _ string) {
+func testRustBackupRestore(t *testing.T, _ string) {
 	t.Skip("native controller lifecycle locking requires a Unix host")
 }
