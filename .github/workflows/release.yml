@@ -50,12 +50,15 @@ jobs:
   package:
     name: ${{ matrix.os }} ${{ matrix.arch }} package
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, darwin]
-        arch: [amd64, arm64]
+        include:
+          - {os: linux, arch: amd64, runner: ubuntu-24.04}
+          - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
+          - {os: darwin, arch: amd64, runner: ubuntu-24.04}
+          - {os: darwin, arch: arm64, runner: ubuntu-24.04}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -64,11 +67,28 @@ jobs:
         with:
           go-version: "1.26.x"
           cache-dependency-path: go/go.sum
+      - name: Build static Rust runtime candidates
+        if: matrix.os == 'linux'
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: |
+          output="$RUNNER_TEMP/laneway-rust"
+          docker buildx build --platform "linux/$PACKAGE_GOARCH" \
+            --build-arg VERSION="${GITHUB_REF_NAME#v}" --file deploy/containers/Dockerfile.rust-release \
+            --target artifacts --output "type=local,dest=$output" .
+          printf 'PACKAGE_RUST_RUNTIME_DIR=%s\n' "$output" >> "$GITHUB_ENV"
       - name: Build reproducible package
         env:
           PACKAGE_GOOS: ${{ matrix.os }}
           PACKAGE_GOARCH: ${{ matrix.arch }}
         run: make package VERSION="${GITHUB_REF_NAME#v}"
+      - name: Verify the packaged Rust binaries and the compatibility link
+        if: matrix.os == 'linux'
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: |
+          sh integration/rust-release-package.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
+            "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
       - name: Generate package SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:

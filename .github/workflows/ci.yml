@@ -211,7 +211,10 @@ jobs:
           test "$(docker run --rm --network none laneway-admin:ci version)" = ci
           test "$(docker run --rm --network none lane-edge:ci version)" = ci
           test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = ci
-          ! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true
+          if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then
+            echo "the connector image unexpectedly contains a runnable shell" >&2
+            exit 1
+          fi
           ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci
           ./integration/connector-bootstrap.sh lane-edge:ci
           ./integration/connector-upgrade.sh lane-edge:ci
@@ -219,7 +222,10 @@ jobs:
         run: |
           docker build --file deploy/containers/Dockerfile.connector \
             --target rust-connector --build-arg VERSION=ci --tag lane-edge-rust:ci .
-          ! docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true
+          if docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true; then
+            echo "the Rust connector image unexpectedly contains a runnable shell" >&2
+            exit 1
+          fi
           docker build --tag laneway-rust-lab:local integration/rust-lab
           bash integration/rust-lab/connector-cutover.sh --prime-cache
           bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci
@@ -260,6 +266,25 @@ jobs:
           CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
           RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
+
+  rust-linux-package:
+    name: Static Rust Linux package preview
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - name: Build and smoke test the preview without publishing
+        run: |
+          version=0.0.0-ci
+          output="$RUNNER_TEMP/laneway-rust"
+          docker buildx build --platform linux/amd64 --build-arg VERSION="$version" \
+            --file deploy/containers/Dockerfile.rust-release --target artifacts \
+            --output "type=local,dest=$output" .
+          PACKAGE_GOOS=linux PACKAGE_GOARCH=amd64 PACKAGE_RUST_RUNTIME_DIR="$output" make package VERSION="$version"
+          sh integration/rust-release-package.sh dist/laneway_linux_amd64.tar.gz amd64 "$version"
 
   cross-build:
     name: Go build ${{ matrix.goos }}/${{ matrix.goarch }}

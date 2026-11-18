@@ -1,0 +1,30 @@
+# Build on the target architecture. Static binaries work with the existing
+# package/bootstrap contract and do not depend on the build host's libc.
+FROM docker.io/library/rust:1.91.1-alpine3.22@sha256:8efbfb788786eeb127adc581394349c5fb567712156e0f8c2e499acadbc23756 AS build
+WORKDIR /src
+COPY api/proto /src/api/proto
+COPY rust /src/rust
+ARG VERSION=dev
+ENV SOURCE_DATE_EPOCH=0 \
+    CARGO_INCREMENTAL=0 \
+    CARGO_PROFILE_RELEASE_STRIP=symbols \
+    RUSTFLAGS="-C target-feature=+crt-static --remap-path-prefix=/src=. --remap-path-prefix=/usr/local/cargo/registry=.cargo-registry"
+RUN cargo fetch --locked --manifest-path rust/Cargo.toml
+RUN --network=none set -eu; \
+    case "$VERSION" in ""|*[!0-9A-Za-z._+-]*) exit 1;; esac; \
+    test "${#VERSION}" -le 64; \
+    target="$(rustc -vV | sed -n 's/^host: //p')"; \
+    case "$target" in x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) ;; *) exit 1;; esac; \
+    LANEWAY_PRODUCT_VERSION="$VERSION" cargo build --offline --locked --release \
+      --manifest-path rust/Cargo.toml --target "$target" \
+      -p lanewayd-rs -p laneway-controller -p laneway-relay -p laneway-healthcheck; \
+    out="rust/target/$target/release"; \
+    mkdir /artifacts; \
+    install -m 0755 "$out/lanewayd-rs" /artifacts/lanewayd-rs; \
+    for name in laneway-controller laneway-relay laneway-healthcheck; do \
+      install -m 0755 "$out/$name" "/artifacts/$name-rs"; \
+    done; \
+    cargo clean --offline --manifest-path rust/Cargo.toml
+
+FROM scratch AS artifacts
+COPY --from=build /artifacts/ /

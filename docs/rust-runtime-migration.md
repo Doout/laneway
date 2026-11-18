@@ -14,6 +14,37 @@ Keep one controller writing to each database.
 | Private fleet features | Fleet worktree includes private DNS, updates, recovery, policy history, diagnostics, alerts and topology | Compare against the identified deployed source and exercise each feature through its UI/API and node consumer. |
 | Packaging and platforms | Go also provides the Docker plugin, platform-specific CLI/daemon entry points and readiness helpers | Verify signed install, update, rollback, desktop local API and active service processes per platform. The one-shot operator CLI and compatibility harness can stay in Go. |
 
+## Linux release preview
+
+The Linux release workflow builds the four Rust runtime candidates on native
+AMD64 and ARM64 runners. The existing signed Linux archive carries them as
+`sbin/laneway-controller-rs`, `sbin/laneway-relay-rs`,
+`sbin/lanewayd-rs`, and `sbin/laneway-healthcheck-rs`. The Go binaries,
+the default `lanewayd` link, the production image tags, and the macOS packages
+are unchanged. Shipping these files does not select them at runtime.
+
+To build and verify an unsigned preview on a Linux lab host, set `arch` to its
+native architecture:
+
+```sh
+arch=arm64 # or amd64
+version=0.0.0-rust-lab
+artifacts="$(mktemp -d)"
+docker buildx build --platform "linux/$arch" --build-arg VERSION="$version" \
+  --file deploy/containers/Dockerfile.rust-release --target artifacts \
+  --output "type=local,dest=$artifacts" .
+PACKAGE_GOOS=linux PACKAGE_GOARCH="$arch" PACKAGE_RUST_RUNTIME_DIR="$artifacts" \
+  make package VERSION="$version"
+sh integration/rust-release-package.sh "dist/laneway_linux_$arch.tar.gz" "$arch" "$version"
+```
+
+The archive gate checks architecture and static linkage, executes each packaged
+binary to verify its build version, and checks the default daemon link. To test
+the archived binaries with real traffic, extract the four `-rs` entries into
+a disposable directory and point `LANEWAY_NODE_TEST_RUST_RUNTIME_DIR` at that
+directory when running `integration/rust-controller-node-netns.sh` on the
+isolated host. The package alone does not satisfy the systemd or cutover gates.
+
 ## First Linux lab run
 
 Use a separate CA and network on a disposable Linux host. Install Rust 1.91

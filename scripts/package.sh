@@ -7,6 +7,7 @@ version=${VERSION-dev}
 package_goos=${PACKAGE_GOOS:-$(cd "$project_dir/go" && go env GOOS)}
 package_goarch=${PACKAGE_GOARCH:-$(cd "$project_dir/go" && go env GOARCH)}
 package_rust_node=${PACKAGE_RUST_NODE:-}
+package_rust_runtime_dir=${PACKAGE_RUST_RUNTIME_DIR:-}
 
 case "$package_goos" in linux|darwin) ;; *) echo "unsupported package operating system: $package_goos" >&2; exit 1;; esac
 case "$package_goarch" in
@@ -17,6 +18,11 @@ case "$package_goarch" in
     ;;
 esac
 [ -n "$version" ] || { echo "version is empty" >&2; exit 1; }
+if [ -n "$package_rust_runtime_dir" ]; then
+  [ "$package_goos" = linux ] && [ -z "$package_rust_node" ] ||
+    { echo "PACKAGE_RUST_RUNTIME_DIR is Linux-only and cannot be combined with PACKAGE_RUST_NODE" >&2; exit 1; }
+  sh "$script_dir/verify-rust-release-runtime.sh" "$package_rust_runtime_dir" "$package_goarch"
+fi
 if [ -n "$package_rust_node" ]; then
   [ "$package_goos" = linux ] && [ -f "$package_rust_node" ] && [ ! -L "$package_rust_node" ] && [ -x "$package_rust_node" ] ||
     { echo "PACKAGE_RUST_NODE must be an executable Linux runtime file" >&2; exit 1; }
@@ -46,6 +52,11 @@ if [ "$package_goos" = linux ]; then
 		"$package_dir/nftables" "$package_dir/spec" "$package_dir/deploy" "$package_dir/integration"
 	if [ -n "$package_rust_node" ]; then
 		install -m 0755 "$package_rust_node" "$package_dir/sbin/lanewayd-rs"
+	elif [ -n "$package_rust_runtime_dir" ]; then
+		for runtime in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs lanewayd-rs; do
+			install -m 0755 "$package_rust_runtime_dir/$runtime" "$package_dir/sbin/$runtime"
+		done
+		cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 	fi
 fi
 

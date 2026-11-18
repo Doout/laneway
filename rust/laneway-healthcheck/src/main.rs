@@ -123,6 +123,17 @@ async fn tls_probe(
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
+    if matches!(
+        env::args_os().nth(1).as_deref().and_then(|s| s.to_str()),
+        Some("--version" | "-version")
+    ) && env::args_os().nth(2).is_none()
+    {
+        println!(
+            "{}",
+            option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+        );
+        return ExitCode::SUCCESS;
+    }
     let Some(target) = target(env::args().skip(1)) else {
         eprintln!(
             "usage: laneway-healthcheck (-tcp 127.0.0.1:PORT [-tls-ca PATH -tls-server-name NAME] | -unix /absolute/socket)"

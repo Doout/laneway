@@ -16,9 +16,10 @@ one-use invitation to stdout. Run the command on the Linux host, then paste the
 invitation at its hidden `/dev/tty` prompt. Never put the invitation in argv,
 an environment variable, shell history, or a pipe shared with another user.
 
-The Go daemon remains the default. For a signed Linux preview archive built
-with `PACKAGE_RUST_NODE` pointing to the matching `lanewayd-rs` binary, append
-`--runtime rust` to the immutable bootstrap command. The Rust service uses
+The Go daemon remains the default. For a signed Linux release containing
+`laneway/sbin/lanewayd-rs`, append `--runtime rust` to the immutable bootstrap
+command. Older releases without that archive member fail before enrollment.
+The Rust service uses
 the same transient systemd credentials and invitation. It requires a kernel
 with WireGuard support, but does not require a `wg` executable or a TUN device.
 

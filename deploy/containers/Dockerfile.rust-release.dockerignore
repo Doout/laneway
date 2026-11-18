@@ -1,0 +1,11 @@
+**
+!api/
+!api/proto/
+!api/proto/**
+!rust/
+!rust/**
+rust/target
+rust/**/target
+rust/**/.env*
+rust/**/*.key
+rust/**/*.pem

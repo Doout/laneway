@@ -20,7 +20,8 @@ use super::native::WireGuardNode;
 
 const CREDENTIAL_ROOT: &str = "/run/credentials";
 const UNIT_PREFIX: &str = "laneway-ephemeral-exit-";
-const RAMFS_MAGIC: libc::c_long = 0x858458f6_u32 as libc::c_long;
+const RAMFS_MAGIC: u32 = 0x858458f6;
+const TMPFS_MAGIC: u32 = libc::TMPFS_MAGIC as u32;
 
 /// Native service for a private systemd network namespace. Keeps TLS
 /// credentials pinned by descriptor for the entire lifetime of the service.
@@ -136,9 +137,11 @@ fn open_ram_directory(path: &Path) -> Result<File> {
             directory.as_raw_fd(),
             information.as_mut_ptr(),
         ))?;
-        let filesystem = information.assume_init().f_type;
+        // Linux filesystem magic values are 32 bits; musl and glibc expose
+        // f_type with different signedness on supported architectures.
+        let filesystem = information.assume_init().f_type as u32;
         ensure!(
-            matches!(filesystem, libc::TMPFS_MAGIC | RAMFS_MAGIC),
+            matches!(filesystem, TMPFS_MAGIC | RAMFS_MAGIC),
             "shared-host credentials must be on a memory-backed filesystem"
         );
     }

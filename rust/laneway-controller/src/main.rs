@@ -13,6 +13,13 @@ fn main() -> Result<()> {
     let mut args = env::args_os().skip(1);
     const USAGE: &str = "usage: laneway-controller {inventory|session-inventory} {networks DATABASE | nodes DATABASE NETWORK_ID} [LIMIT]";
     let scoped = match args.next().as_deref().and_then(|a| a.to_str()) {
+        Some("--version" | "-version") if args.next().is_none() => {
+            println!(
+                "{}",
+                option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+            );
+            return Ok(());
+        }
         Some("serve") => return server::start(args),
         Some("inventory") => false,
         Some("session-inventory") => true,

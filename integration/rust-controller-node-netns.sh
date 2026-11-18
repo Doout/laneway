@@ -219,12 +219,27 @@ echo "==> building the real controller service fixture, product binaries, and Ru
   go build -o "${work_dir}/netprobe" ./integration/netprobe
   go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller
 )
-cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-healthcheck
-cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
-if [[ "${node_controller}" == "rust" ]]; then
-  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p laneway-controller -p laneway-relay
-  cp "${repo_root}/rust/target/debug/laneway-controller" "${work_dir}/rust-controller"
-  cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/rust-relay"
+if [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" ]]; then
+  runtime_dir="${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR}"
+  install -m 0755 "${runtime_dir}/lanewayd-rs" "${work_dir}/rust-node"
+  if [[ "${node_controller}" == "rust" ]]; then
+    install -m 0755 "${runtime_dir}/laneway-controller-rs" "${work_dir}/rust-controller"
+    install -m 0755 "${runtime_dir}/laneway-relay-rs" "${work_dir}/rust-relay"
+    controller_version="$("${work_dir}/rust-controller" --version)"
+    relay_version="$("${work_dir}/rust-relay" --version)"
+    printf '==> prebuilt Rust controller %s and relay %s\n' \
+      "${controller_version}" "${relay_version}"
+  fi
+  node_version="$("${work_dir}/rust-node" --version)"
+  printf '==> prebuilt Rust node %s\n' "${node_version}"
+else
+  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-healthcheck
+  cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
+  if [[ "${node_controller}" == "rust" ]]; then
+    cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p laneway-controller -p laneway-relay
+    cp "${repo_root}/rust/target/debug/laneway-controller" "${work_dir}/rust-controller"
+    cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/rust-relay"
+  fi
 fi
 
 network_id="21000000000000000000000000000001"

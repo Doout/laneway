@@ -148,6 +148,8 @@ do
 done
 require 'ephemeral-exit-bootstrap.sh' "$workflow"
 require 'ephemeral-exit' "$package_workflow"
+require 'verify-rust-release-runtime.sh' "$package_workflow"
+require 'verified release does not contain the Rust Exit runtime' "$ephemeral_exit_bootstrap"
 require 'mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"' "$ephemeral_exit_bootstrap"
 require 'systemd-run --unit="$cleanup_unit"' "$ephemeral_exit_bootstrap"
 require '/bin/sh "$cleanup_path"' "$ephemeral_exit_bootstrap"
@@ -162,7 +164,12 @@ if grep -F "cp -R \"\$project_dir/deploy/.\"" "$package_workflow" >/dev/null; th
 fi
 
 for value in \
-	'os: [linux, darwin]' \
+  'os: linux, arch: amd64, runner: ubuntu-24.04' \
+  'os: linux, arch: arm64, runner: ubuntu-24.04-arm' \
+  'os: darwin, arch: amd64, runner: ubuntu-24.04' \
+  'os: darwin, arch: arm64, runner: ubuntu-24.04' \
+  'PACKAGE_RUST_RUNTIME_DIR=' \
+  'integration/rust-release-package.sh' \
 	"dist/laneway_\${{ matrix.os }}_\${{ matrix.arch }}" \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \
 	'install.sh' \
@@ -305,7 +312,7 @@ require '--target admin --build-arg VERSION=ci' "$ci_workflow"
 require 'docker run --rm --network none laneway-controller:ci -version' "$ci_workflow"
 require 'docker run --rm --network none laneway-relay:ci -version' "$ci_workflow"
 require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci' "$ci_workflow"
-require '! docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true' "$ci_workflow"
+require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then' "$ci_workflow"
 require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
 require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
 require 'bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci' "$ci_workflow"
