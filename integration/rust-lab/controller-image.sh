@@ -32,4 +32,4 @@ docker run --rm --network none --read-only --tmpfs /tmp:exec --cap-drop ALL --us
   -e LANEWAY_RUST_CONTROLLER=/packaged/laneway-controller \
   -e LANEWAY_RUST_CONSOLE_ASSETS=/console laneway-rust-lab:local sh -ec '
     /tests/sessions -test.run "^TestRustControllerSessions$"
-    /tests/https -test.run "^TestRust(Controller(Inventory|HTTPS|QUIC|Discovery|ServiceTLS|Topology)|NodeCredentialRecovery)$"'
+    /tests/https -test.run "^TestRust(Controller(Inventory|HTTPS|QUIC|Discovery|ServiceTLS|Topology|FleetUpdates)|NodeCredentialRecovery)$"'

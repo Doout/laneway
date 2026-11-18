@@ -87,7 +87,7 @@ pub(super) async fn handle(
     Ok(no_content(id))
 }
 
-fn failure(err: anyhow::Error) -> Failure {
+pub(super) fn failure(err: anyhow::Error) -> Failure {
     match err.downcast_ref::<EnrollError>() {
         Some(EnrollError::Denied) => DENIED,
         Some(EnrollError::Invalid) => AUTH,

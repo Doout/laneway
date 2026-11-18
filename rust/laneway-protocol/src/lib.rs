@@ -10,6 +10,7 @@ use thiserror::Error;
 use x509_parser::{extensions::GeneralName, prelude::*};
 
 pub mod endpoint_status;
+pub mod fleet_updates;
 pub mod policy;
 pub mod public_application;
 pub mod relay_endpoint;

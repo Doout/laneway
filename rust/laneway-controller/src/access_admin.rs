@@ -19,6 +19,7 @@ use crate::{
 pub use acl::AclRule;
 use anyhow::{Result, ensure};
 use laneway_protocol::Id;
+use laneway_protocol::fleet_updates::Create as FleetPlan;
 pub use routes::{NodeRouteRequest, RouteKind, RouteMode, RouteSpec};
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{Value, json};
@@ -39,6 +40,9 @@ pub enum Request {
     PrivateDns(Id),
     EndpointStatuses(Id, usize),
     Topology(Id, usize),
+    FleetUpdates(Id, usize),
+    CreateFleetUpdate(Id, Result<FleetPlan>),
+    AdvanceFleetUpdate(Id, Id, bool),
     NodeLocations(Id, usize, Option<&'static str>),
     SetNodeLocation(Id, Option<Location>),
     ListRoutes(Id, usize),
@@ -116,9 +120,9 @@ struct Scope {
     network: Id,
     object: bool,
 }
-struct Actor {
-    kind: &'static str,
-    id: Id,
+pub(crate) struct Actor {
+    pub(crate) kind: &'static str,
+    pub(crate) id: Id,
 }
 
 pub struct AdminReply {
@@ -151,6 +155,7 @@ impl Request {
                 | Self::PrivateDns(_)
                 | Self::EndpointStatuses(..)
                 | Self::Topology(..)
+                | Self::FleetUpdates(..)
                 | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
                 | Self::PolicyPreview(..)
@@ -164,9 +169,10 @@ impl Request {
     fn permission(&self) -> &'static str {
         match self {
             Self::ListRoutes(..) => "route.read",
-            Self::EndpointStatuses(..) | Self::Topology(..) | Self::NodeLocations(..) => {
-                "node.read"
-            }
+            Self::EndpointStatuses(..)
+            | Self::Topology(..)
+            | Self::FleetUpdates(..)
+            | Self::NodeLocations(..) => "node.read",
             Self::ListCertificates(..) => "certificate.read",
             Self::ListRelays(..) => "relay.read",
             Self::RegisterRelay { .. } | Self::UpdateRelay(..) | Self::DisableRelay(_) => {
@@ -175,6 +181,8 @@ impl Request {
             Self::RevokeCertificate(..) => "certificate.revoke",
             Self::RevokeNode(..)
             | Self::IssueNodeRecovery(..)
+            | Self::CreateFleetUpdate(..)
+            | Self::AdvanceFleetUpdate(..)
             | Self::SetNodeCapabilities(..)
             | Self::SetNodeLocation(..) => "node.manage",
             Self::AssignRoute(..) | Self::ApproveRoute(_) | Self::WithdrawRoute(_) => {
@@ -190,6 +198,9 @@ impl Request {
             | Self::PrivateDns(net)
             | Self::EndpointStatuses(net, _)
             | Self::Topology(net, _)
+            | Self::FleetUpdates(net, _)
+            | Self::CreateFleetUpdate(net, _)
+            | Self::AdvanceFleetUpdate(net, ..)
             | Self::NodeLocations(net, ..)
             | Self::ListRoutes(net, _)
             | Self::AssignRoute(net, ..)
@@ -264,6 +275,14 @@ impl Request {
                 crate::endpoint_status::inventory(tx, net, limit, now)
             }
             Self::Topology(_, limit) => crate::topology::inventory(tx, net, limit, now),
+            Self::FleetUpdates(_, limit) => crate::fleet_updates::inventory(tx, net, limit),
+            Self::CreateFleetUpdate(_, plan) => {
+                crate::fleet_updates::create(tx, net, &editor.actor, now, plan?)
+            }
+            Self::AdvanceFleetUpdate(_, id, cancel) => {
+                crate::fleet_updates::advance(tx, net, &editor.actor, now, id, cancel)?;
+                Ok(Value::Null)
+            }
             Self::NodeLocations(_, limit, provider) => {
                 crate::node_location::inventory(tx, net, now, limit, provider)
             }
@@ -464,7 +483,7 @@ fn change(
     audit(tx, net, actor, now, action, target, details)?;
     Ok(epoch)
 }
-fn audit(
+pub(crate) fn audit(
     tx: &Transaction<'_>,
     net: Id,
     actor: &Actor,
@@ -480,7 +499,7 @@ fn audit(
 fn epoch_reply(epoch: i64) -> Value {
     json!({"configuration_epoch":epoch})
 }
-fn next_id() -> Result<Id> {
+pub(crate) fn next_id() -> Result<Id> {
     let mut id = [0; 16];
     getrandom::fill(&mut id)?;
     Ok(Id::new(id)?)

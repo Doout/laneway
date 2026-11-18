@@ -1058,6 +1058,24 @@ gate uses the existing Go CLI against the Rust ACL API to prove that removing
 the allow rule blocks a real routed packet and adding it back restores traffic.
 The fixture still uses Go for route administration.
 
+### Managed fleet update controller (lab only)
+
+Schema 19 supports the existing Fleet Updates console API. Listing requires
+`node.read`; creating, promoting, and cancelling require `node.manage` for
+the network. Plans pin a stable release tag and put the first selected targets
+in the canary stage. Promotion requires healthy reports from all original
+canaries. A failure or verified rollback pauses the plan. These changes are
+audited without bumping the network configuration epoch.
+
+The node poll and result endpoints require a current, authenticated node
+certificate. The runtime node and network identifiers in the request must
+match that certificate. A running claim survives cancellation, and retrying a
+terminal report does not repeat the state change or audit. The controller
+returns a release tag, not a binary, executable command, or download URL.
+This phase does not install or enable a Rust updater. Signed artifact
+verification, runtime identity checks, and rollback need their own Linux
+install/restart gate before it can execute assignments.
+
 ### Recover an expired Rust node credential (lab only)
 
 On schema 19, a scoped `node.manage` administrator can request a 10-minute

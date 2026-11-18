@@ -23,6 +23,8 @@ pub(super) enum Route<'a> {
     PrivateDns(&'a str),
     EndpointStatuses(&'a str),
     Topology(&'a str),
+    FleetUpdates(&'a str),
+    AdvanceFleetUpdate(&'a str, &'a str, bool),
     NodeLocations(&'a str),
     NodeLocation(&'a str),
     ListRoutes(&'a str),
@@ -64,6 +66,27 @@ impl<'a> Route<'a> {
             ["", "v1", "admin", "networks", id, "private-dns"] => PrivateDns(id),
             ["", "v1", "admin", "networks", id, "endpoint-statuses"] => EndpointStatuses(id),
             ["", "v1", "admin", "networks", id, "topology"] => Topology(id),
+            ["", "v1", "admin", "networks", id, "fleet-updates"] => FleetUpdates(id),
+            [
+                "",
+                "v1",
+                "admin",
+                "networks",
+                net,
+                "fleet-updates",
+                id,
+                "promote",
+            ] => AdvanceFleetUpdate(net, id, false),
+            [
+                "",
+                "v1",
+                "admin",
+                "networks",
+                net,
+                "fleet-updates",
+                id,
+                "cancel",
+            ] => AdvanceFleetUpdate(net, id, true),
             ["", "v1", "admin", "networks", id, "node-locations"] => NodeLocations(id),
             ["", "v1", "admin", "nodes", id, "location"] => NodeLocation(id),
             ["", "v1", "admin", "networks", id, "routes"] => ListRoutes(id),
@@ -132,7 +155,7 @@ impl<'a> Route<'a> {
             Self::NodeLocation(_) => "DELETE, PUT",
             Self::NodeCapabilities(_) | Self::RelayUpdate(_) => "PUT",
             Self::RelayCollection(_) => "GET, HEAD, POST",
-            Self::AclRules(_) => "GET, HEAD, POST",
+            Self::AclRules(_) | Self::FleetUpdates(_) => "GET, HEAD, POST",
             Self::AclRule(_) => "DELETE, PUT",
             Self::UserCreate(_)
             | Self::AssignSubnet
@@ -144,6 +167,7 @@ impl<'a> Route<'a> {
             | Self::RelayDisable(_)
             | Self::PolicyPreview(_)
             | Self::Diagnostics(_)
+            | Self::AdvanceFleetUpdate(..)
             | Self::RestorePolicy(..)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
@@ -305,7 +329,10 @@ pub(super) async fn handle(
         return Ok(r);
     }
     let auth = credential(req.headers())?;
-    let empty = matches!(route, Route::NodeLocation(_));
+    let empty = matches!(
+        route,
+        Route::NodeLocation(_) | Route::AdvanceFleetUpdate(..)
+    );
     let access = if matches!(route, Route::PolicyPreview(_) | Route::Diagnostics(_)) {
         BrowserAccess::Query
     } else if matches!(*req.method(), Method::GET | Method::HEAD) {
@@ -317,6 +344,7 @@ pub(super) async fn handle(
         && matches!(
             route,
             Route::AclRules(_)
+                | Route::FleetUpdates(_)
                 | Route::IssueNodeRecovery(_)
                 | Route::RelayCollection(_)
                 | Route::UserCreate(_)
@@ -380,6 +408,21 @@ async fn decode(
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
         Route::PrivateDns(net) => Action::PrivateDns(parse(net)?),
+        Route::FleetUpdates(net) => {
+            let net = parse(net)?;
+            if req.method() == Method::POST {
+                Action::CreateFleetUpdate(net, required_json_form(req).await.map_err(Into::into))
+            } else {
+                Action::FleetUpdates(
+                    net,
+                    super::list_limit(req.uri().query(), 100)
+                        .map_err(|_| malformed("invalid limit"))?,
+                )
+            }
+        }
+        Route::AdvanceFleetUpdate(net, id, cancel) => {
+            Action::AdvanceFleetUpdate(parse(net)?, parse(id)?, cancel)
+        }
         Route::IssueNodeRecovery(id) => Action::IssueNodeRecovery(
             parse(id)?,
             required_json_form::<NodeRecoveryForm>(req)

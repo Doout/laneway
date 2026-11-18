@@ -29,6 +29,7 @@ mod management;
 mod mutations;
 mod node_configuration;
 mod node_credential_recovery;
+mod node_fleet_updates;
 mod node_installer;
 mod node_private_dns;
 mod node_proto;
@@ -332,6 +333,11 @@ async fn dispatch(
     if path == "/v1/topology" && state.workload_mtls_enabled {
         return endpoint_status::handle(req, state, id, peer, endpoint_status::Kind::Topology)
             .await;
+    }
+    if state.workload_mtls_enabled
+        && let Some(route) = node_fleet_updates::Route::parse(path)
+    {
+        return node_fleet_updates::handle(req, state, id, route).await;
     }
     if path == "/v1/node/private-dns" && state.workload_mtls_enabled {
         return node_private_dns::handle(req, state, id).await;
