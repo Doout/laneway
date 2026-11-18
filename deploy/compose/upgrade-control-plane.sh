@@ -23,6 +23,11 @@ for path in "$destination/.env" "$destination/compose.yaml"; do
     die "existing deployment file is missing or unsafe: $path"
   fi
 done
+if [ -e "$destination/compose.rust.yaml" ] || [ -L "$destination/compose.rust.yaml" ] ||
+   grep -Eq '^[[:space:]]*(export[[:space:]]+)?LANEWAY_RUST_VERSION[[:space:]]*=' "$destination/.env"; then
+  sh "$source_dir/laneway-control" check-go-runtime "$destination" ||
+    die "legacy upgrade cannot proceed on this deployment"
+fi
 package_version=
 [ -f "$source_dir/../../VERSION" ] && [ ! -L "$source_dir/../../VERSION" ] && \
   package_version=$(sed -n '1p' "$source_dir/../../VERSION")

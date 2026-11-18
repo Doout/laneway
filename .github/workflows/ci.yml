@@ -184,6 +184,7 @@ jobs:
           shellcheck deploy/ephemeral-exit/bootstrap.sh
           ./integration/release-contract.sh
           sh integration/rust-compose-release.sh
+          sh integration/rust-go-runtime-guard.sh
           ./integration/connector-updater.sh
           ./integration/control-plane-prepare.sh
           sudo env PATH="$PATH" ./integration/control-plane-install.sh

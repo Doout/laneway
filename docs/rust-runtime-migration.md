@@ -174,8 +174,11 @@ Use `laneway-control --rust status` for routine inventory and
 online copy using the running controller, includes the Rust Compose inputs, and puts validated current
 controller and relay certificates into the encrypted bundle as restore seeds
 without changing the originals. The public ACME cache is not archived.
-The wrapper refuses the Go lifecycle commands in Rust mode; do not use the Go
-upgrade, rollback or token-rotation commands on this stack.
+The updated wrapper refuses Go lifecycle commands while any Rust controller,
+relay, or exit service is running in the project, even if the operator omits
+`--rust`. The packaged Go upgrader checks before changing deployment files.
+This guard does not block maintenance just because the overlay is staged; it
+allows the Go commands again after a deliberate rollback.
 
 On an empty, stopped deployment with the verified Rust images already
 installed, use `sudo laneway-control --rust restore BUNDLE.age --identity

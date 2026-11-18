@@ -101,7 +101,46 @@ acquire_lock() {
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if [ "$runtime" = go ]; then
+    case "$command" in
+      init|upgrade|rollback|backup|restore|production-check|administrator)
+        require_go_runtime "$base_dir" ;;
+    esac
+  fi
 }
+
+# A staged Rust overlay does not by itself block Go maintenance. Inspect the
+# active instances of the shared services before touching their state.
+require_go_runtime() (
+  case "$1" in /*) ;; *) die "expected an absolute deployment directory" ;; esac
+  base_dir=$1
+  env_file=$base_dir/.env
+  if [ ! -e "$env_file" ] && [ ! -L "$env_file" ]; then
+    # A fresh restore target may have the overlay, but no deployment yet.
+    [ ! -e "$base_dir/generated/config/bootstrap.rust.json" ] ||
+      die "cannot determine the runtime of the prepared Rust deployment without .env"
+    return 0
+  fi
+  if [ ! -e "$base_dir/compose.rust.yaml" ] && [ ! -L "$base_dir/compose.rust.yaml" ]; then
+    [ -f "$env_file" ] &&
+      grep -Eq '^[[:space:]]*(export[[:space:]]+)?LANEWAY_RUST_VERSION[[:space:]]*=' "$env_file" || return 0
+  fi
+  for input in "$base_dir/compose.yaml" "$env_file"; do
+    [ -f "$input" ] && [ ! -L "$input" ] || die "cannot verify the running control-plane runtime: missing or unsafe input"
+  done
+  runtime=go
+  ids=$(compose --profile exit-node ps --status running -q controller relay exit-node) ||
+    die "cannot verify the running control-plane runtime; legacy maintenance refused"
+  for id in $ids; do
+    case "$id" in ''|*[!0-9a-f]*) die "invalid container ID during runtime verification" ;; esac
+    observed=$(docker inspect --type container --format '{{index .Config.Labels "io.laneway.control-runtime"}} {{.Config.Image}}' "$id") ||
+      die "cannot inspect a running control-plane service; legacy maintenance refused"
+    case "$observed" in
+      rust\ *|*\ ghcr.io/doout/laneway-controller-rust[:@]*|*\ ghcr.io/doout/laneway-relay-rust[:@]*|*\ ghcr.io/doout/laneway-exit-node-rust[:@]*)
+        die "a Rust control-plane service is running; legacy Go maintenance refused. Use --rust status or the cutover runbook" ;;
+    esac
+  done
+)
 
 compose() {
   if [ "$runtime" = rust ]; then
@@ -1577,6 +1616,7 @@ run_update() {
     die "this control plane is not a supported Docker Compose installation"
   fi
   compose config --quiet || die "the Docker Compose installation is invalid"
+  require_go_runtime "$base_dir"
 
   current_version=$(read_setting "$env_file" LANEWAY_VERSION)
   printf '%s\n' "$current_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
@@ -1658,6 +1698,7 @@ run_update() {
 
   acquire_lock
   trap 'release_lock; cleanup_update' EXIT
+  require_go_runtime "$base_dir"
   run_step "Install control-plane tools" env PREFIX=/usr/local sh "$package_dir/install.sh" || \
     die "could not install the verified release package"
   bootstrap_manifest=$state_dir/bootstrap-artifacts-$latest_version.toml
@@ -1904,6 +1945,10 @@ case "$command" in
   invite) acquire_lock; run_invite "$@" ;;
   route) acquire_lock; run_route "$@" ;;
   status) run_status "$@" ;;
+  check-go-runtime)
+    [ "$#" -eq 1 ] || die "check-go-runtime requires an absolute deployment directory"
+    require_go_runtime "$1"
+    ;;
   readiness)
     [ "$runtime" = rust ] && [ "$#" -eq 1 ] || die "use --rust readiness RELEASE_METADATA_DIRECTORY"
     [ "$(id -u)" -eq 0 ] || die "readiness must run as root"

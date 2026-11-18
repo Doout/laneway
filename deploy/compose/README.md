@@ -46,6 +46,9 @@ After starting the Rust stack, run
 `sudo laneway-control --rust readiness METADATA_DIRECTORY` to check the
 running image digests, health, authenticated inventory, and discovery.
 Rehearse backup, restore, and rollback separately.
+On a running Rust stack, use `laneway-control --rust backup`. The updated
+wrapper and packaged Go upgrader refuse legacy lifecycle operations while a
+Rust controller, relay, or exit is active in the same Compose project.
 
 ## Administrator access
 

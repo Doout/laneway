@@ -17,7 +17,7 @@ project=laneway-cutover-${work##*.}
 project=${project,,}
 base="$work/deploy"
 mkdir -p "$base" "$work/bin" "$work/issuer"
-for file in compose.yaml compose.rust.yaml prepare.sh prepare-rust.py verify-rust-release.sh laneway-control; do
+for file in compose.yaml compose.rust.yaml prepare.sh prepare-rust.py verify-rust-release.sh laneway-control upgrade-control-plane.sh; do
   cp "$root/deploy/compose/$file" "$base/"
 done
 export LANEWAY_LAB_FIXTURE_DIR="$work"
@@ -174,6 +174,7 @@ if (( ${#exit_overlay[@]} )); then relay_endpoint=relay:4433; fi
 admin relay register --network-id "$network" --service-id "$relay" --name relay --endpoint "$relay_endpoint" >/dev/null
 base_compose up --pull never -d relay --wait --wait-timeout 40
 assert_network "$network" baseline
+env COMPOSE_PROJECT_NAME="$project" sh ./laneway-control check-go-runtime "$base"
 if (( ${#exit_overlay[@]} )); then
   enroll_compose_exit
   test_compose_exit base_compose go-baseline 27701
@@ -207,6 +208,21 @@ test "$(rust_compose exec -T controller /usr/local/bin/laneway-controller --vers
 assert_network "$network" baseline
 admin network create --network-id "$added" --name added-in-rust --ipv4-pool 100.115.19.0/24 >/dev/null
 assert_network "$added" added-in-rust
+# Neither a direct legacy backup nor the package updater may mistake a healthy
+# Rust project for a Go stack. The configured project explicitly selects both.
+if env COMPOSE_PROJECT_NAME="$project" sh ./laneway-control backup wrong-runtime.age >"$work/legacy-guard.out" 2>&1; then
+  echo 'legacy Go backup accepted the running Rust stack' >&2
+  exit 1
+fi
+grep -F 'legacy Go maintenance refused' "$work/legacy-guard.out"
+if env COMPOSE_PROJECT_NAME="$project" LANEWAY_DEPLOY_DIR="$base" \
+  sh ./upgrade-control-plane.sh >"$work/legacy-package.out" 2>&1; then
+  echo 'legacy package upgrader accepted the running Rust stack' >&2
+  exit 1
+fi
+grep -F 'legacy Go maintenance refused' "$work/legacy-package.out"
+test ! -e generated/recovery/wrong-runtime.age
+test ! -e generated/lifecycle/operator.lock
 if env COMPOSE_PROJECT_NAME="$project" LANEWAY_COSIGN_BIN="$work/bin/compose-cosign" \
   sh ./laneway-control --rust readiness "$work/release" >"$work/wrong-running-image.out" 2>&1; then
   echo 'Rust readiness accepted an unsigned local runtime image' >&2
@@ -243,5 +259,6 @@ base_compose up --pull never -d controller relay --wait --wait-timeout 40
 test "$(base_compose exec -T controller /usr/local/bin/laneway -version)" = 0.0.9100
 assert_network "$network" baseline
 assert_network "$added" added-in-rust
+env COMPOSE_PROJECT_NAME="$project" sh ./laneway-control check-go-runtime "$base"
 if (( ${#exit_overlay[@]} )); then test_compose_exit base_compose go-rollback 27703; fi
 echo 'PASS: Compose kept the existing data, Rust served public HTTPS discovery and console, and Go read the Rust write after rollback.'
