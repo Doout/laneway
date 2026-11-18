@@ -18,6 +18,7 @@ mod registry;
 mod server;
 mod tcp;
 mod tls;
+mod workload;
 
 pub use config::{Config, PeerConfig, RelayConfig, TcpFallbackConfig, TlsConfig};
 pub use metrics::{Metrics, MetricsSnapshot};

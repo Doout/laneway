@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use x509_parser::prelude::{FromDer, X509Certificate, X509CertificationRequest};
 
 const MAX_DER: usize = 64 * 1024;
-const CONTROLLER_LIFETIME: i64 = 30 * 24 * 60 * 60;
+const SERVICE_LIFETIME: i64 = 30 * 24 * 60 * 60;
 
 pub struct VerifiedCsr(SubjectPublicKeyInfo);
 
@@ -189,18 +189,54 @@ impl NodeIssuer {
         minimum_validity: i64,
     ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
         ensure!(
-            identity.role == Role::Controller
-                && !names.is_empty()
-                && names
-                    .iter()
-                    .all(|name| matches!(name, SanType::DnsName(_) | SanType::IpAddress(_))),
+            identity.role == Role::Controller && !names.is_empty(),
             "invalid controller service names"
+        );
+        let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+        let (chain, _) = self.sign_service(&key, identity, names, now, minimum_validity)?;
+        Ok((chain, PrivatePkcs8KeyDer::from(key.serialize_der()).into()))
+    }
+
+    pub(crate) fn issue_relay(
+        &self,
+        csr: &VerifiedCsr,
+        identity: AuthenticatedIdentity,
+        names: &[SanType],
+        now: i64,
+        minimum_validity: i64,
+    ) -> Result<laneway_protocol::v1::CertificateChain> {
+        ensure!(identity.role == Role::Relay, "invalid relay role");
+        let (chain, expires) = self.sign_service(&csr.0, identity, names, now, minimum_validity)?;
+        Ok(laneway_protocol::v1::CertificateChain {
+            certificates_der: chain.into_iter().map(|der| der.as_ref().to_vec()).collect(),
+            not_after_unix_seconds: expires.try_into()?,
+        })
+    }
+
+    fn sign_service(
+        &self,
+        key: &impl PublicKeyData,
+        identity: AuthenticatedIdentity,
+        names: &[SanType],
+        now: i64,
+        minimum_validity: i64,
+    ) -> Result<(Vec<CertificateDer<'static>>, i64)> {
+        let role = match identity.role {
+            Role::Relay => "relay",
+            Role::Controller => "controller",
+            _ => anyhow::bail!("not a renewable service role"),
+        };
+        ensure!(
+            names
+                .iter()
+                .all(|name| matches!(name, SanType::DnsName(_) | SanType::IpAddress(_))),
+            "invalid service names"
         );
         ensure!(
             self.valid_from <= now && now < self.valid_to,
             "service issuer is not currently valid"
         );
-        let not_after = now.saturating_add(CONTROLLER_LIFETIME).min(self.valid_to);
+        let not_after = now.saturating_add(SERVICE_LIFETIME).min(self.valid_to);
         ensure!(
             not_after.saturating_sub(now) >= minimum_validity,
             "service issuer needs operator renewal"
@@ -210,16 +246,15 @@ impl NodeIssuer {
         if serial == [0; 16] {
             serial[15] = 1;
         }
-        let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
         let mut params = CertificateParams::default();
         params.distinguished_name.push(
             DnType::CommonName,
-            format!("laneway-controller-{}", identity.subject_id),
+            format!("laneway-{role}-{}", identity.subject_id),
         );
         params.subject_alt_names = names.to_vec();
         params.subject_alt_names.push(SanType::URI(
             format!(
-                "spiffe://laneway/network/{}/controller/{}",
+                "spiffe://laneway/network/{}/{role}/{}",
                 identity.network_id, identity.subject_id
             )
             .try_into()?,
@@ -227,16 +262,21 @@ impl NodeIssuer {
         params.is_ca = IsCa::ExplicitNoCa;
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        if identity.role == Role::Relay {
+            params
+                .extended_key_usages
+                .push(ExtendedKeyUsagePurpose::ClientAuth);
+        }
         params.use_authority_key_identifier_extension = true;
         params.not_before =
             OffsetDateTime::from_unix_timestamp(now.saturating_sub(60).max(self.valid_from))?;
         params.not_after = OffsetDateTime::from_unix_timestamp(not_after)?;
         params.serial_number = Some(SerialNumber::from_slice(&serial));
-        let certificate = params.signed_by(&key, &self.signer)?;
+        let certificate = params.signed_by(key, &self.signer)?;
         let chain = std::iter::once(certificate.der().clone())
             .chain(self.intermediates.iter().cloned().map(CertificateDer::from))
             .collect();
-        Ok((chain, PrivatePkcs8KeyDer::from(key.serialize_der()).into()))
+        Ok((chain, not_after))
     }
 
     pub fn issue(

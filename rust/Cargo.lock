@@ -1162,6 +1162,7 @@ dependencies = [
  "hyper-util",
  "ipnet",
  "laneway-protocol",
+ "pem",
  "prost",
  "quinn",
  "rcgen 0.14.8",

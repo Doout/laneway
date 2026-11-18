@@ -134,7 +134,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(io::Error::other)?
 }
 
-fn directory(path: &Path, owner_only: bool) -> Result<()> {
+pub(crate) fn directory(path: &Path, owner_only: bool) -> Result<()> {
     let mut options = fs::DirBuilder::new();
     options.recursive(true);
     #[cfg(unix)]
@@ -159,7 +159,7 @@ fn directory(path: &Path, owner_only: bool) -> Result<()> {
     Ok(())
 }
 
-fn read(path: &Path) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+pub(crate) fn read(path: &Path) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -185,7 +185,7 @@ fn read(path: &Path) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
     Ok(Some(data))
 }
 
-fn write(path: &Path, data: &[u8]) -> io::Result<()> {
+pub(crate) fn write(path: &Path, data: &[u8]) -> io::Result<()> {
     if data.is_empty() || data.len() > MAX_CACHE_FILE {
         return Err(io::Error::other("invalid ACME cache length"));
     }

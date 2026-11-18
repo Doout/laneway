@@ -35,6 +35,7 @@ use crate::{
     public_tls::Renewal,
     registry::{Registry, Session, SessionCapabilities, SessionChannels},
     tcp, tls,
+    workload::Workload,
 };
 
 const CONTROL_PREFACE: &[u8] = b"LWC1";
@@ -87,22 +88,24 @@ impl Server {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let metrics = Arc::new(Metrics::default());
         let static_authorizations = config.authorizations()?;
+        let workload = Workload::load(&config.tls)?;
         let (authorizations, controller) = if let Some(controller_config) = config
             .controller
             .as_ref()
             .filter(|value| !value.endpoint.is_empty())
         {
-            let relay_identity = tls::local_identity(&config)?;
+            let relay_identity = workload.identity();
             (
                 ControllerState::controller_with_certificate(
                     relay_identity.network_id,
-                    &config.tls.certificate_file,
+                    Arc::clone(&workload),
                     Arc::clone(&metrics),
                 )?,
                 Some(Arc::new(ControllerClient::new(
                     &config,
                     controller_config,
                     relay_identity.network_id,
+                    Arc::clone(&workload),
                 )?)),
             )
         } else {
@@ -111,7 +114,7 @@ impl Server {
                 None,
             )
         };
-        let server_config = tls::server_config(&config)?;
+        let server_config = tls::server_config(&config, Arc::clone(&workload))?;
         let endpoint = Endpoint::server(server_config, config.listen_addr()?)
             .context("bind QUIC relay endpoint")?;
         let tcp_address = config.tcp_fallback_addr()?;
@@ -126,7 +129,7 @@ impl Server {
             None
         };
         let tcp_tls = if tcp_listener.is_some() {
-            Some(tls::tcp_server_config(&config)?)
+            Some(tls::tcp_server_config(&config, workload)?)
         } else {
             None
         };

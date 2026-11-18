@@ -5,7 +5,7 @@ use super::{
 use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
     SessionStore,
-    enrollment::{EnrollError, renewal::NodeCredential},
+    enrollment::{EnrollError, relay_configuration::RelayCredential, renewal::NodeCredential},
 };
 use laneway_protocol::v1::{ErrorCode as Code, RenewalRequest};
 use prost::Message;
@@ -73,6 +73,71 @@ pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -
     {
         Ok(Ok(r)) => proto(S::OK, id, r),
         Ok(Err(e)) => failure(e, id),
+        Err(_) => internal(id),
+    }
+}
+
+pub(super) async fn relay(mut req: Request<Incoming>, state: State, id: &str) -> Reply {
+    if req.method() != Method::POST {
+        let mut reply = error(
+            S::METHOD_NOT_ALLOWED,
+            Code::Malformed,
+            "method not allowed",
+            false,
+            id,
+        );
+        reply
+            .headers_mut()
+            .insert(header::ALLOW, "POST".parse().unwrap());
+        return reply;
+    }
+    if req.uri().query().is_some() {
+        return error(
+            S::BAD_REQUEST,
+            Code::Malformed,
+            "expected POST without a query",
+            false,
+            id,
+        );
+    }
+    let Some(leaf) = req.extensions_mut().remove::<CertificateDer<'static>>() else {
+        return failure(EnrollError::Invalid.into(), id);
+    };
+    if let Err(err) = RelayCredential::from_verified_peer(leaf.as_ref()) {
+        return failure(err, id);
+    }
+    let Some(issuer) = state.issuer else {
+        return error(
+            S::SERVICE_UNAVAILABLE,
+            Code::Internal,
+            "relay renewal is not configured",
+            false,
+            id,
+        );
+    };
+    let Some(permit) = state.queries.try_acquire_owned().ok() else {
+        return error(
+            S::SERVICE_UNAVAILABLE,
+            Code::ResourceExhausted,
+            "controller busy",
+            true,
+            id,
+        );
+    };
+    let data = match read_body(req, id).await {
+        Ok(value) => value,
+        Err(reply) => return reply,
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let request = RenewalRequest::decode(data.as_slice())
+            .map_err(|_| EnrollError::Malformed("malformed relay renewal request"))?;
+        SessionStore::open(&state.database)?.renew_relay_tls(leaf.as_ref(), request, &issuer)
+    })
+    .await
+    {
+        Ok(Ok(reply)) => proto(S::OK, id, reply),
+        Ok(Err(err)) => failure(err, id),
         Err(_) => internal(id),
     }
 }

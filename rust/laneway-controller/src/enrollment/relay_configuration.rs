@@ -8,11 +8,16 @@ use super::{
     },
     snapshot_policy,
 };
-use crate::{SessionStore, check_snapshot};
+use crate::{
+    SessionStore, check_snapshot,
+    node_pki::{NodeIssuer, VerifiedCsr},
+};
 use anyhow::{Context, Result, ensure};
+use laneway_protocol::v1::{RenewalRequest, RenewalResponse};
 use laneway_protocol::{
     AuthenticatedIdentity, DEFAULT_MAX_CONTROL_PAYLOAD, Id, Role, identity_from_certificate_der,
     policy::prefix_from_wire,
+    service_names,
     v1::{
         CertificateHealth, ConfigurationLease, IpPrefix, RelayConfiguration,
         RelayConfigurationRequest, RelayPeerAuthorization,
@@ -58,6 +63,64 @@ impl RelayCredential {
 }
 
 impl SessionStore {
+    pub fn renew_relay_tls(
+        &mut self,
+        verified_leaf: &[u8],
+        req: RenewalRequest,
+        issuer: &NodeIssuer,
+    ) -> Result<RenewalResponse> {
+        let peer = RelayCredential::from_verified_peer(verified_leaf)?;
+        ensure!(
+            req.wireguard_public_key.is_empty(),
+            EnrollError::Malformed("relay renewal does not carry a WireGuard key")
+        );
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check_snapshot(&tx)?;
+        let now = clock(&tx)?;
+        peer.authorize(&tx, now)?;
+        ensure!(
+            peer.health.renew_after_unix_seconds <= u64::try_from(now)?,
+            EnrollError::Denied
+        );
+        let network = peer.identity.network_id;
+        let service = peer.identity.subject_id;
+        let recent: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM audit_events
+            WHERE network_id=?1 AND created_at>=?2 AND action='relay.certificate_renew' AND target_id=?3)",
+            (network.as_bytes(), now.saturating_sub(60), service.as_bytes()), |row| row.get(0))?;
+        ensure!(!recent, EnrollError::Conflict);
+        let names = service_names::from_der(verified_leaf)
+            .map_err(|_| EnrollError::Invalid)?
+            .into_iter()
+            .map(|name| {
+                Ok(match name {
+                    service_names::Name::Dns(dns) => rcgen::SanType::DnsName(dns.try_into()?),
+                    service_names::Name::Ip(ip) => rcgen::SanType::IpAddress(ip),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let csr = VerifiedCsr::parse(&req.pkcs10_csr_der)
+            .map_err(|_| EnrollError::Malformed("invalid signed relay CSR"))?;
+        let remaining = i64::try_from(peer.health.not_after_unix_seconds)?.saturating_sub(now);
+        let chain = issuer.issue_relay(&csr, peer.identity, &names, now, remaining + 300)?;
+        super::audit(
+            &tx,
+            network,
+            None,
+            "relay.certificate_renew",
+            ("relay", service),
+            serde_json::json!({"previous_serial":hex::encode(&peer.health.presented_serial),
+                "expires_at_unix_seconds":chain.not_after_unix_seconds}),
+            now,
+        )?;
+        tx.commit()?;
+        Ok(RenewalResponse {
+            certificate_chain: Some(chain),
+            wireguard_public_key: Vec::new(),
+        })
+    }
+
     pub fn check_relay_peer(&mut self, peer: &RelayCredential) -> Result<()> {
         let tx = self.db.transaction()?;
         check_snapshot(&tx)?;

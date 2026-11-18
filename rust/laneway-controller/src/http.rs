@@ -318,6 +318,9 @@ async fn dispatch(
     if path == "/v1/renew" && state.workload_mtls_enabled {
         return Ok(renew::handle(req, state, id).await);
     }
+    if path == "/v1/relay/renew" && state.workload_mtls_enabled {
+        return Ok(renew::relay(req, state, id).await);
+    }
     if path == "/v1/configuration" && state.workload_mtls_enabled {
         return Ok(node_configuration::handle(req, state, id, peer).await);
     }

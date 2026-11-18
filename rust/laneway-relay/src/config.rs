@@ -86,6 +86,8 @@ pub struct TlsConfig {
     #[serde(rename = "ca")]
     pub ca_file: PathBuf,
     #[serde(default)]
+    pub(crate) renewal_dir: Option<PathBuf>,
+    #[serde(default)]
     server_name: String,
 }
 
@@ -421,6 +423,12 @@ impl Config {
             .controller
             .as_ref()
             .is_some_and(|controller| !controller.endpoint.is_empty());
+        if let Some(path) = &self.tls.renewal_dir {
+            ensure!(
+                controller_enabled && path.is_absolute(),
+                "tls.renewal_dir requires an absolute state path and controller.endpoint"
+            );
+        }
         ensure!(
             controller_enabled || !self.peers.is_empty(),
             "static peers or a controller endpoint are required"

@@ -15,7 +15,7 @@ use rustls::{
     server::WebPkiClientVerifier,
 };
 
-use crate::Config;
+use crate::{Config, workload::Workload};
 
 pub(crate) const ALPN: &[u8] = b"laneway-relay/1";
 pub(crate) const TCP_FALLBACK_ALPN: &[u8] = b"laneway-fallback/1";
@@ -74,60 +74,45 @@ impl ServerCertVerifier for ControllerVerifier {
 pub(crate) fn controller_http_tls(
     config: &Config,
     expected: AuthenticatedIdentity,
+    workload: Arc<Workload>,
 ) -> Result<rustls::ClientConfig> {
-    let mut roots = RootCertStore::empty();
-    let (accepted, rejected) =
-        roots.add_parsable_certificates(load_certificates(&config.tls.ca_file)?);
-    ensure!(
-        accepted > 0 && rejected == 0,
-        "invalid controller CA bundle"
-    );
+    let roots = roots(&config.tls.ca_file)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
         .build()?;
-    rustls::ClientConfig::builder_with_provider(provider)
+    let mut client = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(ControllerVerifier { web, expected }))
-        .with_client_auth_cert(
-            load_certificates(&config.tls.certificate_file)?,
-            load_private_key(&config.tls.private_key_file)?,
-        )
-        .context("load relay controller identity")
+        .with_client_cert_resolver(workload);
+    client.resumption = rustls::client::Resumption::disabled();
+    Ok(client)
 }
 
-pub(crate) fn server_config(config: &Config) -> Result<ServerConfig> {
-    let certificates = load_certificates(&config.tls.certificate_file)?;
-    let leaf = certificates
-        .first()
-        .context("relay certificate chain is empty")?;
-    let local_identity =
-        identity_from_certificate_der(leaf.as_ref()).context("relay certificate identity")?;
-    ensure!(
-        local_identity.role == Role::Relay,
-        "local certificate role is not relay"
-    );
-    let key = load_private_key(&config.tls.private_key_file)?;
-
-    let roots = load_certificates(&config.tls.ca_file)?;
+pub(crate) fn roots(path: &std::path::Path) -> Result<RootCertStore> {
+    let roots = load_certificates(path)?;
     let mut root_store = RootCertStore::empty();
     let (accepted, rejected) = root_store.add_parsable_certificates(roots);
     ensure!(
         accepted > 0 && rejected == 0,
         "CA file contains an invalid certificate"
     );
-    let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+    Ok(root_store)
+}
+
+pub(crate) fn server_config(config: &Config, workload: Arc<Workload>) -> Result<ServerConfig> {
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots(&config.tls.ca_file)?))
         .build()
         .context("build mTLS client verifier")?;
 
     let mut crypto = rustls::ServerConfig::builder()
         .with_client_cert_verifier(verifier)
-        .with_single_cert(certificates, key)
-        .context("load relay certificate and key")?;
+        .with_cert_resolver(workload);
     crypto.alpn_protocols = vec![ALPN.to_vec()];
     // rustls defaults to zero bytes of TLS early data for servers. Keep it
     // explicit because authenticated control messages are never replay-safe.
     crypto.max_early_data_size = 0;
+    crypto.send_tls13_tickets = 0;
 
     let crypto = QuicServerConfig::try_from(crypto).context("build QUIC TLS config")?;
     let mut server = ServerConfig::with_crypto(Arc::new(crypto));
@@ -161,51 +146,21 @@ pub(crate) fn server_config(config: &Config) -> Result<ServerConfig> {
     Ok(server)
 }
 
-pub(crate) fn tcp_server_config(config: &Config) -> Result<Arc<rustls::ServerConfig>> {
-    let certificates = load_certificates(&config.tls.certificate_file)?;
-    let leaf = certificates
-        .first()
-        .context("relay certificate chain is empty")?;
-    let local_identity =
-        identity_from_certificate_der(leaf.as_ref()).context("relay certificate identity")?;
-    ensure!(
-        local_identity.role == Role::Relay,
-        "local certificate role is not relay"
-    );
-    let key = load_private_key(&config.tls.private_key_file)?;
-
-    let roots = load_certificates(&config.tls.ca_file)?;
-    let mut root_store = RootCertStore::empty();
-    let (accepted, rejected) = root_store.add_parsable_certificates(roots);
-    ensure!(
-        accepted > 0 && rejected == 0,
-        "CA file contains an invalid certificate"
-    );
-    let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+pub(crate) fn tcp_server_config(
+    config: &Config,
+    workload: Arc<Workload>,
+) -> Result<Arc<rustls::ServerConfig>> {
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots(&config.tls.ca_file)?))
         .build()
         .context("build mTLS client verifier")?;
     let mut crypto =
         rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
             .with_client_cert_verifier(verifier)
-            .with_single_cert(certificates, key)
-            .context("load relay certificate and key")?;
+            .with_cert_resolver(workload);
     crypto.alpn_protocols = vec![TCP_FALLBACK_ALPN.to_vec()];
     crypto.max_early_data_size = 0;
+    crypto.send_tls13_tickets = 0;
     Ok(Arc::new(crypto))
-}
-
-pub(crate) fn local_identity(config: &Config) -> Result<AuthenticatedIdentity> {
-    let certificates = load_certificates(&config.tls.certificate_file)?;
-    let leaf = certificates
-        .first()
-        .context("relay certificate chain is empty")?;
-    let identity =
-        identity_from_certificate_der(leaf.as_ref()).context("relay certificate identity")?;
-    ensure!(
-        identity.role == Role::Relay,
-        "local certificate role is not relay"
-    );
-    Ok(identity)
 }
 
 pub(crate) fn peer_identity(connection: &quinn::Connection) -> Result<AuthenticatedIdentity> {

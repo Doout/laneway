@@ -125,11 +125,37 @@ and the cache is unusable, it must issue a valid replacement before binding.
 If issuance or persistence fails while running, the active credential stays
 in place and renewal retries. An expiring issuer still needs operator action.
 
-The lab checks this with `TestRustControllerServiceTLS`. Neither this option
-nor the public ACME worker rotates the relay's internal identity or trust
-anchors. The existing Compose timer remains the renewal path for Go deployments.
+The lab checks this with `TestRustControllerServiceTLS`. The existing Compose
+timer remains the renewal path for Go deployments.
 Keep a still-valid conventional certificate and key for rollback to a Go
 controller; it does not read the Rust renewal state.
+
+### Internal relay TLS renewal
+
+To opt in, add `renewal_dir = "/var/lib/laneway-relay/tls-renewal"` under
+`[tls]` and use a registered relay with a Rust controller that serves private
+mTLS HTTPS and has `--node-issuer` and `--node-client-ca` configured. Give each
+relay its own persistent directory, writable and accessible only by the relay
+user. Leave the option unset if an external job still manages its certificate.
+The controller does not send a private key or accept new names from the relay.
+
+After two-thirds of the current certificate lifetime, the relay creates a new
+key and sends a signed request over the pinned controller connection. The
+controller checks the live certificate and registration, keeps the relay's
+identity and DNS/IP names, and logs the issuance. The relay validates the
+replacement and saves it before switching new TCP and QUIC handshakes. Current
+node sessions keep running; the relay reconnects to the controller to get a
+lease under the new certificate. The public HTTPS certificate and CA files are
+unchanged.
+
+Restarting uses the last valid replacement from the private state directory.
+Keep the seed files in place to pin the identity and names. If there is no
+valid cached credential and the seed expires, install a new operator-issued
+relay certificate; the relay cannot authenticate to ask for a renewal. The
+`TestRustControllerRelayTLS` lab test uses both Rust binaries to verify live
+rotation, authorization, and restart after seed expiry.
+
+### Administrator console
 
 The Rust controller image includes the same `pnpm build:live` console as the
 Go image and enables it from `/usr/share/laneway-console`. For a standalone

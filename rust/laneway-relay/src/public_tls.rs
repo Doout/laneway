@@ -1,4 +1,4 @@
-mod cache;
+pub(crate) mod cache;
 
 use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
