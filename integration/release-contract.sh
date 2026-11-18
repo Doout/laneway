@@ -81,7 +81,7 @@ require_compose_target() {
 
 # Release credentials can publish packages and attestations, so every external
 # action is fixed to an immutable commit instead of a mutable tag or branch.
-if sed -n 's/^[[:space:]]*- uses: \([^ #]*\).*/\1/p' "$workflow" |
+if sed -n 's/^[[:space:]]*\(- \)\{0,1\}uses: \([^ #]*\).*/\2/p' "$workflow" |
   grep -Ev '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$' >/dev/null; then
   echo "release workflow contains an action that is not pinned to a full commit" >&2
   exit 1
@@ -108,7 +108,7 @@ if grep -F 'BINARY=' "$workflow" >/dev/null || grep -F 'matrix.binary' "$workflo
   echo "release images must use fixed Docker targets instead of a free-form binary argument" >&2
   exit 1
 fi
-release_target_expression="target: \${{ matrix.target }}"
+release_target_expression="target: \${{ matrix.role.target }}"
 if [ "$(grep -Fc "$release_target_expression" "$workflow")" -ne 2 ]; then
   echo "release scan and publication builds must both select the matrix Docker target" >&2
   exit 1
@@ -201,7 +201,15 @@ for value in \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \
 	'install.sh' \
 	'bootstrap-artifacts.toml' \
-	'platforms: linux/amd64,linux/arm64' \
+  'arch: [amd64, arm64]' \
+  'platforms: linux/${{ matrix.arch }}' \
+  'build-contexts: ${{ steps.runtime.outputs.contexts }}' \
+  'cache-from: type=gha,scope=rust-release-deps-${{ matrix.arch }}' \
+  'push-by-digest=true' \
+  'docker buildx imagetools create --metadata-file index.json' \
+  '== ["amd64", "arm64"]' \
+  '.annotations["vnd.docker.reference.digest"] == $scanned' \
+  'fetch-depth: 0' \
   'provenance: mode=max' \
   'sbom: true' \
   'cosign sign' \
@@ -211,21 +219,34 @@ for value in \
   'actions/attest-build-provenance@' \
   'aquasecurity/trivy-action@' \
   'Extract OCI layout for vulnerability scanning' \
-  "tar -xf \"/tmp/\${{ matrix.name }}.oci.tar\" -C \"/tmp/\${{ matrix.name }}.oci\"" \
-  "test -f \"/tmp/\${{ matrix.name }}.oci/index.json\"" \
-  "input: /tmp/\${{ matrix.name }}.oci" \
+  'tar -xf /tmp/release.oci.tar -C /tmp/release.oci' \
+  'test -f /tmp/release.oci/index.json' \
+  'input: /tmp/release.oci' \
   'ignore-unfixed: false' \
   'severity: HIGH,CRITICAL' \
   'version: v0.73.0' \
   'syft-version: v1.50.0' \
   'cosign-release: v3.1.3' \
   'sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6' \
-  'docker.io/tonistiigi/binfmt@sha256:' \
   'image=moby/buildkit:buildx-stable-1@sha256:' \
   'image-digests.txt'
 do
   require "$value" "$workflow"
 done
+require 'cache-to: type=gha,scope=rust-release-deps-${{ matrix.arch }},mode=max' "$ci_workflow"
+if ! awk '
+  /Reject vulnerable image before registry publication/ { scan=1 }
+  /Push the native candidate by digest only/ { push=scan }
+  /Verify the registry candidate matches the scan/ { verified=push }
+  END { exit !verified }
+' "$workflow"; then
+  echo 'each platform must be scanned before pushing and checked against the scanned digest' >&2
+  exit 1
+fi
+if grep -Ei 'setup-qemu|tonistiigi/binfmt|fetch-tags:' "$workflow" >/dev/null; then
+  echo 'releases must build natively and use full history for annotated tag checkout' >&2
+  exit 1
+fi
 require 'bootstrap-artifacts.toml ephemeral-exit-bootstrap.sh image-digests.txt install.sh' "$workflow"
 for image in laneway-controller-rust laneway-relay-rust laneway-node-rust laneway-exit-node-rust; do
   require "image: ghcr.io/doout/$image" "$workflow"

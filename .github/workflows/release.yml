@@ -14,6 +14,7 @@ jobs:
   verify:
     name: Verify release source
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -50,19 +51,69 @@ jobs:
           sudo ./integration/lane-prepare.sh
           sudo env PATH="$PATH" ./integration/lane-recovery.sh
 
-  package:
-    name: ${{ matrix.os }} ${{ matrix.arch }} package
-    needs: verify
+  linux-runtime:
+    name: Build shared Linux ${{ matrix.arch }} runtime
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: amd64, runner: ubuntu-24.04}
+          - {arch: arm64, runner: ubuntu-24.04-arm}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.36.1
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+      - name: Resolve release version
+        id: version
+        run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Build static Rust runtime and fleet test fixture
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/containers/Dockerfile.rust-release
+          target: artifacts
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.value }}
+            FLEET_ACTIVATION_FIXTURE=1
+          outputs: type=local,dest=${{ runner.temp }}/runtime
+          cache-from: type=gha,scope=rust-release-deps-${{ matrix.arch }},timeout=1m
+      - name: Archive binaries with executable permissions
+        working-directory: ${{ runner.temp }}/runtime
+        run: |
+          tar -czf "$RUNNER_TEMP/runtime.tar.gz" -- ./*-rs
+          tar -czf "$RUNNER_TEMP/activation-fixture.tar.gz" -- activation-fixture
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}/runtime.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-fixture-${{ matrix.arch }}
+          path: ${{ runner.temp }}/activation-fixture.tar.gz
+          compression-level: 0
+          if-no-files-found: error
+
+  package-linux:
+    name: ${{ matrix.os }} ${{ matrix.arch }} package
+    needs: linux-runtime
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 14
     strategy:
       fail-fast: false
       matrix:
         include:
           - {os: linux, arch: amd64, runner: ubuntu-24.04}
           - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
-          - {os: darwin, arch: amd64, runner: macos-15-intel}
-          - {os: darwin, arch: arm64, runner: macos-15}
-    steps:
+    steps: &package-steps
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -70,21 +121,32 @@ jobs:
         with:
           go-version: "1.26.11"
           cache-dependency-path: go/go.sum
-      - name: Build static Rust runtime candidates
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: matrix.os == 'linux'
-        env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
+        with:
+          pattern: release-*-${{ matrix.arch }}
+          path: ${{ runner.temp }}
+          merge-multiple: true
+      - name: Unpack the shared Linux build
+        if: matrix.os == 'linux'
         run: |
           output="$RUNNER_TEMP/laneway-rust"
-          docker buildx build --platform "linux/$PACKAGE_GOARCH" \
-            --build-arg VERSION="${GITHUB_REF_NAME#v}" --build-arg FLEET_ACTIVATION_FIXTURE=1 \
-            --file deploy/containers/Dockerfile.rust-release \
-            --target artifacts --output "type=local,dest=$output" .
+          mkdir -p "$output"
+          tar -xzf "$RUNNER_TEMP/runtime.tar.gz" -C "$output"
+          tar -xzf "$RUNNER_TEMP/activation-fixture.tar.gz" -C "$output"
           printf 'PACKAGE_RUST_RUNTIME_DIR=%s\n' "$output" >> "$GITHUB_ENV"
+      - name: Install the pinned macOS Rust compiler
+        if: matrix.os == 'darwin'
+        run: rustup toolchain install 1.91.1 --profile minimal && rustup default 1.91.1
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        if: matrix.os == 'darwin'
+        with:
+          workspaces: rust
+          shared-key: macos-release
+          save-if: 'false'
       - name: Build the native macOS Rust runtime candidate
         if: matrix.os == 'darwin'
         run: |
-          rustup toolchain install 1.91.1 --profile minimal
           LANEWAY_PRODUCT_VERSION="${GITHUB_REF_NAME#v}" cargo +1.91.1 build --locked --release \
             --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
           printf 'PACKAGE_RUST_MACOS=%s\n' "$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" >> "$GITHUB_ENV"
@@ -135,19 +197,31 @@ jobs:
             dist/laneway_${{ matrix.os }}_${{ matrix.arch }}.spdx.json
           if-no-files-found: error
 
-  image:
-    name: ${{ matrix.name }} multi-architecture image
-    needs: verify
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
+  package-macos:
+    name: ${{ matrix.os }} ${{ matrix.arch }} package
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         include:
+          - {os: darwin, arch: amd64, runner: macos-15-intel}
+          - {os: darwin, arch: arm64, runner: macos-15}
+    steps: *package-steps
+
+  image:
+    name: ${{ matrix.role.name }} linux/${{ matrix.arch }} image
+    needs: [verify, linux-runtime]
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        role: &release-images
           - name: admin
             image: ghcr.io/doout/laneway-admin
             dockerfile: deploy/containers/Dockerfile
@@ -179,42 +253,127 @@ jobs:
       - id: version
         name: Resolve immutable release version
         run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: matrix.role.name != 'admin'
         with:
-          image: docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0
-          platforms: arm64
+          name: release-runtime-${{ matrix.arch }}
+          path: ${{ runner.temp }}
+      - id: runtime
+        name: Supply prebuilt Rust binaries to the image
+        if: matrix.role.name != 'admin'
+        run: |
+          mkdir "$RUNNER_TEMP/runtime"
+          tar -xzf "$RUNNER_TEMP/runtime.tar.gz" -C "$RUNNER_TEMP/runtime"
+          {
+            echo 'contexts<<EOF'
+            for binary in node controller relay healthcheck; do
+              printf '%s-binary=%s/runtime\n' "$binary" "$RUNNER_TEMP"
+            done
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.36.1
           driver-opts: image=moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
-      - name: Build unprivileged multi-architecture scan input
+      - name: Build unprivileged native scan input
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          build-args: |
+          file: ${{ matrix.role.dockerfile }}
+          target: ${{ matrix.role.target }}
+          build-contexts: ${{ steps.runtime.outputs.contexts }}
+          build-args: &image-build-args |
             VERSION=${{ steps.version.outputs.value }}
-          platforms: linux/amd64,linux/arm64
-          outputs: type=oci,dest=/tmp/${{ matrix.name }}.oci.tar
+            SOURCE_DATE_EPOCH=0
+          labels: &image-labels |
+            org.opencontainers.image.version=${{ steps.version.outputs.value }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=oci,dest=/tmp/release.oci.tar
           provenance: false
           sbom: false
       - name: Extract OCI layout for vulnerability scanning
         run: |
-          mkdir -p "/tmp/${{ matrix.name }}.oci"
-          tar -xf "/tmp/${{ matrix.name }}.oci.tar" -C "/tmp/${{ matrix.name }}.oci"
-          test -f "/tmp/${{ matrix.name }}.oci/index.json"
-          test -f "/tmp/${{ matrix.name }}.oci/oci-layout"
+          mkdir /tmp/release.oci
+          tar -xf /tmp/release.oci.tar -C /tmp/release.oci
+          test -f /tmp/release.oci/index.json
+          test -f /tmp/release.oci/oci-layout
       - name: Reject vulnerable image before registry publication
         uses: aquasecurity/trivy-action@2736533278103862a861f4a35ebac3e97854d956
         with:
-          input: /tmp/${{ matrix.name }}.oci
+          input: /tmp/release.oci
           format: table
           ignore-unfixed: false
           severity: HIGH,CRITICAL
           exit-code: "1"
           version: v0.73.0
-      - name: Install and verify Cosign before publication
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        name: Push the native candidate by digest only
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.role.dockerfile }}
+          target: ${{ matrix.role.target }}
+          build-contexts: ${{ steps.runtime.outputs.contexts }}
+          build-args: *image-build-args
+          labels: *image-labels
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ matrix.role.image }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
+          provenance: mode=max
+          sbom: true
+      - name: Verify the registry candidate matches the scan
+        env:
+          IMAGE: ${{ matrix.role.image }}
+          ARCH: ${{ matrix.arch }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          scanned=$(jq -er --arg arch "$ARCH" '
+            [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)]
+            | if length == 1 then .[0].digest else error("expected one scanned platform") end
+          ' /tmp/release.oci/index.json)
+          docker buildx imagetools inspect --raw "$IMAGE@$DIGEST" | jq -e --arg arch "$ARCH" --arg scanned "$scanned" '
+            any(.manifests[]; .platform.os == "linux" and .platform.architecture == $arch and .digest == $scanned)
+            and any(.manifests[]; .annotations["vnd.docker.reference.type"] == "attestation-manifest"
+              and .annotations["vnd.docker.reference.digest"] == $scanned)
+          ' >/dev/null
+          printf '%s\n' "$DIGEST" > "$ARCH.digest"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-platform-${{ matrix.role.name }}-${{ matrix.arch }}
+          path: ${{ matrix.arch }}.digest
+          if-no-files-found: error
+
+  image-index:
+    name: Publish and sign ${{ matrix.name }} index
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: *release-images
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: image-platform-${{ matrix.name }}-*
+          path: platform-digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.36.1
+      - name: Install Cosign before publication
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.1.3
@@ -223,30 +382,29 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: metadata
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ${{ matrix.image }}
-          tags: type=raw,value=${{ steps.version.outputs.value }}
-          labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.value }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
       - id: build
-        name: Build and publish AMD64/ARM64 image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          target: ${{ matrix.target }}
-          build-args: |
-            VERSION=${{ steps.version.outputs.value }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          provenance: mode=max
-          sbom: true
+        name: Assemble and verify both native platforms
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          amd64=$(<platform-digests/amd64.digest)
+          arm64=$(<platform-digests/arm64.digest)
+          [[ $amd64 =~ ^sha256:[0-9a-f]{64}$ && $arm64 =~ ^sha256:[0-9a-f]{64}$ && $amd64 != "$arm64" ]]
+          version=${GITHUB_REF_NAME#v}
+          docker buildx imagetools create --metadata-file index.json \
+            --annotation "index:org.opencontainers.image.version=$version" \
+            --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --tag "$IMAGE:$version" "$IMAGE@$amd64" "$IMAGE@$arm64"
+          digest=$(jq -er '."containerimage.descriptor".digest' index.json)
+          docker buildx imagetools inspect --raw "$IMAGE@$digest" | jq -e '
+            ([.manifests[] | select(.platform.os == "linux") | .platform.architecture] | sort) == ["amd64", "arm64"]
+            and ([.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")
+              | .annotations["vnd.docker.reference.digest"]] | sort)
+              == ([.manifests[] | select(.platform.os == "linux") | .digest] | sort)
+          ' >/dev/null
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Generate image SBOM release asset
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -277,8 +435,9 @@ jobs:
 
   release:
     name: Publish signed GitHub release
-    needs: [package, image]
+    needs: [package-linux, package-macos, image-index]
     runs-on: ubuntu-latest
+    timeout-minutes: 18
     permissions:
       contents: write
       id-token: write
@@ -288,7 +447,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          fetch-tags: true
+          fetch-depth: 0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: laneway-*
@@ -367,6 +526,7 @@ jobs:
           set -euo pipefail
           tag_ref="refs/tags/$GITHUB_REF_NAME"
           tag_commit=$(git rev-parse --verify "$tag_ref^{commit}")
+          test "$tag_commit" = "$GITHUB_SHA"
           test "$tag_commit" = "$(git rev-parse HEAD)"
           tag_type=$(git cat-file -t "$tag_ref")
           tag_subject=$(git for-each-ref --format='%(contents:subject)' "$tag_ref")
