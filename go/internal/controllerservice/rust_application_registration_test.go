@@ -16,7 +16,7 @@ import (
 	"github.com/Doout/laneway/go/internal/applicationauth"
 )
 
-func testRustApplicationRegistration(t *testing.T, f fixture, client *http.Client, goURL, rustURL string, web, automation labCredentials) {
+func testRustApplicationRegistration(t *testing.T, f fixture, client *http.Client, goURL, rustURL string, web, automation labCredentials) map[string]any {
 	t.Helper()
 	const reviewPath = "/v1/admin/application-registration-requests/"
 	const applications = "/v1/admin/applications"
@@ -110,6 +110,7 @@ func testRustApplicationRegistration(t *testing.T, f fixture, client *http.Clien
 	exchangeBody := func(code, verifier string) string {
 		return jsonBody(map[string]string{"code": code, "code_verifier": verifier})
 	}
+	var exchanged map[string]any
 	for i, direction := range []struct{ start, approve, redeem string }{
 		{goURL, rustURL, goURL},
 		{rustURL, goURL, rustURL},
@@ -140,6 +141,7 @@ func testRustApplicationRegistration(t *testing.T, f fixture, client *http.Clien
 			t.Fatal("bad verifier did not return invalid_grant")
 		}
 		issued := send(direction.redeem, "POST", exchange, exchangeBody(code, proof), labCredentials{}, 200)
+		exchanged = issued
 		for _, base := range []string{goURL, rustURL} {
 			replay := send(base, "POST", exchange, exchangeBody(code, proof), labCredentials{}, 400)
 			if replay["error"] != "invalid_grant" {
@@ -167,4 +169,5 @@ func testRustApplicationRegistration(t *testing.T, f fixture, client *http.Clien
 	if err := db.QueryRowContext(t.Context(), "SELECT count(*) FROM application_installations").Scan(&installs); err != nil || installs != 0 {
 		t.Fatalf("application registration must not grant network access: %d (%v)", installs, err)
 	}
+	return exchanged
 }

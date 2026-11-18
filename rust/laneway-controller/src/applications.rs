@@ -14,6 +14,7 @@ use std::{collections::BTreeMap, fmt::Write, path::Path};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+pub mod authorization;
 mod secrets;
 use secrets::{Purpose, challenge_valid, id, matches_pkce, new_secret, parse_secret};
 
@@ -53,22 +54,23 @@ impl Manifest {
             self.redirect_uris.windows(2).all(|pair| pair[0] != pair[1]),
             AdministratorError::Invalid
         );
-        self.scopes.sort_unstable();
-        ensure!(
-            (1..=16).contains(&self.scopes.len())
-                && self.scopes.windows(2).all(|pair| pair[0] != pair[1])
-                && self.scopes.iter().all(|scope| matches!(
-                    scope.as_str(),
-                    "network.read"
-                        | "node.read"
-                        | "enrollment.issue"
-                        | "route.read"
-                        | "route.manage"
-                )),
-            AdministratorError::Invalid
-        );
+        self.scopes = normalize_scopes(self.scopes)?;
         Ok(self)
     }
+}
+
+fn normalize_scopes(mut scopes: Vec<String>) -> Result<Vec<String>> {
+    scopes.sort_unstable();
+    ensure!(
+        (1..=16).contains(&scopes.len())
+            && scopes.windows(2).all(|p| p[0] != p[1])
+            && scopes.iter().all(|s| matches!(
+                s.as_str(),
+                "network.read" | "node.read" | "enrollment.issue" | "route.read" | "route.manage"
+            )),
+        AdministratorError::Invalid
+    );
+    Ok(scopes)
 }
 
 fn valid_uri(raw: &str, allow_loopback: bool) -> bool {

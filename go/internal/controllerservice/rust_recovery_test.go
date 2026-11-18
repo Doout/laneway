@@ -228,9 +228,16 @@ func testRustAdministratorRecovery(t *testing.T, client *http.Client, pair tls.C
 	t.Run("automation", func(t *testing.T) {
 		testRustAutomationCredentials(t, f, client, goServer.URL, rustURL, ownerSession, labCredentials{bearer: automation})
 	})
-	t.Run("application-registration", func(t *testing.T) {
-		testRustApplicationRegistration(t, f, client, goServer.URL, rustURL, ownerSession, labCredentials{bearer: automation})
-	})
+	var registered map[string]any
+	if t.Run("application-registration", func(t *testing.T) {
+		registered = testRustApplicationRegistration(t, f, client, goServer.URL, rustURL, ownerSession, labCredentials{bearer: automation})
+	}) {
+		t.Run("network-authorization", func(t *testing.T) {
+			// Keep the public request limiter enabled; give this flow its own listener.
+			authURL, _ := startRustAdministratorLab(t, f.dbPath, cert, key, rootFile)
+			testRustApplicationAuthorization(t, f, client, goServer.URL, authURL, ownerSession, registered)
+		})
+	}
 	t.Run("root-rotation", func(t *testing.T) {
 		testRustRootRotation(t, f, client, goServer.URL, rustURL, stop, cert, key, ownerSession, labCredentials{bearer: automation})
 	})

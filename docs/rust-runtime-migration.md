@@ -135,7 +135,8 @@ the serve command. Use a private file (e.g. mode 0600); never pass its
 contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
-contexts or when combined with a session cookie. OAuth still requires Go.
+contexts or when combined with a session cookie. OAuth token exchange still
+requires Go.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -208,8 +209,16 @@ Rust at consent and exchange, validates PKCE and replay rejection, and
 checks that an audit failure leaves the registration pending.
 Callbacks require HTTPS by default. For a local lab only, the
 `--allow-insecure-application-callbacks` flag permits HTTP on loopback
-addresses. OAuth authorization, installation, and token endpoints still
-require Go.
+addresses.
+
+Rust also serves OAuth authorization requests and the network installation
+approval, cancellation, inventory, and revocation endpoints. Approval binds the
+one-time code to the registered callback, the selected network, and the
+approved scopes. Owners and scoped operators can approve; a root bearer
+cannot approve on their behalf. Narrowing or revoking an installation retires
+its prior credentials in the same transaction. The mixed lab redeems Rust
+authorization codes at Go's token endpoint; Rust token exchange, refresh, and
+revocation endpoints remain pending.
 
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly

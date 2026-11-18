@@ -327,6 +327,9 @@ async fn dispatch(
     if let Some(route) = automation::Route::parse(&pieces) {
         return automation::handle(req, state, id, route).await;
     }
+    if let Some(route) = applications::authorization::Route::parse(&pieces) {
+        return applications::authorization::handle(req, state, id, peer, route).await;
+    }
     if let Some(route) = applications::Route::parse(&pieces) {
         return applications::handle(req, state, id, peer, route).await;
     }

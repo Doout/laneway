@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 pub(super) enum Purpose {
     Client,
     Registration,
+    Authorization,
 }
 
 impl Purpose {
@@ -21,6 +22,10 @@ impl Purpose {
             Self::Registration => (
                 "lnw_registration_v1",
                 b"laneway-application-registration_code-v1\0",
+            ),
+            Self::Authorization => (
+                "lnw_authorization_v1",
+                b"laneway-application-authorization_code-v1\0",
             ),
         }
     }

@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, net::IpAddr, time::Instant};
 use zeroize::Zeroizing;
 
+pub(super) mod authorization;
+
 pub(super) enum Route<'a> {
     Start,
     Exchange,
