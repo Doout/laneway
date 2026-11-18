@@ -17,18 +17,10 @@ import (
 	"github.com/Doout/laneway/go/internal/identity"
 )
 
-func testRustNetworkManagement(t *testing.T, f fixture, client *http.Client, goURL, rustURL, token, csrf string) {
-	t.Helper()
-	const path = "/v1/admin/networks"
-	db, err := sql.Open("sqlite", f.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	type credentials struct{ bearer, session, csrf string }
-	owner := credentials{session: token, csrf: csrf}
-	root := credentials{bearer: testRootBearer}
-	send := func(base, method, route, body string, c credentials, want int) map[string]any {
+type labCredentials struct{ bearer, session, csrf string }
+
+func labManagementHTTP(t *testing.T, client *http.Client) func(string, string, string, string, labCredentials, int) map[string]any {
+	return func(base, method, route, body string, c labCredentials, want int) map[string]any {
 		t.Helper()
 		r, err := http.NewRequestWithContext(t.Context(), method, base+route, strings.NewReader(body))
 		if err != nil {
@@ -50,8 +42,10 @@ func testRustNetworkManagement(t *testing.T, f fixture, client *http.Client, goU
 		}
 		defer res.Body.Close()
 		var value map[string]any
-		if err = json.NewDecoder(res.Body).Decode(&value); err != nil {
-			t.Fatal(err)
+		if res.StatusCode != http.StatusNoContent {
+			if err = json.NewDecoder(res.Body).Decode(&value); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if res.StatusCode != want {
 			t.Fatalf("%s %s: got %d (%v), want %d", method, route, res.StatusCode, value["detail"], want)
@@ -62,6 +56,20 @@ func testRustNetworkManagement(t *testing.T, f fixture, client *http.Client, goU
 		delete(value, "request_id")
 		return value
 	}
+}
+
+func testRustNetworkManagement(t *testing.T, f fixture, client *http.Client, goURL, rustURL, token, csrf string) {
+	t.Helper()
+	const path = "/v1/admin/networks"
+	db, err := sql.Open("sqlite", f.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	type credentials = labCredentials
+	owner := credentials{session: token, csrf: csrf}
+	root := credentials{bearer: testRootBearer}
+	send := labManagementHTTP(t, client)
 	create := func(name, id string) string {
 		data, err := json.Marshal(networkRequest{NetworkID: id, Name: name, IPv4Pool: "10.186.0.0/24", IPv6Pool: "fd86:1::/64"})
 		if err != nil {

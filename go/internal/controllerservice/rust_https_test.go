@@ -289,6 +289,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	}
 	testRustBearerInventory(t, f, cookie, check)
 	t.Run("network-management", func(t *testing.T) { testRustNetworkManagement(t, f, client, goServer.URL, rustURL, cookie, csrf) })
+	t.Run("enrollment-issuance", func(t *testing.T) { testRustEnrollmentIssuance(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	if err := f.store.LogoutAdministratorSession(t.Context(), adminauth.SessionSubject(session.PrincipalID, session.ID)); err != nil {
 		t.Fatal(err)
 	}

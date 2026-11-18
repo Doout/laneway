@@ -4,19 +4,31 @@ use super::{
     response,
 };
 use hyper::StatusCode;
-use laneway_controller::{SessionError, SessionStore};
+use laneway_controller::{
+    ListError, NetworkError, RootCredential, SessionError, SessionReply, SessionStore,
+};
+use serde::{Serialize, de::DeserializeOwned};
 
-pub(super) async fn create_network(
+type BrowserWriter<F, T> =
+    fn(&mut SessionStore, &str, Option<&str>, anyhow::Result<F>) -> anyhow::Result<SessionReply<T>>;
+type BearerWriter<F, T> =
+    fn(&mut SessionStore, &str, Option<&RootCredential>, anyhow::Result<F>) -> anyhow::Result<T>;
+
+pub(super) async fn create<
+    F: DeserializeOwned + Default + Send + 'static,
+    T: Serialize + Send + 'static,
+>(
     req: hyper::Request<hyper::body::Incoming>,
     state: State,
     id: &str,
+    browser: BrowserWriter<F, T>,
+    bearer: BearerWriter<F, T>,
 ) -> Result<Reply, Failure> {
-    use laneway_controller::{CreateNetwork, NetworkError};
     let auth = super::credential(req.headers())?;
     let proof = csrf_proof(req.headers()).filter(|_| crate::origin::same_origin(req.headers()));
     // Buffer a bounded body before obtaining a database worker. A slow
     // upload must not hold a SQLite write lock or exhaust the query pool.
-    let form = super::form::json_form::<CreateNetwork>(req).await;
+    let form = super::form::json_form::<F>(req).await;
     let permit = state.queries.try_acquire_owned().map_err(|_| {
         Failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -25,17 +37,17 @@ pub(super) async fn create_network(
             true,
         )
     })?;
-    let (network, meta) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+    let (created, meta) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
         let mut store = SessionStore::open(&state.database)?;
         let form = form.map_err(anyhow::Error::from);
         Ok(match auth {
             super::Credential::Session(token) => {
-                let r = store.create_network(&token, proof.as_deref(), form)?;
+                let r = browser(&mut store, &token, proof.as_deref(), form)?;
                 (r.list, Some((r.id, r.idle, r.absolute)))
             }
             super::Credential::Bearer(header) => (
-                store.bearer_create_network(&header, state.root.as_deref(), form)?,
+                bearer(&mut store, &header, state.root.as_deref(), form)?,
                 None,
             ),
         })
@@ -43,6 +55,14 @@ pub(super) async fn create_network(
     .await
     .map_err(|_| INTERNAL)?
     .map_err(|e| {
+        if matches!(e.downcast_ref::<ListError>(), Some(ListError::Missing)) {
+            return Failure(
+                StatusCode::NOT_FOUND,
+                "ERROR_CODE_MALFORMED",
+                "record not found",
+                false,
+            );
+        }
         if let Some(p) = e.downcast_ref::<NetworkError>() {
             return match p {
                 NetworkError::Malformed(detail) => super::malformed(detail),
@@ -66,7 +86,7 @@ pub(super) async fn create_network(
         response(
             StatusCode::CREATED,
             id,
-            serde_json::to_vec(&network).map_err(|_| INTERNAL)?,
+            serde_json::to_vec(&created).map_err(|_| INTERNAL)?,
             false,
         ),
         meta,

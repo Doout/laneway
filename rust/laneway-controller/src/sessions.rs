@@ -51,7 +51,7 @@ struct StoredSession {
     absolute: i64,
 }
 
-fn check_network(tx: &Transaction<'_>, principal: Id, network: Id) -> Result<()> {
+pub(crate) fn check_network(tx: &Transaction<'_>, principal: Id, network: Id) -> Result<()> {
     let allowed: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM administrator_principal_networks WHERE principal_id=?1 AND network_id=?2)",
         (principal.as_bytes(),network.as_bytes()), |r|r.get(0))?;

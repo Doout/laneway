@@ -15,8 +15,8 @@ use std::{
 use tokio::sync::Semaphore;
 mod form;
 mod login;
+mod management;
 mod mutations;
-mod network;
 
 const COOKIE: &str = "__Host-laneway_admin_session";
 const CSRF: &str = "__Host-laneway_admin_csrf";
@@ -222,11 +222,21 @@ async fn dispatch(
     let logout = path == "/v1/admin/auth/logout";
     let rotate = path == "/v1/admin/auth/session/rotate";
     let login = path == "/v1/admin/auth/login";
+    let issue_token = path == "/v1/admin/enrollment-tokens";
     let discovery = path == "/v1/admin/auth/state";
     let session_view = path == "/v1/admin/auth/session";
     let network_detail = matches!(pieces.as_slice(), ["", "v1", "admin", "networks", _]);
     let network = match pieces.as_slice() {
-        _ if root_probe || discovery || session_view || logout || rotate || login => None,
+        _ if root_probe
+            || discovery
+            || session_view
+            || logout
+            || rotate
+            || login
+            || issue_token =>
+        {
+            None
+        }
         ["", "v1", "admin", "networks"] => None,
         ["", "v1", "admin", "networks", network] => Some(*network),
         ["", "v1", "admin", "networks", network, "nodes"] => Some(*network),
@@ -239,7 +249,7 @@ async fn dispatch(
             ));
         }
     };
-    if (logout || rotate || login) && req.method() != Method::POST {
+    if (logout || rotate || login || issue_token) && req.method() != Method::POST {
         let mut r = Failure(
             StatusCode::METHOD_NOT_ALLOWED,
             "ERROR_CODE_MALFORMED",
@@ -251,7 +261,9 @@ async fn dispatch(
             .insert(header::ALLOW, "POST".parse().unwrap());
         return Ok(r);
     }
-    if !(logout || rotate || login || create_network || head) && req.method() != Method::GET {
+    if !(logout || rotate || login || create_network || issue_token || head)
+        && req.method() != Method::GET
+    {
         let error = Failure(
             StatusCode::METHOD_NOT_ALLOWED,
             "ERROR_CODE_MALFORMED",
@@ -271,7 +283,24 @@ async fn dispatch(
         return login::handle(req, state, id, peer).await;
     }
     if create_network {
-        return network::create_network(req, state, id).await;
+        return management::create(
+            req,
+            state,
+            id,
+            SessionStore::create_network,
+            SessionStore::bearer_create_network,
+        )
+        .await;
+    }
+    if issue_token {
+        return management::create(
+            req,
+            state,
+            id,
+            SessionStore::issue_enrollment,
+            SessionStore::bearer_issue_enrollment,
+        )
+        .await;
     }
     if discovery {
         // This loopback listener does not authenticate relay client certificates.

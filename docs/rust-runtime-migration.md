@@ -110,7 +110,7 @@ The Go/Rust gate also checks scoped and all-network visibility, live changes
 to grants, disabled principals, revoked credentials, logout, idle and absolute
 expiry, and clock regression. An audit write failure must roll back expiry.
 
-### Serve authenticated inventory over HTTPS (lab only)
+### Serve authenticated management APIs over HTTPS (lab only)
 
 Run this against a writable **disposable** schema-18 database, with a lab
 certificate whose subject alternative names include the host used by the probe:
@@ -136,7 +136,7 @@ contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
 contexts or when combined with a session cookie. Bootstrap, recovery, and
-resource management writes other than network creation still require Go.
+resource writes other than network creation and enrollment-token issuance still require Go.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -176,5 +176,14 @@ epoch through Rust, checks forbidden and
 revoked subjects, and verifies rollback if the audit insert fails. When Go
 and Rust race to create the same ID, exactly one succeeds and emits an audit event.
 
-Next: port enrollment-token issuance and consumption, including certificate
-issuance, address allocation, expiry and one-time use on the mixed node lab.
+`POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
+invitations. It accepts owner or operator sessions with network access, the
+configured root bearer, or automation with `enrollment.issue` on that network.
+Only a digest is stored; the token and its actor-attributed audit record commit
+together. The mixed HTTPS test redeems Rust-issued tokens at the Go controller
+and verifies their certificates, node names, network and user binding,
+capabilities, ephemeral exit lease and replay rejection.
+
+Next: port the receiving half (`POST /v1/enroll`), including CSR verification,
+CA signing, address allocation and atomic one-time consumption. Until then
+nodes must still redeem their tokens at Go.

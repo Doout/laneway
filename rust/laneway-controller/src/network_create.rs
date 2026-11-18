@@ -1,20 +1,16 @@
 //! A network and its actor-attributed audit record commit together. Caller
 //! credentials are verified against the same snapshot that accepts the write.
-use crate::{
-    Network, RootCredential, SessionError, SessionReply, SessionStore, bearer, check_snapshot,
-    sessions::csrf_digest,
-};
+use crate::{Network, RootCredential, SessionReply, SessionStore, management_write::BrowserWrite};
 use anyhow::{Result, ensure};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use laneway_protocol::Id;
-use rusqlite::{Transaction, TransactionBehavior, params};
+use rusqlite::{Transaction, params};
 use serde::{
     Deserialize, Deserializer,
     de::{Error as _, MapAccess, Visitor},
 };
 use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -179,14 +175,16 @@ impl SessionStore {
         csrf: Option<&str>,
         form: Result<CreateNetwork>,
     ) -> Result<SessionReply<Network>> {
-        self.with_session(token,true,|tx,actor,session,_,now|{
-            let proof=csrf.and_then(|s|csrf_digest(s).ok()).ok_or(SessionError::Denied)?;
-            let (owner,stored):(bool,[u8;32])=tx.query_row("SELECT p.role='owner',s.csrf_hash FROM administrator_sessions s JOIN administrator_principals p ON p.id=s.principal_id WHERE s.id=?1",[session.as_bytes()],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            ensure!(owner && bool::from(stored.ct_eq(&proof)),SessionError::Denied);
-            let form=form?;
-            let pools=form.pools()?;
-            form.insert(tx,"administrator",actor,now,pools)
-        })
+        self.browser_write(
+            token,
+            csrf,
+            BrowserWrite::CreateNetwork,
+            |tx, actor, _, now| {
+                let form = form?;
+                let pools = form.pools()?;
+                form.insert(tx, "administrator", actor, now, pools)
+            },
+        )
     }
     pub fn bearer_create_network(
         &mut self,
@@ -194,17 +192,11 @@ impl SessionStore {
         root: Option<&RootCredential>,
         form: Result<CreateNetwork>,
     ) -> Result<Network> {
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        check_snapshot(&tx)?;
-        let actor = bearer::authenticate(&tx, header, root)?;
-        let form = form?;
-        let pools = form.pools()?;
-        actor.authorize(&tx, "network.create", None)?;
-        let now = tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?;
-        let result = form.insert(&tx, "service_principal", actor.id, now, pools)?;
-        tx.commit()?;
-        Ok(result)
+        self.bearer_write(header, root, |tx, actor, now| {
+            let form = form?;
+            let pools = form.pools()?;
+            actor.authorize(tx, "network.create", None)?;
+            form.insert(tx, "service_principal", actor.id, now, pools)
+        })
     }
 }
