@@ -20,7 +20,7 @@ FROM build AS node-build
 RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
 
-FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS node
+FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS node
 RUN apk add --no-cache ca-certificates iproute2-minimal nftables procps-ng setpriv tini \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway \
     && apk add --no-cache --virtual .cap-tools libcap-setcap \
@@ -33,7 +33,7 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
 ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/lanewayd-rs"]
 CMD ["--config", "/etc/laneway/node.toml"]
 
-FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS connector
+FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS connector
 RUN apk add --no-cache ca-certificates tini \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway
 COPY --from=node-build /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
