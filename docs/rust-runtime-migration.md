@@ -40,6 +40,11 @@ signature verification and image pulls are real.
 The same gate passed an ARM64 rehearsal using fixture signatures and local
 images; the actual tagged workflow is still required.
 
+For a pinned test deployment, annotate the numeric release tag with the
+subject `Laneway pinned prerelease`. The workflow runs the same signing and
+fresh-install checks, then publishes it as a prerelease without setting it
+as Latest. Install by specifying that exact tag, not the latest release.
+
 The isolated ARM64 installer rehearsal used fixture signatures and local
 images. The packaged host-tools install left no daemon or systemd units; the
 installer created an empty Rust deployment, verified authenticated inventory,

@@ -288,6 +288,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-tags: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: laneway-*
@@ -362,8 +363,16 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "$GITHUB_REF_NAME" dist/*
-          --repo "$GITHUB_REPOSITORY"
-          --verify-tag
-          --generate-notes
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          tag_commit=$(git rev-parse --verify "$tag_ref^{commit}")
+          test "$tag_commit" = "$(git rev-parse HEAD)"
+          tag_type=$(git cat-file -t "$tag_ref")
+          tag_subject=$(git for-each-ref --format='%(contents:subject)' "$tag_ref")
+          flags=()
+          if [[ $tag_type == tag && $tag_subject == 'Laneway pinned prerelease' ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${flags[@]}"
