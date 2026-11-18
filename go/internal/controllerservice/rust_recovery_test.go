@@ -25,9 +25,10 @@ import (
 	"github.com/Doout/laneway/go/internal/identity"
 )
 
-func startRustAdministratorLab(t *testing.T, database, cert, key, rootFile string) (string, func()) {
+func startRustAdministratorLab(t *testing.T, database, cert, key, rootFile string, options ...string) (string, func()) {
 	t.Helper()
-	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", database, "127.0.0.1:0", cert, key, "--root-token-file", rootFile)
+	args := append([]string{"serve", database, "127.0.0.1:0", cert, key, "--root-token-file", rootFile}, options...)
+	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

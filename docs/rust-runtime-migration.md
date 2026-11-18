@@ -216,6 +216,29 @@ then run `LANEWAY_RUST_CONSOLE_ASSETS="$PWD/web/dist" make rust-controller-inter
 from the repository root. The controller image lab also tests the packaged
 assets while running with its non-root UID and no network.
 
+Fleet features in a private live console can be checked separately without
+copying those assets into the public release. Install the Playwright browser
+from the migration checkout (`cd web && pnpm install --frozen-lockfile &&
+pnpm exec playwright install chromium`). Build the private console with
+`pnpm build:live` in its own checkout, then run the following from the migration
+checkout root:
+
+```sh
+cd go
+LANEWAY_RUST_CONTROLLER=/absolute/path/to/laneway-controller \
+LANEWAY_RUST_RELAY=/absolute/path/to/laneway-relay \
+LANEWAY_RUST_FLEET_CONSOLE_ASSETS=/absolute/path/to/private/web/dist \
+go test -count=1 -tags=rustinterop ./internal/controllerservice \
+  -run '^TestRustControllerFleetConsole$' -v
+```
+
+The gate signs in through the Rust relay's public HTTPS listener and checks a
+canary plan, alert acknowledgement, diagnostics, private DNS, policy preview and
+history, and map location editing against a real Rust controller. It uses a
+disposable database and blocks external browser requests. It does not install a
+runtime release, measure live packet reachability, or certify which assets ship
+in the public image.
+
 ## macOS endpoint preview
 
 `lanewayd-rs` runs the ordinary macOS tunnel and its privileged helper as
@@ -926,7 +949,8 @@ grants. TCP/UDP port ranges are merged and sealed on creation. Browser
 writes require same-origin CSRF proof; scoped automation uses `acl.read`
 or `acl.manage`. Each policy change, epoch advance, and audit entry commits
 together. The private fleet API and its node consumers are not yet at parity;
-keep Go serving production.
+the isolated tests below cover individual features, not the exact deployed
+private build or its release and rollback procedures. Keep Go serving production.
 
 The Rust controller preview serves the private directory through
 `GET /v1/admin/networks/{network_id}/private-dns` and

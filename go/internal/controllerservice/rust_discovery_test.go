@@ -381,7 +381,8 @@ func startRustPublicRelay(t *testing.T, binary, cfg string) (string, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Env = append(os.Environ(), "NO_COLOR=1")
+	// Listener discovery uses the relay's info-level readiness message.
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "RUST_LOG=info")
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
