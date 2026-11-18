@@ -59,6 +59,13 @@ workflow, tag, and OIDC issuer policy and checks the hashes of the release
 assets. Those are separate gates; neither claims the published bootstrap has
 been installed with a real invitation on the dedicated host.
 
+The isolated ARM64 systemd VM passed the archive gate for
+`0.0.0-fleet-rust-lab`. The packaged Rust node exchanged encrypted traffic
+with a Go peer over QUIC and TCP using both controller/relay pairs. The tests
+also covered policy withdrawal, partition recovery, and NAT and revocation
+after an invitation through Rust HTTPS. This archive was unsigned; it did not
+exercise the fleet updater or a signed release.
+
 ## First Linux lab run
 
 Use a separate CA and network on a disposable Linux host. Install Rust 1.91
@@ -292,6 +299,8 @@ The native CI matrix runs the unprivileged stream-framing and credential
 handoff tests on Apple Silicon and Intel. On disposable runners it removes
 the compatibility Go helper before exercising the Rust helper with a real
 `utun`, benchmark-only IPv4 routes, a conflicting route, traffic, and cleanup.
+The local Apple Silicon archive and twelve unprivileged tests passed for
+`0.0.0-fleet-rust-lab`; the installed-helper test was not run on that host.
 The release package gate checks both binaries, preserves the standalone Go
 artifact, and verifies the installed runtime on disposable native runners. Release checksum
 signing is separate from Apple Developer ID signing or notarization.
@@ -948,9 +957,9 @@ teams, memberships, direct grants, named resources, services, and named
 grants. TCP/UDP port ranges are merged and sealed on creation. Browser
 writes require same-origin CSRF proof; scoped automation uses `acl.read`
 or `acl.manage`. Each policy change, epoch advance, and audit entry commits
-together. The private fleet API and its node consumers are not yet at parity;
-the isolated tests below cover individual features, not the exact deployed
-private build or its release and rollback procedures. Keep Go serving production.
+together. Full parity with the deployed private fleet build is still unverified.
+The isolated tests below cover individual features, not the exact deployed build
+or its release and rollback procedures. Keep Go serving production.
 
 The Rust controller preview serves the private directory through
 `GET /v1/admin/networks/{network_id}/private-dns` and
