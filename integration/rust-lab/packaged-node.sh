@@ -199,9 +199,24 @@ check_foreground_packaged_node() {
   local sockets=("$directory"/laneway-connect-*/laneway.sock)
   "$installed/sbin/laneway-healthcheck-rs" -unix "${sockets[0]}"
   if [[ $role == exit ]]; then
-    local local_ip
-    ip -n "$rust_ns" route get "$address" | grep -Fq "dev $interface"
-    ip -n "$rust_ns" route get 10.254.0.2 | grep -Fq 'dev eth0'
+    local local_ip exit_route transport_route routes_ready=false
+    # A connected relay does not make a policy refresh atomic. Wait for both
+    # routes before exercising real traffic and the gateway's NAT.
+    for _ in $(seq 1 160); do
+      if exit_route=$(ip -n "$rust_ns" route get "$address" 2>&1) &&
+        transport_route=$(ip -n "$rust_ns" route get 10.254.0.2 2>&1) &&
+        [[ " $exit_route " == *" dev $interface "* && " $transport_route " == *' dev eth0 '* ]]; then
+        routes_ready=true
+        break
+      fi
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    if [[ $routes_ready != true ]]; then
+      printf 'Foreground exit routes not ready:\n%s\n%s\n' "${exit_route:-}" "${transport_route:-}" >&2
+      tail -30 "$log" >&2
+      return 1
+    fi
     local_ip=$(ip -n "$rust_ns" -o -4 address show dev "$interface" | awk '{split($4, a, "/"); print a[1]}')
     [[ -n $local_ip ]]
     for _ in $(seq 1 160); do

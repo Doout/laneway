@@ -2024,19 +2024,24 @@ via_node = "{first_node}"
             assert!(!connector_socket.exists());
         } else {
             let packet = ipv4([100, 96, 0, 1], [100, 96, 0, 2]);
-            first_outbound_tx
-                .send(OutboundPacket::new(second_id, packet.clone()))
-                .await
-                .unwrap();
-            assert_eq!(
-                timeout(Duration::from_secs(3), second_inject_rx.recv())
-                    .await
-                    .expect("post-promotion packet was not delivered")
-                    .expect("second injection queue closed")
-                    .bytes,
-                packet
-            );
-            assert_eq!(server_metrics.snapshot().forwarded_packets, 1);
+            // Binding publication can precede the peer's first usable datagram.
+            let received = timeout(Duration::from_secs(3), async {
+                let mut retry = tokio::time::interval(Duration::from_millis(50));
+                loop {
+                    tokio::select! {
+                        _ = retry.tick() => first_outbound_tx
+                            .send(OutboundPacket::new(second_id, packet.clone()))
+                            .await
+                            .unwrap(),
+                        received = second_inject_rx.recv() => break received,
+                    }
+                }
+            })
+            .await
+            .expect("post-promotion packet was not delivered")
+            .expect("second injection queue closed");
+            assert_eq!(received.bytes, packet);
+            assert!(server_metrics.snapshot().forwarded_packets >= 1);
             second_task.abort();
             let _ = second_task.await;
         }

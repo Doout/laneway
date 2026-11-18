@@ -186,7 +186,9 @@ func TestRustNodeCredentialRecovery(t *testing.T) {
 	broken := proof(approved, oldKey.PrivateKey, true)
 	broken[len(broken)-1] ^= 1
 	redeem(approved, broken, 403)
-	db, err := sql.Open("sqlite", f.dbPath)
+	// The running controller can briefly hold a write lock while the fixture
+	// installs or removes its rollback trigger.
+	db, err := sql.Open("sqlite", f.dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatal(err)
 	}
