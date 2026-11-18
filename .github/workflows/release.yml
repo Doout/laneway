@@ -30,7 +30,7 @@ jobs:
       - name: Check scripts
         run: |
           python3 -m unittest discover -s deploy/compose -p 'test_*.py'
-          shellcheck integration/rust-release-macos.sh integration/rust-release-install.sh
+          shellcheck integration/rust-release-macos.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
           sh integration/rust-compose-release.sh
           sh integration/rust-go-runtime-guard.sh
@@ -77,7 +77,8 @@ jobs:
         run: |
           output="$RUNNER_TEMP/laneway-rust"
           docker buildx build --platform "linux/$PACKAGE_GOARCH" \
-            --build-arg VERSION="${GITHUB_REF_NAME#v}" --file deploy/containers/Dockerfile.rust-release \
+            --build-arg VERSION="${GITHUB_REF_NAME#v}" --build-arg FLEET_ACTIVATION_FIXTURE=1 \
+            --file deploy/containers/Dockerfile.rust-release \
             --target artifacts --output "type=local,dest=$output" .
           printf 'PACKAGE_RUST_RUNTIME_DIR=%s\n' "$output" >> "$GITHUB_ENV"
       - name: Build the native macOS Rust runtime candidate
@@ -113,6 +114,8 @@ jobs:
           sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
           sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
             "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
+          sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
+            "$PACKAGE_RUST_RUNTIME_DIR/activation-fixture"
       - name: Generate package SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:

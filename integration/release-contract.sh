@@ -160,6 +160,11 @@ require 'verify-rust-release-runtime.sh' "$package_workflow"
 require 'verify-rust-release.sh' "$package_workflow"
 require 'sh deploy/compose/verify-rust-release.sh --publish "$GITHUB_REF_NAME" dist' "$workflow"
 require 'bash integration/rust-release-install.sh dist "$GITHUB_REF_NAME"' "$workflow"
+for pipeline in "$workflow" "$ci_workflow"; do
+  require 'FLEET_ACTIVATION_FIXTURE=1' "$pipeline"
+  require 'bash integration/rust-release-fleet-update.sh' "$pipeline"
+done
+require 'the installed Rust utun probe did not run' "$repo_dir/integration/rust-release-macos.sh"
 if ! awk '/cosign sign-blob/ { signed=1 }
   /bash integration\/rust-release-install\.sh/ { installed=signed }
   /gh release create/ { if (!installed) exit 1; published=1 }

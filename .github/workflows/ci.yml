@@ -311,9 +311,11 @@ jobs:
           cache-dependency-path: go/go.sum
       - name: Build and smoke test the preview without publishing
         run: |
-          version=0.0.0-ci
+          # The fleet updater accepts only a stable numeric release version.
+          version=0.0.1
           output="$RUNNER_TEMP/laneway-rust"
           docker buildx build --platform linux/amd64 --build-arg VERSION="$version" \
+            --build-arg FLEET_ACTIVATION_FIXTURE=1 \
             --file deploy/containers/Dockerfile.rust-release --target artifacts \
             --output "type=local,dest=$output" .
           PACKAGE_GOOS=linux PACKAGE_GOARCH=amd64 PACKAGE_RUST_RUNTIME_DIR="$output" make package VERSION="$version"
@@ -325,7 +327,9 @@ jobs:
           sudo modprobe tun
           sudo modprobe wireguard
           sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
-          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh dist/laneway_linux_amd64.tar.gz amd64 0.0.0-ci
+          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh dist/laneway_linux_amd64.tar.gz amd64 0.0.1
+          sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh dist/laneway_linux_amd64.tar.gz \
+            "$RUNNER_TEMP/laneway-rust/activation-fixture"
 
   cross-build:
     name: Go build ${{ matrix.goos }}/${{ matrix.goarch }}

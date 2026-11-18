@@ -596,7 +596,8 @@ The native CI matrix runs the unprivileged stream-framing and credential
 handoff tests on Apple Silicon and Intel. On disposable runners, the default
 archive install must leave the old helper path absent. The probe exercises
 the Rust helper with a real `utun`, isolated IPv4 routes, a conflicting
-route, traffic, and cleanup.
+route, traffic, and cleanup. The archive gate fails if the exact privileged
+test did not actually run.
 On a disposable native Mac outside hosted CI, point the test at the local
 archive and its companion Go executable. Mark **only that disposable host**
 and run as an administrator account with noninteractive sudo:
@@ -1485,8 +1486,8 @@ CA. Only the standard non-root, read-only Rust Connector with
 or copy setup-token settings. It uses the current node certificate from the
 selected container, not shared administrator or registry credentials.
 
-The release workflow publishes `ghcr.io/doout/lane-edge-rust` separately
-from the Go `lane-edge` image. A Connector update verifies both the signed
+The release workflow publishes `ghcr.io/doout/lane-edge-rust`.
+A Connector update verifies both the signed
 release manifest and the native image's digest signature. It runs an offline,
 read-only state preflight before stopping the old container. After a swap,
 success requires a fresh daemon instance, the same network and node IDs,
@@ -1553,6 +1554,14 @@ new signed release.
 On the isolated ARM64 VM, the gate upgraded `v0.0.9100` to `v0.0.9101`,
 then restored that exact executable after the next candidate never became
 healthy. Both restarts preserved the node's identity and certificate.
+The release matrix now runs `integration/rust-release-fleet-update.sh`
+on native AMD64 and ARM64. It takes the controller, updater, and upgrade
+candidate from the actual release archive. The previous runtime and the
+activation harness are built for the lab and excluded from the archive.
+The ARM64 rehearsal activated the packaged `v0.0.9104` node from the
+synthetic `v0.0.0` fixture, then restored it after the next candidate failed.
+It verified the same node certificate and a fresh authenticated controller
+lease after both restarts.
 
 New durable Rust Connector invitations use the encrypted one-time bootstrap.
 It activates the identity in a named volume before starting the serving

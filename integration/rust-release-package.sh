@@ -48,6 +48,10 @@ for member in sbin/laneway-controller sbin/laneway-relay \
     exit 1
   fi
 done
+if printf '%s\n' "$listing" | grep -Eq '(^|/)(activation-fixture|activation-test|prior-node)(/|$)'; then
+  echo 'the Linux archive must not include fleet activation test fixtures' >&2
+  exit 1
+fi
 for member in examples/managed-updates-rust.toml systemd/laneway-rust-updater.service systemd/laneway-rust-updater.timer \
   systemd/lanewayd-rs.service systemd/laneway-relay-rs.service \
   deploy/compose/verify-rust-release.sh; do

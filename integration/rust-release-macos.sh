@@ -83,8 +83,15 @@ if [ "$install_probe" = 1 ]; then
   [ "$(readlink "$alias_path")" = laneway ]
   cmp -s "$package/bin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
   if [ "$utun_probe" = 1 ]; then
-    cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs --lib \
-      darwin_installed_helper_routes_and_restores_real_utun -- --ignored
+    utun_case=tun::darwin::tests::darwin_installed_helper_routes_and_restores_real_utun
+    if ! cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs --lib \
+      -- --ignored --exact "$utun_case" >"$probe_dir/utun.log" 2>&1; then
+      cat "$probe_dir/utun.log" >&2
+      exit 1
+    fi
+    cat "$probe_dir/utun.log"
+    grep -Fxq "test $utun_case ... ok" "$probe_dir/utun.log" ||
+      { echo 'the installed Rust utun probe did not run' >&2; exit 1; }
   fi
 fi
 printf 'Verified the macOS %s archive and standalone Go client at version %s.\n' "$arch" "$version"
