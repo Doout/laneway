@@ -8,6 +8,7 @@ fi
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 socket=$2
 [[ "$socket" = /*/docker.sock ]] || { echo "expected an absolute local VM Docker socket path" >&2; exit 2; }
+socket_gid=$(stat -c '%g' "$socket")
 suffix="$(date +%s)-$$"
 name="laneway-connector-update-lab-$suffix"
 volume="$name-state"
@@ -61,6 +62,7 @@ identity_bytes() {
 }
 before="$(identity_bytes)"
 docker run --rm --network none --cap-drop ALL --tmpfs /tmp:exec,size=1g \
+  --group-add "$socket_gid" \
   --mount "type=bind,src=$socket,dst=/var/run/docker.sock,readonly" \
   --mount type=bind,src=/usr/bin/docker,dst=/usr/bin/docker,readonly \
   -v "$root:/src:ro" -v laneway-rust-191-target:/src/rust/target \

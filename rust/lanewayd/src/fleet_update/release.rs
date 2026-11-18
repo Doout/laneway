@@ -4,15 +4,17 @@ use anyhow::{Context, Result, bail, ensure};
 use flate2::read::MultiGzDecoder;
 use sha2::{Digest, Sha256};
 use std::{
+    cmp::Ordering,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::AsyncWriteExt;
 
 const RELEASE_ORIGIN: &str = "https://github.com/Doout/laneway/releases/download";
+const LATEST_URL: &str = "https://github.com/Doout/laneway/releases/latest";
 const WORKFLOW: &str = "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags";
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 const COSIGN: &str = "/usr/local/libexec/laneway/cosign-v3.1.3";
@@ -23,6 +25,49 @@ const MAX_EXPANDED: u64 = 512 << 20;
 const MAX_BINARY: u64 = 128 << 20;
 const MEMBER: &[u8] = b"laneway/sbin/lanewayd-rs";
 const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
+
+pub(super) fn compare_versions(target: &str, previous: &str) -> Result<Ordering> {
+    fn numbers(value: &str) -> Result<Vec<u64>> {
+        stable_tag(value)?
+            .trim_start_matches('v')
+            .split('.')
+            .map(|part| {
+                part.parse()
+                    .context("release version exceeds the numeric bound")
+            })
+            .collect()
+    }
+    Ok(numbers(target)?.cmp(&numbers(previous)?))
+}
+
+pub(super) async fn latest_tag() -> Result<String> {
+    let request_nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let reply = github_client()?
+        .get(format!("{LATEST_URL}?laneway_cache_bust={request_nonce}"))
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .header(reqwest::header::PRAGMA, "no-cache")
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await?
+        .error_for_status()?;
+    ensure!(
+        reply.status() == reqwest::StatusCode::OK,
+        "latest stable release not found"
+    );
+    tag_from_url(reply.url())
+}
+
+fn tag_from_url(url: &reqwest::Url) -> Result<String> {
+    let tag = url
+        .as_str()
+        .strip_prefix("https://github.com/Doout/laneway/releases/tag/")
+        .context("latest release did not resolve to the official Laneway release page")?;
+    ensure!(
+        stable_tag(tag)? == tag,
+        "latest release did not resolve to a stable tag"
+    );
+    Ok(tag.into())
+}
 
 pub(super) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
     let arch = match std::env::consts::ARCH {
@@ -60,9 +105,16 @@ pub(super) async fn connector_image(tag: &str, directory: &Path) -> Result<Strin
         "connector image manifest checksum mismatch"
     );
     let reference = connector_subject(std::str::from_utf8(&bytes)?)?;
-    verify(tag, directory, "verify", &[], Path::new(&reference))
-        .await
-        .context("Rust connector image signature verification failed")?;
+    verify(
+        &client,
+        tag,
+        directory,
+        "verify",
+        &[],
+        Path::new(&reference),
+    )
+    .await
+    .context("Rust connector image signature verification failed")?;
     Ok(reference)
 }
 
@@ -87,12 +139,8 @@ fn connector_subject(manifest: &str) -> Result<String> {
     Ok(line.into())
 }
 
-async fn signed_manifest(tag: &str, directory: &Path) -> Result<(reqwest::Client, String)> {
-    ensure!(
-        stable_tag(tag)? == tag,
-        "assignment must pin an exact stable tag"
-    );
-    let client = reqwest::Client::builder()
+fn github_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -115,7 +163,15 @@ async fn signed_manifest(tag: &str, directory: &Path) -> Result<(reqwest::Client
                 attempt.error("release download redirect is not permitted")
             }
         }))
-        .build()?;
+        .build()?)
+}
+
+async fn signed_manifest(tag: &str, directory: &Path) -> Result<(reqwest::Client, String)> {
+    ensure!(
+        stable_tag(tag)? == tag,
+        "assignment must pin an exact stable tag"
+    );
+    let client = github_client()?;
     let manifest = directory.join("checksums.txt");
     let bundle = directory.join("checksums.sigstore.json");
     download(&client, tag, "checksums.txt", &manifest, MAX_CHECKSUMS, 30).await?;
@@ -129,6 +185,7 @@ async fn signed_manifest(tag: &str, directory: &Path) -> Result<(reqwest::Client
     )
     .await?;
     verify(
+        &client,
         tag,
         directory,
         "verify-blob",
@@ -141,23 +198,17 @@ async fn signed_manifest(tag: &str, directory: &Path) -> Result<(reqwest::Client
 }
 
 async fn verify(
+    client: &reqwest::Client,
     tag: &str,
     directory: &Path,
     subcommand: &str,
     args: &[&Path],
     subject: &Path,
 ) -> Result<()> {
-    // The installed verifier is selected by the operator, not by the plan.
-    journal::protect_parents(Path::new(COSIGN))?;
-    let verifier = fs::symlink_metadata(COSIGN)?;
-    ensure!(verifier.is_file(), "verifier must not be a symlink");
-    journal::verify_file(
-        &File::open(COSIGN).context("open pinned release verifier")?,
-        0o022,
-    )?;
+    let verifier = release_verifier(client, directory).await?;
     // Do not inherit trust overrides. With no account home Cosign's TUF
     // client uses a temporary directory; keep it inside root-only staging.
-    let mut command = clean_command(COSIGN);
+    let mut command = clean_command(verifier);
     command.env("TMPDIR", directory);
     command
         .arg(subcommand)
@@ -170,6 +221,62 @@ async fn verify(
         ])
         .arg(subject);
     checked_command(command, Duration::from_secs(60)).await
+}
+
+async fn release_verifier(client: &reqwest::Client, directory: &Path) -> Result<PathBuf> {
+    let installed = Path::new(COSIGN);
+    if !journal::absent(installed)? {
+        journal::protect_parents(installed)?;
+        ensure!(
+            fs::symlink_metadata(installed)?.is_file(),
+            "verifier must not be a symlink"
+        );
+        journal::verify_file(
+            &File::open(installed).context("open pinned release verifier")?,
+            0o022,
+        )?;
+        return Ok(installed.into());
+    }
+    let (arch, digest) = match std::env::consts::ARCH {
+        "x86_64" => (
+            "amd64",
+            "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
+        ),
+        "aarch64" => (
+            "arm64",
+            "c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a",
+        ),
+        _ => bail!("no pinned Cosign verifier for this architecture"),
+    };
+    let local = directory.join("cosign-v3.1.3");
+    // Both the checksum bundle and the image can use this temporary verifier.
+    if journal::absent(&local)? {
+        download_url(
+            client,
+            &format!(
+                "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-{arch}"
+            ),
+            &local,
+            160 << 20,
+            180,
+        )
+        .await
+        .context("download pinned release verifier")?;
+        let path = local.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut file = File::open(path)?;
+            let mut hash = Sha256::new();
+            io::copy(&mut file, &mut hash)?;
+            ensure!(
+                hex::encode(hash.finalize()) == digest,
+                "pinned Cosign checksum verification failed"
+            );
+            file.set_permissions(fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        })
+        .await??;
+    }
+    Ok(local)
 }
 
 fn verified_extract(
@@ -196,8 +303,25 @@ async fn download(
     limit: usize,
     seconds: u64,
 ) -> Result<()> {
+    download_url(
+        client,
+        &format!("{RELEASE_ORIGIN}/{tag}/{asset}"),
+        output,
+        limit,
+        seconds,
+    )
+    .await
+}
+
+async fn download_url(
+    client: &reqwest::Client,
+    url: &str,
+    output: &Path,
+    limit: usize,
+    seconds: u64,
+) -> Result<()> {
     let mut response = client
-        .get(format!("{RELEASE_ORIGIN}/{tag}/{asset}"))
+        .get(url)
         .timeout(Duration::from_secs(seconds))
         .send()
         .await?
@@ -304,6 +428,36 @@ fn extract(source: impl Read, output: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
+
+    #[test]
+    fn latest_release_accepts_only_the_exact_official_stable_tag() {
+        let valid =
+            reqwest::Url::parse("https://github.com/Doout/laneway/releases/tag/v1.2.3").unwrap();
+        assert_eq!(tag_from_url(&valid).unwrap(), "v1.2.3");
+        for url in [
+            "https://github.com/other/laneway/releases/tag/v1.2.3",
+            "https://github.com/Doout/laneway/releases/tag/v1.2.3-rc1",
+            "https://github.com/Doout/laneway/releases/tag/v1.2.3?x=1",
+            "https://example.org/Doout/laneway/releases/tag/v1.2.3",
+        ] {
+            assert!(
+                tag_from_url(&reqwest::Url::parse(url).unwrap()).is_err(),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            compare_versions("v1.10.0", "v1.2.0").unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("v1.2.0", "v1.10.0").unwrap(),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("1.2.0", "v1.2.0").unwrap(),
+            Ordering::Equal
+        );
+    }
 
     #[test]
     fn rust_connector_manifest_never_selects_the_go_image() {

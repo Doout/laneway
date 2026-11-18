@@ -135,7 +135,21 @@ nsenter -t "$controller_pid" -n "$control_link" invite --name fixture-exit --sha
   > "$work/invitation" 2> "$work/instructions"
 grep -Fq -- '--runtime rust' "$work/instructions"
 nsenter -t "$controller_pid" -n "$control_link" invite --name fixture-connector --docker --connector > "$work/connector"
-grep -Fq "ghcr.io/doout/lane-edge-rust:0.0.9104@sha256:$(printf '%064d' 1)" "$work/connector"
+bundle_id=$(sed -n "s|.*\\.well-known/laneway/bootstrap/\\([A-Za-z0-9_-]\\{43\\}\\)'.*|\\1|p" "$work/connector")
+[[ $bundle_id =~ ^[A-Za-z0-9_-]{43}$ ]]
+controller_port=$(sed -n 's/^LANEWAY_CONTROLLER_PORT=//p' "$destination/.env")
+nsenter -t "$controller_pid" -n /usr/bin/curl --fail --silent --show-error \
+  --resolve "installer.fresh.test:$controller_port:127.0.0.1" \
+  --cacert "$destination/generated/pki/ca.crt" \
+  --cert "$destination/generated/pki/relay.crt" --key "$destination/generated/pki/relay.key" \
+  "https://installer.fresh.test:$controller_port/v1/bootstrap-bundles/$bundle_id" > "$work/connector-bootstrap.sh"
+bash -n "$work/connector-bootstrap.sh"
+grep -Fq "ghcr.io/doout/lane-edge-rust:0.0.9104@sha256:$(printf '%064d' 1)" "$work/connector-bootstrap.sh"
+grep -Fq 'connector bootstrap-activate' "$work/connector-bootstrap.sh"
+if grep -Eq 'SETUP_TOKEN|--health-cmd' "$work/connector-bootstrap.sh"; then
+  echo 'Rust Connector bootstrap added an enrollment secret or a shell health check' >&2
+  exit 1
+fi
 test ! -e "$work/recovery-kit/control-plane-input"
 bundle=$(find "$work/recovery-kit" -maxdepth 1 -name 'initial-recovery-*.age' -type f)
 test -s "$bundle"

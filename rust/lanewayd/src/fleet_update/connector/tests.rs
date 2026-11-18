@@ -77,6 +77,7 @@ enum Mode {
     Healthy,
     WrongIdentity,
     UncertainStart,
+    RejectedRename,
 }
 
 struct Fixture {
@@ -115,6 +116,7 @@ impl Docker for Fixture {
             ),
             ["exec", NEW, ..] => runtime(TAG, "userspace", 11, self.mode == Mode::Healthy),
             ["pull" | "run" | "stop", ..] => Vec::new(),
+            ["rename", OLD, _] if self.mode == Mode::RejectedRename => return Err(Exit.into()),
             ["rename", OLD, dest] => {
                 self.name.set(if *dest == NAME { Some(OLD) } else { None });
                 Vec::new()
@@ -198,8 +200,38 @@ async fn preserves_the_volume_and_rolls_back_the_exact_container() {
                 assert!(!calls.iter().any(|v| v[0] == "rm"));
                 assert!(!docker.original_restarted.get());
             }
+            Mode::RejectedRename => unreachable!("exercised separately before candidate creation"),
         }
     }
+}
+
+#[tokio::test]
+async fn failed_rename_restarts_only_the_still_named_original() {
+    let docker = Fixture::new(Mode::RejectedRename);
+    let prior: LiveStatus =
+        serde_json::from_slice(&runtime(PREVIOUS, "userspace", 10, true)).unwrap();
+    let existing = profile(&inspect_fixture(), OLD, NAME).unwrap();
+    let outcome = apply(
+        &docker,
+        NAME,
+        existing,
+        IMAGE,
+        &prior,
+        TAG,
+        laneway_protocol::Id::new([4; 16]).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome, Activated::RolledBack);
+    assert_eq!(docker.name.get(), Some(OLD));
+    assert!(docker.original_restarted.get());
+    assert!(
+        docker
+            .calls
+            .borrow()
+            .iter()
+            .all(|v| v[0] != "create" && v[0] != "rm")
+    );
 }
 
 fn credential_tar(kind: tar::EntryType, name: &str) -> Vec<u8> {

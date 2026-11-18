@@ -12,6 +12,8 @@ dockerfile=$repo_dir/deploy/containers/Dockerfile
 connector_dockerfile=$repo_dir/deploy/containers/Dockerfile.connector
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 connector_updater=$repo_dir/deploy/containers/update-connector.sh
+rust_updater_release=$repo_dir/rust/lanewayd/src/fleet_update/release.rs
+rust_connector_transaction=$repo_dir/rust/lanewayd/src/fleet_update/connector.rs
 compose_file=$repo_dir/deploy/compose/compose.yaml
 compose_dev_file=$repo_dir/deploy/compose/compose.dev.yaml
 docker_exit_integration=$repo_dir/integration/docker-exit-node.sh
@@ -351,14 +353,14 @@ for value in \
   'checksums.sigstore.json' \
   'verify-blob' \
   'image-digests.txt' \
-  'Connector image signature verification failed' \
-  'connector validate --state-dir /var/lib/laneway/connector' \
-  'container must mount the named volume' \
-  'docker rename' \
-  'previous Connector restored'
+  'Rust connector image signature verification failed'
 do
-  require "$value" "$connector_updater"
+  require "$value" "$rust_updater_release"
 done
+require 'exec "$updater" --connector "$@"' "$connector_updater"
+require 'Connector must use its own writable named identity volume' "$rust_connector_transaction"
+require 'serving_connector' "$rust_connector_transaction"
+require 'Activated::RolledBack' "$rust_connector_transaction"
 require 'deploy/containers/update-connector.sh' "$package_workflow"
 require 'laneway-update-connector' "$package_installer"
 

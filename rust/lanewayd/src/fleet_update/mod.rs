@@ -338,6 +338,13 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<bool> {
         "managed updates must run as root"
     );
     let args: Vec<_> = args.into_iter().collect();
+    match args.as_slice() {
+        [flag, name] if flag == "--connector" => return connector::manual_update(name, None).await,
+        [flag, name, pin, tag] if flag == "--connector" && pin == "--version" => {
+            return connector::manual_update(name, Some(tag)).await;
+        }
+        _ => {}
+    }
     let reconcile = match args.as_slice() {
         [] => None,
         [flag, id, target, previous] if flag == "--reconcile" => Some((
@@ -345,7 +352,9 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<bool> {
             stable_tag(target)?,
             stable_tag(previous)?,
         )),
-        _ => bail!("usage: laneway-update-rs [--reconcile ID TARGET_VERSION PREVIOUS_VERSION]"),
+        _ => bail!(
+            "usage: laneway-update-rs [--reconcile ID TARGET_VERSION PREVIOUS_VERSION | --connector NAME [--version TAG]]"
+        ),
     };
     for path in [CONFIG, STATE].map(Path::new) {
         journal::protect_parents(path)?;

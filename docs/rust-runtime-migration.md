@@ -1517,6 +1517,18 @@ On the isolated ARM64 VM, the gate upgraded `v0.0.9100` to `v0.0.9101`,
 then restored that exact executable after the next candidate never became
 healthy. Both restarts preserved the node's identity and certificate.
 
+New durable Rust Connector invitations use the encrypted one-time bootstrap.
+It activates the identity in a named volume before starting the serving
+container. The serving container carries no invitation and uses the image's
+exec-form health check; the scratch image does not contain a shell.
+
+On the Connector host, `laneway-update-connector NAME [--version TAG]` uses
+the same Rust transaction as fleet updates. It authenticates the release
+manifest and immutable Rust image, verifies the candidate against the
+identity volume read-only, and checks the restarted daemon's version,
+identity, and controller lease. It refuses downgrades, legacy Go images,
+and updates with a pending fleet claim.
+
 The Connector transaction has a separate Docker gate. Give it a local native
 Connector image built with a numeric release version and the local daemon
 socket path as seen by the test VM. Use a disposable Docker lab:
@@ -1531,6 +1543,10 @@ verifies that the identical previous container is serving again and that
 certificate, key, and configuration bytes in the state volume did not
 change. The gate uses local images without downloading from a registry;
 it does not verify publication of a signed Rust Connector release.
+The ARM64 Docker lab also ran the packaged updater's manual mode against the
+serving fixture. It recognized the running version, rejected a downgrade,
+then verified a real container replacement and rollback without changing the
+identity files. The lab did not download a signed candidate.
 
 ### Recover an expired Rust node credential (lab only)
 

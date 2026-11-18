@@ -20,19 +20,24 @@ off the control-plane host. Laneway does not manage the host firewall.
 
 ```sh
 sudo laneway control status
-sudo laneway control update
 sudo laneway control backup
 ```
 
-`status` exits nonzero when a required service is unhealthy. `update` verifies
-the release, creates a backup, and retains the prior release for rollback.
+`status` exits nonzero when a required service is unhealthy. This branch
+does not yet enable `laneway control update` on a Rust control plane.
 
 Connector identities persist in named Docker volumes. Do not remove the volume
-during an upgrade. Update a Connector with:
+during an upgrade. From the Connector host, use the updater in the signed
+Linux package to update a standard durable Rust Connector:
 
 ```sh
 sudo laneway-update-connector laneway-connector-office
 ```
+
+Add `--version vX.Y.Z` to select an exact signed release. The updater does
+not downgrade or convert a Go Connector. It checks the candidate against
+the existing identity without giving it network access or write access to
+the volume, then switches containers only after those checks pass.
 
 ## Administrator lifecycle
 

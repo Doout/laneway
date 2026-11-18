@@ -78,13 +78,14 @@ deployment. They target the Go runtime and refuse to operate here.
 ## Docker Connector
 
 ```sh
-sudo laneway-control invite --name office --docker --connector --bootstrap
+sudo laneway-control invite --name office --docker --connector
 ```
 
 Run the generated command within ten minutes. Its rate-limited URL is consumed
 by the first download; later requests return `404`. A one-shot container enrolls
 the digest-pinned `lane-edge-rust` image, then a clean runtime container starts
-without the setup token, bootstrap key, or temporary mount.
+without the setup token, bootstrap key, or temporary mount. On the Connector
+host, update it with `sudo laneway-update-connector laneway-connector-office`.
 
 ## Backup and restore
 

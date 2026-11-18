@@ -1,5 +1,7 @@
 //! Transactional replacement of one root-managed Docker Connector.
-use super::{Activated, LiveStatus, RuntimeIdentity, clean_command, journal};
+use super::{
+    Activated, LiveStatus, RuntimeIdentity, STATE, clean_command, journal, release, stable_tag,
+};
 use crate::{TlsConfig, controller::Client};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -63,63 +65,78 @@ impl Drop for Lock {
 
 impl Connector {
     pub(super) fn open(settings: Settings) -> Result<Self> {
-        ensure!(
-            valid_name(&settings.container),
-            "invalid managed Connector name"
-        );
-        let path = Path::new(DOCKER);
-        journal::protect_parents(path)?;
-        // Inspect only a locally installed executable; Docker contexts,
-        // daemon hosts and registry settings cannot be inherited.
-        ensure!(
-            fs::symlink_metadata(path)?.is_file(),
-            "Docker CLI must not be a symlink"
-        );
-        journal::verify_file(&fs::File::open(path)?, 0o022)?;
-        let dir = Path::new("/run/lock");
-        journal::protect_parents(dir)?;
-        let metadata = fs::symlink_metadata(dir)?;
-        ensure!(
-            metadata.is_dir()
-                && metadata.uid() == 0
-                && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0),
-            "Docker updater lock parent must be protected"
-        );
-        let lock = dir.join(format!("laneway-connector-update-{}", settings.container));
-        DirBuilder::new()
-            .mode(0o700)
-            .create(&lock)
-            .context("Connector updater lock exists; inspect any interrupted update first")?;
+        let lock = lock_connector(&settings.container)?;
         Ok(Self {
             settings,
             docker: LocalDocker,
-            _lock: Lock(lock),
+            _lock: lock,
         })
     }
 
     pub(super) async fn status(&self) -> Result<LiveStatus> {
-        let old = self.profile().await?;
-        let status = status(&self.docker, &old.id).await?;
+        let (_, status) = serving_connector(&self.docker, &self.settings.container).await?;
         ensure!(
-            status.interface == "userspace"
-                && status.identity.network == self.settings.network_id.to_string(),
-            "running Connector does not match the configured network and mode"
+            status.identity.network == self.settings.network_id.to_string(),
+            "running Connector does not match the configured network"
         );
         Ok(status)
     }
 
     async fn profile(&self) -> Result<Profile> {
-        let previous = previous_name(&self.settings.container);
-        ensure!(
-            lookup(&self.docker, &previous).await?.is_none(),
-            "an interrupted Connector replacement still has its previous container"
-        );
-        let id = lookup(&self.docker, &self.settings.container)
-            .await?
-            .context("managed Connector does not exist")?;
-        inspect(&self.docker, &id, &self.settings.container).await
+        local_profile(&self.docker, &self.settings.container).await
     }
+}
 
+fn lock_connector(name: &str) -> Result<Lock> {
+    ensure!(valid_name(name), "invalid managed Connector name");
+    let path = Path::new(DOCKER);
+    journal::protect_parents(path)?;
+    // Inspect only a locally installed executable; Docker contexts,
+    // daemon hosts and registry settings cannot be inherited.
+    ensure!(
+        fs::symlink_metadata(path)?.is_file(),
+        "Docker CLI must not be a symlink"
+    );
+    journal::verify_file(&fs::File::open(path)?, 0o022)?;
+    let dir = Path::new("/run/lock");
+    journal::protect_parents(dir)?;
+    let metadata = fs::symlink_metadata(dir)?;
+    ensure!(
+        metadata.is_dir()
+            && metadata.uid() == 0
+            && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0),
+        "Docker updater lock parent must be protected"
+    );
+    let lock = dir.join(format!("laneway-connector-update-{name}"));
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&lock)
+        .context("Connector updater lock exists; inspect any interrupted update first")?;
+    Ok(Lock(lock))
+}
+
+async fn local_profile(docker: &impl Docker, name: &str) -> Result<Profile> {
+    ensure!(
+        lookup(docker, &previous_name(name)).await?.is_none(),
+        "an interrupted Connector replacement still has its previous container"
+    );
+    let id = lookup(docker, name)
+        .await?
+        .context("managed Connector does not exist")?;
+    inspect(docker, &id, name).await
+}
+
+async fn serving_connector(docker: &impl Docker, name: &str) -> Result<(Profile, LiveStatus)> {
+    let old = local_profile(docker, name).await?;
+    let status = status(docker, &old.id).await?;
+    ensure!(
+        status.interface == "userspace",
+        "running Connector is not a userspace runtime"
+    );
+    Ok((old, status))
+}
+
+impl Connector {
     pub(super) async fn client(&self, identity: &RuntimeIdentity, root: &Path) -> Result<Client> {
         let (network, node) = identity.checked()?;
         ensure!(
@@ -178,6 +195,66 @@ impl Connector {
         )
         .await
     }
+}
+
+pub(super) async fn manual_update(name: &str, pin: Option<&str>) -> Result<bool> {
+    ensure!(valid_name(name), "invalid managed Connector name");
+    let tag = pin.map(stable_tag).transpose()?;
+    journal::protect_parents(Path::new(STATE))?;
+    let journal = journal::Journal::open_named(Path::new(STATE), Some(name))?;
+    ensure!(
+        journal.read()?.is_none(),
+        "a fleet update is pending for this Connector; reconcile it first"
+    );
+    let _lock = lock_connector(name)?;
+    let docker = LocalDocker;
+    let (old, before) = serving_connector(&docker, name).await?;
+    let previous = before.version()?;
+    ensure!(
+        before.healthy(&before.identity, &previous)?,
+        "the Connector must have a current authenticated controller lease before updating"
+    );
+    let target = match tag {
+        Some(tag) => tag,
+        None => release::latest_tag().await?,
+    };
+    match release::compare_versions(&target, &previous)? {
+        std::cmp::Ordering::Equal => {
+            println!("{name} is already current ({target})");
+            return Ok(true);
+        }
+        std::cmp::Ordering::Less => {
+            anyhow::bail!("{target} would downgrade {name} from {previous}");
+        }
+        std::cmp::Ordering::Greater => {}
+    }
+    let directory = tempfile::Builder::new()
+        .prefix("connector-release-")
+        .tempdir_in(journal.root())?;
+    let image = release::connector_image(&target, directory.path()).await?;
+    pull(&docker, &image, &old.volume).await?;
+    let prepared = local_profile(&docker, name).await?;
+    ensure!(
+        prepared.id == old.id,
+        "Connector changed during release verification"
+    );
+    let outcome = apply(
+        &docker,
+        name,
+        prepared,
+        &image,
+        &before,
+        &target,
+        crate::agent::random_id()?,
+    )
+    .await?;
+    match outcome {
+        Activated::Healthy => println!("{name} updated to {target}"),
+        Activated::RolledBack => {
+            eprintln!("{name} did not become healthy at {target}; restored {previous}")
+        }
+    }
+    Ok(outcome == Activated::Healthy)
 }
 
 pub(super) fn valid_name(name: &str) -> bool {
@@ -561,9 +638,22 @@ async fn apply(
     docker
         .run(&["stop", "--time", "15", &old.id], DOCKER_TIMEOUT)
         .await?;
-    docker
+    if let Err(error) = docker
         .run(&["rename", &old.id, &previous], DOCKER_TIMEOUT)
-        .await?;
+        .await
+    {
+        if error.is::<Exit>() && lookup(docker, name).await?.as_ref() == Some(&old.id) {
+            docker.run(&["start", &old.id], DOCKER_TIMEOUT).await?;
+            ensure!(
+                restarted(docker, &old.id, before, &old_version).await,
+                "Connector rename failed; previous runtime restarted but health was not confirmed"
+            );
+            return Ok(Activated::RolledBack);
+        }
+        return Err(
+            error.context("Connector rename outcome is uncertain; inspect the preserved container")
+        );
+    }
 
     let volume = format!("{}:{STATE_MOUNT}", old.volume);
     let label = format!("{LABEL}={update}");

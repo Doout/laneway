@@ -1335,7 +1335,6 @@ docker run -d \\
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
   --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \\
   --volume 'laneway-connector-$node_name-state:/var/lib/laneway' \\
-  --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \\
   --health-interval 10s \\
   --health-timeout 3s \\
   --health-retries 6 \\
@@ -1409,7 +1408,6 @@ docker run -d \\
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
   --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \\
   --volume "\$volume_name:/var/lib/laneway" \\
-  --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \\
   --health-interval 10s \\
   --health-timeout 3s \\
   --health-retries 6 \\
@@ -1516,6 +1514,11 @@ run_invite() {
   case "$name" in ''|*[!A-Za-z0-9._-]*) die "invite requires a safe --name NAME" ;; esac
   if [ "$docker_install" != "$exit_node" ]; then
     die "--docker and --connector must be used together"
+  fi
+  # Activate the durable identity separately; the serving Rust container
+  # must not carry an enrollment secret or bootstrap mount.
+  if [ "$runtime" = rust ] && [ "$docker_install" = true ] && [ "$class" = durable ]; then
+    bootstrap_install=true
   fi
 	if [ "$bootstrap_install" = true ]; then
 		[ "$docker_install" = true ] || die "--bootstrap requires --docker --connector"
