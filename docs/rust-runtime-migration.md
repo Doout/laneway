@@ -135,8 +135,7 @@ the serve command. Use a private file (e.g. mode 0600); never pass its
 contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
-contexts or when combined with a session cookie. OAuth token exchange still
-requires Go.
+contexts or when combined with a session cookie.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -216,9 +215,16 @@ approval, cancellation, inventory, and revocation endpoints. Approval binds the
 one-time code to the registered callback, the selected network, and the
 approved scopes. Owners and scoped operators can approve; a root bearer
 cannot approve on their behalf. Narrowing or revoking an installation retires
-its prior credentials in the same transaction. The mixed lab redeems Rust
-authorization codes at Go's token endpoint; Rust token exchange, refresh, and
-revocation endpoints remain pending.
+its prior credentials in the same transaction.
+
+Rust also serves `POST /oauth/token` and `POST /oauth/revoke`. Exchange
+checks the registered client credential, exact redirect URI, PKCE, and
+installation scope in one transaction. Access tokens last one hour; refresh
+families last 30 days without extending that deadline on rotation. A
+duplicate refresh within five seconds does not revoke its successor. Later
+reuse or explicit client revocation retires the whole family. The lab
+exchanges and refreshes credentials across Go and Rust and checks both
+implementations' access decisions after revocation.
 
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly

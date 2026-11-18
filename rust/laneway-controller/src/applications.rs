@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 
 pub mod authorization;
 mod secrets;
+pub mod tokens;
 use secrets::{Purpose, challenge_valid, id, matches_pkce, new_secret, parse_secret};
 
 #[derive(Clone, Deserialize, Serialize)]

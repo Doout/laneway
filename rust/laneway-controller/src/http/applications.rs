@@ -19,10 +19,13 @@ use std::{collections::HashMap, net::IpAddr, time::Instant};
 use zeroize::Zeroizing;
 
 pub(super) mod authorization;
+mod tokens;
 
 pub(super) enum Route<'a> {
     Start,
     Exchange,
+    Token,
+    RevokeToken,
     Apps,
     App(&'a str),
     Review(&'a str),
@@ -34,6 +37,8 @@ impl<'a> Route<'a> {
         Some(match path {
             ["", "applications", "new"] => Self::Start,
             ["", "v1", "application-registrations", "exchange"] => Self::Exchange,
+            ["", "oauth", "token"] => Self::Token,
+            ["", "oauth", "revoke"] => Self::RevokeToken,
             ["", "v1", "admin", "applications"] => Self::Apps,
             ["", "v1", "admin", "applications", id] => Self::App(id),
             ["", "v1", "admin", "application-registration-requests", id] => Self::Review(id),
@@ -73,7 +78,10 @@ pub(super) async fn handle(
     route: Route<'_>,
 ) -> Result<Reply, Failure> {
     let head = req.method() == Method::HEAD;
-    let post = matches!(route, Route::Start | Route::Exchange | Route::Consent(..));
+    let post = matches!(
+        route,
+        Route::Start | Route::Exchange | Route::Consent(..) | Route::Token | Route::RevokeToken
+    );
     if if post {
         req.method() != Method::POST
     } else {
@@ -92,7 +100,10 @@ pub(super) async fn handle(
         );
         return Ok(reply);
     }
-    if matches!(route, Route::Start | Route::Exchange) {
+    if matches!(
+        route,
+        Route::Start | Route::Exchange | Route::Token | Route::RevokeToken
+    ) {
         if !state
             .applications
             .lock()
@@ -108,10 +119,12 @@ pub(super) async fn handle(
             reply.headers_mut().insert(header::RETRY_AFTER, 1.into());
             return Ok(reply);
         }
-        return Ok(if matches!(route, Route::Start) {
-            start(req, state, id).await
-        } else {
-            exchange(req, state, id).await
+        return Ok(match route {
+            Route::Start => start(req, state, id).await,
+            Route::Exchange => exchange(req, state, id).await,
+            Route::Token => tokens::handle(req, state, id, false).await,
+            Route::RevokeToken => tokens::handle(req, state, id, true).await,
+            _ => unreachable!("not a public application endpoint"),
         });
     }
     let auth = credential(req.headers())?;
@@ -204,7 +217,10 @@ fn no_cache(mut reply: Reply) -> Reply {
     reply
 }
 
-async fn form(req: Request<Incoming>) -> Option<HashMap<String, String>> {
+async fn form(
+    req: Request<Incoming>,
+    allowed: &[&str],
+) -> Option<HashMap<String, Zeroizing<String>>> {
     if req.uri().query().is_some_and(|q| !q.is_empty())
         || req.headers().get_all(header::CONTENT_TYPE).iter().count() != 1
         || req.headers().get(header::CONTENT_TYPE)?.as_bytes()
@@ -212,7 +228,7 @@ async fn form(req: Request<Incoming>) -> Option<HashMap<String, String>> {
     {
         return None;
     }
-    let mut input = Vec::new();
+    let mut input = Zeroizing::new(Vec::new());
     let mut body = req.into_body();
     while let Some(frame) = body.frame().await {
         if let Ok(bytes) = frame.ok()?.into_data() {
@@ -228,12 +244,10 @@ async fn form(req: Request<Incoming>) -> Option<HashMap<String, String>> {
     }
     let mut fields = HashMap::new();
     for (key, value) in form_urlencoded::parse(&input) {
-        if !matches!(
-            key.as_ref(),
-            "manifest" | "state" | "code_challenge" | "code_challenge_method"
-        ) || fields
-            .insert(key.into_owned(), value.into_owned())
-            .is_some()
+        if !allowed.contains(&key.as_ref())
+            || fields
+                .insert(key.into_owned(), Zeroizing::new(value.into_owned()))
+                .is_some()
         {
             return None;
         }
@@ -258,7 +272,17 @@ async fn start(req: Request<Incoming>, state: State, id: &str) -> Reply {
             "registration unavailable",
         )
     };
-    let Some(mut fields) = form(req).await else {
+    let Some(mut fields) = form(
+        req,
+        &[
+            "manifest",
+            "state",
+            "code_challenge",
+            "code_challenge_method",
+        ],
+    )
+    .await
+    else {
         return invalid();
     };
     let (Some(manifest), Some(proof), Some(relay_state)) = (
@@ -268,7 +292,10 @@ async fn start(req: Request<Incoming>, state: State, id: &str) -> Reply {
     ) else {
         return invalid();
     };
-    if fields.get("code_challenge_method").map(String::as_str) != Some("S256")
+    if fields
+        .get("code_challenge_method")
+        .map(|value| value.as_str())
+        != Some("S256")
         || manifest.is_empty()
         || proof.is_empty()
         || relay_state.is_empty()

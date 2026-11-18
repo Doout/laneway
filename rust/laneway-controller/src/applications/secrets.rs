@@ -10,6 +10,7 @@ pub(super) enum Purpose {
     Client,
     Registration,
     Authorization,
+    Refresh,
 }
 
 impl Purpose {
@@ -27,6 +28,7 @@ impl Purpose {
                 "lnw_authorization_v1",
                 b"laneway-application-authorization_code-v1\0",
             ),
+            Self::Refresh => ("lnw_refresh_v1", b"laneway-application-refresh_token-v1\0"),
         }
     }
 
@@ -40,7 +42,7 @@ impl Purpose {
     }
 }
 
-fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
+pub(super) fn random<const N: usize>() -> Result<Zeroizing<[u8; N]>> {
     let mut out = Zeroizing::new([0; N]);
     getrandom::fill(out.as_mut_slice())
         .map_err(|_| anyhow::anyhow!("application randomness unavailable"))?;

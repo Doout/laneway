@@ -278,7 +278,7 @@ fn inventory(tx: &Transaction<'_>, network: Id, limit: i64) -> Result<Installati
     })
 }
 
-fn installation_scopes(tx: &Transaction<'_>, installation: Id) -> Result<Vec<String>> {
+pub(super) fn installation_scopes(tx: &Transaction<'_>, installation: Id) -> Result<Vec<String>> {
     Ok(tx.prepare("SELECT scope FROM application_installation_scopes WHERE installation_id=?1 ORDER BY scope")?
         .query_map([installation.as_bytes()],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?)
 }
