@@ -15,6 +15,8 @@ form_urlencoded = "1"
 getrandom.workspace = true
 hex.workspace = true
 http-body-util = "0.1"
+httpdate = "1"
+mime = "0.3"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rustls.workspace = true

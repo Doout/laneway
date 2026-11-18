@@ -13,8 +13,11 @@ use std::{
     },
 };
 use tokio::sync::Semaphore;
+mod login;
+mod mutations;
 
 const COOKIE: &str = "__Host-laneway_admin_session";
+const CSRF: &str = "__Host-laneway_admin_csrf";
 const REQUEST_ID: &str = "x-laneway-request-id";
 type Reply = Response<Full<Bytes>>;
 
@@ -24,15 +27,21 @@ pub struct State {
     queries: Arc<Semaphore>,
     root: Option<Arc<RootCredential>>,
     discovery: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
+    logins: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
+    passwords: Arc<laneway_controller::password::PasswordVerifier>,
 }
 impl State {
-    pub fn new(database: PathBuf, root: Option<RootCredential>) -> Self {
-        Self {
+    pub fn new(database: PathBuf, root: Option<RootCredential>) -> anyhow::Result<Self> {
+        Ok(Self {
             database: Arc::new(database),
             queries: Arc::new(Semaphore::new(8)),
             root: root.map(Arc::new),
             discovery: Default::default(),
-        }
+            logins: Arc::new(std::sync::Mutex::new(
+                crate::discovery_limit::Limiter::login(),
+            )),
+            passwords: Arc::new(laneway_controller::password::PasswordVerifier::new()?),
+        })
     }
 }
 
@@ -166,7 +175,11 @@ fn query_limit(raw: Option<&str>) -> Result<usize, ListError> {
     Ok(limit)
 }
 
-pub async fn handle<B>(req: Request<B>, state: State, peer: std::net::IpAddr) -> Reply {
+pub async fn handle(
+    req: Request<hyper::body::Incoming>,
+    state: State,
+    peer: std::net::IpAddr,
+) -> Reply {
     let head = req.method() == Method::HEAD;
     let mut random = [0; 16];
     if getrandom::fill(&mut random).is_err() {
@@ -183,8 +196,8 @@ pub async fn handle<B>(req: Request<B>, state: State, peer: std::net::IpAddr) ->
     }
 }
 
-async fn dispatch<B>(
-    req: Request<B>,
+async fn dispatch(
+    req: Request<hyper::body::Incoming>,
     state: State,
     id: &str,
     head: bool,
@@ -200,10 +213,13 @@ async fn dispatch<B>(
     }
     let pieces: Vec<_> = path.split('/').collect();
     let root_probe = path == "/v1/admin/auth/root";
+    let logout = path == "/v1/admin/auth/logout";
+    let rotate = path == "/v1/admin/auth/session/rotate";
+    let login = path == "/v1/admin/auth/login";
     let discovery = path == "/v1/admin/auth/state";
     let session_view = path == "/v1/admin/auth/session";
     let network = match pieces.as_slice() {
-        _ if root_probe || discovery || session_view => None,
+        _ if root_probe || discovery || session_view || logout || rotate || login => None,
         ["", "v1", "admin", "networks"] => None,
         ["", "v1", "admin", "networks", network, "nodes"] => Some(*network),
         _ => {
@@ -215,13 +231,28 @@ async fn dispatch<B>(
             ));
         }
     };
-    if !head && req.method() != Method::GET {
+    if (logout || rotate || login) && req.method() != Method::POST {
+        let mut r = Failure(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "ERROR_CODE_MALFORMED",
+            "method not allowed",
+            false,
+        )
+        .reply(id, head);
+        r.headers_mut()
+            .insert(header::ALLOW, "POST".parse().unwrap());
+        return Ok(r);
+    }
+    if !(logout || rotate || login || head) && req.method() != Method::GET {
         return Err(Failure(
             StatusCode::METHOD_NOT_ALLOWED,
             "ERROR_CODE_MALFORMED",
             "method not allowed",
             false,
         ));
+    }
+    if login {
+        return login::handle(req, state, id, peer).await;
     }
     if discovery {
         // This loopback listener does not authenticate relay client certificates.
@@ -251,14 +282,16 @@ async fn dispatch<B>(
         .transpose();
     let limit = query_limit(req.uri().query());
     // Keep this permit in the blocking closure even if the socket disappears.
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = Arc::clone(&state.queries)
+        .try_acquire_owned()
+        .map_err(|_| {
+            Failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "ERROR_CODE_RESOURCE_EXHAUSTED",
+                "controller busy",
+                true,
+            )
+        })?;
     if discovery {
         let v = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -275,8 +308,14 @@ async fn dispatch<B>(
         ));
     }
     let credential = credential(req.headers())?;
+    if logout || rotate {
+        let Credential::Session(token) = credential else {
+            return Err(AUTH);
+        };
+        return mutations::session(state, permit, id, token, req.headers(), rotate).await;
+    }
     let csrf = if session_view {
-        cookie(req.headers(), "__Host-laneway_admin_csrf")
+        cookie(req.headers(), CSRF)
             .ok()
             .flatten()
             .map(str::to_owned)

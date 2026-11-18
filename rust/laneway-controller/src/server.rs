@@ -48,7 +48,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         .enable_all()
         .build()?
         .block_on(serve(
-            super::http::State::new(database, root),
+            super::http::State::new(database, root)?,
             address,
             config,
         ))

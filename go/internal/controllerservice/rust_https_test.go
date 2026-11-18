@@ -291,4 +291,10 @@ func TestRustControllerHTTPS(t *testing.T) {
 		t.Fatal("logged-out session still had access")
 	}
 	pairRequest(sessionPath, []string{cookie}, http.Header{"Cookie": {adminauth.CSRFCookieName + "=" + csrf}}, 401)
+	testRustSessionMutations(t, f, goServer.URL, rustURL, func(server, path, token string, fields http.Header) (int, map[string]any, http.Header) {
+		r := request(t, server, "POST", path, []string{token}, false, fields)
+		return r.status, r.body, r.header
+	})
+	testRustLogoutRotationRace(t, f, client, goServer.URL, rustURL)
+	testRustBrowserLogin(t, f, client, goServer.URL, rustURL)
 }

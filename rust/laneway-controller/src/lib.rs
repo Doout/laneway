@@ -16,6 +16,8 @@ pub use bearer::{RootCredential, bearer_inventory};
 pub use browser::auth_state;
 mod nodes;
 pub mod password;
+mod session_lifecycle;
+pub use session_lifecycle::IssuedSession;
 mod sessions;
 pub use nodes::Node;
 pub use sessions::{ListError, SessionError, SessionReply, SessionStore};

@@ -122,7 +122,7 @@ laneway-healthcheck -tcp 127.0.0.1:9443 -tls-ca /lab/ca.crt -tls-server-name 127
 
 The listener requires loopback and TLS 1.3. It serves GET and HEAD for
 `/v1/admin/networks` and `/v1/admin/networks/{id}/nodes`, using sessions
-issued by Go. A successful browser request renews the session; the TLS probe
+issued by Go or Rust. A successful browser inventory request renews the session; the TLS probe
 only checks the handshake and server identity. Go-issued automation tokens
 can also read inventory: listing networks requires `network.list`; listing
 nodes requires `node.read` and access to that network. Reads recheck the
@@ -133,8 +133,8 @@ the serve command. Use a private file (e.g. mode 0600); never pass its
 contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
-contexts or when combined with a session cookie. Sign-in and management
-writes remain on Go. Do not route production traffic here.
+contexts or when combined with a session cookie. Bootstrap, recovery, and
+resource management writes still require Go. Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
 or `sign_in`. The lab listener limits that public lookup to 30 requests per
@@ -151,7 +151,16 @@ deadlines and request IDs; it also tests hostname verification in the probe.
 After warming the lab toolchain and Go module cache, run
 `bash integration/rust-lab/controller-image.sh` to repeat the gate using the
 scratch image's binaries as UID 65532 with external networking disabled.
-The Rust password verifier accepts the Go Argon2id format at its fixed
-parameters and bounds concurrent memory-hard checks. It is not an HTTP
-login endpoint. Next: same-origin sign-in, session issuance and logout,
-including durable audit, throttling and rollback tests.
+`POST /v1/admin/auth/login` verifies existing Go Argon2id credentials. It
+requires a same-origin HTTPS request, rate-limits attempts, bounds password
+verification to two concurrent checks, and sets the session and CSRF cookies.
+`POST /v1/admin/auth/session/rotate` replaces both cookies without extending
+the absolute deadline. `POST /v1/admin/auth/logout` revokes the session and its
+successors, even if the submitted cookies belong to a rotated predecessor.
+Both mutations require the CSRF cookie and header as well as same-origin checks.
+
+The HTTPS fixture signs in on one implementation and restores the session on
+the other, and tests rotation and logout in both directions. It injects audit
+failures to verify that failed mutations do not create or revoke sessions.
+Next: port the authenticated network management operations, preserving role
+checks, network scope, configuration epochs and audit records.

@@ -2,14 +2,11 @@
 //! presentation; they never authorize an operation on their own.
 use crate::{SessionError, check_snapshot, open_existing};
 use anyhow::{Result, ensure};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use laneway_protocol::Id;
 use rusqlite::{OpenFlags, Transaction};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 use subtle::ConstantTimeEq;
-use zeroize::Zeroizing;
 
 pub fn auth_state(database: &Path) -> Result<&'static str> {
     let mut db = open_existing(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -67,17 +64,9 @@ pub(super) fn session_view(
     csrf: Option<&str>,
 ) -> Result<Value> {
     let csrf = csrf.ok_or(SessionError::Invalid)?;
-    let mut raw = Zeroizing::new([0u8; 32]);
-    ensure!(
-        csrf.len() == 43 && URL_SAFE_NO_PAD.decode_slice(csrf, &mut *raw) == Ok(32),
-        SessionError::Invalid
-    );
+    let got = crate::sessions::csrf_digest(csrf)?;
     let (username,role,expected,lifetime):(String,String,[u8;32],i64) =
       tx.query_row("SELECT p.username,p.role,s.csrf_hash,s.idle_lifetime_seconds FROM administrator_principals p JOIN administrator_sessions s ON s.principal_id=p.id WHERE p.id=?1 AND s.id=?2",(principal.as_bytes(),session.as_bytes()),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-    let got = Sha256::new()
-        .chain_update(b"laneway-admin-csrf-v1\0")
-        .chain_update(csrf.as_bytes())
-        .finalize();
     ensure!(bool::from(expected.ct_eq(&got)), SessionError::Invalid);
     let rank = match role.as_str() {
         "owner" => 1,

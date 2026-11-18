@@ -39,7 +39,7 @@ pub struct SessionReply<T = InventoryList> {
 /// Opens only an existing database. Nothing here can create a principal or
 /// grant a permission. Session-owned operations must not use local inventory.
 pub struct SessionStore {
-    db: Connection,
+    pub(crate) db: Connection,
 }
 
 struct StoredSession {
@@ -70,7 +70,7 @@ impl SessionStore {
         token: &str,
         query: Result<(Option<Id>, usize), ListError>,
     ) -> Result<SessionReply> {
-        self.with_session(token, |tx, principal, _, all| {
+        self.with_session(token, true, |tx, principal, _, all, _| {
             // Match Go management middleware: authenticate before reporting a
             // malformed resource identifier or list limit, without touching it.
             let (network, limit) = query?;
@@ -101,15 +101,16 @@ impl SessionStore {
         token: &str,
         csrf: Option<&str>,
     ) -> Result<SessionReply<serde_json::Value>> {
-        self.with_session(token, |tx, principal, session, all| {
+        self.with_session(token, true, |tx, principal, session, all, _| {
             crate::browser::session_view(tx, principal, session, all, csrf)
         })
     }
 
-    fn with_session<T>(
+    pub(crate) fn with_session<T>(
         &mut self,
         token: &str,
-        read: impl FnOnce(&Transaction<'_>, Id, Id, bool) -> Result<T>,
+        touch: bool,
+        read: impl FnOnce(&Transaction<'_>, Id, Id, bool, i64) -> Result<T>,
     ) -> Result<SessionReply<T>> {
         let digest = session_digest(token)?;
         // Acquire the write lock before reading the clock or permissions. A
@@ -161,10 +162,10 @@ impl SessionStore {
             tx.commit()?;
             return Err(SessionError::Invalid.into());
         };
-        let list = read(&tx, principal, session_id, all)?;
+        let list = read(&tx, principal, session_id, all, now)?;
         // Only a successful authorized read can extend the idle deadline.
-        let idle = tx
-            .query_row(
+        let idle = if touch {
+            tx.query_row(
                 "UPDATE administrator_sessions SET last_seen_at=?1,
                  idle_expires_at=min(?1+idle_lifetime_seconds,absolute_expires_at)
                  WHERE id=?2 AND revoked_at IS NULL RETURNING idle_expires_at",
@@ -172,7 +173,10 @@ impl SessionStore {
                 |r| r.get(0),
             )
             .optional()?
-            .ok_or(SessionError::Invalid)?;
+            .ok_or(SessionError::Invalid)?
+        } else {
+            idle
+        };
         tx.commit()?;
         Ok(SessionReply {
             list,
@@ -183,13 +187,22 @@ impl SessionStore {
     }
 }
 
-fn session_digest(token: &str) -> Result<[u8; 32], SessionError> {
-    let mut decoded = [0; 32];
-    if token.len() != 43 || URL_SAFE_NO_PAD.decode_slice(token, &mut decoded) != Ok(decoded.len()) {
+pub(crate) fn session_digest(token: &str) -> Result<[u8; 32], SessionError> {
+    secret_digest(b"laneway-admin-session-v1\0", token)
+}
+
+pub(crate) fn csrf_digest(token: &str) -> Result<[u8; 32], SessionError> {
+    secret_digest(b"laneway-admin-csrf-v1\0", token)
+}
+
+fn secret_digest(prefix: &[u8], token: &str) -> Result<[u8; 32], SessionError> {
+    let mut decoded = zeroize::Zeroizing::new([0; 32]);
+    if token.len() != 43 || URL_SAFE_NO_PAD.decode_slice(token, &mut *decoded) != Ok(decoded.len())
+    {
         return Err(SessionError::Invalid);
     }
     Ok(Sha256::new()
-        .chain_update(b"laneway-admin-session-v1\0")
+        .chain_update(prefix)
         .chain_update(token.as_bytes())
         .finalize()
         .into())

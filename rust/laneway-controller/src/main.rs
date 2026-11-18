@@ -5,6 +5,7 @@ use std::{env, io, path::Path};
 
 mod discovery_limit;
 mod http;
+mod origin;
 mod server;
 
 fn main() -> Result<()> {

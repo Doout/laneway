@@ -175,10 +175,10 @@ mod tests {
         db.execute_batch("CREATE TABLE schema_versions(version INTEGER PRIMARY KEY);
             WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<18)
             INSERT INTO schema_versions SELECT v FROM n;
-            CREATE TABLE administrator_principals(id BLOB, username TEXT,enabled INTEGER, disabled_at INTEGER);
+            CREATE TABLE administrator_principals(id BLOB, username TEXT,enabled INTEGER, disabled_at INTEGER,all_networks INTEGER);
             CREATE TABLE administrator_credentials(id BLOB,principal_id BLOB,secret_hash TEXT,credential_type TEXT,revoked_at INTEGER)").unwrap();
         db.execute(
-            "INSERT INTO administrator_principals VALUES(?1,'owner',1,NULL)",
+            "INSERT INTO administrator_principals VALUES(?1,'owner',1,NULL,1)",
             [[1u8; 16]],
         )
         .unwrap();
@@ -207,6 +207,15 @@ mod tests {
         )
         .unwrap();
         assert!(verify("owner").await.unwrap().is_none());
+        let error = crate::SessionStore::open(&path)
+            .unwrap()
+            .issue_after_password(candidate)
+            .err()
+            .expect("disablement must invalidate the verified candidate");
+        assert!(matches!(
+            error.downcast_ref::<crate::SessionError>(),
+            Some(crate::SessionError::Invalid)
+        ));
         assert!(verify("unknown").await.unwrap().is_none());
     }
 }
