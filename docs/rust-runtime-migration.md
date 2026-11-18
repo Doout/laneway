@@ -301,6 +301,23 @@ tunnel, the container's traffic was rejected even though the host could still
 reach the destination. The Rust image also recovered persisted state across
 restart through its Unix socket.
 
+On a separate rootful Docker Engine 29.10 ARM64 VM, Docker installed and
+enabled the Rust managed plugin, rejected an ungranted network, and connected
+a running container through a test tunnel. The existing container lost the
+path at grant expiry, regained it after renewal, and kept it through a plugin
+disable/enable cycle. The Go package also passed the shared managed lifecycle
+checks. Teardown removed the test bridge, policy rule, and firewall. The Rust
+packet test adds and removes only the two host firewall rules needed for its
+ICMP probe; Docker's default forwarding policy stays unchanged.
+
+Repeat on a disposable rootful Linux Docker host with `iproute2`, `iptables`,
+`iputils-ping`, and `nftables`:
+
+```sh
+sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=rust \
+  ./integration/docker-plugin.sh
+```
+
 ## Linux node image
 
 Build the opt-in `node` target and check the packaged entry point after the
