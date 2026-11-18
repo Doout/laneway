@@ -1,5 +1,6 @@
-//! Root-owned, opt-in updater for the standard Linux Rust node systemd unit.
+//! Root-owned, opt-in updater for Linux Rust nodes and Docker Connectors.
 mod activate;
+mod connector;
 mod journal;
 mod release;
 #[cfg(test)]
@@ -10,7 +11,7 @@ use self::{
     journal::{Entry, Journal},
 };
 use crate::{
-    Config,
+    Config, TlsConfig,
     controller::{Client, ClientOptions},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -41,6 +42,7 @@ struct Settings {
     #[serde(default)]
     enabled: bool,
     channel: Channel,
+    connector: Option<connector::Settings>,
 }
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -65,6 +67,8 @@ struct LiveStatus {
     product_version: String,
     running: bool,
     actor: String,
+    #[serde(default)]
+    interface: String,
     controller: ControlHealth,
 }
 
@@ -186,31 +190,143 @@ impl Control for Client {
 }
 
 async fn client(config: &Config, identity: &RuntimeIdentity) -> Result<Client> {
-    let (network, node) = identity.checked()?;
-    // The daemon may renew its own leaf, but it cannot choose who can issue
-    // the controller's certificate or schedule a release for this host.
-    journal::protect_parents(&config.tls.ca)?;
-    let _ = journal::root_file(&config.tls.ca, 0o022, 1 << 20)
-        .context("the controller trust anchor must be protected by root")?;
-    crate::tls::validate_local(&config.tls, network, node)
-        .context("local node credential does not match its runtime identity")?;
-    let controller = config
+    let ctrl = config
         .controller
         .as_ref()
         .context("managed updates need authenticated controller authority")?;
+    pinned_client(
+        &config.tls,
+        identity,
+        &ctrl.endpoint,
+        &ctrl.server_name,
+        ctrl.service_id.parse()?,
+        ctrl.timeout.min(Duration::from_secs(20)),
+    )
+    .await
+}
+
+async fn pinned_client(
+    tls: &TlsConfig,
+    identity: &RuntimeIdentity,
+    endpoint: &str,
+    server_name: &str,
+    service: Id,
+    deadline: Duration,
+) -> Result<Client> {
+    let (network, node) = identity.checked()?;
+    // The daemon may renew its own leaf, but it cannot choose who can issue
+    // the controller's certificate or schedule a release for this host.
+    journal::protect_parents(&tls.ca)?;
+    let _ = journal::root_file(&tls.ca, 0o022, 1 << 20)
+        .context("the controller trust anchor must be protected by root")?;
+    crate::tls::validate_local(tls, network, node)
+        .context("local node credential does not match its runtime identity")?;
     Client::new(ClientOptions {
-        endpoint: controller.endpoint.clone(),
+        endpoint: endpoint.into(),
         quic_endpoint: None,
-        server_name: controller.server_name.clone(),
+        server_name: server_name.into(),
         network,
-        service: controller.service_id.parse()?,
-        certificate: config.tls.certificate.clone(),
-        private_key: config.tls.private_key.clone(),
-        ca: config.tls.ca.clone(),
-        timeout: controller.timeout.min(Duration::from_secs(20)),
+        service,
+        certificate: tls.certificate.clone(),
+        private_key: tls.private_key.clone(),
+        ca: tls.ca.clone(),
+        timeout: deadline,
         exit_generation: None,
     })
     .await
+}
+
+enum Host {
+    Node {
+        config: Box<Config>,
+        runtime: SystemNode,
+        install: Install,
+    },
+    Connector(connector::Connector),
+}
+
+impl Host {
+    fn for_settings(settings: Option<connector::Settings>) -> Result<Self> {
+        if let Some(settings) = settings {
+            return Ok(Self::Connector(connector::Connector::open(settings)?));
+        }
+        for path in [NODE_CONFIG, BINARY].map(Path::new) {
+            journal::protect_parents(path)?;
+        }
+        let config: Config = toml::from_str(std::str::from_utf8(&journal::root_file(
+            Path::new(NODE_CONFIG),
+            0o022,
+            1 << 20,
+        )?)?)?;
+        config.validate()?;
+        let runtime = SystemNode::new(&config.socket_path)?;
+        let install = Install::new(Path::new(BINARY));
+        install.ready()?;
+        Ok(Self::Node {
+            config: Box::new(config),
+            runtime,
+            install,
+        })
+    }
+
+    fn component(&self) -> Component {
+        match self {
+            Self::Node { .. } => Component::Node,
+            Self::Connector(_) => Component::Connector,
+        }
+    }
+
+    async fn status(&self) -> Result<LiveStatus> {
+        match self {
+            Self::Node {
+                config, runtime, ..
+            } => {
+                let value = runtime.status().await?;
+                ensure!(
+                    value.identity.checked()? == config.ids()?,
+                    "node status does not match the configured network and node"
+                );
+                Ok(value)
+            }
+            Self::Connector(connector) => connector.status().await,
+        }
+    }
+
+    async fn client(&self, identity: &RuntimeIdentity, journal: &Journal) -> Result<Client> {
+        match self {
+            Self::Node { config, .. } => client(config, identity).await,
+            Self::Connector(connector) => connector.client(identity, journal.root()).await,
+        }
+    }
+
+    async fn update(
+        &self,
+        directory: &Path,
+        before: &LiveStatus,
+        tag: &str,
+        id: Id,
+    ) -> Result<Option<Activated>> {
+        let preparation_error = match self {
+            Self::Node {
+                install, runtime, ..
+            } => match release::obtain(tag, directory).await {
+                Ok(binary) => return Ok(Some(install.apply(&binary, runtime, before, tag).await?)),
+                Err(err) => err,
+            },
+            Self::Connector(connector) => match release::connector_image(tag, directory).await {
+                Ok(reference) => match connector.prepare(&reference).await {
+                    Ok(()) => return Ok(Some(connector.apply(&reference, before, tag, id).await?)),
+                    Err(err) => err,
+                },
+                Err(err) => err,
+            },
+        };
+        // These failures precede any stop/restart of the running daemon.
+        eprintln!(
+            "release verification or preparation failed; serving runtime unchanged: {preparation_error}"
+        );
+        Ok(None)
+    }
 }
 
 /// Run one timer iteration, or reconcile an explicitly inspected local claim.
@@ -231,7 +347,7 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<bool> {
         )),
         _ => bail!("usage: laneway-update-rs [--reconcile ID TARGET_VERSION PREVIOUS_VERSION]"),
     };
-    for path in [CONFIG, NODE_CONFIG, STATE, BINARY].map(Path::new) {
+    for path in [CONFIG, STATE].map(Path::new) {
         journal::protect_parents(path)?;
     }
     let settings: Settings = toml::from_str(std::str::from_utf8(&journal::root_file(
@@ -242,32 +358,24 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<bool> {
     if !settings.enabled && reconcile.is_none() {
         return Ok(true);
     }
-    let config: Config = toml::from_str(std::str::from_utf8(&journal::root_file(
-        Path::new(NODE_CONFIG),
-        0o022,
-        1 << 20,
-    )?)?)?;
-    config.validate()?;
-    let (network, node) = config.ids()?;
-    let identity = RuntimeIdentity {
-        network: network.to_string(),
-        node: node.to_string(),
+    let journal = if let Some(connector) = &settings.connector {
+        ensure!(
+            connector::valid_name(&connector.container),
+            "invalid managed Connector name"
+        );
+        Journal::open_named(Path::new(STATE), Some(&connector.container))?
+    } else {
+        Journal::open(Path::new(STATE))?
     };
-    let runtime = SystemNode::new(&config.socket_path)?;
-    let journal = Journal::open(Path::new(STATE))?;
-    let install = Install::new(Path::new(BINARY));
-    install.ready()?;
+    let host = Host::for_settings(settings.connector)?;
     let pending = journal.read()?;
-    let status = runtime.status().await?;
-    ensure!(
-        status.identity == identity,
-        "node status does not match the configured network and node"
-    );
+    let status = host.status().await?;
+    let identity = status.identity.clone();
     if let Some((id, target, previous)) = reconcile {
         let (report, bound) = reconcile_report(pending, &status, id, &target, &previous)?;
         // Build a new pinned connection immediately before the ACK, as the
         // restarted daemon may have renewed its credential.
-        let controller = client(&config, &identity).await?;
+        let controller = host.client(&identity, &journal).await?;
         if !bound {
             // A lost claim response did not establish the supplied ID.
             // Keep the original intent on a rejected or lost ACK so a
@@ -284,19 +392,31 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<bool> {
         return retry_terminal(&journal, &controller, entry, &status).await;
     }
     if let Some(entry) = pending {
-        return retry_terminal(&journal, &client(&config, &identity).await?, entry, &status).await;
+        return retry_terminal(
+            &journal,
+            &host.client(&identity, &journal).await?,
+            entry,
+            &status,
+        )
+        .await;
     }
     let previous = status.version()?;
     ensure!(
-        status.healthy(&identity, &previous)?
-            && installed_version(Path::new(BINARY)).await? == previous,
-        "the installed Rust node must have a current authenticated controller lease before claiming"
+        status.healthy(&identity, &previous)?,
+        "the running node must have a current authenticated controller lease before claiming"
     );
+    if matches!(host, Host::Node { .. }) {
+        ensure!(
+            installed_version(Path::new(BINARY)).await? == previous,
+            "installed Rust binary differs from the live node"
+        );
+    }
     let Some((id, tag)) = claim(
         &journal,
-        &client(&config, &identity).await?,
+        &host.client(&identity, &journal).await?,
         &identity,
         &previous,
+        host.component(),
         settings.channel,
     )
     .await?
@@ -314,42 +434,35 @@ pub async fn run(args: impl IntoIterator<Item = String>) -> Result<bool> {
         let directory = tempfile::Builder::new()
             .prefix("release-")
             .tempdir_in(journal.root())?;
-        match release::obtain(&tag, directory.path()).await {
-            Ok(source) => match install.apply(&source, &runtime, &status, &tag).await? {
-                Activated::Healthy => evidence(
-                    &identity,
-                    Outcome::Healthy,
-                    &tag,
-                    "restarted runtime identity and authenticated controller lease verified",
-                ),
-                Activated::RolledBack => evidence(
-                    &identity,
-                    Outcome::RolledBack,
-                    &previous,
-                    "previous release restarted with a valid controller lease",
-                ),
-            },
-            Err(err) => {
-                eprintln!(
-                    "release verification or download failed; node executable was not changed: {err}"
-                );
-                evidence(
-                    &identity,
-                    Outcome::Failed,
-                    "",
-                    "release download or verification failed before activation",
-                )
-            }
+        match host.update(directory.path(), &status, &tag, id).await? {
+            Some(Activated::Healthy) => evidence(
+                &identity,
+                Outcome::Healthy,
+                &tag,
+                "restarted runtime identity and authenticated controller lease verified",
+            ),
+            Some(Activated::RolledBack) => evidence(
+                &identity,
+                Outcome::RolledBack,
+                &previous,
+                "previous release restarted with a valid controller lease",
+            ),
+            None => evidence(
+                &identity,
+                Outcome::Failed,
+                "",
+                "release download, verification or preflight failed before activation",
+            ),
         }
     };
     // Durable terminal evidence comes before connecting to the server. A
     // failed ACK or credential read may only retry evidence, never activation.
     let entry = terminal(&identity, id, report);
     journal.save(&entry)?;
-    let updated = runtime.status().await?;
+    let updated = host.status().await?;
     retry_terminal(
         &journal,
-        &client(&config, &identity).await?,
+        &host.client(&identity, &journal).await?,
         entry,
         &updated,
     )
@@ -361,6 +474,7 @@ async fn claim(
     controller: &impl Control,
     identity: &RuntimeIdentity,
     previous: &str,
+    component: Component,
     channel: Channel,
 ) -> Result<Option<(Id, String)>> {
     journal.save(&Entry::Intent {
@@ -372,7 +486,7 @@ async fn claim(
             runtime_node_id: identity.node.clone(),
             runtime_network_id: identity.network.clone(),
             current_version: previous.into(),
-            component: Component::Node,
+            component: component.clone(),
             channel: channel.clone(),
         })
         .await
@@ -382,7 +496,7 @@ async fn claim(
         return Ok(None);
     };
     ensure!(
-        assignment.component == Component::Node
+        assignment.component == component
             && assignment.channel == channel
             && valid_version(&assignment.version),
         "assignment does not match the configured release lane"

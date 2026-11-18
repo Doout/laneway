@@ -158,6 +158,10 @@ jobs:
           - name: connector
             image: ghcr.io/doout/lane-edge
             dockerfile: deploy/containers/Dockerfile.connector
+          - name: rust-connector
+            image: ghcr.io/doout/lane-edge-rust
+            dockerfile: deploy/containers/Dockerfile.connector
+            target: rust-connector
           - name: exit-node
             image: ghcr.io/doout/laneway-exit-node
             dockerfile: deploy/containers/Dockerfile.exit-node

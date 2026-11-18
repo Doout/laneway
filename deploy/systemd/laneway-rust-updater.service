@@ -1,5 +1,5 @@
 [Unit]
-Description=Laneway Rust node managed update
+Description=Laneway Rust node or Connector managed update
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/laneway/managed-updates-rust.toml
@@ -7,13 +7,13 @@ ConditionPathExists=/etc/laneway/managed-updates-rust.toml
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/laneway-update-rs
-TimeoutStartSec=15min
+TimeoutStartSec=20min
 User=root
 Group=root
 UMask=0077
 StateDirectory=laneway-updater
 StateDirectoryMode=0700
-ReadWritePaths=/usr/local/sbin
+ReadWritePaths=/usr/local/sbin -/run/lock
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes

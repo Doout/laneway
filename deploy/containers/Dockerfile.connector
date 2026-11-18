@@ -31,7 +31,8 @@ WORKDIR /src
 COPY rust/ ./rust/
 COPY api/ ./api/
 RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
-    cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs -p laneway-healthcheck
+    cargo build --locked --release --manifest-path rust/Cargo.toml \
+      -p lanewayd-rs --bin lanewayd-rs -p laneway-healthcheck --bin laneway-healthcheck
 
 FROM scratch AS rust-connector
 COPY --from=rust-installer /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

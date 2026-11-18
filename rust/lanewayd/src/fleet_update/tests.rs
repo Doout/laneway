@@ -18,6 +18,7 @@ fn status() -> LiveStatus {
         product_version: V1.into(),
         running: true,
         actor: "node".into(),
+        interface: "lane0".into(),
         controller: ControlHealth {
             certificate_presented_serial: "caf0".into(),
             certificate_not_after_unix_seconds: u64::MAX,
@@ -31,6 +32,8 @@ fn status() -> LiveStatus {
 #[derive(Default)]
 struct Upstream {
     lose_claim: bool,
+    requested: Option<Component>,
+    assigned: Option<Component>,
     reject_ack: Cell<bool>,
     polls: Cell<usize>,
     acknowledgements: Cell<usize>,
@@ -41,13 +44,17 @@ impl Control for Upstream {
         self.polls.set(self.polls.get() + 1);
         assert_eq!(request.current_version, V1);
         assert_eq!(request.runtime_node_id, id(2).to_string());
+        assert_eq!(
+            request.component,
+            self.requested.clone().unwrap_or(Component::Node)
+        );
         if self.lose_claim {
             bail!("controller committed the claim but the connection was lost");
         }
         Ok(Some(Assignment {
             id: id(3).to_string(),
             version: V2.into(),
-            component: Component::Node,
+            component: self.assigned.clone().unwrap_or(Component::Node),
             channel: Channel::Manual,
         }))
     }
@@ -62,6 +69,62 @@ impl Control for Upstream {
 }
 
 #[tokio::test]
+async fn connector_uses_its_own_claim_lane_and_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("private");
+    let name = "laneway-connector-lab";
+    let before = status();
+    let connector = Journal::open_named(&path, Some(name)).unwrap();
+    let wrong = Upstream {
+        requested: Some(Component::Connector),
+        ..Upstream::default()
+    };
+    assert!(
+        claim(
+            &connector,
+            &wrong,
+            &before.identity,
+            V1,
+            Component::Connector,
+            Channel::Manual
+        )
+        .await
+        .is_err()
+    );
+    assert!(matches!(
+        connector.read().unwrap(),
+        Some(Entry::Intent { .. })
+    ));
+    assert_eq!(wrong.acknowledgements.get(), 0);
+    drop(connector);
+    assert!(Journal::open(&path).unwrap().read().unwrap().is_none());
+
+    let connector = Journal::open_named(&path, Some(name)).unwrap();
+    assert!(connector.read().unwrap().is_some());
+    // Independently model a fresh operator-configured Connector.
+    let other = Journal::open_named(&dir.path().join("other"), Some(name)).unwrap();
+    let correct = Upstream {
+        requested: Some(Component::Connector),
+        assigned: Some(Component::Connector),
+        ..Upstream::default()
+    };
+    assert_eq!(
+        claim(
+            &other,
+            &correct,
+            &before.identity,
+            V1,
+            Component::Connector,
+            Channel::Manual
+        )
+        .await
+        .unwrap()
+        .map(|x| x.0),
+        Some(id(3))
+    );
+}
+
+#[tokio::test]
 async fn a_lost_claim_response_survives_a_new_timer_run() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("private");
@@ -73,9 +136,16 @@ async fn a_lost_claim_response_survives_a_new_timer_run() {
         ..Upstream::default()
     };
     assert!(
-        claim(&first, &upstream, &original.identity, V1, Channel::Manual)
-            .await
-            .is_err()
+        claim(
+            &first,
+            &upstream,
+            &original.identity,
+            V1,
+            Component::Node,
+            Channel::Manual
+        )
+        .await
+        .is_err()
     );
     drop(first);
     let journal = Journal::open(&path).unwrap();
@@ -100,10 +170,17 @@ async fn terminal_retry_requires_the_same_live_runtime_and_never_reclaims() {
     let journal = Journal::open(&dir.path().join("private")).unwrap();
     let upstream = Upstream::default();
     let before = status();
-    let (assigned, version) = claim(&journal, &upstream, &before.identity, V1, Channel::Manual)
-        .await
-        .unwrap()
-        .unwrap();
+    let (assigned, version) = claim(
+        &journal,
+        &upstream,
+        &before.identity,
+        V1,
+        Component::Node,
+        Channel::Manual,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!((assigned, version.as_str()), (id(3), V2));
     assert!(matches!(
         journal.read().unwrap(),

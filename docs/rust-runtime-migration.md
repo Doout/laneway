@@ -1082,8 +1082,26 @@ root-owned and not writable by the daemon. The updater uses the existing pinned 
 at `/usr/local/libexec/laneway/cosign-v3.1.3`, requires the exact tagged
 `Doout/laneway` release workflow identity, and extracts only
 `laneway/sbin/lanewayd-rs` after checking the archive's signed digest.
-It does not update Go nodes, standalone exit profiles, or containerized
-connectors, and does not change installed config, CA, or private keys.
+It does not update Go nodes or standalone exit profiles, and does not change
+installed config, CA, or private keys.
+
+To manage an already-cut-over Docker Connector instead, use the optional
+`[connector]` settings in the example. Supply the container name, controller
+origin and TLS name, network and controller IDs, and a separately protected
+CA. Only the standard non-root, read-only Rust Connector with
+`<container>-state:/var/lib/laneway` is accepted. The worker does not re-enroll
+or copy setup-token settings. It uses the current node certificate from the
+selected container, not shared administrator or registry credentials.
+
+The release workflow publishes `ghcr.io/doout/lane-edge-rust` separately
+from the Go `lane-edge` image. A Connector update verifies both the signed
+release manifest and the native image's digest signature. It runs an offline,
+read-only state preflight before stopping the old container. After a swap,
+success requires a fresh daemon instance, the same network and node IDs,
+the requested version, and a current authenticated controller lease.
+Rollback restarts the same previous container and volume. An ambiguous Docker
+operation retains the controller claim and the preserved container for
+inspection; it never deletes a volume or a container by guessed name.
 
 Install the updater binary and its service and timer from a verified package.
 Copy `examples/managed-updates-rust.toml` to
@@ -1095,7 +1113,8 @@ upgrading the controller does not enable the timer.
 
 If a request or activation is interrupted, the updater does not claim again or
 reinstall. Stop the timer, inspect the durable `rust-journal.json` under
-`/var/lib/laneway-updater`, and verify the runtime's authenticated controller
+`/var/lib/laneway-updater` (`rust-<container>-journal.json` for Connectors),
+and verify the runtime's authenticated controller
 lease. A terminal ACK can be retried by rerunning the worker. For unresolved
 claims, inspect the installed executable and any
 `/usr/local/sbin/.lanewayd-rs-update-{previous,next}` before moving those
@@ -1115,6 +1134,21 @@ it verifies opt-in, credential binding, and terminal acknowledgment without
 needing release network access. Local activation tests exercise atomic
 replacement and rollback separately; neither test substitutes for a signed
 update and bad-release rollback against a running systemd service.
+
+The Connector transaction has a separate Docker gate. Give it a local native
+Connector image built with a numeric release version and the local daemon
+socket path as seen by the test VM. Use a disposable Docker lab:
+
+```sh
+bash integration/rust-lab/connector-managed-updater.sh \
+  lane-edge:rust-migration-lab /var/run/docker.sock
+```
+
+It performs an actual replacement and forces a failed version check, then
+verifies that the identical previous container is serving again and that
+certificate, key, and configuration bytes in the state volume did not
+change. The gate uses local images without downloading from a registry;
+it does not verify publication of a signed Rust Connector release.
 
 ### Recover an expired Rust node credential (lab only)
 

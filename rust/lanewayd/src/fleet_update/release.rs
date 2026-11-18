@@ -22,18 +22,76 @@ const MAX_ARCHIVE: usize = 256 << 20;
 const MAX_EXPANDED: u64 = 512 << 20;
 const MAX_BINARY: u64 = 128 << 20;
 const MEMBER: &[u8] = b"laneway/sbin/lanewayd-rs";
+const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
 
 pub(super) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
-    ensure!(
-        stable_tag(tag)? == tag,
-        "assignment must pin an exact stable tag"
-    );
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         _ => bail!("unsupported managed Linux node architecture"),
     };
     let name = format!("laneway_linux_{arch}.tar.gz");
+    let (client, manifest) = signed_manifest(tag, directory).await?;
+    let checksum = checksum_for(&manifest, &name)?;
+    let archive = directory.join(&name);
+    download(&client, tag, &name, &archive, MAX_ARCHIVE, 180).await?;
+    let binary = directory.join("verified-lanewayd-rs");
+    let output = binary.clone();
+    tokio::task::spawn_blocking(move || verified_extract(File::open(archive)?, &checksum, &output))
+        .await??;
+    ensure!(
+        super::installed_version(&binary).await? == tag,
+        "verified daemon reports the wrong release tag"
+    );
+    Ok(binary)
+}
+
+/// The same release must authenticate the manifest and the pinned OCI subject.
+pub(super) async fn connector_image(tag: &str, directory: &Path) -> Result<String> {
+    let (client, manifest) = signed_manifest(tag, directory).await?;
+    const ASSET: &str = "image-digests.txt";
+    let expected = checksum_for(&manifest, ASSET)?;
+    let path = directory.join(ASSET);
+    download(&client, tag, ASSET, &path, MAX_CHECKSUMS, 30).await?;
+    let bytes = fs::read(path)?;
+    let actual: [u8; 32] = Sha256::digest(&bytes).into();
+    ensure!(
+        actual == expected,
+        "connector image manifest checksum mismatch"
+    );
+    let reference = connector_subject(std::str::from_utf8(&bytes)?)?;
+    verify(tag, directory, "verify", &[], Path::new(&reference))
+        .await
+        .context("Rust connector image signature verification failed")?;
+    Ok(reference)
+}
+
+fn connector_subject(manifest: &str) -> Result<String> {
+    let mut matches = manifest.lines().filter(|line| {
+        line.split_once('@')
+            .is_some_and(|(repository, _)| repository == CONNECTOR_IMAGE)
+    });
+    let line = matches
+        .next()
+        .context("release has no Rust connector image")?;
+    let digest = line
+        .strip_prefix(CONNECTOR_IMAGE)
+        .and_then(|s| s.strip_prefix("@sha256:"));
+    ensure!(
+        matches.next().is_none()
+            && digest.is_some_and(|d| d.len() == 64
+                && d.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+        "release has no unique canonical Rust connector digest"
+    );
+    Ok(line.into())
+}
+
+async fn signed_manifest(tag: &str, directory: &Path) -> Result<(reqwest::Client, String)> {
+    ensure!(
+        stable_tag(tag)? == tag,
+        "assignment must pin an exact stable tag"
+    );
     let client = reqwest::Client::builder()
         .https_only(true)
         .no_proxy()
@@ -70,6 +128,25 @@ pub(super) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
         30,
     )
     .await?;
+    verify(
+        tag,
+        directory,
+        "verify-blob",
+        &["--bundle".as_ref(), &bundle],
+        &manifest,
+    )
+    .await
+    .context("release signature verification failed")?;
+    Ok((client, fs::read_to_string(manifest)?))
+}
+
+async fn verify(
+    tag: &str,
+    directory: &Path,
+    subcommand: &str,
+    args: &[&Path],
+    subject: &Path,
+) -> Result<()> {
     // The installed verifier is selected by the operator, not by the plan.
     journal::protect_parents(Path::new(COSIGN))?;
     let verifier = fs::symlink_metadata(COSIGN)?;
@@ -83,30 +160,16 @@ pub(super) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
     let mut command = clean_command(COSIGN);
     command.env("TMPDIR", directory);
     command
-        .args(["verify-blob", "--bundle"])
-        .arg(&bundle)
+        .arg(subcommand)
+        .args(args)
         .args([
             "--certificate-identity",
             &format!("{WORKFLOW}/{tag}"),
             "--certificate-oidc-issuer",
             ISSUER,
         ])
-        .arg(&manifest);
-    checked_command(command, Duration::from_secs(60))
-        .await
-        .context("release signature verification failed")?;
-    let checksum = checksum_for(&fs::read_to_string(&manifest)?, &name)?;
-    let archive = directory.join(&name);
-    download(&client, tag, &name, &archive, MAX_ARCHIVE, 180).await?;
-    let binary = directory.join("verified-lanewayd-rs");
-    let output = binary.clone();
-    tokio::task::spawn_blocking(move || verified_extract(File::open(archive)?, &checksum, &output))
-        .await??;
-    ensure!(
-        super::installed_version(&binary).await? == tag,
-        "verified daemon reports the wrong release tag"
-    );
-    Ok(binary)
+        .arg(subject);
+    checked_command(command, Duration::from_secs(60)).await
 }
 
 fn verified_extract(
@@ -241,6 +304,18 @@ fn extract(source: impl Read, output: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
+
+    #[test]
+    fn rust_connector_manifest_never_selects_the_go_image() {
+        let go = format!("ghcr.io/doout/lane-edge@sha256:{}", "a".repeat(64));
+        let native = format!("{CONNECTOR_IMAGE}@sha256:{}", "b".repeat(64));
+        assert_eq!(
+            connector_subject(&format!("{go}\n{native}\n")).unwrap(),
+            native
+        );
+        assert!(connector_subject(&go).is_err());
+        assert!(connector_subject(&format!("{native}\n{CONNECTOR_IMAGE}@invalid")).is_err());
+    }
 
     fn archive(entries: &[(tar::EntryType, &[u8])]) -> Vec<u8> {
         let writer = GzEncoder::new(Vec::new(), Compression::fast());

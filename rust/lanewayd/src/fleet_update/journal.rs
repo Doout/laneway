@@ -45,11 +45,16 @@ pub(super) enum Entry {
 
 pub(super) struct Journal {
     root: PathBuf,
+    file: PathBuf,
     _lock: File,
 }
 
 impl Journal {
     pub(super) fn open(path: &Path) -> Result<Self> {
+        Self::open_named(path, None)
+    }
+
+    pub(super) fn open_named(path: &Path, connector: Option<&str>) -> Result<Self> {
         if let Err(err) = DirBuilder::new().mode(0o700).create(path) {
             ensure!(
                 err.kind() == io::ErrorKind::AlreadyExists,
@@ -80,16 +85,19 @@ impl Journal {
         );
         Ok(Self {
             root: path.into(),
+            file: match connector {
+                None => path.join("rust-journal.json"),
+                Some(name) => path.join(format!("rust-{name}-journal.json")),
+            },
             _lock: lock,
         })
     }
 
     pub(super) fn read(&self) -> Result<Option<Entry>> {
-        let path = self.root.join("rust-journal.json");
-        if absent(&path)? {
+        if absent(&self.file)? {
             return Ok(None);
         }
-        let value: Entry = serde_json::from_slice(&root_file(&path, 0o077, MAX_JOURNAL)?)
+        let value: Entry = serde_json::from_slice(&root_file(&self.file, 0o077, MAX_JOURNAL)?)
             .context("read the durable update journal")?;
         match &value {
             Entry::Intent { identity, previous } => {
@@ -128,12 +136,12 @@ impl Journal {
         let mut staged = tempfile::NamedTempFile::new_in(&self.root)?;
         staged.write_all(&serde_json::to_vec(entry)?)?;
         staged.as_file().sync_all()?;
-        staged.persist(self.root.join("rust-journal.json"))?;
+        staged.persist(&self.file)?;
         sync_dir(&self.root)
     }
 
     pub(super) fn clear(&self) -> Result<()> {
-        fs::remove_file(self.root.join("rust-journal.json"))?;
+        fs::remove_file(&self.file)?;
         sync_dir(&self.root)
     }
 

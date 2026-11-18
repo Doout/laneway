@@ -1,5 +1,5 @@
 [Unit]
-Description=Check for a scheduled Laneway Rust node update
+Description=Check for a scheduled Laneway managed update
 
 [Timer]
 OnBootSec=2min
