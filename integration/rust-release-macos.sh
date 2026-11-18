@@ -1,5 +1,5 @@
 #!/bin/sh
-# Check the actual release archive on a matching native macOS host.
+# Check the actual release archive on a matching macOS architecture.
 set -eu
 
 if [ "$#" -ne 3 ]; then
@@ -11,7 +11,7 @@ arch=$2
 version=$3
 case "$(uname -sm):$arch" in
   'Darwin x86_64:amd64'|'Darwin arm64:arm64') ;;
-  *) echo "the macOS package probe requires the matching native architecture" >&2; exit 2 ;;
+  *) echo "the macOS package probe requires the matching architecture" >&2; exit 2 ;;
 esac
 install_probe=${LANEWAY_MACOS_ARCHIVE_INSTALL:-0}
 utun_probe=${LANEWAY_MACOS_UTUN_TEST:-0}
@@ -20,6 +20,10 @@ case "$install_probe:$utun_probe" in
   *) echo "the utun test requires LANEWAY_MACOS_ARCHIVE_INSTALL=1; use 0 or 1 for both settings" >&2; exit 2 ;;
 esac
 if [ "$install_probe" = 1 ]; then
+  if [ "$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+    echo "the installed macOS helper probe requires native hardware, not Rosetta" >&2
+    exit 2
+  fi
   marker=/var/run/.laneway-isolated-macos-lab
   if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ]; then
     [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(stat -f '%u:%Lp' "$marker")" = 0:600 ] || {

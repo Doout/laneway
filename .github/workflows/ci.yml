@@ -183,6 +183,7 @@ jobs:
           bash -n deploy/ephemeral-exit/bootstrap.sh
           shellcheck deploy/ephemeral-exit/bootstrap.sh
           ./integration/release-contract.sh
+          sh integration/rust-compose-release.sh
           ./integration/connector-updater.sh
           ./integration/control-plane-prepare.sh
           sudo env PATH="$PATH" ./integration/control-plane-install.sh

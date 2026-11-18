@@ -34,6 +34,14 @@ sudo laneway control status
 The first command is fail-closed. The installer does not change host DNS,
 firewall rules, routes, interfaces, or sysctls.
 
+For a Rust cutover rehearsal, download `checksums.txt`,
+`checksums.sigstore.json`, and `image-digests.txt` from the same stable tag.
+Run `sh verify-rust-release.sh vVERSION METADATA_DIRECTORY` with Cosign
+installed. The command verifies the release and all three Compose image
+signatures before printing the Rust settings. It does not pull or deploy images.
+Use the [Rust cutover checklist](../../docs/rust-runtime-migration.md#compose-cutover-rehearsal)
+to apply those settings on a disposable deployment first.
+
 ## Administrator access
 
 Create the first owner from a terminal on the control-plane host:

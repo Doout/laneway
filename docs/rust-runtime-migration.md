@@ -13,10 +13,9 @@ checks pass on the candidate you intend to deploy:
 
 1. Run the native release matrix on the release commit, including the Linux
    systemd packet tests and the installed macOS helper on Intel and Apple
-   Silicon. Verify the
-   published archive checksums and image signatures, then install and roll
-   back the signed candidate on the lab host. The unsigned lab builds do
-   not establish this.
+   Silicon. Verify the published archive checksums and image signatures,
+   then install and roll back the signed candidate on the lab host. The
+   unsigned lab builds do not establish this.
 2. Record the actual production image digests, schema and configuration.
    Restore an encrypted backup into a separate lab volume and rehearse the
    cutover with those inputs. Verify HTTPS, Dispatch authorization, node
@@ -126,11 +125,14 @@ available. The Rust controller requires `--listen-on-network` for non-loopback
 TCP or UDP and requires the node issuer and client CA there. It cannot start
 in that mode with insecure application callbacks enabled.
 
-Rehearse on an isolated, restored copy first. Verify the signed release and
-image digests. Keep the Go `LANEWAY_VERSION` and digests unchanged; set
-`LANEWAY_RUST_VERSION`, `LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST`,
-`LANEWAY_RUST_RELAY_IMAGE_DIGEST`, and `LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST`
-from the verified Rust release. From the Compose directory, run
+Rehearse on an isolated, restored copy first. Place `checksums.txt`,
+`checksums.sigstore.json`, and `image-digests.txt` from the same tagged
+release in a staging directory. From the trusted package or checkout, run
+`sh deploy/compose/verify-rust-release.sh vVERSION METADATA_DIRECTORY`.
+The verifier checks the release identity and each immutable image signature
+before printing all four `LANEWAY_RUST_*` settings. It does not read or change
+the deployment. Copy those settings into the lab's `.env`; keep the Go
+`LANEWAY_VERSION` and digests unchanged. From the Compose directory, run
 `sudo python3 prepare-rust.py` (Python 3.11+). It reads only the existing
 prepared TOML files, stages the Rust discovery and relay inputs without
 overwriting the originals, and keeps a private relay renewal directory.
@@ -444,8 +446,12 @@ LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 \
 
 Use the version built into the archive. The gate refuses existing installation
 paths, installs the preview for the test, then removes the fixture files.
-The local Apple Silicon archive and twelve unprivileged tests passed for
-`0.0.0-fleet-rust-lab`; the installed-helper test was not run on that host.
+For `0.0.9103`, eleven unprivileged Rust helper tests and three Go handoff
+tests passed on Apple Silicon and for the x86-64 binaries under Rosetta.
+Both archives contained and ran the expected thin Go and Rust executables.
+The installed-helper test was not run. The test refuses Rosetta when asked
+to install the helper, so translated checks cannot count as native Intel
+network validation.
 The release package gate checks both binaries, preserves the standalone Go
 artifact, and verifies the installed runtime on disposable native runners. Release checksum
 signing is separate from Apple Developer ID signing or notarization.

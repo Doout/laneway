@@ -39,7 +39,8 @@ if ! tar -tvzf "$archive" laneway/sbin/lanewayd |
   echo "the Rust preview must not change the default Go daemon link" >&2
   exit 1
 fi
-for member in examples/managed-updates-rust.toml systemd/laneway-rust-updater.service systemd/laneway-rust-updater.timer; do
+for member in examples/managed-updates-rust.toml systemd/laneway-rust-updater.service systemd/laneway-rust-updater.timer \
+  deploy/compose/verify-rust-release.sh; do
   printf '%s\n' "$listing" | grep -Fx "laneway/$member" >/dev/null
 done
 printf 'Verified all five static Rust %s runtimes at version %s; default daemon link unchanged.\n' \

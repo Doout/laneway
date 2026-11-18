@@ -32,6 +32,7 @@ jobs:
           python3 -m unittest discover -s deploy/compose -p test_service_certificate_renewal.py
           shellcheck integration/rust-release-macos.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
+          sh integration/rust-compose-release.sh
       - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
@@ -292,6 +293,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      packages: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -337,6 +339,13 @@ jobs:
           source deploy/ephemeral-exit/bootstrap.sh
           verify_exit_release_signature "$(command -v cosign)" dist "$GITHUB_REF_NAME"
           (cd dist && sha256sum --strict -c checksums.txt)
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify with the Rust Compose trust policy before publishing
+        run: sh deploy/compose/verify-rust-release.sh "$GITHUB_REF_NAME" dist
       - name: Attest release artifact provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
