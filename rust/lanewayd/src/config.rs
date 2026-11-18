@@ -133,6 +133,9 @@ pub struct Config {
     pub controller: Option<ControllerConfig>,
     /// Linux TUN interface settings.
     pub tun: TunConfig,
+    /// Unprivileged TCP/UDP subnet forwarding in place of Linux TUN.
+    #[serde(default)]
+    pub connector: ConnectorConfig,
     /// Primary relay path and reconnect policy.
     pub relay: RelayConfig,
     /// Optional stable-v1 TLS/TCP fallback carrier.
@@ -162,6 +165,15 @@ pub struct DiagnosticsConfig {
     /// Loopback TCP address. Omit to disable the HTTP endpoint.
     #[serde(default)]
     pub listen: Option<SocketAddr>,
+}
+
+/// Subnet connector dataplane selection.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorConfig {
+    /// Use ordinary host TCP and UDP sockets without kernel forwarding.
+    #[serde(default)]
+    pub userspace: bool,
 }
 
 /// Strict controller authority and lease polling settings.
@@ -785,6 +797,34 @@ impl Config {
             );
         }
         let forwarding = &self.forwarding;
+        if self.connector.userspace {
+            ensure!(
+                !self.tun.configure
+                    && self.tun.mtu == 1280
+                    && !forwarding.subnet_router
+                    && forwarding.subnet_routes.is_empty()
+                    && !forwarding.exit_gateway
+                    && !forwarding.exit_client.enabled
+                    && !forwarding.exit_client.authorized
+                    && self
+                        .routes
+                        .iter()
+                        .all(|route| route.kind != RouteKind::Exit)
+                    && forwarding
+                        .owned_prefixes
+                        .iter()
+                        .all(|prefix| prefix.prefix_len() != 0),
+                "userspace connector cannot use kernel routing, exit mode, or default forwarding prefixes; MTU must be 1280"
+            );
+            ensure!(
+                if self.controller.is_some() {
+                    forwarding.owned_prefixes.is_empty()
+                } else {
+                    !forwarding.owned_prefixes.is_empty()
+                },
+                "userspace connector subnet prefixes must come from controller approval or an explicit static configuration, not both"
+            );
+        }
         ensure!(
             (1..=16_384).contains(&forwarding.max_rules)
                 && !forwarding.shutdown_timeout.is_zero()
@@ -1180,6 +1220,23 @@ via_node = "202122232425262728292a2b2c2d2e2f"
         ))
         .unwrap();
         controller.validate().unwrap();
+    }
+
+    #[test]
+    fn userspace_connector_rejects_kernel_and_default_route_configuration() {
+        let config: Config =
+            toml::from_str(include_str!("../../../deploy/examples/connector-rust.toml")).unwrap();
+        config.validate().unwrap();
+        assert!(config.connector.userspace);
+        let mut invalid = config.clone();
+        invalid.tun.configure = true;
+        assert!(invalid.validate().is_err());
+        let mut invalid = config.clone();
+        invalid.forwarding.exit_gateway = true;
+        assert!(invalid.validate().is_err());
+        let mut invalid = config;
+        invalid.forwarding.owned_prefixes = vec!["0.0.0.0/0".parse().unwrap()];
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

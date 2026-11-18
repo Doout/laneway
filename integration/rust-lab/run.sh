@@ -14,6 +14,10 @@ mounts=(-v "$root:/src:ro"
 # Only dependency fetch has external networking; it has no extra capabilities.
 docker run --rm "${mounts[@]}" laneway-rust-lab:local sh -ec \
   'cargo fetch --locked --manifest-path rust/Cargo.toml; cd go && go mod download'
+docker run --rm --network none --cap-drop ALL \
+  -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
+  "${mounts[@]}" laneway-rust-lab:local \
+  cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs connector
 docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
   --security-opt systempaths=unconfined --device /dev/net/tun \
   -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \

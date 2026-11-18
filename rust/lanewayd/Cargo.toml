@@ -32,6 +32,7 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-reno"] }
 tokio.workspace = true
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 tokio-tun.workspace = true

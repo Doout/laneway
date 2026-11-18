@@ -27,6 +27,7 @@ use crate::{
     metrics::Metrics,
     packet_pool::PacketPool,
     probe::ProbeSocket,
+    relay::InboundPacket,
     routing::packet_meta,
     state::State,
     tls,
@@ -46,7 +47,7 @@ pub struct DirectManager {
     network: Id,
     node: Id,
     owned: Arc<Vec<ipnet::IpNet>>,
-    inject: mpsc::Sender<Bytes>,
+    inject: mpsc::Sender<InboundPacket>,
     peers: HashMap<Id, DirectPeerConfig>,
     candidates: Option<mpsc::Receiver<EndpointCandidate>>,
     probe: Arc<ProbeSocket>,
@@ -68,7 +69,7 @@ impl DirectManager {
         network: Id,
         node: Id,
         owned: Arc<Vec<ipnet::IpNet>>,
-        inject: mpsc::Sender<Bytes>,
+        inject: mpsc::Sender<InboundPacket>,
         candidates: mpsc::Receiver<EndpointCandidate>,
         probe: Arc<ProbeSocket>,
         kernel: Arc<StdMutex<Option<KernelManager>>>,
@@ -422,6 +423,7 @@ impl DirectManager {
             self.state.direct.load().len(),
         );
         info!(%peer, remote = %connection.remote_address(), "direct path attached");
+        let ingress_serial = Bytes::copy_from_slice(&certificate_serial);
         let result = loop {
             let packet = match connection.read_datagram().await {
                 Ok(packet) => packet,
@@ -452,7 +454,11 @@ impl DirectManager {
                 Metrics::increment(&self.metrics.auth_drops);
                 continue;
             }
-            let sent = self.inject.try_send(packet);
+            let sent = self.inject.try_send(InboundPacket {
+                peer,
+                direct_serial: Some(ingress_serial.clone()),
+                bytes: packet,
+            });
             let depth = self
                 .inject
                 .max_capacity()
@@ -1092,7 +1098,8 @@ server_name = "localhost"
             timeout(Duration::from_secs(2), second_packets.recv())
                 .await
                 .unwrap()
-                .unwrap(),
+                .unwrap()
+                .bytes,
             payload
         );
         let (_, miss) = direct_pool.copy(&payload);
@@ -1172,7 +1179,8 @@ server_name = "localhost"
             timeout(Duration::from_secs(2), second_packets.recv())
                 .await
                 .unwrap()
-                .unwrap(),
+                .unwrap()
+                .bytes,
             recovered
         );
         first_endpoint.close(0_u32.into(), b"test complete");

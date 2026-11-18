@@ -183,6 +183,46 @@ impl State {
         })
     }
 
+    /// Recheck forwarding permission immediately before opening or using a
+    /// host socket. Overlay ownership alone never authorizes host dialing.
+    pub(crate) fn connector_allows(
+        &self,
+        local: Id,
+        static_prefixes: &[ipnet::IpNet],
+        ingress: &crate::relay::InboundPacket,
+    ) -> bool {
+        let Ok(meta) = crate::routing::packet_meta(&ingress.bytes) else {
+            return false;
+        };
+        let peer = ingress.peer;
+        if !self.routes.load().authorizes_source(peer, meta.source) {
+            return false;
+        }
+        if !self.controller_managed {
+            return crate::routing::locally_owned(static_prefixes, meta.destination);
+        }
+        let Some(snapshot) = self.authority.load_full() else {
+            return false;
+        };
+        let subnet = laneway_protocol::v1::Capability::LanewaySubnetRouterV1 as u64;
+        !snapshot.expired()
+            && !snapshot.local_certificate_revoked
+            && snapshot.enabled_capabilities & subnet != 0
+            && snapshot.peers.contains_key(&peer)
+            && snapshot.peers.contains_key(&local)
+            && !ingress
+                .direct_serial
+                .as_ref()
+                .is_some_and(|serial| snapshot.revoked_serials.contains::<[u8]>(serial.as_ref()))
+            && snapshot.routes.iter().any(|route| {
+                route.via == local
+                    && route.kind == laneway_protocol::v1::RouteKind::Subnet
+                    && route.destination.prefix_len() != 0
+                    && route.destination.contains(&meta.destination)
+            })
+            && snapshot.policy.allows(peer, local, &ingress.bytes)
+    }
+
     /// Checks whether a direct certificate path remains controller-authorized.
     pub(crate) fn direct_authorized(&self, peer: Id, serial: &[u8]) -> bool {
         if !self.controller_managed {
@@ -452,5 +492,53 @@ mod tests {
         packet[16..20].copy_from_slice(&[100, 96, 0, 1]);
         assert!(state.owns(&[], "100.96.0.1".parse().unwrap()));
         assert!(state.allows(peer, local, &packet));
+
+        // A local overlay address is not an approved connector destination.
+        let source_route = crate::config::RouteConfig {
+            prefix: "100.96.0.2/32".parse().unwrap(),
+            via_node: peer.to_string(),
+            metric: 100,
+            kind: crate::config::RouteKind::Overlay,
+        };
+        state
+            .routes
+            .store(Arc::new(RoutingTable::compile(&[source_route]).unwrap()));
+        let subnet = "10.20.0.0/24".parse().unwrap();
+        let mut snapshot = original.renew(now + 30).unwrap();
+        snapshot.enabled_capabilities =
+            laneway_protocol::v1::Capability::LanewaySubnetRouterV1 as u64;
+        snapshot.routes.push(crate::controller::Route {
+            id: relay_a,
+            destination: subnet,
+            via: local,
+            kind: laneway_protocol::v1::RouteKind::Subnet,
+            mode: laneway_protocol::v1::RouteAdvertisementMode::Nat,
+            metric: 100,
+        });
+        state.publish_authority(Arc::new(snapshot.clone()));
+        let mut ingress = crate::relay::InboundPacket {
+            peer,
+            direct_serial: Some(bytes::Bytes::from_static(&[42])),
+            bytes: packet.clone().into(),
+        };
+        assert!(!state.connector_allows(local, &[], &ingress));
+        packet[16..20].copy_from_slice(&[10, 20, 0, 8]);
+        ingress.bytes = packet.into();
+        assert!(state.connector_allows(local, &[], &ingress));
+        ingress.peer = relay_b;
+        assert!(!state.connector_allows(local, &[], &ingress));
+        ingress.peer = peer;
+
+        let mut revoked = snapshot.clone();
+        revoked.revoked_serials.insert(vec![42]);
+        state.publish_authority(Arc::new(revoked));
+        assert!(!state.connector_allows(local, &[], &ingress));
+        let mut withdrawn = snapshot.clone();
+        withdrawn.routes.clear();
+        state.publish_authority(Arc::new(withdrawn));
+        assert!(!state.connector_allows(local, &[], &ingress));
+        snapshot.valid_until = now - 1;
+        state.publish_authority(Arc::new(snapshot));
+        assert!(!state.connector_allows(local, &[], &ingress));
     }
 }

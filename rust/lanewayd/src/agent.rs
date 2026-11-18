@@ -18,6 +18,7 @@ use tracing::info;
 use crate::{
     authority::{Authority, Runner, SnapshotApplier},
     config::Config,
+    connector,
     controller::{Client as ControllerClient, ClientOptions, PollResult, Snapshot},
     diagnostics::DiagnosticsServer,
     direct::{DirectManager, try_send_direct},
@@ -110,7 +111,8 @@ impl Agent {
         let exit_intent = Arc::new(ExitIntentStore::new(
             authority_base.exit_intent_path.clone(),
         ));
-        let intent_persisted = if authority_base.controller.is_some() {
+        let userspace = authority_base.connector.userspace;
+        let intent_persisted = if authority_base.controller.is_some() && !userspace {
             let loaded = exit_intent
                 .load(&mut authority_base)
                 .context("load explicit exit selection")?;
@@ -191,8 +193,14 @@ impl Agent {
             Arc::clone(&kernel),
             Arc::clone(&dynamic_bypasses),
         )?;
-        let tun = TunDevice::open(&self.config.tun, &self.config.routes).await?;
-        let tun = Arc::new(Mutex::new(tun));
+        let tun = if userspace {
+            None
+        } else {
+            Some(Arc::new(Mutex::new(
+                TunDevice::open(&self.config.tun, &self.config.routes).await?,
+            )))
+        };
+        let configured_tun = tun.clone().filter(|_| self.config.tun.configure);
         let needs_kernel = self.config.forwarding.subnet_router
             || self.config.forwarding.exit_gateway
             || self.config.forwarding.exit_client.enabled;
@@ -200,7 +208,7 @@ impl Agent {
             match KernelManager::apply(Arc::clone(&self.config)) {
                 Ok(kernel) => Some(kernel),
                 Err(error) => {
-                    let tun_restore = tun.lock().await.restore().await;
+                    let tun_restore = restore_tun(&tun).await;
                     return aggregate_results([
                         ("install owned Linux forwarding state", Err(error)),
                         ("restore TUN after kernel activation failure", tun_restore),
@@ -210,27 +218,30 @@ impl Agent {
         } else {
             None
         };
-        match kernel.lock() {
-            Ok(mut slot) => *slot = initial_kernel,
-            Err(poisoned) => {
-                let kernel_restore = {
-                    let mut slot = poisoned.into_inner();
-                    *slot = initial_kernel;
-                    slot.as_mut().map_or(Ok(()), KernelManager::restore)
-                };
-                let tun_restore = tun.lock().await.restore().await;
-                return aggregate_results([
-                    (
-                        "publish initial kernel manager",
-                        Err(anyhow::anyhow!("kernel manager lock poisoned")),
-                    ),
-                    (
-                        "restore kernel after kernel publication failure",
-                        kernel_restore,
-                    ),
-                    ("restore TUN after kernel publication failure", tun_restore),
-                ]);
+        let publish_kernel_failure = match kernel.lock() {
+            Ok(mut slot) => {
+                *slot = initial_kernel;
+                None
             }
+            Err(poisoned) => {
+                let mut slot = poisoned.into_inner();
+                *slot = initial_kernel;
+                Some(slot.as_mut().map_or(Ok(()), KernelManager::restore))
+            }
+        };
+        if let Some(kernel_restore) = publish_kernel_failure {
+            let tun_restore = restore_tun(&tun).await;
+            return aggregate_results([
+                (
+                    "publish initial kernel manager",
+                    Err(anyhow::anyhow!("kernel manager lock poisoned")),
+                ),
+                (
+                    "restore kernel after kernel publication failure",
+                    kernel_restore,
+                ),
+                ("restore TUN after kernel publication failure", tun_restore),
+            ]);
         }
         Metrics::set(
             &self.metrics.exit_forwarding_ready,
@@ -243,7 +254,10 @@ impl Agent {
         let runtime_base = Arc::new(ArcSwap::from_pointee(authority_base.clone()));
         let control_lock = Arc::new(Mutex::new(()));
         let intent_persisted = Arc::new(StdMutex::new(intent_persisted));
-        let device = tun.lock().await.device();
+        let device = match &tun {
+            Some(tun) => Some(tun.lock().await.device()),
+            None => None,
+        };
         let mut tasks = JoinSet::new();
         let mut replacement: Pin<Box<dyn Future<Output = ()> + Send>> =
             Box::pin(std::future::pending());
@@ -252,8 +266,7 @@ impl Agent {
             let applier = Arc::new(RuntimeApplier {
                 state: Arc::clone(&self.state),
                 metrics: Arc::clone(&self.metrics),
-                tun: Arc::clone(&tun),
-                configure_tun: self.config.tun.configure,
+                tun: configured_tun.clone(),
                 node: self.node,
                 base_config: Arc::clone(&runtime_base),
                 kernel: Arc::clone(&kernel),
@@ -262,7 +275,7 @@ impl Agent {
             });
             if let Err(error) = applier.apply(Arc::clone(&snapshot)).await {
                 let kernel_restore = restore_kernel(&kernel);
-                let tun_restore = tun.lock().await.restore().await;
+                let tun_restore = restore_tun(&tun).await;
                 return aggregate_results([
                     ("apply initial controller snapshot", Err(error)),
                     (
@@ -275,7 +288,7 @@ impl Agent {
             if let Err(error) = authority.seed(snapshot) {
                 let fail_close = applier.fail_close().await;
                 let kernel_restore = restore_kernel(&kernel);
-                let tun_restore = tun.lock().await.restore().await;
+                let tun_restore = restore_tun(&tun).await;
                 return aggregate_results([
                     ("publish initial controller authority", Err(error)),
                     (
@@ -294,7 +307,7 @@ impl Agent {
             }
             let Some(settings) = self.config.controller.as_ref() else {
                 let kernel_restore = restore_kernel(&kernel);
-                let tun_restore = tun.lock().await.restore().await;
+                let tun_restore = restore_tun(&tun).await;
                 return aggregate_results([
                     (
                         "build controller runner",
@@ -341,7 +354,7 @@ impl Agent {
                 Ok(runner) => runner,
                 Err(error) => {
                     let kernel_restore = restore_kernel(&kernel);
-                    let tun_restore = tun.lock().await.restore().await;
+                    let tun_restore = restore_tun(&tun).await;
                     return aggregate_results([
                         ("build controller runner", Err(error)),
                         (
@@ -358,8 +371,7 @@ impl Agent {
         let local_control = Arc::new(RuntimeControl {
             state: Arc::clone(&self.state),
             metrics: Arc::clone(&self.metrics),
-            tun: Arc::clone(&tun),
-            configure_tun: self.config.tun.configure,
+            tun: configured_tun,
             network: self.network,
             node: self.node,
             base_config: Arc::clone(&runtime_base),
@@ -375,13 +387,17 @@ impl Agent {
         let api = local_api::Server::new(
             self.config.socket_path.clone(),
             Arc::new(move || snapshot_control.snapshot()),
-            self.config.controller.as_ref().map(|_| {
-                Arc::new(move |selection| {
-                    let control = Arc::clone(&exit_control);
-                    Box::pin(async move { control.set_exit(selection).await })
-                        as Pin<Box<dyn Future<Output = Result<()>> + Send>>
-                }) as Arc<_>
-            }),
+            self.config
+                .controller
+                .as_ref()
+                .filter(|_| !userspace)
+                .map(|_| {
+                    Arc::new(move |selection| {
+                        let control = Arc::clone(&exit_control);
+                        Box::pin(async move { control.set_exit(selection).await })
+                            as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                    }) as Arc<_>
+                }),
         );
         tasks.spawn(async move { api.run().await });
 
@@ -392,7 +408,7 @@ impl Agent {
         info!(
             node = %self.node,
             network = %self.network,
-            tun = %self.config.tun.name,
+            interface = if userspace { "userspace" } else { self.config.tun.name.as_str() },
             direct = %direct_address,
             "native Rust Laneway agent started"
         );
@@ -403,20 +419,78 @@ impl Agent {
         {
             tasks.spawn(async move { direct_manager.run().await });
         }
+        let mtu = usize::from(self.config.tun.mtu);
+        let mut proxy_packets = if userspace {
+            let (reply, packets) = mpsc::channel(self.config.relay.queue_depth);
+            let state = Arc::clone(&self.state);
+            let prefixes = self.config.forwarding.owned_prefixes.clone();
+            let local = self.node;
+            let metrics = Arc::clone(&self.metrics);
+            tasks.spawn(async move {
+                connector::run(
+                    mtu,
+                    Arc::new(move |packet| state.connector_allows(local, &prefixes, packet)),
+                    metrics,
+                    inject_rx,
+                    reply,
+                )
+                .await
+            });
+            Some(packets)
+        } else {
+            let device = Arc::clone(device.as_ref().expect("kernel dataplane has a device"));
+            let metrics = Arc::clone(&self.metrics);
+            let exit_gateway = self.config.forwarding.exit_gateway;
+            tasks.spawn(async move {
+                while let Some(packet) = inject_rx.recv().await {
+                    metrics.set_inject_queue_depth(
+                        inject_rx
+                            .max_capacity()
+                            .saturating_sub(inject_rx.capacity()),
+                    );
+                    device
+                        .send_all(&packet.bytes)
+                        .await
+                        .context("inject TUN packet")?;
+                    Metrics::increment(&metrics.injected_packets);
+                    Metrics::increment(&metrics.packets_received_total);
+                    Metrics::add(&metrics.bytes_received_total, packet.bytes.len());
+                    if exit_gateway {
+                        Metrics::increment(&metrics.exit_forwarded_packets_total);
+                        Metrics::add(&metrics.exit_forwarded_bytes_total, packet.bytes.len());
+                    }
+                }
+                anyhow::bail!("TUN injection queue closed")
+            });
+            None
+        };
         {
-            let device = Arc::clone(&device);
             let state = Arc::clone(&self.state);
             let metrics = Arc::clone(&self.metrics);
             let owned = Arc::clone(&owned);
-            let mtu = usize::from(self.config.tun.mtu);
             let exit_gateway = self.config.forwarding.exit_gateway;
             let local_node = self.node;
             let packet_pool = packet_pool.clone();
+            let prefixes = self.config.forwarding.owned_prefixes.clone();
             tasks.spawn(async move {
                 let mut buffer = vec![0_u8; mtu];
                 loop {
-                    let size = device.recv(&mut buffer).await.context("read TUN packet")?;
-                    let packet = &buffer[..size];
+                    let reply;
+                    let (packet, reply_peer): (&[u8], Option<Id>) =
+                        if let Some(proxy) = &mut proxy_packets {
+                            reply = proxy
+                                .recv()
+                                .await
+                                .context("connector output queue closed")?;
+                            if !state.connector_allows(local_node, &prefixes, &reply.trigger) {
+                                continue;
+                            }
+                            (&reply.bytes, Some(reply.trigger.peer))
+                        } else {
+                            let device = device.as_ref().expect("kernel dataplane has a device");
+                            let size = device.recv(&mut buffer).await.context("read TUN packet")?;
+                            (&buffer[..size], None)
+                        };
                     let Ok(meta) = packet_meta(packet) else {
                         Metrics::increment(&metrics.invalid_drops);
                         Metrics::increment(&metrics.malformed_drops);
@@ -433,7 +507,12 @@ impl Agent {
                         continue;
                     };
                     let peer = route.via;
-                    Metrics::increment(&metrics.tun_packets);
+                    if reply_peer.is_some_and(|reply_peer| reply_peer != peer) {
+                        continue;
+                    }
+                    if !userspace {
+                        Metrics::increment(&metrics.tun_packets);
+                    }
                     Metrics::increment(&metrics.packets_sent_total);
                     Metrics::add(&metrics.bytes_sent_total, packet.len());
                     if exit_gateway {
@@ -464,33 +543,6 @@ impl Agent {
             let metrics = Arc::clone(&self.metrics);
             tasks.spawn(async move { monitor_selected_exit(state, kernel, metrics).await });
         }
-        {
-            let device = Arc::clone(&device);
-            let metrics = Arc::clone(&self.metrics);
-            let exit_gateway = self.config.forwarding.exit_gateway;
-            tasks.spawn(async move {
-                while let Some(packet) = inject_rx.recv().await {
-                    metrics.set_inject_queue_depth(
-                        inject_rx
-                            .max_capacity()
-                            .saturating_sub(inject_rx.capacity()),
-                    );
-                    device
-                        .send_all(&packet)
-                        .await
-                        .context("inject TUN packet")?;
-                    Metrics::increment(&metrics.injected_packets);
-                    Metrics::increment(&metrics.packets_received_total);
-                    Metrics::add(&metrics.bytes_received_total, packet.len());
-                    if exit_gateway {
-                        Metrics::increment(&metrics.exit_forwarded_packets_total);
-                        Metrics::add(&metrics.exit_forwarded_bytes_total, packet.len());
-                    }
-                }
-                anyhow::bail!("TUN injection queue closed")
-            });
-        }
-
         tokio::pin!(shutdown);
         let run_result = tokio::select! {
             biased;
@@ -506,7 +558,7 @@ impl Agent {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
         let kernel_restore = restore_kernel(&kernel);
-        let tun_restore = tun.lock().await.restore().await;
+        let tun_restore = restore_tun(&tun).await;
         if self.config.forwarding.exit_gateway {
             if kernel_restore.is_err() {
                 Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
@@ -657,8 +709,7 @@ impl PathHysteresis {
 struct RuntimeControl {
     state: Arc<State>,
     metrics: Arc<Metrics>,
-    tun: Arc<Mutex<TunDevice>>,
-    configure_tun: bool,
+    tun: Option<Arc<Mutex<TunDevice>>>,
     network: Id,
     node: Id,
     base_config: Arc<ArcSwap<Config>>,
@@ -753,7 +804,11 @@ impl RuntimeControl {
             name: local_name,
             overlay_addresses,
             selected_routes,
-            interface: effective.tun.name.clone(),
+            interface: if effective.connector.userspace {
+                "userspace".into()
+            } else {
+                effective.tun.name.clone()
+            },
             relay: effective
                 .relay
                 .address
@@ -947,9 +1002,8 @@ impl RuntimeControl {
     ) -> Result<()> {
         let compiled = RoutingTable::compile(&next.routes)?;
         reconcile_kernel(&self.kernel, &self.dynamic_bypasses, Arc::clone(&next))?;
-        if self.configure_tun
-            && let Err(error) = self
-                .tun
+        if let Some(tun) = &self.tun
+            && let Err(error) = tun
                 .lock()
                 .await
                 .apply_controller(&snapshot.overlays, &next.routes)
@@ -1019,6 +1073,7 @@ fn advertised_capabilities(config: &Config) -> u64 {
         capabilities |= v1::Capability::LanewayDirectPeerV1 as u64;
     }
     if config.controller.is_some()
+        || config.connector.userspace
         || config.forwarding.subnet_router
         || config
             .routes
@@ -1027,12 +1082,13 @@ fn advertised_capabilities(config: &Config) -> u64 {
     {
         capabilities |= v1::Capability::LanewaySubnetRouterV1 as u64;
     }
-    if config.controller.is_some()
-        || config.forwarding.exit_gateway
-        || config
-            .routes
-            .iter()
-            .any(|route| route.kind == crate::config::RouteKind::Exit)
+    if !config.connector.userspace
+        && (config.controller.is_some()
+            || config.forwarding.exit_gateway
+            || config
+                .routes
+                .iter()
+                .any(|route| route.kind == crate::config::RouteKind::Exit))
     {
         capabilities |= v1::Capability::LanewayExitNodeV1 as u64;
     }
@@ -1086,8 +1142,7 @@ fn capability_names(value: u64) -> String {
 struct RuntimeApplier {
     state: Arc<State>,
     metrics: Arc<Metrics>,
-    tun: Arc<Mutex<TunDevice>>,
-    configure_tun: bool,
+    tun: Option<Arc<Mutex<TunDevice>>>,
     node: Id,
     base_config: Arc<ArcSwap<Config>>,
     kernel: Arc<StdMutex<Option<KernelManager>>>,
@@ -1121,8 +1176,8 @@ impl SnapshotApplier for RuntimeApplier {
                     Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
                     return Err(cleanup.context("fail close withdrawn relay authority"));
                 }
-                if self.configure_tun {
-                    self.tun.lock().await.apply_controller(&[], &[]).await?;
+                if let Some(tun) = &self.tun {
+                    tun.lock().await.apply_controller(&[], &[]).await?;
                 }
                 return Err(error.context("controller withdrew configured relay authority"));
             }
@@ -1135,9 +1190,8 @@ impl SnapshotApplier for RuntimeApplier {
             let routes = effective.routes.clone();
             let compiled = RoutingTable::compile(&routes)?;
             reconcile_kernel(&self.kernel, &self.dynamic_bypasses, Arc::clone(&effective))?;
-            if self.configure_tun
-                && let Err(error) = self
-                    .tun
+            if let Some(tun) = &self.tun
+                && let Err(error) = tun
                     .lock()
                     .await
                     .apply_controller(&snapshot.overlays, &routes)
@@ -1182,8 +1236,8 @@ impl SnapshotApplier for RuntimeApplier {
                 Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
                 return Err(error.context("fail close controller-owned kernel state"));
             }
-            if self.configure_tun {
-                self.tun.lock().await.apply_controller(&[], &[]).await?;
+            if let Some(tun) = &self.tun {
+                tun.lock().await.apply_controller(&[], &[]).await?;
             }
             Ok(())
         })
@@ -1259,6 +1313,13 @@ fn reconcile_kernel(
             }
             Err(error)
         }
+    }
+}
+
+async fn restore_tun(tun: &Option<Arc<Mutex<TunDevice>>>) -> Result<()> {
+    match tun {
+        Some(tun) => tun.lock().await.restore().await,
+        None => Ok(()),
     }
 }
 

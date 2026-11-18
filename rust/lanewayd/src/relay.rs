@@ -76,6 +76,15 @@ impl OutboundPacket {
     }
 }
 
+/// The authenticated origin travels with each queued packet; a later route
+/// update must never reinterpret the packet as coming from a different peer.
+#[derive(Clone)]
+pub(crate) struct InboundPacket {
+    pub(crate) peer: Id,
+    pub(crate) direct_serial: Option<Bytes>,
+    pub(crate) bytes: Bytes,
+}
+
 /// Reconnecting QUIC relay client.
 pub struct RelayClient {
     endpoint: Endpoint,
@@ -86,7 +95,7 @@ pub struct RelayClient {
     node: Id,
     boot: Id,
     owned: Arc<Vec<ipnet::IpNet>>,
-    inject: mpsc::Sender<Bytes>,
+    inject: mpsc::Sender<InboundPacket>,
     candidates: mpsc::Sender<EndpointCandidate>,
     relay_cursor: AtomicUsize,
 }
@@ -122,7 +131,7 @@ impl RelayClient {
         node: Id,
         boot: Id,
         owned: Arc<Vec<ipnet::IpNet>>,
-        inject: mpsc::Sender<Bytes>,
+        inject: mpsc::Sender<InboundPacket>,
         candidates: mpsc::Sender<EndpointCandidate>,
     ) -> Self {
         Self {
@@ -662,7 +671,11 @@ impl RelayClient {
             return;
         }
         let payload_offset = frame.len() - packet.len();
-        let sent = self.inject.try_send(frame.slice(payload_offset..));
+        let sent = self.inject.try_send(InboundPacket {
+            peer,
+            direct_serial: None,
+            bytes: frame.slice(payload_offset..),
+        });
         let depth = self
             .inject
             .max_capacity()
@@ -745,7 +758,8 @@ fn hello_capabilities_for(config: &Config, required: u64) -> u64 {
     {
         capabilities |= Capability::LanewayDirectPeerV1 as u64;
     }
-    if config.forwarding.subnet_router
+    if config.connector.userspace
+        || config.forwarding.subnet_router
         || config
             .routes
             .iter()
@@ -765,9 +779,10 @@ fn hello_capabilities_for(config: &Config, required: u64) -> u64 {
         // Controller snapshots may add these route families after this relay
         // session is established. Negotiation declares implementation support;
         // the leased snapshot remains the independent authorization source.
-        capabilities |= Capability::LanewaySubnetRouterV1 as u64
-            | Capability::LanewayExitNodeV1 as u64
-            | Capability::LanewayIpv6V1 as u64;
+        capabilities |= Capability::LanewaySubnetRouterV1 as u64 | Capability::LanewayIpv6V1 as u64;
+        if !config.connector.userspace {
+            capabilities |= Capability::LanewayExitNodeV1 as u64;
+        }
     }
     if config
         .tun
@@ -807,7 +822,7 @@ fn packet_capabilities_allow(
             return false;
         }
     }
-    if config.forwarding.subnet_router
+    if (config.forwarding.subnet_router || config.connector.userspace)
         && !locally_owned(&config.tun.addresses, meta.source)
         && locally_owned(&config.forwarding.owned_prefixes, meta.source)
         && capabilities & Capability::LanewaySubnetRouterV1 as u64 == 0
@@ -1350,6 +1365,15 @@ via_node = "202122232425262728292a2b2c2d2e2f"
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn healthy_tcp_session_promotes_to_quic_without_node_restart() {
+        tcp_promotion_case(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn userspace_connector_reaches_host_over_authenticated_relay() {
+        tcp_promotion_case(true).await;
+    }
+
+    async fn tcp_promotion_case(userspace: bool) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("laneway_relay=debug,lanewayd_rs=debug")
             .with_test_writer()
@@ -1359,6 +1383,12 @@ via_node = "202122232425262728292a2b2c2d2e2f"
         let first_node = "101112131415161718191a1b1c1d1e1f";
         let second_node = "202122232425262728292a2b2c2d2e2f";
         let service = "303132333435363738393a3b3c3d3e3f";
+        let relay_prefixes = if userspace {
+            r#"["100.96.0.2/32", "127.0.0.1/32"]"#
+        } else {
+            r#"["100.96.0.2/32"]"#
+        };
+        let connector_socket = directory.path().join("connector.sock");
         let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.key_usages = vec![
@@ -1431,7 +1461,7 @@ prefixes = ["100.96.0.1/32"]
 [[peers]]
 network_id = "{network}"
 node_id = "{second_node}"
-prefixes = ["100.96.0.2/32"]
+prefixes = {relay_prefixes}
 "#,
             relay_cert.display(),
             relay_key.display(),
@@ -1467,6 +1497,13 @@ prefixes = ["100.96.0.2/32"]
             gate_stopped,
         ));
 
+        let connector_route = if userspace {
+            format!(
+                "[[routes]]\nprefix = \"127.0.0.1/32\"\nvia_node = \"{second_node}\"\nkind = \"subnet\""
+            )
+        } else {
+            String::new()
+        };
         let first_config: Config = toml::from_str(&format!(
             r#"
 mode = "node"
@@ -1501,6 +1538,7 @@ queue_depth = 8
 [[routes]]
 prefix = "100.96.0.2/32"
 via_node = "{second_node}"
+{connector_route}
 "#,
             first_cert.display(),
             first_key.display(),
@@ -1512,7 +1550,7 @@ via_node = "{second_node}"
             RoutingTable::compile(&first_config.routes).unwrap(),
         ));
         let first_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let (first_inject_tx, _first_inject_rx) = mpsc::channel(8);
+        let (first_inject_tx, mut first_inject_rx) = mpsc::channel(8);
         let (first_candidate_tx, _first_candidate_rx) = mpsc::channel(8);
         let (first_outbound_tx, first_outbound_rx) = mpsc::channel(8);
         let first_client = RelayClient::new(
@@ -1538,9 +1576,15 @@ via_node = "{second_node}"
         .expect("first node did not establish TCP while UDP was gated");
         assert_eq!(server_metrics.snapshot().sessions_replaced, 0);
 
+        let connector_settings = if userspace {
+            "[connector]\nuserspace = true\n[forwarding]\nowned_prefixes = [\"127.0.0.1/32\"]"
+        } else {
+            ""
+        };
         let second_config: Config = toml::from_str(&format!(
             r#"
 mode = "node"
+socket_path = "{}"
 [identity]
 network_id = "{network}"
 node_id = "{second_node}"
@@ -1565,7 +1609,9 @@ quic_recovery_interval = "100ms"
 [[routes]]
 prefix = "100.96.0.1/32"
 via_node = "{first_node}"
+{connector_settings}
 "#,
+            connector_socket.display(),
             second_cert.display(),
             second_key.display(),
             ca_path.display(),
@@ -1575,23 +1621,31 @@ via_node = "{first_node}"
         let second_state = Arc::new(State::new(
             RoutingTable::compile(&second_config.routes).unwrap(),
         ));
-        let second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
         let (second_inject_tx, mut second_inject_rx) = mpsc::channel(8);
         let (second_candidate_tx, _second_candidate_rx) = mpsc::channel(8);
         let (_second_outbound_tx, second_outbound_rx) = mpsc::channel(8);
-        let second_client = RelayClient::new(
-            second_endpoint,
-            Arc::new(second_config),
-            Arc::clone(&second_state),
-            Arc::new(Metrics::default()),
-            Id::from_str(network).unwrap(),
-            Id::from_str(second_node).unwrap(),
-            Id::new([2; 16]).unwrap(),
-            Arc::new(vec!["100.96.0.2/32".parse().unwrap()]),
-            second_inject_tx,
-            second_candidate_tx,
-        );
-        let second_task = tokio::spawn(second_client.run(second_outbound_rx));
+        let (stop_connector, connector_stopped) = oneshot::channel();
+        let second_task = if userspace {
+            let connector = crate::Agent::new(second_config).unwrap();
+            tokio::spawn(connector.run_until(async {
+                let _ = connector_stopped.await;
+            }))
+        } else {
+            let second_endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            let second_client = RelayClient::new(
+                second_endpoint,
+                Arc::new(second_config),
+                Arc::clone(&second_state),
+                Arc::new(Metrics::default()),
+                Id::from_str(network).unwrap(),
+                Id::from_str(second_node).unwrap(),
+                Id::new([2; 16]).unwrap(),
+                Arc::new(vec!["100.96.0.2/32".parse().unwrap()]),
+                second_inject_tx,
+                second_candidate_tx,
+            );
+            tokio::spawn(second_client.run(second_outbound_rx))
+        };
         timeout(Duration::from_secs(3), async {
             while server_metrics.snapshot().sessions != 2 {
                 sleep(Duration::from_millis(10)).await;
@@ -1615,7 +1669,8 @@ via_node = "{first_node}"
         timeout(Duration::from_secs(3), async {
             loop {
                 let first_bound = first_state.handles.load().outbound.contains_key(&second_id);
-                let second_bound = second_state.handles.load().outbound.contains_key(&first_id);
+                let second_bound =
+                    userspace || second_state.handles.load().outbound.contains_key(&first_id);
                 if first_bound && second_bound {
                     break;
                 }
@@ -1626,24 +1681,59 @@ via_node = "{first_node}"
         .expect("promoted control stream did not restore route bindings");
         assert_eq!(server_metrics.snapshot().sessions, 2);
 
-        let packet = ipv4([100, 96, 0, 1], [100, 96, 0, 2]);
-        first_outbound_tx
-            .send(OutboundPacket::new(second_id, packet.clone()))
-            .await
-            .unwrap();
-        assert_eq!(
-            timeout(Duration::from_secs(3), second_inject_rx.recv())
+        if userspace {
+            let app = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let client = "100.96.0.1:45080".parse().unwrap();
+            let target = app.local_addr().unwrap();
+            let request = crate::connector::udp_packet(client, target, b"relay to host");
+            first_outbound_tx
+                .send(OutboundPacket::new(second_id, request.to_vec()))
                 .await
-                .expect("post-promotion packet was not delivered")
-                .expect("second injection queue closed"),
-            packet
-        );
-        assert_eq!(server_metrics.snapshot().forwarded_packets, 1);
+                .unwrap();
+            let mut payload = [0; 32];
+            let (size, host) = timeout(Duration::from_secs(3), app.recv_from(&mut payload))
+                .await
+                .expect("connector did not reach host socket")
+                .unwrap();
+            assert_eq!(&payload[..size], b"relay to host");
+            app.send_to(b"host to relay", host).await.unwrap();
+            assert_eq!(
+                timeout(Duration::from_secs(3), first_inject_rx.recv())
+                    .await
+                    .expect("host reply did not traverse relay")
+                    .unwrap()
+                    .bytes,
+                crate::connector::udp_packet(target, client, b"host to relay"),
+            );
+            assert!(connector_socket.exists());
+            stop_connector.send(()).unwrap();
+            timeout(Duration::from_secs(3), second_task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(!connector_socket.exists());
+        } else {
+            let packet = ipv4([100, 96, 0, 1], [100, 96, 0, 2]);
+            first_outbound_tx
+                .send(OutboundPacket::new(second_id, packet.clone()))
+                .await
+                .unwrap();
+            assert_eq!(
+                timeout(Duration::from_secs(3), second_inject_rx.recv())
+                    .await
+                    .expect("post-promotion packet was not delivered")
+                    .expect("second injection queue closed")
+                    .bytes,
+                packet
+            );
+            assert_eq!(server_metrics.snapshot().forwarded_packets, 1);
+            second_task.abort();
+            let _ = second_task.await;
+        }
 
         first_task.abort();
-        second_task.abort();
         let _ = first_task.await;
-        let _ = second_task.await;
         tcp_gate_task.await.unwrap();
         let _ = gate_stop.send(());
         gate_task.await.unwrap();

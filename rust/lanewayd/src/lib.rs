@@ -9,6 +9,7 @@ mod authority;
 pub mod benchmark;
 mod codec;
 mod config;
+mod connector;
 mod controller;
 mod diagnostics;
 mod direct;
@@ -31,8 +32,9 @@ mod tun;
 
 pub use agent::Agent;
 pub use config::{
-    Config, ControllerConfig, DiagnosticsConfig, DirectConfig, DirectPeerConfig, ForwardingConfig,
-    IdentityConfig, RelayConfig, RouteConfig, RouteKind, TcpFallbackConfig, TlsConfig, TunConfig,
+    Config, ConnectorConfig, ControllerConfig, DiagnosticsConfig, DirectConfig, DirectPeerConfig,
+    ForwardingConfig, IdentityConfig, RelayConfig, RouteConfig, RouteKind, TcpFallbackConfig,
+    TlsConfig, TunConfig,
 };
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};

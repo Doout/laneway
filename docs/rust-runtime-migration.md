@@ -16,13 +16,13 @@ Keep one controller writing to each database.
 
 ## First Linux lab run
 
-Use a separate CA and network on a disposable Linux host. Install the Rust
-toolchain, Go 1.26, Docker, iproute2, nftables, iputils-ping, jq and procps.
+Use a separate CA and network on a disposable Linux host. Install Rust 1.91
+or newer, Go 1.26, Docker, iproute2, nftables, iputils-ping, jq and procps.
 The privileged gates require network namespaces and `/dev/net/tun`.
 
 For a disposable rootless Docker VM with TUN support, run
 `bash integration/rust-lab/run.sh`. It warms the build caches first, then runs
-all three network-namespace gates with external networking disabled. The
+the unprivileged connector and network-namespace gates without external networking. The
 checkout is mounted read-only and the test topology uses a temporary CA.
 
 ```sh
@@ -187,8 +187,35 @@ configuration and identity, `/dev/net/tun`, and `NET_ADMIN` in its own network
 namespace. The default Docker healthcheck requests `/v1/status` on
 `/run/laneway/lanewayd.sock`; it measures local daemon readiness, not peer
 reachability. The fixture has no external network and uses a disposable test CA.
-The userspace-only Go connector still needs a separate migration. Containerized
-systemd-resolved integration and automatic enrollment/update are separate gates.
+Containerized systemd-resolved integration and automatic enrollment/update
+are separate gates.
+
+### Linux userspace connector
+
+The same Rust agent can terminate IPv4/IPv6 TCP and UDP flows and connect to
+their destinations with ordinary host sockets. Enable `[connector] userspace =
+true` and leave `tun.configure`, kernel forwarding, and exit mode off. The
+agent opens no TUN device and does not change host addresses, routes, sysctls,
+or firewall state. The socket status reports the interface as `userspace`.
+
+For the static lab, use `deploy/examples/connector-rust.toml`. With controller
+authority, omit static addresses, routes, peers, and owned prefixes. The
+connector forwards only through approved local subnet routes permitted by the
+current policy. It drops malformed traffic, fragmented packets, IPv6 extension
+headers, datagrams over the overlay MTU, and protocols other than TCP/UDP.
+It does not act as an exit gateway.
+
+Build the separate `connector` image target for a pre-provisioned workload.
+It needs a readable identity and configuration at `/etc/laneway`, but no
+network capabilities or devices. The Go connector's enrollment, existing
+configuration conversion, and image update workflows have not switched
+over to this image.
+
+```sh
+docker build --target connector -f deploy/containers/Dockerfile.rust-relay \
+  -t laneway-rust-connector:migration-lab .
+bash integration/rust-lab/connector-image.sh
+```
 
 ### Verified on the local ARM64 Linux VM
 

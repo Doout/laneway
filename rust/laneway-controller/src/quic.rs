@@ -51,13 +51,12 @@ enum ControlPeer {
 struct Claim(Exits, Id, usize);
 impl Drop for Claim {
     fn drop(&mut self) {
-        if let Ok(mut exits) = self.0.lock() {
-            if exits
+        if let Ok(mut exits) = self.0.lock()
+            && exits
                 .get(&self.1)
                 .is_some_and(|active| active.stable_id() == self.2)
-            {
-                exits.remove(&self.1);
-            }
+        {
+            exits.remove(&self.1);
         }
     }
 }
