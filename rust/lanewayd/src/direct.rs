@@ -459,6 +459,11 @@ impl DirectManager {
                 direct_serial: Some(ingress_serial.clone()),
                 bytes: packet,
             });
+            if sent.is_ok()
+                && let Some(topology) = &self.state.topology
+            {
+                topology.received(peer, Some(ingress_serial.clone()));
+            }
             let depth = self
                 .inject
                 .max_capacity()

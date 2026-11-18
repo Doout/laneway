@@ -1004,6 +1004,27 @@ An expired overlay identity whose address has not been reclaimed does not fall
 through to a default route. Like preview, diagnostics requires network-scoped
 `acl.read` and browser CSRF proof.
 
+### Live topology (lab only)
+
+Fleet schema 19 accepts node topology over mTLS at `PUT /v1/topology`.
+The map's `GET /v1/admin/networks/{network_id}/topology` requires scoped
+`node.read` and returns only recent contacts between active nodes in that
+network. Each node replaces its previous report, and the controller purges
+expired reports even when no new traffic arrives.
+
+Rust nodes using the raw or userspace dataplane opt in with
+`topology_reporting = true` under `[controller]`. They report the latest
+carrier that delivered authenticated inbound traffic from each peer. A
+configured peer or route does not create an edge. Reports omit packet content,
+IP addresses, and unmeasured latency. Reports run every 30 seconds and expire
+after two minutes, so turning reporting off lets existing edges age out. The
+encrypted-only WireGuard carrier does not claim a peer contact based on relay
+ciphertext alone.
+
+The isolated Linux packet gate uses `LANEWAY_NODE_TEST_TOPOLOGY=1` with
+`LANEWAY_NODE_TEST_CONTROLLER=rust` to verify that the map stays empty until
+an authenticated reply actually crosses the relay.
+
 ### Native controller backup and restore (lab only)
 
 On Unix, take an online backup using SQLite's online copy API. Restore only

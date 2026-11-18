@@ -784,6 +784,11 @@ impl RelayClient {
             direct_serial: None,
             bytes: frame.slice(payload_offset..),
         });
+        if sent.is_ok()
+            && let Some(topology) = &self.state.topology
+        {
+            topology.received(peer, None);
+        }
         let depth = self
             .inject
             .max_capacity()

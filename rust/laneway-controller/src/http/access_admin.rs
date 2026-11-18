@@ -22,6 +22,7 @@ pub(super) enum Route<'a> {
     Inventory(&'a str),
     PrivateDns(&'a str),
     EndpointStatuses(&'a str),
+    Topology(&'a str),
     NodeLocations(&'a str),
     NodeLocation(&'a str),
     ListRoutes(&'a str),
@@ -62,6 +63,7 @@ impl<'a> Route<'a> {
             ["", "v1", "admin", "networks", id, "access-subjects"] => Inventory(id),
             ["", "v1", "admin", "networks", id, "private-dns"] => PrivateDns(id),
             ["", "v1", "admin", "networks", id, "endpoint-statuses"] => EndpointStatuses(id),
+            ["", "v1", "admin", "networks", id, "topology"] => Topology(id),
             ["", "v1", "admin", "networks", id, "node-locations"] => NodeLocations(id),
             ["", "v1", "admin", "nodes", id, "location"] => NodeLocation(id),
             ["", "v1", "admin", "networks", id, "routes"] => ListRoutes(id),
@@ -125,6 +127,7 @@ impl<'a> Route<'a> {
             | Self::ListRoutes(_)
             | Self::Certificates(_)
             | Self::EndpointStatuses(_)
+            | Self::Topology(_)
             | Self::NodeLocations(_) => "GET, HEAD",
             Self::NodeLocation(_) => "DELETE, PUT",
             Self::NodeCapabilities(_) | Self::RelayUpdate(_) => "PUT",
@@ -419,6 +422,11 @@ async fn decode(
         Route::EndpointStatuses(net) => Action::EndpointStatuses(
             parse(net)?,
             super::query_limit(req.uri().query())
+                .map_err(|_| malformed("limit must be an integer from 1 through 1000"))?,
+        ),
+        Route::Topology(net) => Action::Topology(
+            parse(net)?,
+            super::list_limit(req.uri().query(), 1000)
                 .map_err(|_| malformed("limit must be an integer from 1 through 1000"))?,
         ),
         Route::NodeLocations(net) => Action::NodeLocations(

@@ -42,6 +42,7 @@ pub use schema::migrate_fleet;
 mod session_lifecycle;
 pub use session_lifecycle::IssuedSession;
 mod sessions;
+pub mod topology;
 pub use nodes::Node;
 pub use sessions::{ListError, SessionError, SessionReply, SessionStore};
 

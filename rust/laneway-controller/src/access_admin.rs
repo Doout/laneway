@@ -38,6 +38,7 @@ pub enum Request {
     Inventory(Id),
     PrivateDns(Id),
     EndpointStatuses(Id, usize),
+    Topology(Id, usize),
     NodeLocations(Id, usize, Option<&'static str>),
     SetNodeLocation(Id, Option<Location>),
     ListRoutes(Id, usize),
@@ -149,6 +150,7 @@ impl Request {
             Self::Inventory(_)
                 | Self::PrivateDns(_)
                 | Self::EndpointStatuses(..)
+                | Self::Topology(..)
                 | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
                 | Self::PolicyPreview(..)
@@ -162,7 +164,9 @@ impl Request {
     fn permission(&self) -> &'static str {
         match self {
             Self::ListRoutes(..) => "route.read",
-            Self::EndpointStatuses(..) | Self::NodeLocations(..) => "node.read",
+            Self::EndpointStatuses(..) | Self::Topology(..) | Self::NodeLocations(..) => {
+                "node.read"
+            }
             Self::ListCertificates(..) => "certificate.read",
             Self::ListRelays(..) => "relay.read",
             Self::RegisterRelay { .. } | Self::UpdateRelay(..) | Self::DisableRelay(_) => {
@@ -185,6 +189,7 @@ impl Request {
             Self::Inventory(net)
             | Self::PrivateDns(net)
             | Self::EndpointStatuses(net, _)
+            | Self::Topology(net, _)
             | Self::NodeLocations(net, ..)
             | Self::ListRoutes(net, _)
             | Self::AssignRoute(net, ..)
@@ -258,6 +263,7 @@ impl Request {
             Self::EndpointStatuses(_, limit) => {
                 crate::endpoint_status::inventory(tx, net, limit, now)
             }
+            Self::Topology(_, limit) => crate::topology::inventory(tx, net, limit, now),
             Self::NodeLocations(_, limit, provider) => {
                 crate::node_location::inventory(tx, net, now, limit, provider)
             }

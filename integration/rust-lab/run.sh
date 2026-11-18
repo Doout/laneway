@@ -31,6 +31,7 @@ docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
     ./integration/rust-node-interop.sh
     ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_CONTROLLER=rust LANEWAY_NODE_TEST_PRIVATE_DNS=1 ./integration/rust-controller-node-netns.sh
+    LANEWAY_NODE_TEST_CONTROLLER=rust LANEWAY_NODE_TEST_TOPOLOGY=1 ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_DURABLE_EXIT=1 ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_DURABLE_EXIT=1 LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_WIREGUARD=1 ./integration/rust-controller-node-netns.sh

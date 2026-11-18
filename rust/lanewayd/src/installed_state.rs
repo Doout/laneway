@@ -64,6 +64,8 @@ struct StoredController {
     server_name: String,
     network_id: String,
     service_id: String,
+    #[serde(default)]
+    topology_reporting: bool,
     #[serde(default, deserialize_with = "private_dns_listen")]
     private_dns_listen: Option<SocketAddr>,
     #[serde(default = "legacy_poll", deserialize_with = "StoredDuration::required")]
@@ -434,6 +436,7 @@ impl Stored {
             },
             tls,
             controller: Some(ControllerConfig {
+                topology_reporting: self.controller.topology_reporting && !shared_host,
                 auto_renew_certificate: false, // Keep identity bytes intact for a reversible image swap.
                 disable_status_reporting: shared_host,
                 private_dns_listen: self.controller.private_dns_listen,

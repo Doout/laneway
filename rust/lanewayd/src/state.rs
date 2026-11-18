@@ -55,6 +55,7 @@ pub struct State {
     exit_sources: ArcSwapOption<Vec<ipnet::IpNet>>,
     controller_managed: bool,
     local_node: Option<Id>,
+    pub(crate) topology: Option<crate::topology::Observations>,
 }
 
 impl State {
@@ -82,6 +83,7 @@ impl State {
             exit_sources: ArcSwapOption::empty(),
             controller_managed,
             local_node,
+            topology: None,
         }
     }
 

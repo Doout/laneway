@@ -14,6 +14,7 @@ pub mod policy;
 pub mod public_application;
 pub mod relay_endpoint;
 pub mod service_names;
+pub mod topology;
 
 /// Generated `laneway.v1` Protobuf messages.
 #[allow(missing_docs)]

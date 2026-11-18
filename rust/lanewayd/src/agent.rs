@@ -65,16 +65,24 @@ impl Agent {
         let routes = RoutingTable::compile(&config.routes)?;
         let boot = random_id()?;
         let controller_managed = config.controller.is_some();
+        let mut state = if controller_managed {
+            State::controller(routes, node)
+        } else {
+            State::new(routes)
+        };
+        if config
+            .controller
+            .as_ref()
+            .is_some_and(|c| c.topology_reporting)
+        {
+            state.topology = Some(crate::topology::Observations::default());
+        }
         Ok(Self {
             config: Arc::new(config),
             network,
             node,
             boot,
-            state: Arc::new(if controller_managed {
-                State::controller(routes, node)
-            } else {
-                State::new(routes)
-            }),
+            state: Arc::new(state),
             metrics: Arc::new(Metrics::default()),
         })
     }
@@ -360,6 +368,12 @@ impl Agent {
                 ]);
             };
             let client = Arc::new(client);
+            if settings.topology_reporting {
+                tasks.spawn(crate::topology::run(
+                    Arc::clone(&client),
+                    Arc::clone(&self.state),
+                ));
+            }
             if let Some(server) = private_dns {
                 let client = Arc::clone(&client);
                 let not_after = local_certificate.not_after;

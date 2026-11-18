@@ -155,6 +155,11 @@ impl WireGuardRelay {
             .controller
             .as_ref()
             .context("missing WireGuard controller")?;
+        if control.topology_reporting {
+            tracing::warn!(
+                "peer topology reporting is unavailable without authenticated WireGuard receive evidence"
+            );
+        }
         let cert = tls::local_certificate_health(&self.config.tls)?;
         let dns_cert_end = cert.not_after;
         let private_dns = if let Some(address) = control.private_dns_listen {

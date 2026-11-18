@@ -37,6 +37,8 @@ last_pid=""
 link_index=0
 node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
 test_dns="${LANEWAY_NODE_TEST_PRIVATE_DNS:-0}"
+test_topology="${LANEWAY_NODE_TEST_TOPOLOGY:-0}"
+topology_config=""
 private_dns_listen=""
 test_durable_exit="${LANEWAY_NODE_TEST_DURABLE_EXIT:-0}"
 test_wireguard="${LANEWAY_NODE_TEST_WIREGUARD:-0}"
@@ -49,6 +51,13 @@ if [[ "${test_dns}" == "1" ]]; then
   [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
     { echo "Private DNS gate requires the default node profile and Rust controller" >&2; exit 1; }
   private_dns_listen="127.0.0.1:5354"
+fi
+if [[ "${test_topology}" == "1" ]]; then
+  [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
+    { echo "Topology gate requires the default node profile and Rust controller" >&2; exit 1; }
+  command -v curl >/dev/null && command -v jq >/dev/null ||
+    { echo "Topology gate requires curl and jq" >&2; exit 1; }
+  topology_config='topology_reporting = true'
 fi
 credential_dir=""
 snapshot_seconds=2
@@ -459,7 +468,7 @@ if [[ "${node_controller}" == "rust" ]]; then
     '{ type nat hook prerouting priority dstnat; policy accept; }'
   ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
     iifname eth0 ip saddr "${location_node_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
-  if [[ "${test_durable_exit}" == "1" || "${test_invitation}" == "1" ]]; then
+  if [[ "${test_durable_exit}" == "1" || "${test_invitation}" == "1" || "${test_topology}" == "1" ]]; then
     gateway_location_ip="81.2.69.139"
     ip -n "${gateway_ns}" address add "${gateway_location_ip}/28" dev eth0
     ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
@@ -476,6 +485,14 @@ if [[ "${node_controller}" == "rust" ]]; then
     jq -n --arg https "${node_endpoint}" --arg quic "${node_quic_endpoint}" --arg name "${discovery_name}" \
       '{enrollment_endpoint:$https, quic_endpoint:$quic, server_name:$name}' >"${work_dir}/bootstrap-profile.json"
     discovery_args=(--bootstrap-profile "${work_dir}/bootstrap-profile.json")
+  fi
+  if [[ "${test_topology}" == "1" ]]; then
+    # The topology tables must be installed before the Rust process takes the
+    # writer lock. Legacy nodes talk to that same authoritative controller.
+    stop_process "${controller_pid}"
+    "${work_dir}/rust-controller" migrate-fleet "${work_dir}/controller.db"
+    gateway_config_endpoint="${node_endpoint}"
+    gateway_quic_endpoint="${node_quic_endpoint}"
   fi
   start_process "${controller_ns}" "${work_dir}/native-controller.log" \
     "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
@@ -580,6 +597,7 @@ private_key = "${work_dir}/pki/rust.key"
 ca = "${work_dir}/pki/ca.crt"
 [controller]
 auto_renew_certificate = true
+${topology_config}
 private_dns_listen = "${private_dns_listen}"
 endpoint = "${node_endpoint}"
 quic_endpoint = "${node_quic_endpoint}"
@@ -1193,6 +1211,15 @@ relay_forwarded_packets() {
 if [[ "${node_controller}" == "rust" ]]; then
   forwarded_before="$(relay_forwarded_packets)"
 fi
+if [[ "${test_topology}" == "1" ]]; then
+  (umask 077; printf 'Authorization: Bearer %s\n' "${admin_token}" >"${work_dir}/topology-header")
+  topology() {
+    ip netns exec "${controller_ns}" curl --noproxy '*' --silent --show-error --fail --max-time 2 \
+      --cacert "${work_dir}/pki/ca.crt" -H "@${work_dir}/topology-header" \
+      "https://127.0.0.1:9443/v1/admin/networks/${network_id}/topology"
+  }
+  topology | jq -e '.retention_seconds == 120 and (.edges | length == 0)' >/dev/null
+fi
 udp_success 9701 rust-route-allowed
 if [[ "${node_controller}" == "rust" ]]; then
   forwarded_after="$(relay_forwarded_packets)"
@@ -1200,6 +1227,23 @@ if [[ "${node_controller}" == "rust" ]]; then
     echo "ERROR: the request and reply did not use the Rust relay" >&2
     exit 1
   fi
+fi
+if [[ "${test_topology}" == "1" ]]; then
+  recorded=0
+  for _ in $(seq 1 175); do
+    if topology | jq -e --arg source "${rust_id}" --arg peer "${gateway_id}" \
+      '(.edges | length == 1) and (.edges[0] | .node_id == $source and .peer_id == $peer and .path == "relay" and (has("latency_ms") | not))' >/dev/null; then
+      recorded=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ "${recorded}" != "1" ]]; then
+    echo "ERROR: an authenticated reply did not appear in the controller topology" >&2
+    tail -60 "${work_dir}/rust.log" >&2
+    exit 1
+  fi
+  echo "PASS: configured peers produced no topology edge until a real relayed packet arrived"
 fi
 
 echo "==> live Rust node reports its authenticated carrier and routes; the controller observes its source"

@@ -188,6 +188,27 @@ impl Client {
         Ok(())
     }
 
+    pub(crate) async fn report_topology(
+        &self,
+        report: &laneway_protocol::topology::Report,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .put(self.http_origin.join("/v1/topology")?)
+            .timeout(Duration::from_secs(5))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(report)?)
+            .send()
+            .await
+            .context("send peer topology report")?;
+        ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "controller topology returned {}",
+            response.status()
+        );
+        Ok(())
+    }
+
     pub(crate) async fn private_dns(&self) -> Result<crate::private_dns::Catalog> {
         let response = self
             .http

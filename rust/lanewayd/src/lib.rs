@@ -30,6 +30,7 @@ mod state;
 mod status_report;
 mod tcp_fallback;
 mod tls;
+mod topology;
 mod tun;
 mod wireguard;
 

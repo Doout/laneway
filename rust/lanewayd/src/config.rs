@@ -200,6 +200,9 @@ pub struct ConnectorConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ControllerConfig {
+    /// Opt in to short-lived, authenticated peer path observations for the map.
+    #[serde(default)]
+    pub topology_reporting: bool,
     /// Renew a controller-managed certificate in place using the existing TLS
     /// key. Requires a writable certificate directory owned by the node.
     #[serde(default)]

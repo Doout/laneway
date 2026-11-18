@@ -4,6 +4,7 @@ use hyper::{Request, StatusCode, body::Incoming, header};
 use serde::{Deserialize, Deserializer};
 use zeroize::Zeroizing;
 
+const MAX_JSON_BYTES: usize = 131072;
 pub(super) fn empty_secret() -> Zeroizing<String> {
     Zeroizing::new(String::new())
 }
@@ -17,19 +18,27 @@ pub(super) fn secret<'de, D: Deserializer<'de>>(d: D) -> Result<Zeroizing<String
 pub(super) async fn json_form<T: serde::de::DeserializeOwned + Default>(
     req: Request<Incoming>,
 ) -> Result<T, Failure> {
-    Ok(decode(req).await?.unwrap_or_default())
+    Ok(decode(req, MAX_JSON_BYTES).await?.unwrap_or_default())
 }
 
 pub(super) async fn required_json_form<T: serde::de::DeserializeOwned>(
     req: Request<Incoming>,
 ) -> Result<T, Failure> {
-    decode(req)
+    bounded_json_form(req, MAX_JSON_BYTES).await
+}
+
+pub(super) async fn bounded_json_form<T: serde::de::DeserializeOwned>(
+    req: Request<Incoming>,
+    max_bytes: usize,
+) -> Result<T, Failure> {
+    decode(req, max_bytes)
         .await?
         .ok_or(malformed("JSON request is required"))
 }
 
 async fn decode<T: serde::de::DeserializeOwned>(
     req: Request<Incoming>,
+    max_bytes: usize,
 ) -> Result<Option<T>, Failure> {
     let media = req
         .headers()
@@ -54,7 +63,7 @@ async fn decode<T: serde::de::DeserializeOwned>(
             .map_err(|_| malformed("could not read request body"))?
             .into_data()
         {
-            if bytes.len() > 131072 - data.len() {
+            if bytes.len() > max_bytes - data.len() {
                 return Err(Failure(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "ERROR_CODE_RESOURCE_EXHAUSTED",

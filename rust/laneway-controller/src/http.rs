@@ -327,7 +327,11 @@ async fn dispatch(
         return Ok(node_configuration::handle(req, state, id, peer).await);
     }
     if path == "/v1/status" && state.workload_mtls_enabled {
-        return endpoint_status::handle(req, state, id, peer).await;
+        return endpoint_status::handle(req, state, id, peer, endpoint_status::Kind::Status).await;
+    }
+    if path == "/v1/topology" && state.workload_mtls_enabled {
+        return endpoint_status::handle(req, state, id, peer, endpoint_status::Kind::Topology)
+            .await;
     }
     if path == "/v1/node/private-dns" && state.workload_mtls_enabled {
         return node_private_dns::handle(req, state, id).await;

@@ -339,11 +339,14 @@ async fn serve(
         println!("listening quic://{}", ep.local_addr()?);
     }
     let renewal = renewal.map(|worker| tokio::spawn(worker.run()));
+    let topology_expiry = prune_topology(state.clone());
+    tokio::pin!(topology_expiry);
     let stop = stop();
     tokio::pin!(stop);
     loop {
         tokio::select! {
             result=&mut control => return result,
+            _=&mut topology_expiry => unreachable!("topology expiry loop never returns"),
             result=&mut stop => { result?; break; }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             socket=listener.accept() => {
@@ -380,4 +383,21 @@ async fn serve(
     }
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+async fn prune_topology(state: super::http::State) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(30));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let Ok(permit) = Arc::clone(&state.queries).try_acquire_owned() else {
+            continue;
+        };
+        let database = state.database.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            laneway_controller::SessionStore::open(&database)?.prune_topology()
+        })
+        .await;
+    }
 }
