@@ -35,7 +35,7 @@ use crate::{
     tun::TunDevice,
 };
 
-/// Native Linux node agent owning TUN, routing, and all packet carriers.
+/// Native node agent owning TUN, routing, and all packet carriers.
 pub struct Agent {
     config: Arc<Config>,
     network: Id,
@@ -50,6 +50,14 @@ impl Agent {
     /// a network device or socket.
     pub fn new(config: Config) -> Result<Self> {
         config.validate()?;
+        #[cfg(target_os = "macos")]
+        anyhow::ensure!(
+            !config.forwarding.subnet_router
+                && !config.forwarding.exit_gateway
+                && !config.forwarding.exit_client.authorized
+                && !config.forwarding.exit_client.enabled,
+            "macOS Rust preview supports ordinary node routes only; use the installed client for exit routing"
+        );
         let (network, node) = config.ids()?;
         tls::validate_local(&config.tls, network, node)?;
         let routes = RoutingTable::compile(&config.routes)?;
@@ -112,17 +120,18 @@ impl Agent {
             authority_base.exit_intent_path.clone(),
         ));
         let userspace = authority_base.connector.userspace;
-        let intent_persisted = if authority_base.controller.is_some() && !userspace {
-            let loaded = exit_intent
-                .load(&mut authority_base)
-                .context("load explicit exit selection")?;
-            authority_base
-                .validate()
-                .context("validate persisted exit selection")?;
-            loaded
-        } else {
-            false
-        };
+        let intent_persisted =
+            if cfg!(target_os = "linux") && authority_base.controller.is_some() && !userspace {
+                let loaded = exit_intent
+                    .load(&mut authority_base)
+                    .context("load explicit exit selection")?;
+                authority_base
+                    .validate()
+                    .context("validate persisted exit selection")?;
+                loaded
+            } else {
+                false
+            };
         let bootstrap = self.controller_bootstrap().await?;
         if let Some((client, snapshot, _, _)) = &bootstrap {
             if snapshot
@@ -204,8 +213,17 @@ impl Agent {
             None
         } else {
             Some(Arc::new(Mutex::new(
-                TunDevice::open(&self.config.tun, &self.config.routes).await?,
+                TunDevice::open(
+                    &self.config.tun,
+                    &self.config.routes,
+                    &tun_transport_bypasses(&self.config),
+                )
+                .await?,
             )))
+        };
+        let interface = match &tun {
+            Some(tun) => tun.lock().await.interface_name().to_owned(),
+            None => "userspace".to_owned(),
         };
         let configured_tun = tun.clone().filter(|_| self.config.tun.configure);
         let needs_kernel = self.config.forwarding.subnet_router
@@ -390,6 +408,7 @@ impl Agent {
             exit_intent,
             intent_persisted,
             certificate_presented_serial,
+            interface,
         });
         let snapshot_control = Arc::clone(&local_control);
         let exit_control = Arc::clone(&local_control);
@@ -399,7 +418,7 @@ impl Agent {
             self.config
                 .controller
                 .as_ref()
-                .filter(|_| !userspace)
+                .filter(|_| !userspace && cfg!(target_os = "linux"))
                 .map(|_| {
                     Arc::new(move |selection| {
                         let control = Arc::clone(&exit_control);
@@ -417,7 +436,7 @@ impl Agent {
         info!(
             node = %self.node,
             network = %self.network,
-            interface = if userspace { "userspace" } else { self.config.tun.name.as_str() },
+            interface = %local_control.interface,
             direct = %direct_address,
             "native Rust Laneway agent started"
         );
@@ -751,6 +770,7 @@ struct RuntimeControl {
     exit_intent: Arc<ExitIntentStore>,
     intent_persisted: Arc<StdMutex<bool>>,
     certificate_presented_serial: String,
+    interface: String,
 }
 
 impl RuntimeControl {
@@ -836,11 +856,7 @@ impl RuntimeControl {
             name: local_name,
             overlay_addresses,
             selected_routes,
-            interface: if effective.connector.userspace {
-                "userspace".into()
-            } else {
-                effective.tun.name.clone()
-            },
+            interface: self.interface.clone(),
             relay: effective
                 .relay
                 .address
@@ -1039,7 +1055,11 @@ impl RuntimeControl {
             && let Err(error) = tun
                 .lock()
                 .await
-                .apply_controller(&snapshot.overlays, &next.routes)
+                .apply_controller(
+                    &snapshot.overlays,
+                    &next.routes,
+                    &tun_transport_bypasses(&next),
+                )
                 .await
         {
             let rollback_result = reconcile_kernel(&self.kernel, &self.dynamic_bypasses, rollback);
@@ -1211,7 +1231,7 @@ impl SnapshotApplier for RuntimeApplier {
                     return Err(cleanup.context("fail close withdrawn relay authority"));
                 }
                 if let Some(tun) = &self.tun {
-                    tun.lock().await.apply_controller(&[], &[]).await?;
+                    tun.lock().await.apply_controller(&[], &[], &[]).await?;
                 }
                 return Err(error.context("controller withdrew configured relay authority"));
             }
@@ -1229,9 +1249,15 @@ impl SnapshotApplier for RuntimeApplier {
                 && let Err(error) = tun
                     .lock()
                     .await
-                    .apply_controller(&snapshot.overlays, &routes)
+                    .apply_controller(
+                        &snapshot.overlays,
+                        &routes,
+                        &tun_transport_bypasses(&effective),
+                    )
                     .await
             {
+                #[cfg(target_os = "macos")]
+                self.state.fail_close();
                 let rollback =
                     reconcile_kernel(&self.kernel, &self.dynamic_bypasses, rollback_config);
                 return Err(match rollback {
@@ -1273,7 +1299,7 @@ impl SnapshotApplier for RuntimeApplier {
                 return Err(error.context("fail close controller-owned kernel state"));
             }
             if let Some(tun) = &self.tun {
-                tun.lock().await.apply_controller(&[], &[]).await?;
+                tun.lock().await.apply_controller(&[], &[], &[]).await?;
             }
             Ok(())
         })
@@ -1294,6 +1320,24 @@ impl SnapshotApplier for RuntimeApplier {
             Ok(())
         })
     }
+}
+
+fn tun_transport_bypasses(config: &Config) -> Vec<std::net::IpAddr> {
+    if !cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    let mut bypasses = config.forwarding.exit_client.controller_bypass.clone();
+    bypasses.extend(config.relay.address.map(|address| address.ip()));
+    bypasses.extend(config.tcp_fallback.as_ref().and_then(|fallback| {
+        fallback
+            .address
+            .parse::<std::net::SocketAddr>()
+            .ok()
+            .map(|address| address.ip())
+    }));
+    bypasses.sort_unstable();
+    bypasses.dedup();
+    bypasses
 }
 
 fn reconcile_kernel(

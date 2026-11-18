@@ -215,6 +215,28 @@ then run `LANEWAY_RUST_CONSOLE_ASSETS="$PWD/web/dist" make rust-controller-inter
 from the repository root. The controller image lab also tests the packaged
 assets while running with its non-root UID and no network.
 
+## macOS endpoint preview
+
+`lanewayd-rs` can run an ordinary macOS tunnel with the existing privileged
+helper. It receives a verified `utun` file descriptor over the inherited Unix
+socket, reads and writes IPv4/IPv6 packets in Rust, and asks the helper to
+replace and restore only ordinary routes. Node credentials stay in the Rust
+process. The preview does not change the installed client or its package.
+
+On an isolated Mac with the existing Laneway helper installed at
+`/Library/PrivilegedHelperTools/laneway-network-helper`, use a native node
+configuration with `[tun]` set to `name = "utun"` and `configure = true`.
+Set `socket_path` to a path in a private user-owned directory. Run the separately
+built Rust binary as the regular user. Exit routing and DNS switching remain
+with the existing client. A changed overlay address requires reconnecting;
+losing controller authority withdraws the ordinary routes.
+
+The native CI matrix runs the unprivileged stream-framing and descriptor tests
+on Apple Silicon and Intel. It also installs the existing helper on disposable
+runners and exercises a real `utun` with a benchmark-only IPv4 route, a packet,
+authority withdrawal, and cleanup. That lab test does not exercise desktop
+onboarding, public relay reachability, or the signed macOS package.
+
 ## Linux node image
 
 Build the opt-in `node` target and check the packaged entry point after the

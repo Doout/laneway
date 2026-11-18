@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Native Linux Laneway node dataplane"
+description = "Native Laneway node dataplane"
 
 [[bin]]
 name = "lanewayd-rs"
@@ -35,7 +35,6 @@ sha2.workspace = true
 smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-tcp-reno"] }
 tokio.workspace = true
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
-tokio-tun.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -43,9 +42,13 @@ wait-timeout.workspace = true
 x509-parser.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+tokio-tun.workspace = true
 libc = "0.2.189"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1.9.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
 
 [dev-dependencies]
 laneway-relay = { path = "../laneway-relay" }

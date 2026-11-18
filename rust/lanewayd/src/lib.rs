@@ -1,6 +1,6 @@
 #![deny(missing_docs)]
 
-//! Native Linux Laneway node dataplane. The crate owns the TUN hot path,
+//! Native Laneway node dataplane. The crate owns the TUN hot path,
 //! immutable routing, authenticated QUIC relay/direct carriers, bounded queues,
 //! and reconnect lifecycle without per-packet cross-language IPC.
 

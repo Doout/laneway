@@ -267,6 +267,34 @@ jobs:
           RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
           LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
 
+  rust-macos-endpoint:
+    name: Rust macOS endpoint (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --lib
+      - run: cargo build --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+      - name: Verify real utun traffic and route cleanup with the installed helper
+        run: |
+          set -euo pipefail
+          helper=/Library/PrivilegedHelperTools/laneway-network-helper
+          test ! -e "$helper" && test ! -L "$helper"
+          (cd go && go build -trimpath -o "$RUNNER_TEMP/laneway-network-helper" ./cmd/laneway)
+          sudo -n install -d -m 0755 -o root -g wheel /Library/PrivilegedHelperTools
+          sudo -n install -m 0755 -o root -g wheel "$RUNNER_TEMP/laneway-network-helper" "$helper"
+          trap 'sudo -n rm -f "$helper"' EXIT
+          LANEWAY_MACOS_UTUN_TEST=1 cargo test --locked --manifest-path rust/Cargo.toml \
+            -p lanewayd-rs --lib darwin_installed_helper_routes_and_restores_real_utun -- --ignored
+
   rust-linux-package:
     name: Static Rust Linux package preview
     runs-on: ubuntu-24.04

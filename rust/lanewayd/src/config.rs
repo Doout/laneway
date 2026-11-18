@@ -114,7 +114,7 @@ fn default_exit_intent_path() -> PathBuf {
     PathBuf::from("/var/lib/laneway/exit-intent-v1.json")
 }
 
-/// Strict top-level configuration for the native Linux agent.
+/// Strict top-level configuration for the native agent.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -278,11 +278,11 @@ pub struct TlsConfig {
     pub ca: PathBuf,
 }
 
-/// Linux TUN settings.
+/// Native tunnel settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunConfig {
-    /// Interface name, normally `lane0`.
+    /// Interface name, normally `lane0` on Linux and `utun` on macOS.
     pub name: String,
     /// Interface MTU. Laneway v1 defaults to the IPv6 minimum of 1280.
     #[serde(default = "default_mtu")]
@@ -290,7 +290,7 @@ pub struct TunConfig {
     /// Host prefixes assigned to the interface.
     #[serde(default)]
     pub addresses: Vec<IpNet>,
-    /// Install interface addresses and routes with `ip(8)`.
+    /// Configure addresses and routes using the platform network manager.
     #[serde(default)]
     pub configure: bool,
 }
@@ -643,7 +643,7 @@ impl Config {
                     .name
                     .bytes()
                     .all(|value| value.is_ascii_alphanumeric() || value == b'_' || value == b'-'),
-            "tun.name must be a simple Linux interface name"
+            "tun.name must be a simple interface name"
         );
         ensure!(
             (576..=1280).contains(&self.tun.mtu),
