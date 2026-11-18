@@ -1,6 +1,6 @@
 use super::{
     AUTH, Failure, INTERNAL, Reply, State, credential,
-    form::json_form,
+    form::{json_form, required_json_form},
     malformed,
     mutations::{DENIED, csrf_proof},
     response, with_session_headers,
@@ -9,8 +9,8 @@ use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
     SessionError, SessionStore,
     access_admin::{
-        AccessError, AclRule, AclSelector, Port, Request as Action, ResourceTarget,
-        ServiceProtocol, Subject, Target,
+        AccessError, AclRule, AclSelector, Port, Request as Action, ResourceTarget, RouteMode,
+        RouteSpec, ServiceProtocol, Subject, Target,
     },
 };
 use laneway_protocol::Id;
@@ -18,6 +18,10 @@ use serde::Deserialize;
 
 pub(super) enum Route<'a> {
     Inventory(&'a str),
+    ListRoutes(&'a str),
+    AssignSubnet,
+    ApproveAdvertisement(&'a str),
+    WithdrawAdvertisement(&'a str),
     AclRules(&'a str),
     AclRule(&'a str),
     UserCreate(&'a str),
@@ -38,6 +42,10 @@ impl<'a> Route<'a> {
         use Route::*;
         Some(match parts {
             ["", "v1", "admin", "networks", id, "access-subjects"] => Inventory(id),
+            ["", "v1", "admin", "networks", id, "routes"] => ListRoutes(id),
+            ["", "v1", "admin", "routes", "assign"] => AssignSubnet,
+            ["", "v1", "admin", "routes", id, "approve"] => ApproveAdvertisement(id),
+            ["", "v1", "admin", "routes", id, "withdraw"] => WithdrawAdvertisement(id),
             ["", "v1", "admin", "networks", id, "acl-rules"] => AclRules(id),
             ["", "v1", "admin", "acl-rules", id] => AclRule(id),
             ["", "v1", "admin", "networks", id, "users"] => UserCreate(id),
@@ -59,10 +67,13 @@ impl<'a> Route<'a> {
     }
     fn allow(&self) -> &'static str {
         match self {
-            Self::Inventory(_) => "GET, HEAD",
+            Self::Inventory(_) | Self::ListRoutes(_) => "GET, HEAD",
             Self::AclRules(_) => "GET, HEAD, POST",
             Self::AclRule(_) => "DELETE, PUT",
             Self::UserCreate(_)
+            | Self::AssignSubnet
+            | Self::ApproveAdvertisement(_)
+            | Self::WithdrawAdvertisement(_)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
             | Self::ResourceCreate(_)
@@ -79,6 +90,16 @@ impl<'a> Route<'a> {
 #[serde(default, deny_unknown_fields)]
 struct NameForm {
     name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssignForm {
+    network_id: String,
+    node_id: String,
+    prefix: ipnet::IpNet,
+    mode: RouteMode,
+    #[serde(default)]
+    metric: u32,
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -170,7 +191,11 @@ pub(super) async fn handle(
     }
     let auth = credential(req.headers())?;
     let read = matches!(req.method().clone(), Method::GET | Method::HEAD);
-    let post = req.method() == Method::POST;
+    let creates = req.method() == Method::POST
+        && !matches!(
+            route,
+            Route::ApproveAdvertisement(_) | Route::WithdrawAdvertisement(_)
+        );
     let put = req.method() == Method::PUT;
     let proof = (!read)
         .then(|| csrf_proof(req.headers()).filter(|_| crate::origin::same_origin(req.headers())))
@@ -201,16 +226,36 @@ pub(super) async fn handle(
     .await
     .map_err(|_| INTERNAL)?
     .map_err(failure)?;
-    let data = serde_json::to_vec(&data).map_err(|_| INTERNAL)?;
-    with_session_headers(
-        response(if post { S::CREATED } else { S::OK }, id, data, head),
-        meta,
-    )
+    let status = if data.created.unwrap_or(creates) {
+        S::CREATED
+    } else {
+        S::OK
+    };
+    let data = serde_json::to_vec(&data.data).map_err(|_| INTERNAL)?;
+    with_session_headers(response(status, id, data, head), meta)
 }
 
 async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<Action, Failure> {
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
+        Route::ListRoutes(net) => Action::ListRoutes(
+            parse(net)?,
+            super::query_limit(req.uri().query()).map_err(|_| malformed("invalid limit"))?,
+        ),
+        Route::AssignSubnet => {
+            let f = required_json_form::<AssignForm>(req).await?;
+            Action::AssignRoute(
+                parse(&f.network_id)?,
+                parse(&f.node_id)?,
+                RouteSpec {
+                    prefix: f.prefix,
+                    mode: f.mode,
+                    metric: f.metric,
+                },
+            )
+        }
+        Route::ApproveAdvertisement(id) => Action::ApproveRoute(parse(id)?),
+        Route::WithdrawAdvertisement(id) => Action::WithdrawRoute(parse(id)?),
         Route::AclRules(net) if req.method() == Method::POST => {
             let id = parse(net)?;
             let f = json_form::<AclCreateForm>(req).await?;
@@ -313,10 +358,8 @@ async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<A
         Route::ResourceGrantDelete(id) => Action::DeleteResourceGrant(parse(id)?),
     })
 }
-fn parse(value: &str) -> Result<Id, Failure> {
-    value
-        .parse()
-        .map_err(|_| malformed("invalid access identifier"))
+pub(super) fn parse(value: &str) -> Result<Id, Failure> {
+    value.parse().map_err(|_| malformed("invalid identifier"))
 }
 fn subject(kind: &str, id: &str) -> Result<Subject, Failure> {
     let id = parse(id)?;
@@ -332,7 +375,7 @@ async fn enabled(req: Request<Incoming>) -> Result<bool, Failure> {
         .enabled
         .ok_or(malformed("enabled is required"))
 }
-fn failure(e: anyhow::Error) -> Failure {
+pub(super) fn failure(e: anyhow::Error) -> Failure {
     match e.downcast_ref::<AccessError>() {
         Some(AccessError::Invalid(detail)) => return malformed(detail),
         Some(AccessError::Missing) => {

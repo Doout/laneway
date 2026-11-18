@@ -7,6 +7,20 @@ use zeroize::Zeroizing;
 pub(super) async fn json_form<T: serde::de::DeserializeOwned + Default>(
     req: Request<Incoming>,
 ) -> Result<T, Failure> {
+    Ok(decode(req).await?.unwrap_or_default())
+}
+
+pub(super) async fn required_json_form<T: serde::de::DeserializeOwned>(
+    req: Request<Incoming>,
+) -> Result<T, Failure> {
+    decode(req)
+        .await?
+        .ok_or(malformed("JSON request is required"))
+}
+
+async fn decode<T: serde::de::DeserializeOwned>(
+    req: Request<Incoming>,
+) -> Result<Option<T>, Failure> {
     let media = req
         .headers()
         .get(header::CONTENT_TYPE)
@@ -42,9 +56,8 @@ pub(super) async fn json_form<T: serde::de::DeserializeOwned + Default>(
         }
     }
     let mut de = serde_json::Deserializer::from_slice(&data);
-    let form = Option::<T>::deserialize(&mut de)
-        .map_err(|_| malformed("malformed JSON request"))?
-        .unwrap_or_default();
+    let form =
+        Option::<T>::deserialize(&mut de).map_err(|_| malformed("malformed JSON request"))?;
     de.end()
         .map_err(|_| malformed("request must contain one JSON value"))?;
     Ok(form)

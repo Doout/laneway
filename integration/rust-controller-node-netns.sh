@@ -321,7 +321,9 @@ node_quic_endpoint="${controller_quic_endpoint}"
 node_server_name="10.254.0.1"
 native_controller_pid=""
 relay_metrics=""
-acl_connection=("${admin_connection[@]}")
+management_connection=("${admin_connection[@]}")
+advertiser_namespace="${gateway_ns}"
+advertiser_endpoint="${controller_endpoint}"
 if [[ "${node_controller}" == "rust" ]]; then
   node_endpoint="https://10.254.0.1:9443"
   node_quic_endpoint="10.254.0.1:9443"
@@ -336,7 +338,9 @@ if [[ "${node_controller}" == "rust" ]]; then
     --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity 2
   native_controller_pid="${last_pid}"
   wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
-  acl_connection=(
+  advertiser_namespace="${controller_ns}"
+  advertiser_endpoint="https://127.0.0.1:9443"
+  management_connection=(
     --controller https://127.0.0.1:9443 --ca "${work_dir}/pki/ca.crt"
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
     --admin-token-file "${work_dir}/admin.token"
@@ -346,7 +350,7 @@ fi
 acl_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl add \
   --network-id "${network_id}" --priority 100 --action accept \
   --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description rust-live-allow \
-  "${acl_connection[@]}")"
+  "${management_connection[@]}")"
 acl_id="$(printf '%s\n' "${acl_json}" | json_string_field rule_id)"
 if [[ ! "${acl_id}" =~ ^[0-9a-f]{32}$ ]]; then
   echo "ERROR: failed to parse ACL rule ID" >&2
@@ -397,6 +401,9 @@ poll_interval = "100ms"
 advertise = ["192.168.77.0/24"]
 nat = true
 output_interface = "lan1"
+# This gate asserts relay forwarding. The mixed-node gate covers direct paths.
+[direct]
+enabled = false
 EOF
 
 cat >"${work_dir}/rust.toml" <<EOF
@@ -505,8 +512,8 @@ if ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q .; then
   echo "ERROR: Rust node installed the unapproved subnet route" >&2
   exit 1
 fi
-route_json="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" route advertise 192.168.77.0/24 \
-  --kind subnet --mode nat --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+route_json="$(ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" route advertise 192.168.77.0/24 \
+  --kind subnet --mode nat --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
   --cert "${work_dir}/pki/gateway.crt" --key "${work_dir}/pki/gateway.key")"
 route_id="$(printf '%s\n' "${route_json}" | json_string_field route_id)"
@@ -514,8 +521,9 @@ if [[ ! "${route_id}" =~ ^[0-9a-f]{32}$ ]]; then
   echo "ERROR: failed to parse advertised route ID" >&2
   exit 1
 fi
+wait_route "${rust_ns}" 192.168.77.0/24 0
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route approve \
-  --route-id "${route_id}" "${admin_connection[@]}" >"${work_dir}/route-approval.json"
+  --route-id "${route_id}" "${management_connection[@]}" >"${work_dir}/route-approval.json"
 wait_route "${rust_ns}" 192.168.77.0/24 1
 for _ in $(seq 1 200); do
   if ip netns exec "${gateway_ns}" nft list table inet laneway 2>/dev/null | grep -q '192.168.77.0/24' && \
@@ -543,7 +551,7 @@ fi
 
 echo "==> deleting the only ACL rule leaves the route present but fails traffic closed"
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl delete \
-  --rule-id "${acl_id}" "${acl_connection[@]}" >"${work_dir}/acl-delete.json"
+  --rule-id "${acl_id}" "${management_connection[@]}" >"${work_dir}/acl-delete.json"
 sleep 0.6
 ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q 'dev lane0'
 udp_denied 9702 rust-acl-denied
@@ -552,13 +560,47 @@ echo "==> an explicit replacement ACL restores the same authorized route"
 replacement_acl="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl add \
   --network-id "${network_id}" --priority 100 --action accept \
   --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description rust-live-restored \
-  "${acl_connection[@]}")"
+  "${management_connection[@]}")"
 replacement_acl_id="$(printf '%s\n' "${replacement_acl}" | json_string_field rule_id)"
 if [[ ! "${replacement_acl_id}" =~ ^[0-9a-f]{32}$ ]]; then
   echo "ERROR: replacement ACL was not created" >&2
   exit 1
 fi
 udp_success 9703 rust-acl-restored
+
+if [[ "${node_controller}" == "rust" ]]; then
+  rust_workload_connection=(
+    --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt"
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
+    --cert "${work_dir}/pki/rust.crt" --key "${work_dir}/pki/rust.key"
+  )
+  if ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
+    --route-id "${route_id}" "${rust_workload_connection[@]}" >"${work_dir}/foreign-withdrawal.log" 2>&1; then
+    echo "ERROR: a different node withdrew the gateway's route" >&2
+    exit 1
+  fi
+  grep -q 'ERROR_CODE_PERMISSION_DENIED' "${work_dir}/foreign-withdrawal.log"
+  if ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" route advertise 192.0.2.0/24 \
+    --kind subnet --mode nat "${rust_workload_connection[@]}" >"${work_dir}/unprivileged-advertisement.log" 2>&1; then
+    echo "ERROR: a node without subnet-router capability advertised a route" >&2
+    exit 1
+  fi
+  grep -q 'node lacks route capability' "${work_dir}/unprivileged-advertisement.log"
+  echo "==> a route owner withdraws through Rust; the route disappears and packets stop"
+  ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
+    --route-id "${route_id}" --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+    --cert "${work_dir}/pki/gateway.crt" --key "${work_dir}/pki/gateway.key" >"${work_dir}/route-withdrawal.json"
+  wait_route "${rust_ns}" 192.168.77.0/24 0
+  udp_denied 9705 rust-route-withdrawn
+
+  echo "==> assigning the same subnet through Rust reinstalls it and restores traffic"
+  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route assign \
+    --network-id "${network_id}" --connector "${gateway_id}" --to 192.168.77.0/24 \
+    "${management_connection[@]}" >"${work_dir}/route-assignment.json"
+  wait_route "${rust_ns}" 192.168.77.0/24 1
+  udp_success 9706 rust-route-reassigned
+fi
 
 echo "==> certificate revocation closes the established gateway path"
 gateway_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/gateway.crt")"

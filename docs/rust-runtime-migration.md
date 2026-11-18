@@ -135,8 +135,8 @@ the serve command. Use a private file (e.g. mode 0600); never pass its
 contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
-contexts or when combined with a session cookie. Bootstrap, recovery, and
-other admin resource writes besides network creation and enrollment-token issuance still require Go.
+contexts or when combined with a session cookie. Bootstrap, recovery, OAuth,
+and the remaining node and certificate administration still require Go.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -175,6 +175,22 @@ node through the Go store, checks both allocated addresses and the resulting
 epoch through Rust, checks forbidden and
 revoked subjects, and verifies rollback if the audit insert fails. When Go
 and Rust race to create the same ID, exactly one succeeds and emits an audit event.
+
+The Rust HTTPS listener also lists, assigns, approves, and withdraws routes.
+Route inventory uses `route.read`; automation writes require `route.manage`.
+Browser writes require a scoped owner or operator, same-origin request, and
+CSRF proof. Node advertisements and owner withdrawals use the verified mTLS
+certificate when `--node-client-ca` is configured. A node needs the relevant
+subnet-router or exit capability to advertise; an advertisement does not
+authorize forwarding until approved. Assignment is idempotent for the same
+node, prefix, mode, and metric. Its capability change, route approval, audit
+events, and configuration epochs commit together.
+
+The HTTPS gate checks Go/Rust route inventory parity, scope, conflicting
+routes, and assignment rollback. With `LANEWAY_NODE_TEST_CONTROLLER=rust`,
+the namespace gate uses the existing Go CLI against the Rust route API and
+verifies that approval carries packets, withdrawal stops them, and
+reassignment restores the path.
 
 `POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
 invitations. It accepts owner or operator sessions with network access, the

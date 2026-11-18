@@ -2,6 +2,7 @@
 mod acl;
 mod inventory;
 mod named;
+mod routes;
 pub(crate) mod service_ports;
 mod subjects;
 pub use crate::enrollment::snapshot_policy::AclSelector;
@@ -12,6 +13,7 @@ use crate::{
 pub use acl::AclRule;
 use anyhow::{Result, ensure};
 use laneway_protocol::Id;
+pub use routes::{NodeRouteRequest, RouteKind, RouteMode, RouteSpec};
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::{Value, json};
 pub use service_ports::{Port, ServiceProtocol};
@@ -28,6 +30,10 @@ pub enum AccessError {
 
 pub enum Request {
     Inventory(Id),
+    ListRoutes(Id, usize),
+    AssignRoute(Id, Id, RouteSpec),
+    ApproveRoute(Id),
+    WithdrawRoute(Id),
     ListAclRules(Id, usize),
     CreateAclRule(Id, AclRule),
     UpdateAclRule(Id, AclRule),
@@ -80,20 +86,33 @@ struct Actor {
     id: Id,
 }
 
+pub struct AdminReply {
+    pub data: Value,
+    pub created: Option<bool>,
+}
+
 impl Request {
     pub fn is_read(&self) -> bool {
-        matches!(self, Self::Inventory(_) | Self::ListAclRules(..))
+        matches!(
+            self,
+            Self::Inventory(_) | Self::ListAclRules(..) | Self::ListRoutes(..)
+        )
     }
     fn permission(&self) -> &'static str {
-        if self.is_read() {
-            "acl.read"
-        } else {
-            "acl.manage"
+        match self {
+            Self::ListRoutes(..) => "route.read",
+            Self::AssignRoute(..) | Self::ApproveRoute(_) | Self::WithdrawRoute(_) => {
+                "route.manage"
+            }
+            _ if self.is_read() => "acl.read",
+            _ => "acl.manage",
         }
     }
     fn scope(&self, tx: &Transaction<'_>) -> Result<Scope> {
         let object = match self {
             Self::Inventory(net)
+            | Self::ListRoutes(net, _)
+            | Self::AssignRoute(net, ..)
             | Self::ListAclRules(net, _)
             | Self::CreateAclRule(net, _)
             | Self::CreateUser(net, _)
@@ -110,6 +129,9 @@ impl Request {
             Self::SetUserEnabled(id, _) => ("SELECT network_id FROM access_users WHERE id=?", id),
             Self::SetMember(id, _, _) => ("SELECT network_id FROM access_teams WHERE id=?", id),
             Self::DeleteGrant(id) => ("SELECT network_id FROM access_grants WHERE id=?", id),
+            Self::ApproveRoute(id) | Self::WithdrawRoute(id) => {
+                ("SELECT network_id FROM routes WHERE id=?", id)
+            }
             Self::UpdateAclRule(id, _) | Self::DeleteAclRule(id) => {
                 ("SELECT network_id FROM acl_rules WHERE id=?", id)
             }
@@ -133,15 +155,25 @@ impl Request {
             object: true,
         })
     }
-    fn execute(self, tx: &Transaction<'_>, net: Id, actor: Actor, now: i64) -> Result<Value> {
+    fn execute(self, tx: &Transaction<'_>, net: Id, actor: Actor, now: i64) -> Result<AdminReply> {
         let editor = subjects::Editor {
             tx,
             net,
             actor,
             now,
         };
-        match self {
+        let data = match self {
             Self::Inventory(_) => inventory::read(tx, net),
+            Self::ListRoutes(_, limit) => editor.list_routes(limit),
+            Self::AssignRoute(_, node, spec) => {
+                let (data, created) = editor.assign_route(node, spec)?;
+                return Ok(AdminReply {
+                    data,
+                    created: Some(created),
+                });
+            }
+            Self::ApproveRoute(id) => editor.approve_route(id).map(epoch_reply),
+            Self::WithdrawRoute(id) => editor.withdraw_route(id, None).map(epoch_reply),
             Self::ListAclRules(_, limit) => editor.list_acl_rules(limit),
             Self::CreateAclRule(_, rule) => editor.write_acl_rule(None, rule),
             Self::UpdateAclRule(id, rule) => editor.write_acl_rule(Some(id), rule),
@@ -167,7 +199,11 @@ impl Request {
                 ..
             } => editor.resource_grant(subject, resource, service),
             Self::DeleteResourceGrant(id) => editor.delete_resource_grant(id),
-        }
+        }?;
+        Ok(AdminReply {
+            data,
+            created: None,
+        })
     }
 }
 impl Scope {
@@ -190,7 +226,7 @@ impl SessionStore {
         csrf: Option<&str>,
         read: bool,
         request: Result<Request>,
-    ) -> Result<SessionReply<Value>> {
+    ) -> Result<SessionReply<AdminReply>> {
         let run = |tx: &Transaction<'_>, id: Id, all: bool, now: i64| {
             let req = request?;
             ensure!(
@@ -223,7 +259,7 @@ impl SessionStore {
         header: &str,
         root: Option<&RootCredential>,
         request: Result<Request>,
-    ) -> Result<Value> {
+    ) -> Result<AdminReply> {
         self.bearer_write(header, root, |tx, actor, now| {
             let req = request?;
             let permission = req.permission();
@@ -261,9 +297,21 @@ fn change(
         )
         .optional()?
         .ok_or(AccessError::Conflict)?;
+    audit(tx, net, actor, now, action, target, details)?;
+    Ok(epoch)
+}
+fn audit(
+    tx: &Transaction<'_>,
+    net: Id,
+    actor: &Actor,
+    now: i64,
+    action: &str,
+    target: (&str, Id),
+    details: Value,
+) -> Result<()> {
     tx.execute("INSERT INTO audit_events(id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
         VALUES(randomblob(16),?,?,?,?,?,?,?,?)",rusqlite::params![net.as_bytes(),actor.kind,actor.id.as_bytes(),action,target.0,target.1.as_bytes(),details.to_string(),now])?;
-    Ok(epoch)
+    Ok(())
 }
 fn epoch_reply(epoch: i64) -> Value {
     json!({"configuration_epoch":epoch})

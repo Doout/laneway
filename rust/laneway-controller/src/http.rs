@@ -20,6 +20,7 @@ mod login;
 mod management;
 mod mutations;
 mod node_proto;
+mod node_routes;
 mod relay_configuration;
 mod renew;
 
@@ -247,6 +248,15 @@ async fn dispatch(
         return Err(malformed("administrator path must be canonical"));
     }
     let pieces: Vec<_> = path.split('/').collect();
+    if state.workload_mtls_enabled {
+        match pieces.as_slice() {
+            ["", "v1", "routes"] => return node_routes::handle(req, state, id, None).await,
+            ["", "v1", "routes", route] => {
+                return node_routes::handle(req, state, id, Some(route)).await;
+            }
+            _ => {}
+        }
+    }
     if let Some(route) = access_admin::Route::parse(&pieces) {
         return access_admin::handle(req, state, id, route).await;
     }

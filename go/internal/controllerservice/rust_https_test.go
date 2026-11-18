@@ -298,6 +298,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	testRustBearerInventory(t, f, cookie, check)
 	t.Run("network-management", func(t *testing.T) { testRustNetworkManagement(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("access-management", func(t *testing.T) { testRustAccessManagement(t, f, client, goServer.URL, rustURL) })
+	t.Run("route-management", func(t *testing.T) { testRustRouteManagement(t, f, client, goServer.URL, rustURL) })
 	t.Run("enrollment-issuance", func(t *testing.T) { testRustEnrollmentIssuance(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("enrollment-redemption", func(t *testing.T) { testRustRedemption(t, f, client, rustURL, goServer.URL) })
 	t.Run("node-renewal", func(t *testing.T) { testRustRenewal(t, f, client, rustURL, goServer.URL) })
