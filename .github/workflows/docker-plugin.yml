@@ -47,22 +47,6 @@ jobs:
       - run: rustup toolchain install 1.91.1 --profile minimal
       - run: cargo +1.91.1 test --locked --manifest-path rust/Cargo.toml -p laneway-docker-plugin
   privileged:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        runtime: [go, rust]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
-      - run: sudo apt-get update && sudo apt-get install -y iproute2 iptables iputils-ping nftables
-      - run: sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME="$PLUGIN_RUNTIME" ./integration/docker-plugin.sh
-        env:
-          PLUGIN_RUNTIME: ${{ matrix.runtime }}
-  migration:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -70,12 +54,7 @@ jobs:
         include:
           - {runner: ubuntu-24.04, arch: amd64}
           - {runner: ubuntu-24.04-arm, arch: arm64}
-    name: Managed plugin upgrade (${{ matrix.arch }})
+    name: Fresh Rust plugin (${{ matrix.arch }})
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
-      - run: sudo apt-get update && sudo apt-get install -y curl iproute2 iptables iputils-ping jq nftables
-      - run: sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=go LANEWAY_DOCKER_PLUGIN_UPGRADE=1 ./integration/docker-plugin.sh
+      - run: sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-plugin.sh

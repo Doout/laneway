@@ -2,21 +2,16 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if command -v go >/dev/null 2>&1; then
+if [[ "${LANEWAY_RUN_PRIVILEGED:-0}" != 1 ]]; then
+  command -v go >/dev/null 2>&1 || { echo "missing go" >&2; exit 1; }
   cd "$repo_root/go"
   go test ./internal/dockerplugin
   go build ./cmd/laneway-docker-plugin
-elif [[ "${LANEWAY_RUN_PRIVILEGED:-0}" != 1 ]]; then
-  echo "missing go" >&2
-  exit 1
-fi
-
-if [[ "${LANEWAY_RUN_PRIVILEGED:-0}" != 1 ]]; then
   printf '%s\n' 'docker-plugin: set LANEWAY_RUN_PRIVILEGED=1 for managed-plugin lifecycle tests'
   exit 0
 fi
 
-runtime=${LANEWAY_DOCKER_PLUGIN_RUNTIME:-go}
+runtime=${LANEWAY_DOCKER_PLUGIN_RUNTIME:-rust}
 upgrade=${LANEWAY_DOCKER_PLUGIN_UPGRADE:-0}
 packet_test=false
 if [[ "$runtime" == rust || "$upgrade" == 1 ]]; then packet_test=true; fi
@@ -103,7 +98,8 @@ if [[ "$upgrade" == 1 ]]; then
   done
   docker plugin install --alias "$plugin_ref" --grant-all-permissions "$remote_go"
 else
-  VERSION=integration "$repo_root/deploy/docker-plugin/build-rootfs.sh" "$work/plugin"
+  VERSION=integration LANEWAY_DOCKER_PLUGIN_RUNTIME="$runtime" \
+    "$repo_root/deploy/docker-plugin/build-rootfs.sh" "$work/plugin"
   docker plugin create "$plugin_ref" "$work/plugin"
   docker plugin enable "$plugin_ref"
 fi

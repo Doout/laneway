@@ -8,16 +8,9 @@ docker plugin create laneway:dev dist/docker-plugin
 docker plugin enable laneway:dev
 ```
 
-On an isolated Linux test host, build the Rust candidate into a separate directory:
-
-```sh
-LANEWAY_DOCKER_PLUGIN_RUNTIME=rust VERSION=dev \
-  ./deploy/docker-plugin/build-rootfs.sh dist/docker-plugin-rust
-```
-
-It uses the same socket, entrypoint, and v1 ownership journal. Do not let two
-plugin processes share the `/data` directory or own the same Docker networks.
-Published releases still default to Go.
+The local build and the tagged release workflow use the Rust driver. Install on
+a clean Docker host. Do not let two plugin processes share the `/data` directory
+or own the same Docker networks.
 
 Published releases use independent `docker-plugin/vX.Y.Z` source tags and are installed with:
 

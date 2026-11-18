@@ -4,7 +4,7 @@ set -eu
 repo_root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 version=${VERSION:-dev}
 output=${1:-"$repo_root/dist/docker-plugin"}
-runtime=${LANEWAY_DOCKER_PLUGIN_RUNTIME:-go}
+runtime=${LANEWAY_DOCKER_PLUGIN_RUNTIME:-rust}
 case "$runtime" in
   go) dockerfile=Dockerfile; context="$repo_root/go" ;;
   rust) dockerfile=Dockerfile.rust; context="$repo_root" ;;
