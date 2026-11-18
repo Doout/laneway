@@ -9,7 +9,10 @@ if [[ "$(id -u)" != "0" ]]; then
   echo "ERROR: the controller/Rust-node gate requires root" >&2
   exit 1
 fi
-for command in cargo go ip nft grep sed; do
+required_commands=(ip nft grep sed)
+[[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" && "${LANEWAY_NODE_WIREGUARD_NATIVE:-1}" == "1" ]] || required_commands+=(cargo)
+[[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]] || required_commands+=(go)
+for command in "${required_commands[@]}"; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "ERROR: required command is missing: ${command}" >&2
     exit 1
@@ -21,7 +24,6 @@ if [[ ! -c /dev/net/tun ]]; then
 fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-work_dir="$(mktemp -d -t laneway-rust-controller.XXXXXX)"
 prefix="lwrc$$_"
 switch="${prefix}s"
 controller_ns="${prefix}c"
@@ -39,6 +41,7 @@ test_wireguard="${LANEWAY_NODE_TEST_WIREGUARD:-0}"
 wireguard_native="${LANEWAY_NODE_WIREGUARD_NATIVE:-1}"
 test_drain="${LANEWAY_NODE_WIREGUARD_DRAIN:-0}"
 test_credentials="${LANEWAY_NODE_WIREGUARD_CREDENTIALS:-0}"
+test_systemd="${LANEWAY_NODE_WIREGUARD_SYSTEMD:-0}"
 credential_dir=""
 snapshot_seconds=2
 if [[ "${test_drain}" == "1" ]]; then
@@ -51,9 +54,24 @@ if [[ "${test_credentials}" == "1" ]]; then
      -e /run/credentials/.laneway-isolated-credential-lab ]] ||
     { echo "Credential gate requires the disposable container's marked tmpfs" >&2; exit 1; }
 fi
+if [[ "${test_systemd}" == "1" ]]; then
+  [[ "${test_wireguard}:${wireguard_native}:${test_credentials}" == "1:1:0" &&
+     "$(cat /proc/1/comm)" == systemd && "$(stat -f -c %T /run)" == tmpfs &&
+     -f /run/.laneway-isolated-systemd-lab && ! -L /run/.laneway-isolated-systemd-lab &&
+     "$(stat -c '%u:%a' /run/.laneway-isolated-systemd-lab)" == '0:600' ]] ||
+    { echo "Systemd gate requires a marked disposable systemd VM and native WireGuard" >&2; exit 1; }
+  # shellcheck source=deploy/ephemeral-exit/bootstrap.sh
+  source "${repo_root}/deploy/ephemeral-exit/bootstrap.sh"
+  # shellcheck source=integration/rust-lab/transient-exit.sh
+  source "${repo_root}/integration/rust-lab/transient-exit.sh"
+fi
 case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
+work_dir="$(mktemp -d -t laneway-rust-controller.XXXXXX)"
 
 cleanup() {
+  if [[ "${test_systemd}" == "1" ]]; then
+    cleanup_systemd_exit || true
+  fi
   for pid in "${!active_processes[@]}"; do
     kill -TERM "${pid}" >/dev/null 2>&1 || true
   done
@@ -181,6 +199,12 @@ attach_switch() {
   ip -n "${target}" link set "${interface_name}" up
 }
 
+block_udp_relay() {
+  ip netns exec "${rust_ns}" nft add table inet lab_block_relay
+  ip netns exec "${rust_ns}" nft add chain inet lab_block_relay output '{ type filter hook output priority 0; policy accept; }'
+  ip netns exec "${rust_ns}" nft add rule inet lab_block_relay output udp dport 4433 drop
+}
+
 udp_success() {
   local port="$1" message="$2"
   start_process "${lan_ns}" "${work_dir}/${message}-server.log" \
@@ -210,15 +234,21 @@ udp_denied() {
   unset "active_processes[${server_pid}]"
 }
 
-echo "==> building the real controller service fixture, product binaries, and Rust node"
-(
-  cd "${repo_root}/go"
-  go build -o "${work_dir}/laneway" ./cmd/laneway
-  go build -o "${work_dir}/lanewayd" ./cmd/laneway
-  go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
-  go build -o "${work_dir}/netprobe" ./integration/netprobe
-  go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller
-)
+echo "==> preparing the controller, relay and node test binaries"
+if [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]]; then
+  for fixture in laneway lanewayd laneway-relay netprobe rustnodecontroller; do
+    install -m 0755 "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR}/${fixture}" "${work_dir}/${fixture}"
+  done
+else
+  (
+    cd "${repo_root}/go"
+    go build -o "${work_dir}/laneway" ./cmd/laneway
+    go build -o "${work_dir}/lanewayd" ./cmd/laneway
+    go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
+    go build -o "${work_dir}/netprobe" ./integration/netprobe
+    go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller
+  )
+fi
 if [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" ]]; then
   runtime_dir="${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR}"
   install -m 0755 "${runtime_dir}/lanewayd-rs" "${work_dir}/rust-node"
@@ -593,16 +623,10 @@ exit_output_interface = "uplink0"
 EOF
     bridge_command=("${work_dir}/rust-node" --wireguard-config "${work_dir}/wireguard-native.toml"
       --wireguard-key "${work_dir}/pki/rust.wireguard.key" --exit-generation "${rust_generation}")
-    if [[ "${test_credentials}" == "1" ]]; then
-      transient_name="laneway-ephemeral-exit-$(printf '%016x' "$$")"
-      target_credentials="/run/credentials/${transient_name}.service"
-      mkdir -m 0700 -- "${target_credentials}"
-      credential_dir="${target_credentials}"
-      install -m 0400 "${work_dir}/pki/ca.crt" "${credential_dir}/ca.crt"
-      install -m 0400 "${work_dir}/pki/rust.crt" "${credential_dir}/node.crt"
-      install -m 0400 "${work_dir}/pki/rust.key" "${credential_dir}/node.key"
-      install -m 0400 "${work_dir}/pki/rust.wireguard.key" "${credential_dir}/wireguard.key"
-      cat >"${credential_dir}/config" <<EOF
+    if [[ "${test_credentials}" == "1" || "${test_systemd}" == "1" ]]; then
+      write_shared_exit_config() {
+        local transient_name="$1"
+        cat <<EOF
 mode = "node"
 state_dir = "/run/${transient_name}/state"
 socket_path = "/run/${transient_name}/lanewayd.sock"
@@ -641,6 +665,18 @@ enabled = false
 address = "10.254.0.2:4435"
 handshake_timeout = "1s"
 EOF
+      }
+    fi
+    if [[ "${test_credentials}" == "1" ]]; then
+      transient_name="laneway-ephemeral-exit-$(printf '%016x' "$$")"
+      target_credentials="/run/credentials/${transient_name}.service"
+      mkdir -m 0700 -- "${target_credentials}"
+      credential_dir="${target_credentials}"
+      install -m 0400 "${work_dir}/pki/ca.crt" "${credential_dir}/ca.crt"
+      install -m 0400 "${work_dir}/pki/rust.crt" "${credential_dir}/node.crt"
+      install -m 0400 "${work_dir}/pki/rust.key" "${credential_dir}/node.key"
+      install -m 0400 "${work_dir}/pki/rust.wireguard.key" "${credential_dir}/wireguard.key"
+      write_shared_exit_config "${transient_name}" >"${credential_dir}/config"
       chmod 0400 "${credential_dir}/config"
       bridge_command=(env CREDENTIALS_DIRECTORY="${credential_dir}" "${work_dir}/rust-node" --shared-host-exit)
       if ip netns exec "${rust_ns}" "${bridge_command[@]}" --check-config 9</dev/null >"${work_dir}/inherited-fd.log" 2>&1; then
@@ -670,19 +706,24 @@ EOF
   fi
 
   for transport in quic tcp; do
-    if [[ "${transport}" == tcp ]]; then
-      ip netns exec "${rust_ns}" nft add table inet lab_block_relay
-      ip netns exec "${rust_ns}" nft add chain inet lab_block_relay output '{ type filter hook output priority 0; policy accept; }'
-      ip netns exec "${rust_ns}" nft add rule inet lab_block_relay output udp dport 4433 drop
-      connected="Rust agent relay TCP fallback connected"
-    else
-      connected="Rust agent relay connected"
-    fi
     echo "==> kernel WireGuard packets cross the ${node_controller} relay over ${transport}"
-    start_process "${rust_ns}" "${work_dir}/wg-rust-${transport}.log" env RUST_LOG=info "${bridge_command[@]}"
-    bridge_pid="${last_pid}"
-    wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "${connected}"
+    if [[ "${test_systemd}" == "1" ]]; then
+      run_systemd_exit "${transport}"
+    else
+      if [[ "${transport}" == tcp ]]; then
+        block_udp_relay
+        connected="Rust agent relay TCP fallback connected"
+      else
+        connected="Rust agent relay connected"
+      fi
+      start_process "${rust_ns}" "${work_dir}/wg-rust-${transport}.log" env RUST_LOG=info "${bridge_command[@]}"
+      bridge_pid="${last_pid}"
+      wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "${connected}"
+    fi
     wait_relay_sessions 2
+    if [[ "${test_systemd}" == "1" ]]; then
+      verify_systemd_transport "${transport}"
+    fi
     start_process "${gateway_ns}" "${work_dir}/wg-probe-${transport}.log" \
       "${work_dir}/netprobe" udp-echo-server -listen "${gateway_address}:9791"
     echo_pid="${last_pid}"
@@ -782,7 +823,11 @@ EOF
         ip netns exec "${rust_ns}" nft add table inet lab_drain
         ip netns exec "${rust_ns}" nft add chain inet lab_drain output '{ type filter hook output priority 0; policy accept; }'
         ip netns exec "${rust_ns}" nft add rule inet lab_drain output ip daddr "${node_quic_endpoint%:*}" udp dport "${node_quic_endpoint##*:}" drop
-        wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "draining established WireGuard exit flows" 640
+        if [[ "${test_systemd}" == "1" ]]; then
+          wait_systemd_drain "${wg_table}"
+        else
+          wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "draining established WireGuard exit flows" 640
+        fi
         ip netns exec "${rust_ns}" nft list table inet "${wg_table}" | grep -E 'ct state.*jump inbound' >/dev/null
         ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
           -target 203.0.113.2:9793 -source-port 57801 -message drained-existing-flow -timeout 4s
@@ -830,7 +875,11 @@ EOF
       echo "verified full-MTU WireGuard ciphertext over TCP"
       ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node revoke \
         --node-id "${rust_id}" --reason wireguard-transport-lab "${management_connection[@]}" >/dev/null
-      wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "controller rejected node authority"
+      if [[ "${test_systemd}" == "1" ]]; then
+        wait_systemd_revocation
+      else
+        wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "controller rejected node authority"
+      fi
       if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
         -target "${gateway_address}:9791" -message revoked-wireguard -timeout 2s; then
         echo "ERROR: revoked ephemeral identity still exchanged kernel packets" >&2
@@ -838,7 +887,11 @@ EOF
       fi
     fi
     stop_process "${echo_pid}"
-    stop_process "${bridge_pid}"
+    if [[ "${test_systemd}" == "1" ]]; then
+      stop_systemd_exit
+    else
+      stop_process "${bridge_pid}"
+    fi
     if [[ "${wireguard_native}" == "1" ]]; then
       if ip -n "${rust_ns}" link show dev lane0 >/dev/null 2>&1 ||
         ip netns exec "${rust_ns}" nft list table inet lw_wg_6c616e6530 >/dev/null 2>&1; then

@@ -380,10 +380,28 @@ device cleanup. Set `LANEWAY_NODE_WIREGUARD_NATIVE=0` to run just the
 fixture-managed encrypted transport gate. Set `LANEWAY_NODE_WIREGUARD_DRAIN=1`
 to partition the controller after opening an exit flow: the same flow continues,
 new flows are blocked, and fresh mTLS restores forwarding without replacing the
-device. The full rootless lab also exercises the shared-host credential entrypoint
-using a marked disposable tmpfs. It does not replace testing the actual systemd
-transient unit on a dedicated Linux host, routed-only egress, or IPv6 NAT on the
-encrypted profile.
+device. The rootless lab exercises the shared-host credential parser using a
+marked tmpfs. Use a disposable Linux VM for the actual transient systemd unit:
+
+```sh
+# Inside a disposable VM with systemd as PID 1 and kernel WireGuard support.
+sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
+sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_WIREGUARD=1 \
+  LANEWAY_NODE_WIREGUARD_SYSTEMD=1 LANEWAY_NODE_WIREGUARD_DRAIN=1 \
+  LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh
+```
+
+With a read-only checkout, supply `LANEWAY_NODE_TEST_RUST_RUNTIME_DIR` and
+`LANEWAY_NODE_TEST_GO_FIXTURE_DIR` instead of building in the VM. The Go fixture
+directory must contain `laneway` and `lanewayd` from `./cmd/laneway`,
+`laneway-relay` from `./cmd/laneway-relay`, and `netprobe` and
+`rustnodecontroller` from their respective `./integration/` packages in `go/`.
+The systemd gate uses the installer unit definition with lab-only networking and
+credentials. It checks the private namespace, dynamic UID, memory lock,
+read-only credential mount and removal of source copies, then runs the same
+packet, policy and teardown checks. It does not run the signed download path
+or the installer's host carrier, and it does not cover routed-only egress or
+IPv6 NAT on the encrypted profile.
 
 ### Verified on the local ARM64 Linux VM
 
@@ -394,6 +412,10 @@ encrypted profile.
   after ACL removal and certificate revocation, and authority expiry on outage.
 - Packaged Rust node running non-root with TUN and a healthy status socket;
   Docker stop returned exit code zero.
+- Packaged Rust shared-host Exit under Ubuntu 24.04/systemd 255: QUIC and
+  TLS/TCP fallback with both Go and Rust controllers/relays, live ACLs, scoped
+  NAT and established-flow drain, route withdrawal, identity revocation, and
+  kernel state cleanup.
 
 Repeat on the dedicated host using its architecture and service manager before
 any production canary. These results do not establish private fleet parity.

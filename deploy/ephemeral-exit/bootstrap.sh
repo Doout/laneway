@@ -1,4 +1,60 @@
 #!/bin/bash
+
+# Keep the real service definition reusable by the disposable systemd gate.
+# Sourcing this file defines only these helpers; executing it runs bootstrap.
+stage_exit_entrypoint() {
+	local runtime_dir=$1 runtime=$2 command
+	case "$runtime" in
+		go) command="$runtime_dir/laneway node run -config \"\$CREDENTIALS_DIRECTORY/config\"" ;;
+		rust) command="$runtime_dir/lanewayd-rs --shared-host-exit" ;;
+		*) return 2 ;;
+	esac
+	cat > "$runtime_dir/entrypoint" <<EOF
+#!/bin/sh
+set -eu
+attempt=0
+while [ ! -e $runtime_dir/network.ready ]; do
+  attempt=\$((attempt + 1))
+  [ \$attempt -le 600 ] || exit 1
+  sleep 0.05
+done
+exec $command
+EOF
+	chmod 0555 "$runtime_dir/entrypoint"
+}
+
+start_transient_exit() {
+	local unit=$1 runtime_dir=$2 credentials=$3 runtime=$4 max_runtime=$5
+	local -a device_allow=()
+	if [[ $runtime == go ]]; then
+		device_allow=(--property=DeviceAllow='/dev/net/tun rw')
+	fi
+	systemd-run --unit="$unit" --collect --quiet \
+		--property=Type=exec --property=DynamicUser=yes --property=PrivateNetwork=yes \
+		--property=RuntimeDirectory="${unit%.service}" --property=RuntimeDirectoryMode=0700 \
+		--property=LoadCredential=ca.crt:"$credentials/ca.crt" \
+		--property=LoadCredential=node.crt:"$credentials/node.crt" \
+		--property=LoadCredential=node.key:"$credentials/node.key" \
+		--property=LoadCredential=wireguard.key:"$credentials/wireguard.key" \
+		--property=LoadCredential=config:"$credentials/laneway.toml" \
+		--property=BindReadOnlyPaths="$runtime_dir/resolv.conf:/etc/resolv.conf" \
+		--property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=ProtectSystem=strict \
+		--property=ProtectHome=yes --property=ProtectKernelTunables=no --property=ProtectKernelModules=yes \
+		--property=ProtectControlGroups=yes --property=LockPersonality=yes --property=MemoryDenyWriteExecute=yes \
+		--property=RestrictSUIDSGID=yes --property=RestrictRealtime=yes --property=RemoveIPC=yes \
+		--property=CapabilityBoundingSet='CAP_NET_ADMIN CAP_IPC_LOCK' \
+		--property=AmbientCapabilities='CAP_NET_ADMIN CAP_IPC_LOCK' \
+		--property=DevicePolicy=closed "${device_allow[@]}" \
+		--property=RestrictAddressFamilies='AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
+		--property=LimitCORE=0 --property=LimitMEMLOCK=infinity --property=MemoryMax=512M --property=TasksMax=128 --property=UMask=0077 \
+		--property=StandardOutput=null --property=StandardError=null --property=RuntimeMaxSec="$max_runtime" \
+		--property=TimeoutStopSec=15s --property=KillMode=mixed "$runtime_dir/entrypoint"
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+	return 0
+fi
+
 set -euo pipefail
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -177,16 +233,12 @@ entries=$(tar -tzf "$work/$archive")
 tar -xzf "$work/$archive" -C "$work" laneway/bin/laneway
 install -m 0555 "$work/laneway/bin/laneway" "$runtime_dir/laneway"
 runtime_binary=laneway
-runtime_command="/run/$runtime_name/laneway node run -config \"\$CREDENTIALS_DIRECTORY/config\""
-device_allow=(--property=DeviceAllow='/dev/net/tun rw')
 if [[ $runtime == rust ]]; then
 	[[ $(printf '%s\n' "$entries" | grep -Fxc 'laneway/sbin/lanewayd-rs') == 1 ]] ||
 		die 'verified release does not contain the Rust Exit runtime'
 	tar -xzf "$work/$archive" -C "$work" laneway/sbin/lanewayd-rs
 	install -m 0555 "$work/laneway/sbin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
 	runtime_binary=lanewayd-rs
-	runtime_command="/run/$runtime_name/lanewayd-rs --shared-host-exit"
-	device_allow=()
 fi
 
 printf 'One-use Exit invitation: ' >&2
@@ -219,38 +271,8 @@ awk '$1 == "nameserver" && $2 !~ /^(127\.|0\.0\.0\.0$)/ && $2 ~ /^[0-9.]+$/ { pr
 [[ -s $runtime_dir/resolv.conf ]] || die 'no non-loopback DNS resolver is available to the private namespace'
 chmod 0444 "$runtime_dir/resolv.conf"
 
-cat > "$runtime_dir/entrypoint" <<EOF
-#!/bin/sh
-set -eu
-attempt=0
-while [ ! -e /run/$runtime_name/network.ready ]; do
-  attempt=\$((attempt + 1))
-  [ \$attempt -le 600 ] || exit 1
-  sleep 0.05
-done
-exec $runtime_command
-EOF
-chmod 0555 "$runtime_dir/entrypoint"
-systemd-run --unit="$unit" --collect --quiet \
-	--property=Type=exec --property=DynamicUser=yes --property=PrivateNetwork=yes \
-	--property=RuntimeDirectory="$runtime_name" --property=RuntimeDirectoryMode=0700 \
-	--property=LoadCredential=ca.crt:"$work/credentials/ca.crt" \
-	--property=LoadCredential=node.crt:"$work/credentials/node.crt" \
-	--property=LoadCredential=node.key:"$work/credentials/node.key" \
-	--property=LoadCredential=wireguard.key:"$work/credentials/wireguard.key" \
-	--property=LoadCredential=config:"$work/credentials/laneway.toml" \
-	--property=BindReadOnlyPaths="$runtime_dir/resolv.conf:/etc/resolv.conf" \
-	--property=NoNewPrivileges=yes --property=PrivateTmp=yes --property=ProtectSystem=strict \
-	--property=ProtectHome=yes --property=ProtectKernelTunables=no --property=ProtectKernelModules=yes \
-	--property=ProtectControlGroups=yes --property=LockPersonality=yes --property=MemoryDenyWriteExecute=yes \
-	--property=RestrictSUIDSGID=yes --property=RestrictRealtime=yes --property=RemoveIPC=yes \
-	--property=CapabilityBoundingSet='CAP_NET_ADMIN CAP_IPC_LOCK' \
-	--property=AmbientCapabilities='CAP_NET_ADMIN CAP_IPC_LOCK' \
-	--property=DevicePolicy=closed "${device_allow[@]}" \
-	--property=RestrictAddressFamilies='AF_UNIX AF_INET AF_INET6 AF_NETLINK' \
-	--property=LimitCORE=0 --property=LimitMEMLOCK=infinity --property=MemoryMax=512M --property=TasksMax=128 --property=UMask=0077 \
-	--property=StandardOutput=null --property=StandardError=null --property=RuntimeMaxSec="$max_runtime" \
-	--property=TimeoutStopSec=15s --property=KillMode=mixed "$runtime_dir/entrypoint"
+stage_exit_entrypoint "$runtime_dir" "$runtime"
+start_transient_exit "$unit" "$runtime_dir" "$work/credentials" "$runtime" "$max_runtime"
 unit_started=true
 
 pid=
