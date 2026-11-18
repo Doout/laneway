@@ -42,6 +42,7 @@ wireguard_native="${LANEWAY_NODE_WIREGUARD_NATIVE:-1}"
 test_drain="${LANEWAY_NODE_WIREGUARD_DRAIN:-0}"
 test_credentials="${LANEWAY_NODE_WIREGUARD_CREDENTIALS:-0}"
 test_systemd="${LANEWAY_NODE_WIREGUARD_SYSTEMD:-0}"
+test_invitation="${LANEWAY_NODE_WIREGUARD_INVITATION:-0}"
 credential_dir=""
 snapshot_seconds=2
 if [[ "${test_drain}" == "1" ]]; then
@@ -64,6 +65,14 @@ if [[ "${test_systemd}" == "1" ]]; then
   source "${repo_root}/deploy/ephemeral-exit/bootstrap.sh"
   # shellcheck source=integration/rust-lab/transient-exit.sh
   source "${repo_root}/integration/rust-lab/transient-exit.sh"
+fi
+if [[ "${test_invitation}" == "1" ]]; then
+  [[ "${test_systemd}:${node_controller}" == 1:rust ]] ||
+    { echo "Invitation gate requires the isolated systemd gate and Rust controller" >&2; exit 1; }
+  # Keep the lease longer than the enrollment CLI's 10-second poll interval.
+  snapshot_seconds=30
+  # shellcheck source=integration/rust-lab/exit-invitation.sh
+  source "${repo_root}/integration/rust-lab/exit-invitation.sh"
 fi
 case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 work_dir="$(mktemp -d -t laneway-rust-controller.XXXXXX)"
@@ -205,6 +214,20 @@ block_udp_relay() {
   ip netns exec "${rust_ns}" nft add rule inet lab_block_relay output udp dport 4433 drop
 }
 
+attach_wireguard_uplink() {
+  # Exercise NAT without connecting the lab network to the host.
+  ip link add "wr$$" type veth peer name "wl$$"
+  ip link set "wr$$" netns "${rust_ns}"
+  ip link set "wl$$" netns "${lan_ns}"
+  ip -n "${rust_ns}" link set "wr$$" name uplink0
+  ip -n "${lan_ns}" link set "wl$$" name wgout
+  ip -n "${rust_ns}" address add 203.0.113.1/24 dev uplink0
+  ip -n "${lan_ns}" address add 203.0.113.2/24 dev wgout
+  ip -n "${rust_ns}" link set uplink0 up
+  ip -n "${lan_ns}" link set wgout up
+  ip netns exec "${rust_ns}" sysctl -qw net.ipv4.ip_forward=0
+}
+
 udp_success() {
   local port="$1" message="$2"
   start_process "${lan_ns}" "${work_dir}/${message}-server.log" \
@@ -285,10 +308,12 @@ chmod 600 "${work_dir}/admin.token"
 # The existing MaxMind test fixture resolves the node address to London.
 location_controller_ip="81.2.69.141"
 location_node_ip="81.2.69.142"
+discovery_name="exit-lab.invalid"
 location_fixture="${repo_root}/go/internal/nodelocation/testdata/GeoIP2-City-Test.mmdb"
 "${work_dir}/laneway" pki controller \
   -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
   -network-id "${network_id}" -service-id "${controller_service}" -ip "10.254.0.1,127.0.0.1,${location_controller_ip}" \
+  -dns "${discovery_name}" \
   -out-cert "${work_dir}/pki/controller.crt" -out-key "${work_dir}/pki/controller.key"
 "${work_dir}/laneway" pki relay \
   -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
@@ -351,31 +376,31 @@ rust_role=()
 if [[ "${test_wireguard}" == "1" ]]; then
   rust_role=(--class ephemeral --session-lifetime 10m --exit-node --requested-name rust-controller-node)
 fi
-rust_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
-  --network-id "${network_id}" --label rust-node --expires-in 10m "${rust_role[@]}" "${admin_connection[@]}")"
 gateway_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
   --network-id "${network_id}" --label gateway --expires-in 10m "${admin_connection[@]}")"
-rust_token="$(printf '%s\n' "${rust_token_json}" | json_string_field enrollment_token)"
 gateway_token="$(printf '%s\n' "${gateway_token_json}" | json_string_field enrollment_token)"
-if [[ -z "${rust_token}" || -z "${gateway_token}" ]]; then
-  echo "ERROR: controller enrollment tokens were not returned" >&2
-  exit 1
-fi
-printf '%s\n' "${rust_token}" >"${work_dir}/rust.token"
-printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token"
-chmod 0600 "${work_dir}/rust.token" "${work_dir}/gateway.token"
+[[ -n "${gateway_token}" ]] || { echo "ERROR: gateway enrollment token was not returned" >&2; exit 1; }
+(umask 077; printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token")
 
-if [[ "${test_wireguard}" == "1" ]]; then
-  rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/netprobe" enroll-exit --token-file "${work_dir}/rust.token" \
-    --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
-    --network-id "${network_id}" --service-id "${controller_service}" \
-    --name rust-controller-node --out-prefix "${work_dir}/pki/rust")"
-else
-  rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/rust.token" \
-    --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
-    --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-    --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key" \
-    --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
+rust_join=""
+if [[ "${test_invitation}" != "1" ]]; then
+  rust_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
+    --network-id "${network_id}" --label rust-node --expires-in 10m "${rust_role[@]}" "${admin_connection[@]}")"
+  rust_token="$(printf '%s\n' "${rust_token_json}" | json_string_field enrollment_token)"
+  [[ -n "${rust_token}" ]] || { echo "ERROR: Rust enrollment token was not returned" >&2; exit 1; }
+  (umask 077; printf '%s\n' "${rust_token}" >"${work_dir}/rust.token")
+  if [[ "${test_wireguard}" == "1" ]]; then
+    rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/netprobe" enroll-exit --token-file "${work_dir}/rust.token" \
+      --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+      --network-id "${network_id}" --service-id "${controller_service}" \
+      --name rust-controller-node --out-prefix "${work_dir}/pki/rust")"
+  else
+    rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/rust.token" \
+      --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+      --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+      --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" --out-key "${work_dir}/pki/rust.key" \
+      --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
+  fi
 fi
 gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/gateway.token" \
   --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
@@ -388,8 +413,8 @@ rust_overlay="$(printf '%s\n' "${rust_join}" | sed -n 's/.* overlay=\([^, ]*\).*
 gateway_overlay="$(printf '%s\n' "${gateway_join}" | sed -n 's/.* overlay=\([^, ]*\).*/\1/p')"
 rust_address="${rust_overlay%/32}"
 gateway_address="${gateway_overlay%/32}"
-if [[ ! "${rust_id}" =~ ^[0-9a-f]{32}$ || ! "${gateway_id}" =~ ^[0-9a-f]{32}$ || \
-      -z "${rust_address}" || -z "${gateway_address}" ]]; then
+if [[ ! "${gateway_id}" =~ ^[0-9a-f]{32}$ || -z "${gateway_address}" ]] ||
+  { [[ "${test_invitation}" != "1" ]] && [[ ! "${rust_id}" =~ ^[0-9a-f]{32}$ || -z "${rust_address}" ]]; }; then
   echo "ERROR: failed to parse enrollment results" >&2
   printf '%s\n%s\n' "${rust_join}" "${gateway_join}" >&2
   exit 1
@@ -399,6 +424,8 @@ node_quic_endpoint="${controller_quic_endpoint}"
 node_server_name="10.254.0.1"
 gateway_endpoint="${node_endpoint}"
 gateway_server_name="${node_server_name}"
+gateway_config_endpoint="${controller_endpoint}"
+gateway_quic_endpoint="${controller_quic_endpoint}"
 native_controller_pid=""
 relay_metrics=""
 management_connection=("${admin_connection[@]}")
@@ -423,7 +450,7 @@ if [[ "${node_controller}" == "rust" ]]; then
     '{ type nat hook prerouting priority dstnat; policy accept; }'
   ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
     iifname eth0 ip saddr "${location_node_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
-  if [[ "${test_durable_exit}" == "1" ]]; then
+  if [[ "${test_durable_exit}" == "1" || "${test_invitation}" == "1" ]]; then
     gateway_location_ip="81.2.69.139"
     ip -n "${gateway_ns}" address add "${gateway_location_ip}/28" dev eth0
     ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
@@ -431,13 +458,23 @@ if [[ "${node_controller}" == "rust" ]]; then
     gateway_endpoint="${node_endpoint}"
     gateway_server_name="${node_server_name}"
   fi
+  discovery_args=()
+  if [[ "${test_invitation}" == "1" ]]; then
+    # Rust is the only controller once the fixture database is provisioned.
+    stop_process "${controller_pid}"
+    gateway_config_endpoint="${node_endpoint}"
+    gateway_quic_endpoint="${node_quic_endpoint}"
+    jq -n --arg https "${node_endpoint}" --arg quic "${node_quic_endpoint}" --arg name "${discovery_name}" \
+      '{enrollment_endpoint:$https, quic_endpoint:$quic, server_name:$name}' >"${work_dir}/bootstrap-profile.json"
+    discovery_args=(--bootstrap-profile "${work_dir}/bootstrap-profile.json")
+  fi
   start_process "${controller_ns}" "${work_dir}/native-controller.log" \
     "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
     "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
     --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
     --root-token-file "${work_dir}/admin.token" \
     --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity "${snapshot_seconds}" \
-    --location-database "${location_fixture}"
+    --location-database "${location_fixture}" "${discovery_args[@]}"
   native_controller_pid="${last_pid}"
   wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
   advertiser_namespace="${controller_ns}"
@@ -506,8 +543,8 @@ relay_service_id = "${relay_service}"
 reconnect_min = "50ms"
 reconnect_max = "500ms"
 [controller]
-endpoint = "${controller_endpoint}"
-quic_endpoint = "${controller_quic_endpoint}"
+endpoint = "${gateway_config_endpoint}"
+quic_endpoint = "${gateway_quic_endpoint}"
 network_id = "${network_id}"
 service_id = "${controller_service}"
 poll_interval = "100ms"
@@ -520,7 +557,8 @@ output_interface = "lan1"
 enabled = false
 EOF
 
-cat >"${work_dir}/rust.toml" <<EOF
+if [[ "${test_invitation}" != "1" ]]; then
+  cat >"${work_dir}/rust.toml" <<EOF
 mode = "node"
 socket_path = "${work_dir}/rust.sock"
 exit_intent_path = "${work_dir}/rust-exit-intent.json"
@@ -561,6 +599,7 @@ listen = "0.0.0.0:4434"
 authorized = true
 failure_mode = "closed"
 EOF
+fi
 
 if [[ "${test_wireguard}" == "1" ]]; then
   command -v wg >/dev/null || { echo "ERROR: wireguard-tools is required" >&2; exit 1; }
@@ -595,6 +634,12 @@ EOF
     -config "${work_dir}/wg-go.toml"
   wait_log "${last_pid}" "${work_dir}/gateway.log" "interface=lane0"
 
+  if [[ "${test_invitation}" == "1" ]]; then
+    attach_wireguard_uplink
+    check_invited_systemd_exit
+    exit 0
+  fi
+
   rust_key="$(base64 -w0 <"${work_dir}/pki/rust.wireguard.key" | wg pubkey)"
   rust_generation="$(sed -n 's/.* generation=\([0-9]\+\)$/\1/p' <<<"${rust_join}")"
   [[ "${rust_generation}" =~ ^[1-9][0-9]*$ ]]
@@ -604,17 +649,7 @@ address = "10.254.0.2:4435"
 EOF
   if [[ "${wireguard_native}" == "1" ]]; then
     sed '/^auto_renew_certificate = /d' "${work_dir}/rust.toml" >"${work_dir}/wireguard-native.toml"
-    # A separate underlay makes the service exercise real forwarding and NAT.
-    ip link add "wr$$" type veth peer name "wl$$"
-    ip link set "wr$$" netns "${rust_ns}"
-    ip link set "wl$$" netns "${lan_ns}"
-    ip -n "${rust_ns}" link set "wr$$" name uplink0
-    ip -n "${lan_ns}" link set "wl$$" name wgout
-    ip -n "${rust_ns}" address add 203.0.113.1/24 dev uplink0
-    ip -n "${lan_ns}" address add 203.0.113.2/24 dev wgout
-    ip -n "${rust_ns}" link set uplink0 up
-    ip -n "${lan_ns}" link set wgout up
-    ip netns exec "${rust_ns}" sysctl -qw net.ipv4.ip_forward=0
+    attach_wireguard_uplink
     cat >>"${work_dir}/wireguard-native.toml" <<'EOF'
 [forwarding]
 exit_gateway = true

@@ -45,9 +45,15 @@ struct StoredNode {
     relay_service_id: String,
     #[serde(default)]
     overlay_addresses: Vec<String>,
-    #[serde(default = "legacy_reconnect_min", with = "humantime_serde")]
+    #[serde(
+        default = "legacy_reconnect_min",
+        deserialize_with = "StoredDuration::required"
+    )]
     reconnect_min: Duration,
-    #[serde(default = "legacy_reconnect_max", with = "humantime_serde")]
+    #[serde(
+        default = "legacy_reconnect_max",
+        deserialize_with = "StoredDuration::required"
+    )]
     reconnect_max: Duration,
 }
 
@@ -58,7 +64,7 @@ struct StoredController {
     server_name: String,
     network_id: String,
     service_id: String,
-    #[serde(default = "legacy_poll", with = "humantime_serde")]
+    #[serde(default = "legacy_poll", deserialize_with = "StoredDuration::required")]
     poll_interval: Duration,
 }
 
@@ -72,11 +78,11 @@ struct StoredDirect {
     allow_loopback: bool,
     #[serde(default)]
     allow_link_local: bool,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     probe_interval: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     probe_timeout: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     rendezvous_interval: Option<Duration>,
 }
 
@@ -141,18 +147,49 @@ struct StoredWireGuard {
 struct StoredTcp {
     #[serde(default)]
     address: String,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     handshake_timeout: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     write_timeout: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     idle_timeout: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     keep_alive_period: Option<Duration>,
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "StoredDuration::optional")]
     quic_probe_interval: Option<Duration>,
     #[serde(default)]
     queue_depth: Option<usize>,
+}
+
+// The Go installer marshals time.Duration as signed integer nanoseconds.
+// Hand-authored legacy configs use strings such as "10s" instead.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredDuration {
+    Nanoseconds(u64),
+    Text(#[serde(with = "humantime_serde")] Duration),
+}
+
+impl StoredDuration {
+    fn into_duration<E: serde::de::Error>(self) -> Result<Duration, E> {
+        match self {
+            Self::Nanoseconds(value) if i64::try_from(value).is_ok() => {
+                Ok(Duration::from_nanos(value))
+            }
+            Self::Nanoseconds(_) => Err(E::custom("installed duration exceeds Go's range")),
+            Self::Text(value) => Ok(value),
+        }
+    }
+
+    fn required<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Duration, D::Error> {
+        Self::deserialize(value)?.into_duration()
+    }
+
+    fn optional<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Duration>, D::Error> {
+        Option::<Self>::deserialize(value)?
+            .map(Self::into_duration)
+            .transpose()
+    }
 }
 
 fn legacy_reconnect_min() -> Duration {
@@ -545,6 +582,43 @@ enabled = true
 listen = ":0"
 "#
         ))
+    }
+
+    #[test]
+    fn installed_durations_accept_go_nanoseconds_and_existing_strings() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let base = write_fixture(fixture.path())?;
+        let text = base
+            .replace(
+                "[node]",
+                "[node]\nreconnect_min = 1000000000\nreconnect_max = \"10s\"",
+            )
+            .replace("[controller]", "[controller]\npoll_interval = 10000000000")
+            .replace("[direct]", "[direct]\nprobe_interval = 200000000")
+            .replace(
+                "[tcp_fallback]",
+                "[tcp_fallback]\nhandshake_timeout = 10000000000",
+            );
+        let stored: Stored = toml::from_str(&text)?;
+        assert_eq!(stored.node.reconnect_min, Duration::from_secs(1));
+        assert_eq!(stored.node.reconnect_max, Duration::from_secs(10));
+        assert_eq!(stored.controller.poll_interval, Duration::from_secs(10));
+        assert_eq!(
+            stored.direct.probe_interval,
+            Some(Duration::from_millis(200))
+        );
+        assert_eq!(stored.direct.probe_timeout, None);
+        assert_eq!(
+            stored.tcp_fallback.handshake_timeout,
+            Some(Duration::from_secs(10))
+        );
+        assert!(
+            toml::from_str::<Stored>(
+                &text.replace("poll_interval = 10000000000", "poll_interval = -1")
+            )
+            .is_err()
+        );
+        Ok(())
     }
 
     #[test]

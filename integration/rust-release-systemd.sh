@@ -46,11 +46,16 @@ for fixture in netprobe rustnodecontroller; do
 done
 chmod 0755 "$probe_dir/go/"* "$probe_dir/rust/"*
 
-for controller in go rust; do
+run_packet_gate() {
+  local controller="$1" drain="$2" invitation="$3"
   env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_CONTROLLER="$controller" \
     LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_WIREGUARD_NATIVE=1 \
-    LANEWAY_NODE_WIREGUARD_CREDENTIALS=0 LANEWAY_NODE_WIREGUARD_DRAIN=1 \
-    LANEWAY_NODE_WIREGUARD_SYSTEMD=1 \
+    LANEWAY_NODE_WIREGUARD_CREDENTIALS=0 LANEWAY_NODE_WIREGUARD_DRAIN="$drain" \
+    LANEWAY_NODE_WIREGUARD_SYSTEMD=1 LANEWAY_NODE_WIREGUARD_INVITATION="$invitation" \
     LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$probe_dir/go" LANEWAY_NODE_TEST_RUST_RUNTIME_DIR="$probe_dir/rust" \
     bash "$root/integration/rust-controller-node-netns.sh"
-done
+}
+
+run_packet_gate go 1 0
+run_packet_gate rust 1 0
+run_packet_gate rust 0 1

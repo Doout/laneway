@@ -48,6 +48,9 @@ isolated host. The package alone does not satisfy the systemd or cutover gates.
 The release builds run `integration/rust-release-systemd.sh` on native AMD64
 and ARM64 runners. It extracts the actual archive binaries and runs the
 isolated systemd packet gate against both the Go and Rust controller/relay.
+It also redeems a real one-use invitation through Rust HTTPS discovery and
+enrollment, rejects a replay, and forwards traffic using the configuration
+and protected credentials produced by the packaged Go enrollment CLI.
 The unsigned AMD64 CI preview uses the same gate. After signing a tagged
 release, the publish job checks the manifest using the bootstrap's exact
 workflow, tag, and OIDC issuer policy and checks the hashes of the release
@@ -411,6 +414,12 @@ read-only credential mount and removal of source copies, then runs the same
 packet, policy and teardown checks. It does not run the signed download path
 or the installer's host carrier, and it does not cover routed-only egress or
 IPv6 NAT on the encrypted profile.
+
+To use a real invitation rather than pre-staged credentials, add
+`LANEWAY_NODE_WIREGUARD_INVITATION=1` to the Rust-backed systemd command.
+The discovery name and lab CA apply only within the enrollment process.
+The generated config is passed to Rust unchanged; its time fields may be
+integer nanoseconds from Go or strings from older hand-written configs.
 
 ### Verified on the local ARM64 Linux VM
 

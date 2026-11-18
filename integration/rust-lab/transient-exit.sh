@@ -8,7 +8,7 @@ systemd_mounted=0
 
 remove_systemd_sources() {
   if [[ -n "${systemd_sources}" ]]; then
-    rm -f -- "${systemd_sources}/"{ca.crt,node.crt,node.key,wireguard.key,laneway.toml}
+    rm -f -- "${systemd_sources}/"{ca.crt,node.crt,node.key,wireguard.key,laneway.toml,invitation}
     rmdir -- "${systemd_sources}"
     systemd_sources=""
   fi
@@ -37,8 +37,8 @@ systemd_failure() {
   return 1
 }
 
-run_systemd_exit() {
-  local transport="$1" transient_name candidate pid="" private_network
+stage_systemd_exit() {
+  local transient_name candidate
   transient_name="laneway-ephemeral-exit-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
   [[ "${transient_name}" =~ ^laneway-ephemeral-exit-[0-9a-f]{16}$ ]]
   candidate="/run/${transient_name}"
@@ -48,11 +48,20 @@ run_systemd_exit() {
   mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "${systemd_runtime}"
   systemd_mounted=1
   systemd_sources="$(mktemp -d /run/laneway-lab-creds.XXXXXX)"
+}
+
+run_systemd_exit() {
+  stage_systemd_exit
   install -m 0400 "${work_dir}/pki/ca.crt" "${systemd_sources}/ca.crt"
   install -m 0400 "${work_dir}/pki/rust.crt" "${systemd_sources}/node.crt"
   install -m 0400 "${work_dir}/pki/rust.key" "${systemd_sources}/node.key"
   install -m 0400 "${work_dir}/pki/rust.wireguard.key" "${systemd_sources}/wireguard.key"
-  (umask 0377; write_shared_exit_config "${transient_name}" >"${systemd_sources}/laneway.toml")
+  (umask 0377; write_shared_exit_config "${systemd_unit%.service}" >"${systemd_sources}/laneway.toml")
+  start_staged_systemd_exit "$1"
+}
+
+start_staged_systemd_exit() {
+  local transport="$1" pid="" private_network
   install -m 0555 "${work_dir}/rust-node" "${systemd_runtime}/lanewayd-rs"
   printf 'nameserver 10.254.0.1\n' >"${systemd_runtime}/resolv.conf"
   chmod 0444 "${systemd_runtime}/resolv.conf"
