@@ -5,6 +5,9 @@ on:
     paths:
       - "go/internal/dockerplugin/**"
       - "go/cmd/laneway-docker-plugin/**"
+      - "rust/laneway-docker-plugin/**"
+      - "rust/Cargo.*"
+      - "testvectors/docker-plugin/**"
       - "deploy/docker-plugin/**"
       - "integration/docker-plugin.sh"
       - "spec/docker-network-plugin-v1.md"
@@ -14,6 +17,9 @@ on:
     paths:
       - "go/internal/dockerplugin/**"
       - "go/cmd/laneway-docker-plugin/**"
+      - "rust/laneway-docker-plugin/**"
+      - "rust/Cargo.*"
+      - "testvectors/docker-plugin/**"
       - "deploy/docker-plugin/**"
       - "integration/docker-plugin.sh"
       - "spec/docker-network-plugin-v1.md"
@@ -34,6 +40,12 @@ jobs:
       - run: ./integration/docker-plugin.sh
       - run: go vet ./internal/dockerplugin ./cmd/laneway-docker-plugin
         working-directory: go
+  rust-driver:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.91.1 --profile minimal
+      - run: cargo +1.91.1 test --locked --manifest-path rust/Cargo.toml -p laneway-docker-plugin
   privileged:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "networks": {
+    "net-fixture": {
+      "id": "net-fixture",
+      "bridge": "lwbre528879dad",
+      "table": 24434,
+      "subnet": "172.30.60.0/24",
+      "gateway": "172.30.60.1",
+      "policy": {
+        "egress": "selective",
+        "egress_cidrs": ["10.60.0.0/16"],
+        "ingress": "deny",
+        "dns": ["172.30.60.100"],
+        "fail_mode": "closed",
+        "mtu": 1380
+      },
+      "phase": "active",
+      "created_at": "2026-09-21T03:18:22.123456789Z",
+      "endpoints": {
+        "endpoint-fixture": {
+          "id": "endpoint-fixture",
+          "address": "172.30.60.2",
+          "host_veth": "lwhb3d89ecb0d",
+          "peer_veth": "lwcb3d89ecb0d",
+          "sandbox": "/var/run/docker/netns/fixture",
+          "joined": true
+        }
+      }
+    }
+  }
+}

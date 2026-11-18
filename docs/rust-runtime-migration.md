@@ -272,6 +272,18 @@ The release package gate checks both binaries, preserves the standalone Go
 artifact, and verifies the installed runtime on disposable native runners. Release checksum
 signing is separate from Apple Developer ID signing or notarization.
 
+## Managed Docker network plugin
+
+The Rust driver implements Docker's local Unix HTTP protocol and reads the Go
+plugin's v1 network journal and controller authorization format. It preserves
+the derived bridge, route table, and veth names. It checks authorization before
+creation, join, or startup reconciliation. Failed cleanup keeps the ownership
+record, and an interrupted join stays pending until the backend confirms it.
+
+The Rust crate is not a drop-in plugin yet: the Linux bridge, veth, nftables,
+and policy-routing backend and managed-plugin image still need migration and
+privileged lifecycle tests. The published plugin and its packaging remain Go.
+
 ## Linux node image
 
 Build the opt-in `node` target and check the packaged entry point after the
