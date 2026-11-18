@@ -202,6 +202,9 @@ do
   require "$value" "$workflow"
 done
 require 'bootstrap-artifacts.toml ephemeral-exit-bootstrap.sh image-digests.txt install.sh' "$workflow"
+for image in laneway-controller-rust laneway-relay-rust laneway-node-rust laneway-exit-node-rust; do
+  require "image: ghcr.io/doout/$image" "$workflow"
+done
 
 for value in \
   'LANEWAY_CONTROLLER_IMAGE_DIGEST' \

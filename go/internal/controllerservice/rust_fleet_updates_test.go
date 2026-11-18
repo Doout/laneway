@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -289,7 +290,8 @@ func TestRustControllerFleetUpdates(t *testing.T) {
 				t.Fatal(err)
 			}
 			send(endpoint, "POST", base+"/relays", fmt.Sprintf(`{"service_id":%q,"name":"lab relay","endpoint":"127.0.0.1:4433"}`, relayID.String()), root, 201)
-			worker := startRustFleetUpdateNode(t, dir, endpoint, quic, ca, netID.String(), serviceID.String(), canary, c)
+			activation := os.Getenv("LANEWAY_RUST_SYSTEMD_ACTIVATION_TEST")
+			worker := startRustFleetUpdateNode(t, dir, endpoint, quic, ca, netID.String(), serviceID.String(), canary, c, activation != "")
 			nodeVersion, err := exec.CommandContext(t.Context(), worker, "--version").Output()
 			if err != nil {
 				t.Fatal(err)
@@ -339,23 +341,49 @@ func TestRustControllerFleetUpdates(t *testing.T) {
 			if _, err := os.Stat("/var/lib/laneway-updater/rust-journal.json"); !os.IsNotExist(err) {
 				t.Fatalf("confirmed ACK did not clear the journal: %v", err)
 			}
+			if activation != "" {
+				candidate := os.Getenv("LANEWAY_LAB_NODE_CANDIDATE")
+				if !filepath.IsAbs(candidate) || !filepath.IsAbs(activation) {
+					t.Fatal("the activation test binary and candidate must have absolute paths")
+				}
+				cmd := exec.CommandContext(t.Context(), activation, "--ignored", "--exact", "--nocapture",
+					"fleet_update::tests::activation_on_live_systemd_node")
+				cmd.Env = append(os.Environ(), "LANEWAY_LAB_NODE_SOCKET="+filepath.Join(dir, "worker.sock"))
+				out, err := cmd.CombinedOutput()
+				if err != nil || !strings.Contains(string(out), "1 passed; 0 failed") {
+					t.Fatalf("real systemd activation test: %v\n%s", err, out)
+				}
+				t.Logf("activation and rollback:\n%s", out)
+			}
 		})
 	}
 }
 
 // Exercise the unchanged worker binary, the real Unix health API, and pinned
 // client/server mTLS. The assigned version is already serving, so the test
-// uses no public downloads and does not need a service manager.
-func startRustFleetUpdateNode(t *testing.T, dir, endpoint, quic, ca, network, service, node string, tlsClient *http.Client) string {
+// uses no public downloads. Optionally serve through a fixture systemd unit
+// to exercise the real restart and rollback path separately.
+func startRustFleetUpdateNode(t *testing.T, dir, endpoint, quic, ca, network, service, node string, tlsClient *http.Client, systemd bool) string {
 	t.Helper()
 	const installed = "/usr/local/sbin/lanewayd-rs"
 	const settings = "/etc/laneway/managed-updates-rust.toml"
 	const config = "/etc/laneway/node-rust.toml"
 	const trust = "/etc/laneway/ca.crt"
 	if os.Geteuid() != 0 {
-		t.Fatal("native updater lab requires root in a disposable Linux container")
+		t.Fatal("native updater lab requires root in a disposable Linux environment")
 	}
-	if _, err := os.Stat("/.dockerenv"); err != nil {
+	if systemd {
+		marker, err := os.Lstat("/run/.laneway-isolated-systemd-lab")
+		comm, commErr := os.ReadFile("/proc/1/comm")
+		if err != nil || !marker.Mode().IsRegular() || marker.Mode().Perm() != 0600 ||
+			marker.Sys().(*syscall.Stat_t).Uid != 0 || commErr != nil || strings.TrimSpace(string(comm)) != "systemd" {
+			t.Fatal("activation test requires the marked disposable systemd VM")
+		}
+		out, err := exec.CommandContext(t.Context(), "systemctl", "show", "-p", "LoadState", "--value", "lanewayd-rs.service").Output()
+		if err != nil || strings.TrimSpace(string(out)) != "not-found" {
+			t.Fatalf("refusing to replace a pre-existing systemd service: %q %v", out, err)
+		}
+	} else if _, err := os.Stat("/.dockerenv"); err != nil {
 		t.Fatal("native updater lab refuses to use installed paths outside Docker")
 	}
 	for _, path := range []string{installed, "/etc/laneway", "/var/lib/laneway-updater"} {
@@ -431,12 +459,27 @@ service_id = %q
 [connector]
 userspace = true
 `, socket, filepath.Join(dir, "worker-exit.json"), node, network, certFile, keyFile, trust, endpoint, quic, service, service))
-	cmd := exec.CommandContext(t.Context(), installed, "--config", config)
-	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
+	if systemd {
+		const unit = "lanewayd-rs.service"
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			_ = exec.CommandContext(ctx, "systemctl", "stop", unit).Run()
+			_ = exec.CommandContext(ctx, "systemctl", "reset-failed", unit).Run()
+		})
+		if out, err := exec.CommandContext(t.Context(), "systemd-run", "--quiet", "--unit="+unit,
+			"--description=Laneway isolated updater activation fixture", "--property=Type=exec",
+			"--property=Restart=no", installed, "--config", config).CombinedOutput(); err != nil {
+			t.Fatalf("start systemd fixture: %v %s", err, out)
+		}
+	} else {
+		cmd := exec.CommandContext(t.Context(), installed, "--config", config)
+		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	local := &http.Client{Timeout: time.Second, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", socket)

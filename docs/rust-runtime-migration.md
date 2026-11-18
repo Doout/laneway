@@ -14,6 +14,18 @@ Keep one controller writing to each database.
 | Private fleet features | Fleet worktree includes private DNS, updates, recovery, policy history, diagnostics, alerts and topology | Compare against the identified deployed source and exercise each feature through its UI/API and node consumer. |
 | Packaging and platforms | Go also provides the Docker plugin, platform-specific CLI/daemon entry points and readiness helpers | Verify signed install, update, rollback, desktop local API and active service processes per platform. The one-shot operator CLI and compatibility harness can stay in Go. |
 
+The tagged release workflow builds Rust images alongside the legacy images:
+`ghcr.io/doout/laneway-controller-rust`, `ghcr.io/doout/laneway-relay-rust`,
+`ghcr.io/doout/laneway-node-rust`, `ghcr.io/doout/laneway-exit-node-rust`,
+and `ghcr.io/doout/lane-edge-rust`. Each release job targets AMD64 and ARM64,
+scans its build, signs its immutable digest, and adds it to the signed image
+manifest. This configuration does not switch the default deployment or make
+a local build a signed release. Pin the verified digests when staging a lab
+deployment, and keep the prior images and database backup for rollback.
+The local ARM64 lab built all four new image targets and verified that
+their non-root Rust binaries reported the pinned build version. The tagged
+AMD64 build, signing, and publication were not exercised locally.
+
 ## Linux release preview
 
 The Linux release workflow builds the Rust runtime candidates on native
@@ -65,6 +77,12 @@ with a Go peer over QUIC and TCP using both controller/relay pairs. The tests
 also covered policy withdrawal, partition recovery, and NAT and revocation
 after an invitation through Rust HTTPS. This archive was unsigned; it did not
 exercise the fleet updater or a signed release.
+
+For the compatibility baseline, Cosign 3.1.3 verified the published
+`v0.2.72` manifest under the pinned release workflow identity. The ARM64
+archive matched its signed checksum, and asking for the `v0.2.71` identity
+rejected that signature. The published archive contains Go runtimes only;
+it is not a Rust updater test.
 
 ## First Linux lab run
 
@@ -1207,8 +1225,35 @@ Docker container without existing Laneway installation paths. Run
 from the `go` directory. The test claims a release already running locally:
 it verifies opt-in, credential binding, and terminal acknowledgment without
 needing release network access. Local activation tests exercise atomic
-replacement and rollback separately; neither test substitutes for a signed
-update and bad-release rollback against a running systemd service.
+replacement and rollback separately.
+
+To also exercise a real systemd restart and rollback, use the marked
+disposable VM from the Linux packet gate. Stage two native Rust nodes built
+from this branch with different numeric `LANEWAY_PRODUCT_VERSION` values,
+and the test executable printed by
+`cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --lib --no-run`.
+In the VM, compile the Go fixture with
+`go test -tags=rustinterop -c -o /tmp/fleet-updater-check ./internal/controllerservice`
+from the `go` directory, then run it:
+
+```sh
+sudo env LANEWAY_RUST_CONTROLLER=/absolute/path/to/laneway-controller \
+  LANEWAY_RUST_UPDATER=/absolute/path/to/laneway-update-rs \
+  LANEWAY_RUST_NODE=/absolute/path/to/old-node \
+  LANEWAY_LAB_NODE_CANDIDATE=/absolute/path/to/new-node \
+  LANEWAY_RUST_SYSTEMD_ACTIVATION_TEST=/absolute/path/to/rust-test-executable \
+  /tmp/fleet-updater-check -test.run '^TestRustControllerFleetUpdates$/^managed-worker$' -test.v
+```
+
+The test refuses existing Laneway installation paths and services. It uses
+the production activation code against a temporary `lanewayd-rs.service`,
+requires a fresh daemon with a live controller lease, then restores the
+previous executable after a candidate fails. The candidates are supplied
+directly to the test; it does not verify downloading and rolling out a
+new signed release.
+On the isolated ARM64 VM, the gate upgraded `v0.0.9100` to `v0.0.9101`,
+then restored that exact executable after the next candidate never became
+healthy. Both restarts preserved the node's identity and certificate.
 
 The Connector transaction has a separate Docker gate. Give it a local native
 Connector image built with a numeric release version and the local daemon

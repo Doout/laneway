@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.9
+# syntax=docker/dockerfile:1.9@sha256:fe40cf4e92cd0c467be2cfc30657a680ae2398318afd50b0c80585784c604f28
 FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS console-build
 WORKDIR /src/web
 COPY web/package.json web/pnpm-lock.yaml ./
@@ -6,17 +6,19 @@ RUN corepack enable && corepack prepare pnpm@10.14.0 --activate && pnpm install 
 COPY web/ ./
 RUN pnpm build:live
 
-FROM rust:1.91-alpine AS build
-RUN apk add --no-cache musl-dev
+FROM rust:1.91.1-alpine3.22@sha256:8efbfb788786eeb127adc581394349c5fb567712156e0f8c2e499acadbc23756 AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY rust/ ./rust/
 COPY api/ ./api/
-RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-healthcheck
+ENV CARGO_INCREMENTAL=0 CARGO_PROFILE_RELEASE_STRIP=symbols
+RUN cargo fetch --locked --manifest-path rust/Cargo.toml
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p laneway-healthcheck
 
 FROM build AS node-build
-ARG VERSION=dev
-RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
-    cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40 AS node
 RUN apk add --no-cache ca-certificates iproute2-minimal nftables procps-ng setpriv tini \
@@ -43,11 +45,13 @@ ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/lanewayd-rs"]
 CMD ["--config", "/etc/laneway/connector.toml"]
 
 FROM build AS relay-build
-RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-relay
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p laneway-relay
 RUN install -d -m 0700 -o 65532 -g 65532 /out/relay-public
 
 FROM build AS controller-build
-RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-controller
+RUN --network=none LANEWAY_PRODUCT_VERSION="${VERSION}" \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml -p laneway-controller
 
 FROM scratch AS controller
 COPY --from=controller-build /src/rust/target/release/laneway-controller /usr/local/bin/laneway-controller

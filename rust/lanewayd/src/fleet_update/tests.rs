@@ -283,12 +283,15 @@ impl Runtime for FixtureService {
 
 #[tokio::test]
 async fn activation_replaces_only_the_daemon_and_requires_new_healthy_authority() {
+    use std::os::unix::fs::PermissionsExt;
+
     for (reject_target, reject_rollback) in [(false, false), (true, false), (true, true)] {
         let dir = tempfile::tempdir().unwrap();
         let installed = dir.path().join("lanewayd-rs");
         let staged = dir.path().join("asset");
         let other = dir.path().join("node.toml");
         fs::write(&installed, V1).unwrap();
+        fs::set_permissions(&installed, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(&staged, V2).unwrap();
         fs::write(&other, "operator-owned config").unwrap();
         let service = FixtureService {
@@ -321,4 +324,98 @@ async fn activation_replaces_only_the_daemon_and_requires_new_healthy_authority(
             install.ready().unwrap();
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires the disposable systemd VM and an enrolled durable Rust node"]
+async fn activation_on_live_systemd_node() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let marker = fs::symlink_metadata("/run/.laneway-isolated-systemd-lab")?;
+    ensure!(
+        marker.is_file()
+            && marker.uid() == 0
+            && marker.mode() & 0o777 == 0o600
+            && fs::read_to_string("/proc/1/comm")?.trim() == "systemd",
+        "test requires the marked disposable systemd VM"
+    );
+    // SAFETY: reads process metadata without mutating state.
+    ensure!(unsafe { libc::geteuid() } == 0, "test must run as root");
+    let unit = clean_command("/usr/bin/systemctl")
+        .args([
+            "show",
+            "--property=Description",
+            "--value",
+            "lanewayd-rs.service",
+        ])
+        .output()
+        .await?;
+    ensure!(
+        unit.status.success()
+            && std::str::from_utf8(&unit.stdout)?.trim()
+                == "Laneway isolated updater activation fixture",
+        "refusing to replace a non-fixture service"
+    );
+
+    let candidate = PathBuf::from(
+        std::env::var_os("LANEWAY_LAB_NODE_CANDIDATE")
+            .context("set LANEWAY_LAB_NODE_CANDIDATE to the new native node binary")?,
+    );
+    let socket = PathBuf::from(
+        std::env::var_os("LANEWAY_LAB_NODE_SOCKET")
+            .context("set LANEWAY_LAB_NODE_SOCKET to the fixture socket")?,
+    );
+    let runtime = SystemNode::new(&socket)?;
+    let installed = Path::new(BINARY);
+    let before = runtime.status().await?;
+    let target = installed_version(&candidate).await?;
+    assert_ne!(
+        before.version()?,
+        target,
+        "exercise an actual version change"
+    );
+    let install = Install::new(installed);
+    let old_inode = fs::metadata(installed)?.ino();
+    assert_eq!(
+        install
+            .apply(&candidate, &runtime, &before, &target)
+            .await?,
+        Activated::Healthy
+    );
+    assert_ne!(old_inode, fs::metadata(installed)?.ino());
+    let upgraded = runtime.status().await?;
+    assert!(upgraded.healthy(&before.identity, &target)?);
+    assert_ne!(before.daemon_instance_id, upgraded.daemon_instance_id);
+    assert_eq!(
+        before.controller.certificate_presented_serial,
+        upgraded.controller.certificate_presented_serial
+    );
+    println!("systemd activated {target} and the same node regained its controller lease");
+
+    // This executable launches and exits without publishing a health socket.
+    // The worker must time out waiting for health, restore the same good inode,
+    // restart it, and confirm its controller lease before removing recovery markers.
+    let healthy_inode = fs::metadata(installed)?.ino();
+    assert_eq!(
+        install
+            .apply(
+                Path::new("/usr/bin/false"),
+                &runtime,
+                &upgraded,
+                "v0.0.9102"
+            )
+            .await?,
+        Activated::RolledBack
+    );
+    let restored = runtime.status().await?;
+    assert_eq!(healthy_inode, fs::metadata(installed)?.ino());
+    assert!(restored.healthy(&before.identity, &target)?);
+    assert_ne!(upgraded.daemon_instance_id, restored.daemon_instance_id);
+    assert_eq!(
+        before.controller.certificate_presented_serial,
+        restored.controller.certificate_presented_serial
+    );
+    install.ready()?;
+    println!("systemd restored {target}, the same credential, and a fresh controller lease");
+    Ok(())
 }

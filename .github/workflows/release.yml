@@ -162,6 +162,22 @@ jobs:
             image: ghcr.io/doout/lane-edge-rust
             dockerfile: deploy/containers/Dockerfile.connector
             target: rust-connector
+          - name: rust-controller
+            image: ghcr.io/doout/laneway-controller-rust
+            dockerfile: deploy/containers/Dockerfile.rust-relay
+            target: controller
+          - name: rust-relay
+            image: ghcr.io/doout/laneway-relay-rust
+            dockerfile: deploy/containers/Dockerfile.rust-relay
+            target: relay
+          - name: rust-node
+            image: ghcr.io/doout/laneway-node-rust
+            dockerfile: deploy/containers/Dockerfile.rust-relay
+            target: node
+          - name: rust-exit-node
+            image: ghcr.io/doout/laneway-exit-node-rust
+            dockerfile: deploy/containers/Dockerfile.exit-node
+            target: rust-exit
           - name: exit-node
             image: ghcr.io/doout/laneway-exit-node
             dockerfile: deploy/containers/Dockerfile.exit-node
