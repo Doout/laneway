@@ -19,7 +19,7 @@ mod bearer;
 pub mod bootstrap_bundles;
 pub mod bootstrap_discovery;
 mod browser;
-pub use bearer::{RootCredential, bearer_inventory, bearer_network};
+pub use bearer::{PUBLIC_APPLICATION_SCHEME, RootCredential, bearer_inventory, bearer_network};
 pub use browser::auth_state;
 pub mod endpoint_status;
 pub mod enrollment;

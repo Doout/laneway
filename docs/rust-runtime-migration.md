@@ -80,17 +80,31 @@ certificate and client-authentication policy from the TLS ClientHello.
 The HTTPS handler forwards discovery, one-use bootstrap downloads, console
 requests and OAuth to the configured controller. The relay verifies the
 controller's hostname, CA and Laneway service identity before sending HTTP.
-It blocks public access to node APIs and administrator bearer credentials.
-The Rust controller accepts the forwarded client IP only from a currently
-authorized relay presenting its mTLS credential.
+Node transport APIs and private administrator credentials stay off the public
+proxy. An app can use its OAuth access token only on the scoped network
+reads, node installer and route assignment endpoints. The controller accepts
+delegated credentials only from a currently authorized mTLS relay and
+verifies the active app installation, network grant, and operation in the
+same database transaction. Root and non-application automation bearer
+credentials remain private, including tokens with the same wire format.
 
-Run `make rust-controller-interop` for shared-port discovery, browser sessions,
-one-use downloads, OAuth Basic forwarding, and the separate mTLS handshake.
+Run `make rust-controller-interop` for shared-port discovery, one-use
+downloads, browser sessions, the node mTLS handshake, and the application
+flow from registration through scoped operations, refresh, and revoke.
 Run `bash integration/rust-lab/acme.sh` to exercise TLS-ALPN validation,
 live renewal, and offline restart using the cached certificate with a local
-[Pebble](https://github.com/letsencrypt/pebble) CA. This is separate from
-renewing the internal controller certificate or running a complete Dispatch
-exchange through the shared port.
+[Pebble](https://github.com/letsencrypt/pebble) CA. This does not renew the
+internal controller certificate.
+
+To run the real Dispatch client in the same lab flow:
+
+```sh
+bash integration/rust-lab/dispatch.sh /path/to/dispatch REVISION
+```
+
+The script builds the client from a temporary source snapshot. The browser
+approval is driven by the Laneway fixture; the Dispatch client performs the
+backend calls. This does not run the Dispatch server or test its deployment.
 
 The Rust controller image includes the same `pnpm build:live` console as the
 Go image and enables it from `/usr/share/laneway-console`. For a standalone

@@ -77,6 +77,10 @@ func TestRustControllerDiscovery(t *testing.T) {
 	artifact := bootstrap.Artifact{OS: "linux", Arch: "arm64", URL: "https://release.bootstrap.test/laneway",
 		SHA256: strings.Repeat("12", 32), SizeBytes: 512}
 	console := rustConsoleDir(t)
+	// Even a root credential deliberately shaped like an application token
+	// must not be recognized as root through the public relay.
+	const publicFixtureRoot = "lnw_spat_v1.01234567890123456789012345678901.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	rootPath := write("root-token", []byte(publicFixtureRoot))
 	profile := func(name, filename string) string {
 		t.Helper()
 		data, err := json.Marshal(map[string]any{
@@ -90,7 +94,7 @@ func TestRustControllerDiscovery(t *testing.T) {
 	command := func(ctx context.Context, profile string) *exec.Cmd {
 		return exec.CommandContext(ctx, os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0",
 			cert, key, "--node-issuer", ca, issuerKey, "86400", "--node-client-ca", ca, "--bootstrap-profile", profile,
-			"--console-dir", console)
+			"--console-dir", console, "--root-token-file", rootPath)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -260,7 +264,7 @@ private_key = %q
 		publicRoots.AddCert(publicRoot)
 		https := &http.Client{Timeout: 8 * time.Second, Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{RootCAs: publicRoots, ServerName: publicName, MinVersion: tls.VersionTLS13},
-		}}
+		}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		defer https.CloseIdleConnections()
 		testRustConsole(t, https, "https://"+tcp, publicName)
 		request := func(method, path string, body io.Reader, headers http.Header, want int) *http.Response {
@@ -320,11 +324,11 @@ private_key = %q
 		request("POST", "/v1/enroll", nil, nil, 404)
 		request("GET", "/v1/admin/%2e%2e/configuration", nil, nil, 404)
 		request("GET", authState, nil, http.Header{"Authorization": {"Bearer test"}}, 401)
-		oauth := request("POST", "/oauth/token", strings.NewReader("grant_type=authorization_code"),
-			http.Header{"Authorization": {"Basic dGVzdDp0ZXN0"}, "Content-Type": {"application/x-www-form-urlencoded"}}, 401)
-		if !strings.HasPrefix(oauth.Header.Get("Www-Authenticate"), "Basic ") {
-			t.Fatal("OAuth client authentication was blocked by the relay instead of reaching the controller")
+		probe := dispatchClientProbe{
+			binary: os.Getenv("LANEWAY_DISPATCH_PROBE"), address: tcp, authority: "https://" + publicName,
+			caPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: publicRoot.Raw})),
 		}
+		testRustPublicApplication(t, f, foreign.ID, request, client, base, browser, publicFixtureRoot, probe)
 		// Node fallback chooses the Laneway certificate even if HTTP is also
 		// offered, and does not finish a working session without a client key.
 		nodeTLS := &tls.Config{RootCAs: roots, ServerName: workloadName, MinVersion: tls.VersionTLS13,

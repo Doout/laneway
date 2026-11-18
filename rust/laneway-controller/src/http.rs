@@ -210,7 +210,8 @@ fn credential(headers: &HeaderMap) -> Result<Credential, Failure> {
         }
         let raw = value.to_str().map_err(|_| AUTH)?;
         let (scheme, secret) = raw.split_once(' ').ok_or(AUTH)?;
-        if !scheme.eq_ignore_ascii_case("bearer")
+        if !(scheme.eq_ignore_ascii_case("bearer")
+            || scheme == laneway_controller::PUBLIC_APPLICATION_SCHEME)
             || secret.is_empty()
             || secret.bytes().any(|b| b.is_ascii_whitespace() || b == b',')
         {

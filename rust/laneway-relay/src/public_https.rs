@@ -11,6 +11,7 @@ use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{HeaderMap, Method, Request, Response, StatusCode as S, body::Incoming, header};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use laneway_protocol::public_application;
 use tokio::{net::TcpStream, sync::Semaphore, time::timeout};
 use tokio_rustls::server::TlsStream;
 
@@ -99,7 +100,7 @@ impl PublicHttps {
         if !matches!(route, Route::Console) {
             let mut response = if request.method() != Method::GET
                 || uri.query().is_some_and(|q| !q.is_empty())
-                || forbidden_credential(request.headers(), false)
+                || forbidden_credential(request.headers(), false, false)
             {
                 plain(S::NOT_FOUND, "404 page not found\n", head)
             } else if !self
@@ -124,7 +125,8 @@ impl PublicHttps {
 
         let oauth_token = matches!(uri.path(), "/oauth/token" | "/oauth/revoke")
             && request.method() == Method::POST;
-        if forbidden_credential(request.headers(), oauth_token)
+        let app = public_application::route_allowed(request.method().as_str(), uri.path());
+        if forbidden_credential(request.headers(), oauth_token, app)
             || !connection_headers_are_safe(request.headers())
         {
             return plain(
@@ -200,6 +202,17 @@ impl PublicHttps {
         remove_transport_headers(&mut parts.headers);
         parts.headers.remove(header::CONTENT_LENGTH);
         let path = parts.uri.path();
+        if public_application::route_allowed(parts.method.as_str(), path)
+            && let Some(mut bearer) = parts.headers.remove(header::AUTHORIZATION)
+        {
+            // The controller checks the installation and the existing operation
+            // and network grants. Do not forward a generic bearer even to an
+            // older upstream that doesn't implement the application lane.
+            bearer.set_sensitive(true);
+            parts
+                .headers
+                .insert(public_application::ACCESS_HEADER, bearer);
+        }
         if path.starts_with("/v1/admin/")
             || path.starts_with("/oauth/")
             || matches!(
@@ -301,12 +314,23 @@ fn public_host(headers: &HeaderMap, name: &str) -> bool {
         && hosts.next().is_none()
 }
 
-fn forbidden_credential(headers: &HeaderMap, oauth: bool) -> bool {
+fn forbidden_credential(headers: &HeaderMap, oauth: bool, app: bool) -> bool {
     let mut auth = headers.get_all(header::AUTHORIZATION).iter();
     headers.contains_key(header::PROXY_AUTHORIZATION)
-        || auth
-            .next()
-            .is_some_and(|v| !oauth || !v.as_bytes().starts_with(b"Basic "))
+        || auth.next().is_some_and(|value| {
+            !(oauth && value.as_bytes().starts_with(b"Basic ")
+                || app
+                    && value
+                        .to_str()
+                        .ok()
+                        .and_then(public_application::candidate)
+                        .is_some()
+                    && !headers.contains_key(header::COOKIE)
+                    && !headers.contains_key(header::ORIGIN)
+                    && !headers
+                        .keys()
+                        .any(|name| name.as_str().starts_with("sec-fetch-")))
+        })
         || auth.next().is_some()
 }
 
@@ -347,6 +371,7 @@ fn remove_transport_headers(headers: &mut HeaderMap) {
         "x-forwarded-host",
         "x-forwarded-proto",
         CLIENT_IP,
+        public_application::ACCESS_HEADER,
     ] {
         headers.remove(name);
     }

@@ -17,6 +17,10 @@ pub struct RootCredential {
     principal: Id,
 }
 
+/// Internal context for an application access token delegated by a verified
+/// public relay. It is never a valid scheme on an incoming HTTP request.
+pub const PUBLIC_APPLICATION_SCHEME: &str = "LanewayPublicApplication";
+
 fn root_id(tx: &Transaction<'_>) -> Result<Id> {
     Ok(Id::new(tx.query_row(
         "SELECT root_service_principal_id FROM administrator_auth_state WHERE singleton=1",
@@ -111,6 +115,7 @@ pub(crate) fn authenticate(
     root: Option<&RootCredential>,
 ) -> Result<BearerActor> {
     let (scheme, token) = header.split_once(' ').ok_or(SessionError::Invalid)?;
+    let public_app = scheme == PUBLIC_APPLICATION_SCHEME;
     if let Some(root) = root.filter(|r| r.matches(header)) {
         ensure!(root.principal == root_id(tx)?, SessionError::Invalid);
         return Ok(BearerActor {
@@ -119,7 +124,10 @@ pub(crate) fn authenticate(
             all: true,
         });
     }
-    ensure!(scheme.eq_ignore_ascii_case("bearer"), SessionError::Invalid);
+    ensure!(
+        public_app || scheme.eq_ignore_ascii_case("bearer"),
+        SessionError::Invalid
+    );
     let (token_id, proof) = automation_proof(token)?;
     // Authenticate, authorize and read from the same SQLite snapshot. The
     // schema enforces valid principal names, operation names and distinct grants.
@@ -132,8 +140,18 @@ pub(crate) fn authenticate(
                AND NOT(p.all_networks=1 AND EXISTS(SELECT 1 FROM automation_service_principal_networks WHERE principal_id=p.id))
                AND (p.all_networks=1 OR EXISTS(SELECT 1 FROM automation_service_principal_networks WHERE principal_id=p.id))
                    = EXISTS(SELECT 1 FROM automation_service_principal_permissions WHERE principal_id=p.id
-                       AND operation NOT IN ('network.create','bootstrap_bundle.create','audit.read_global'))",
-            [token_id.as_bytes()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(SessionError::Invalid)?;
+                       AND operation NOT IN ('network.create','bootstrap_bundle.create','audit.read_global'))
+               AND (NOT ?2 OR EXISTS(
+                   SELECT 1 FROM application_refresh_tokens r
+                   JOIN application_refresh_token_families f ON f.id=r.family_id
+                   JOIN application_installations i ON i.id=f.installation_id AND i.application_id=f.application_id
+                   JOIN registered_applications a ON a.id=i.application_id
+                   WHERE r.access_token_id=t.id AND i.service_principal_id=p.id
+                     AND r.consumed_at IS NULL AND f.revoked_at IS NULL
+                     AND f.created_at<=unixepoch() AND f.expires_at>unixepoch()
+                     AND i.enabled=1 AND a.enabled=1 AND p.all_networks=0
+               ))",
+            (token_id.as_bytes(), public_app), |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(SessionError::Invalid)?;
     ensure!(bool::from(stored.ct_eq(&proof)), SessionError::Invalid);
     Ok(BearerActor {
         id: Id::new(id)?,
