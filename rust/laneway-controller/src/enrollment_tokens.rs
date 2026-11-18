@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use zeroize::Zeroizing;
 
-const ROUTER: u64 = 1 << 3;
-const EXIT: u64 = 1 << 4;
+pub(crate) const ROUTER: u64 = 1 << 3;
+pub(crate) const EXIT: u64 = 1 << 4;
 const MAX_VALIDITY: i64 = 30 * 86400;
 
 #[derive(Default)]

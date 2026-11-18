@@ -13,6 +13,7 @@ use std::{
     },
 };
 use tokio::sync::Semaphore;
+mod enroll;
 mod form;
 mod login;
 mod management;
@@ -31,11 +32,19 @@ pub struct State {
     discovery: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     logins: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     passwords: Arc<laneway_controller::password::PasswordVerifier>,
+    issuer: Option<Arc<laneway_controller::node_pki::NodeIssuer>>,
+    enrollments: Arc<std::sync::Mutex<enroll::Limiter>>,
 }
 impl State {
-    pub fn new(database: PathBuf, root: Option<RootCredential>) -> anyhow::Result<Self> {
+    pub fn new(
+        database: PathBuf,
+        root: Option<RootCredential>,
+        issuer: Option<laneway_controller::node_pki::NodeIssuer>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             database: Arc::new(database),
+            issuer: issuer.map(Arc::new),
+            enrollments: Default::default(),
             queries: Arc::new(Semaphore::new(8)),
             root: root.map(Arc::new),
             discovery: Default::default(),
@@ -208,6 +217,9 @@ async fn dispatch(
     peer: std::net::IpAddr,
 ) -> Result<Reply, Failure> {
     let path = req.uri().path();
+    if path == "/v1/enroll" && state.issuer.is_some() {
+        return Ok(enroll::handle(req, state, id, peer).await);
+    }
     let network_collection = path == "/v1/admin/networks";
     let create_network = network_collection && req.method() == Method::POST;
     if path.contains('%')

@@ -136,7 +136,7 @@ contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
 contexts or when combined with a session cookie. Bootstrap, recovery, and
-resource writes other than network creation and enrollment-token issuance still require Go.
+other admin resource writes besides network creation and enrollment-token issuance still require Go.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -191,7 +191,18 @@ lifetime, issuer chain and node lease. `make rust-controller-interop` uses
 throwaway Go-generated CAs and five CSR signature variants to verify the
 resulting Rust certificates with Go, including issuance through an intermediate.
 
-Redemption still goes to Go. The next step is to wire this signer into
-`POST /v1/enroll` and commit address allocation, node identity, certificate,
-token consumption, audit and network epoch together. Do not enable the Rust
-controller for node enrollment until mixed-client redemption and rollback pass.
+To enable protobuf `POST /v1/enroll` on the isolated listener, append
+`--node-issuer /lab/node-ca-chain.pem /lab/node-ca.key 86400` to the serve
+command. The last argument is the maximum leaf lifetime in seconds. Use a
+disposable **node CA**, not the HTTPS leaf key. Put the signing certificate
+first, followed by any parent certificates. Without these arguments this
+listener does not offer enrollment. Restart without them to disable it.
+
+Redemption commits the token, node, addresses, certificate, route or exit
+session if granted, audits, and network epoch in one SQLite transaction.
+The interop gate checks all three classes, rollback on a late audit failure,
+Go and Rust racing to redeem one invite, and address reuse after expiry. A
+Go client also presents its Rust-issued certificate over mutual TLS and
+renews that same node identity at the Go controller.
+Credential renewal and authenticated configuration still require Go. Keep
+all production controllers and node update channels unchanged.

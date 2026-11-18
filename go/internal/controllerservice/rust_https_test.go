@@ -39,6 +39,9 @@ func TestRustControllerHTTPS(t *testing.T) {
 	}
 	goServer := httptest.NewUnstartedServer(f.service.Handler())
 	goServer.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{material.CertificateDER}, PrivateKey: material.PrivateKey}}, MinVersion: tls.VersionTLS13}
+	goServer.TLS.ClientAuth = tls.VerifyClientCertIfGiven
+	goServer.TLS.ClientCAs = x509.NewCertPool()
+	goServer.TLS.ClientCAs.AddCert(f.service.ca)
 	goServer.StartTLS()
 	defer goServer.Close()
 	dir := t.TempDir()
@@ -61,7 +64,12 @@ func TestRustControllerHTTPS(t *testing.T) {
 	if err := os.WriteFile(rootFile, []byte(testRootBearer+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key, "--root-token-file", rootFile)
+	caPK, err := x509.MarshalPKCS8PrivateKey(f.service.caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caKey := write("issuer.key", "PRIVATE KEY", caPK)
+	cmd := exec.CommandContext(t.Context(), os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0", cert, key, "--root-token-file", rootFile, "--node-issuer", ca, caKey, "86400")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -290,6 +298,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 	testRustBearerInventory(t, f, cookie, check)
 	t.Run("network-management", func(t *testing.T) { testRustNetworkManagement(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	t.Run("enrollment-issuance", func(t *testing.T) { testRustEnrollmentIssuance(t, f, client, goServer.URL, rustURL, cookie, csrf) })
+	t.Run("enrollment-redemption", func(t *testing.T) { testRustRedemption(t, f, client, rustURL, goServer.URL) })
 	if err := f.store.LogoutAdministratorSession(t.Context(), adminauth.SessionSubject(session.PrincipalID, session.ID)); err != nil {
 		t.Fatal(err)
 	}

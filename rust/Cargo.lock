@@ -826,6 +826,7 @@ dependencies = [
  "ipnet",
  "laneway-protocol",
  "mime",
+ "prost",
  "rcgen",
  "rusqlite",
  "rustls",

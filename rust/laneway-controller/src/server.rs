@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS]";
 
 pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let database = PathBuf::from(args.next().context(USAGE)?);
@@ -31,30 +31,49 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     );
     let cert = PathBuf::from(args.next().context(USAGE)?);
     let key = PathBuf::from(args.next().context(USAGE)?);
-    let root = match args.next() {
-        Some(flag) if flag == "--root-token-file" => {
-            Some(laneway_controller::RootCredential::load(
+    let mut root = None;
+    let mut issuer = None;
+    while let Some(flag) = args.next() {
+        if flag == "--root-token-file" && root.is_none() {
+            root = Some(laneway_controller::RootCredential::load(
                 &PathBuf::from(args.next().context(USAGE)?),
                 &database,
-            )?)
+            )?);
+        } else if flag == "--node-issuer" && issuer.is_none() {
+            let chain = PathBuf::from(args.next().context(USAGE)?);
+            let signer = PathBuf::from(args.next().context(USAGE)?);
+            let lifetime = args
+                .next()
+                .context(USAGE)?
+                .to_str()
+                .context(USAGE)?
+                .parse()?;
+            let certificates = rustls_pemfile::certs(&mut pem(&chain, false)?)
+                .collect::<std::io::Result<Vec<_>>>()?;
+            let key = rustls_pemfile::private_key(&mut pem(&signer, true)?)?
+                .context("missing node CA key")?;
+            issuer = Some(laneway_controller::node_pki::NodeIssuer::new(
+                &certificates,
+                &key,
+                lifetime,
+            )?);
+        } else {
+            anyhow::bail!(USAGE)
         }
-        None => None,
-        _ => anyhow::bail!(USAGE),
-    };
-    ensure!(args.next().is_none(), USAGE);
+    }
     let config = tls(&cert, &key)?;
     laneway_controller::SessionStore::check_database(&database)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(serve(
-            super::http::State::new(database, root)?,
+            super::http::State::new(database, root, issuer)?,
             address,
             config,
         ))
 }
 
-fn pem(path: &Path, private: bool) -> Result<Cursor<Vec<u8>>> {
+fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>> {
     let file = File::open(path)?;
     let meta = file.metadata()?;
     ensure!(meta.is_file(), "TLS material must be a regular file");
@@ -66,7 +85,7 @@ fn pem(path: &Path, private: bool) -> Result<Cursor<Vec<u8>>> {
             "private TLS key must not be group-writable or world-accessible"
         );
     }
-    let mut data = Vec::new();
+    let mut data = zeroize::Zeroizing::new(Vec::new());
     file.take(65537).read_to_end(&mut data)?;
     ensure!(data.len() <= 65536, "oversized TLS material");
     Ok(Cursor::new(data))
