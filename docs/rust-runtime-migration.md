@@ -221,9 +221,20 @@ key, audit events, and network epoch together. Ephemeral certificates cannot
 outlive their leases. The interop gate revokes an admitted request's certificate
 before sending its body and checks that no replacement is issued.
 
-This is the Rust controller's HTTPS endpoint. The node workflow below uses the
-Go controller: the Rust controller does not yet serve the authenticated QUIC
-renewal and configuration requests the Rust node needs. Keep Go serving production.
+### Renew over the Rust controller's QUIC listener (lab only)
+
+Add `--node-quic` alongside `--node-issuer` and `--node-client-ca`. It binds
+UDP on the same loopback address and port as HTTPS. Use a service certificate
+with the controller's network and service ID and the DNS name or IP the client
+verifies. Omit `--node-quic` to return to HTTPS-only without changing stored state.
+
+The Go node client can now renew at Rust using the existing
+`laneway-control/1` protocol, with no working HTTPS fallback. The listener
+requires mutual TLS and only accepts nodes from its own network. Certificate
+revocation takes effect on established connections; an ephemeral exit cannot
+use a second connection to displace a healthy session. Renewal does not extend
+the heartbeat lease. The listener does not yet serve configuration snapshots,
+heartbeats, or relay operations. Keep Go serving production.
 
 ### Renew a Rust node at a Go controller (lab only)
 

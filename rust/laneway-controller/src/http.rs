@@ -29,13 +29,13 @@ type Reply = Response<Full<Bytes>>;
 #[derive(Clone)]
 pub struct State {
     renewal_enabled: bool,
-    database: Arc<PathBuf>,
-    queries: Arc<Semaphore>,
+    pub(crate) database: Arc<PathBuf>,
+    pub(crate) queries: Arc<Semaphore>,
     root: Option<Arc<RootCredential>>,
     discovery: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     logins: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     passwords: Arc<laneway_controller::password::PasswordVerifier>,
-    issuer: Option<Arc<laneway_controller::node_pki::NodeIssuer>>,
+    pub(crate) issuer: Option<Arc<laneway_controller::node_pki::NodeIssuer>>,
     enrollments: Arc<std::sync::Mutex<enroll::Limiter>>,
 }
 impl State {

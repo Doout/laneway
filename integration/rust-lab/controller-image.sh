@@ -26,4 +26,4 @@ docker run --rm --network none --read-only --tmpfs /tmp:exec --cap-drop ALL --us
   -v "$bin_volume:/packaged:ro" -v "$test_volume:/tests:ro" \
   -e LANEWAY_RUST_CONTROLLER=/packaged/laneway-controller laneway-rust-lab:local sh -ec '
     /tests/sessions -test.run "^TestRustControllerSessions$"
-    /tests/https -test.run "^TestRustController(Inventory|HTTPS)$"'
+    /tests/https -test.run "^TestRustController(Inventory|HTTPS|QUIC)$"'

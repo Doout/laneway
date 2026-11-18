@@ -61,7 +61,13 @@ pub(super) async fn handle(mut req: Request<Incoming>, state: State, id: &str) -
         let _permit = permit;
         let req = RenewalRequest::decode(data.as_slice())
             .map_err(|_| EnrollError::Malformed("malformed protobuf request"))?;
-        store.renew_certificate(&peer, req, &issuer, || cancel.is_closed())
+        store.renew_certificate(
+            &peer,
+            req,
+            &issuer,
+            laneway_controller::enrollment::renewal::RenewalTransport::Https,
+            || cancel.is_closed(),
+        )
     })
     .await
     {

@@ -22,6 +22,12 @@ pub struct NodeCredential {
 struct Binding {
     lease: Option<i64>,
     key: Option<[u8; 32]>,
+    capabilities: i64,
+}
+#[derive(Clone, Copy)]
+pub enum RenewalTransport {
+    Https,
+    Quic { holds_exit_claim: bool },
 }
 
 impl NodeCredential {
@@ -40,17 +46,39 @@ impl NodeCredential {
     fn binding(&self, tx: &Transaction<'_>, now: i64) -> Result<Binding> {
         // Match exact certificate bytes as well as serial and identity. The DB
         // decides whether a previously authenticated TLS peer is still allowed.
-        let binding=tx.query_row("SELECT n.lease_expires_at,n.wireguard_public_key
+        let binding=tx.query_row("SELECT n.lease_expires_at,n.wireguard_public_key,n.enabled_capabilities
             FROM nodes n JOIN certificates c ON c.node_id=n.id AND c.network_id=n.network_id
             WHERE n.network_id=?1 AND n.id=?2 AND c.serial=?3 AND c.der=?4
               AND n.revoked_at IS NULL AND c.revoked_at IS NULL AND c.not_before<=?5 AND c.not_after>?5
               AND ((n.enrollment_class='ephemeral' AND n.lease_expires_at>?5)
                 OR (n.enrollment_class IN ('durable','remembered') AND n.lease_expires_at IS NULL))",
-            params![self.net.as_bytes(),self.node.as_bytes(),self.serial,self.der,now],|r|Ok(Binding{lease:r.get(0)?,key:r.get(1)?})).optional()?.ok_or(EnrollError::Denied)?;
+            params![self.net.as_bytes(),self.node.as_bytes(),self.serial,self.der,now],|r|Ok(Binding{lease:r.get(0)?,key:r.get(1)?,capabilities:r.get(2)?})).optional()?.ok_or(EnrollError::Denied)?;
         Ok(binding)
+    }
+    fn exit_admission(
+        &self,
+        tx: &Transaction<'_>,
+        bound: &Binding,
+        now: i64,
+    ) -> Result<Option<bool>> {
+        if bound.lease.is_none() || bound.capabilities != crate::enrollment_tokens::EXIT as i64 {
+            return Ok(None);
+        }
+        Ok(Some(tx.query_row("SELECT suspect_at<=?1 FROM ephemeral_exit_sessions WHERE node_id=?2 AND network_id=?3 AND terminated_at IS NULL AND revoke_at>?1",params![now,self.node.as_bytes(),self.net.as_bytes()],|r|r.get(0)).optional()?.ok_or(EnrollError::Denied)?))
     }
 }
 impl SessionStore {
+    /// Returns takeover eligibility only for an active ephemeral Exit. Ordinary
+    /// nodes do not take an exclusive control-session slot.
+    pub fn node_control_admission(&mut self, peer: &NodeCredential) -> Result<Option<bool>> {
+        let tx = self.db.transaction()?;
+        check_snapshot(&tx)?;
+        let now: i64 = tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?;
+        let bound = peer.binding(&tx, now)?;
+        let result = peer.exit_admission(&tx, &bound, now)?;
+        tx.commit()?;
+        Ok(result)
+    }
     pub fn check_node_peer(&mut self, peer: &NodeCredential) -> Result<()> {
         let tx = self.db.transaction()?;
         check_snapshot(&tx)?;
@@ -63,6 +91,7 @@ impl SessionStore {
         peer: &NodeCredential,
         req: RenewalRequest,
         issuer: &NodeIssuer,
+        transport: RenewalTransport,
         cancelled: impl Fn() -> bool,
     ) -> Result<RenewalResponse> {
         let csr = VerifiedCsr::parse(&req.pkcs10_csr_der)
@@ -97,6 +126,12 @@ impl SessionStore {
         check_snapshot(&tx)?;
         let now = tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?;
         let bound = peer.binding(&tx, now)?;
+        if let RenewalTransport::Quic { holds_exit_claim } = transport {
+            ensure!(
+                peer.exit_admission(&tx, &bound, now)?.is_some() == holds_exit_claim,
+                EnrollError::Denied
+            );
+        }
         if let Some(k) = bound.key {
             ensure!(
                 x25519_dalek::x25519([1; 32], k) != [0; 32],

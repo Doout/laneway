@@ -93,7 +93,7 @@ rust-interop:
 .PHONY: rust-controller-interop
 rust-controller-interop:
 	cargo build --locked --manifest-path rust/Cargo.toml -p laneway-controller -p laneway-healthcheck
-	cd go && LANEWAY_RUST_CONTROLLER="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/laneway-controller" go test -count=1 -tags=rustinterop ./internal/controller ./internal/controllerservice -run '^TestRustController(Inventory|Sessions|HTTPS)$$' -v
+	cd go && LANEWAY_RUST_CONTROLLER="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/laneway-controller" go test -count=1 -tags=rustinterop ./internal/controller ./internal/controllerservice -run '^TestRustController(Inventory|Sessions|HTTPS|QUIC)$$' -v
 	cargo test --locked --manifest-path rust/Cargo.toml -p laneway-controller --test node_issuer_go -- --ignored
 
 rust-node-interop:

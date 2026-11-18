@@ -827,6 +827,7 @@ dependencies = [
  "laneway-protocol",
  "mime",
  "prost",
+ "quinn",
  "rcgen",
  "rusqlite",
  "rustls",

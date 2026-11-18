@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic]";
 
 pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let database = PathBuf::from(args.next().context(USAGE)?);
@@ -34,6 +34,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut root = None;
     let mut issuer = None;
     let mut client_ca = None;
+    let mut node_quic = false;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -60,6 +61,8 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             )?);
         } else if flag == "--node-client-ca" && client_ca.is_none() {
             client_ca = Some(PathBuf::from(args.next().context(USAGE)?));
+        } else if flag == "--node-quic" && !node_quic {
+            node_quic = true;
         } else {
             anyhow::bail!(USAGE)
         }
@@ -68,7 +71,17 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         client_ca.is_none() || issuer.is_some(),
         "node renewal requires --node-issuer"
     );
-    let config = tls(&cert, &key, client_ca.as_deref())?;
+    let (config, _) = tls(&cert, &key, client_ca.as_deref(), false)?;
+    let quic = if node_quic {
+        ensure!(client_ca.is_some(), "node QUIC requires --node-client-ca");
+        let (config, id) = tls(&cert, &key, client_ca.as_deref(), true)?;
+        Some((
+            crate::quic::config(config)?,
+            id.context("missing controller identity")?.network_id,
+        ))
+    } else {
+        None
+    };
     laneway_controller::SessionStore::check_database(&database)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -77,6 +90,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             super::http::State::new(database, root, issuer, client_ca.is_some())?,
             address,
             config,
+            quic,
         ))
 }
 
@@ -98,7 +112,15 @@ fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>
     Ok(Cursor::new(data))
 }
 
-fn tls(cert: &Path, key: &Path, client_ca: Option<&Path>) -> Result<ServerConfig> {
+fn tls(
+    cert: &Path,
+    key: &Path,
+    client_ca: Option<&Path>,
+    quic: bool,
+) -> Result<(
+    ServerConfig,
+    Option<laneway_protocol::AuthenticatedIdentity>,
+)> {
     let chain =
         rustls_pemfile::certs(&mut pem(cert, false)?).collect::<std::io::Result<Vec<_>>>()?;
     let key =
@@ -112,17 +134,37 @@ fn tls(cert: &Path, key: &Path, client_ca: Option<&Path>) -> Result<ServerConfig
             roots.add(cert?)?;
         }
         let verifier =
-            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider)
-                .allow_unauthenticated()
-                .build()?;
+            rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider);
+        let verifier = if quic {
+            verifier
+        } else {
+            verifier.allow_unauthenticated()
+        }
+        .build()?;
         builder.with_client_cert_verifier(verifier)
     } else {
         builder.with_no_client_auth()
     };
+    let identity = if quic {
+        let id = laneway_protocol::identity_from_certificate_der(
+            chain.first().context("empty service certificate")?.as_ref(),
+        )?;
+        ensure!(
+            id.role == laneway_protocol::Role::Controller,
+            "node QUIC requires a controller service certificate"
+        );
+        Some(id)
+    } else {
+        None
+    };
     let mut config = builder.with_single_cert(chain, key)?;
     config.send_tls13_tickets = 0;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(config)
+    config.alpn_protocols = vec![if quic {
+        b"laneway-control/1".to_vec()
+    } else {
+        b"http/1.1".to_vec()
+    }];
+    Ok((config, identity))
 }
 
 async fn stop() -> std::io::Result<()> {
@@ -138,8 +180,30 @@ async fn stop() -> std::io::Result<()> {
     }
 }
 
-async fn serve(state: super::http::State, address: SocketAddr, config: ServerConfig) -> Result<()> {
+async fn serve(
+    state: super::http::State,
+    address: SocketAddr,
+    config: ServerConfig,
+    quic: Option<(quinn::ServerConfig, laneway_protocol::Id)>,
+) -> Result<()> {
     let listener = TcpListener::bind(address).await?;
+    // Bind both sockets before announcing readiness. UDP uses the actual TCP
+    // port even when the lab requests an ephemeral port.
+    let endpoint = quic
+        .map(|(cfg, network)| {
+            Ok::<_, anyhow::Error>((
+                quinn::Endpoint::server(cfg, listener.local_addr()?)?,
+                network,
+            ))
+        })
+        .transpose()?;
+    let control = async {
+        match &endpoint {
+            Some((ep, network)) => crate::quic::serve(ep, *network, state.clone()).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(control);
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let connections = Arc::new(Semaphore::new(64));
     let mut tasks = JoinSet::new();
@@ -148,6 +212,7 @@ async fn serve(state: super::http::State, address: SocketAddr, config: ServerCon
     tokio::pin!(stop);
     loop {
         tokio::select! {
+            result=&mut control => return result,
             result=&mut stop => { result?; break; }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
             socket=listener.accept() => {
@@ -175,6 +240,9 @@ async fn serve(state: super::http::State, address: SocketAddr, config: ServerCon
         }
     }
     // No new sockets. Requests already admitted may finish within their deadline.
+    if let Some((ep, _)) = &endpoint {
+        ep.close(0u32.into(), b"controller shutdown");
+    }
     while tasks.join_next().await.is_some() {}
     Ok(())
 }
