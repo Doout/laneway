@@ -17,16 +17,28 @@ if [[ "${LANEWAY_RUN_PRIVILEGED:-0}" != 1 ]]; then
 fi
 
 runtime=${LANEWAY_DOCKER_PLUGIN_RUNTIME:-go}
+upgrade=${LANEWAY_DOCKER_PLUGIN_UPGRADE:-0}
+packet_test=false
+if [[ "$runtime" == rust || "$upgrade" == 1 ]]; then packet_test=true; fi
 required=(docker ip nft)
-if [[ "$runtime" == rust ]]; then required+=(iptables ping); fi
+if "$packet_test"; then required+=(iptables ping); fi
+if [[ "$upgrade" == 1 ]]; then
+  [[ "$runtime" == go ]] || { echo 'the upgrade test must start with Go' >&2; exit 1; }
+  required+=(curl jq)
+fi
 for command in "${required[@]}"; do command -v "$command" >/dev/null || { echo "missing $command" >&2; exit 1; }; done
 if ip link show dev lane0 >/dev/null 2>&1; then
   echo 'managed-plugin test requires its own lane0 on an isolated host' >&2
   exit 1
 fi
 work=$(mktemp -d)
-plugin_ref="laneway/docker-plugin-test:$(date +%s)-$$"
+run_id="$(date +%s)-$$"
+plugin_ref="laneway/docker-plugin-test:$run_id"
 test_client="laneway-plugin-client-$$"
+rust_client="laneway-plugin-rust-client-$$"
+registry="laneway-plugin-registry-$$"
+remote_go=
+remote_rust=
 remote_ns="laneway-plugin-remote-$$"
 link_alias="laneway-docker-integration-$$"
 test_bridge=
@@ -46,6 +58,10 @@ cleanup() {
   if [[ -n "$test_bridge" ]]; then
     test_host_firewall -D >/dev/null 2>&1 || true
   fi
+  if [[ "$(docker plugin inspect --format '{{.Enabled}}' "$plugin_ref" 2>/dev/null)" == false ]]; then
+    docker plugin enable "$plugin_ref" >/dev/null 2>&1 || true
+  fi
+  docker rm -f "$rust_client" >/dev/null 2>&1 || true
   docker rm -f "$test_client" >/dev/null 2>&1 || true
   docker network rm laneway-plugin-test >/dev/null 2>&1 || true
   docker network rm laneway-plugin-unauthorized >/dev/null 2>&1 || true
@@ -56,14 +72,42 @@ cleanup() {
   ip netns delete "$remote_ns" >/dev/null 2>&1 || true
   docker plugin disable -f "$plugin_ref" >/dev/null 2>&1 || true
   docker plugin rm -f "$plugin_ref" >/dev/null 2>&1 || true
+  if [[ "$upgrade" == 1 ]]; then
+    if [[ -n "$remote_go" ]]; then docker plugin rm "$remote_go" >/dev/null 2>&1 || true; fi
+    if [[ -n "$remote_rust" ]]; then docker plugin rm "$remote_rust" >/dev/null 2>&1 || true; fi
+    docker rm -f "$registry" >/dev/null 2>&1 || true
+  fi
   find "$work" -depth -delete 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-VERSION=integration "$repo_root/deploy/docker-plugin/build-rootfs.sh" "$work/plugin"
-docker plugin create "$plugin_ref" "$work/plugin"
-docker plugin enable "$plugin_ref"
-docker network create --driver "$plugin_ref" --subnet 172.30.251.0/24 --gateway 172.30.251.1 --opt laneway.policy=direct laneway-plugin-test
+if [[ "$upgrade" == 1 ]]; then
+  docker run --detach --name "$registry" --publish 127.0.0.1::5000 \
+    docker.io/library/registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c
+  registry_endpoint=$(docker port "$registry" 5000/tcp)
+  [[ "$registry_endpoint" =~ ^127\.0\.0\.1:[0-9]+$ ]]
+  for _ in {1..15}; do
+    if curl --fail --silent --noproxy '*' --max-time 2 "http://$registry_endpoint/v2/" >/dev/null; then break; fi
+    sleep 1
+  done
+  curl --fail --silent --noproxy '*' --max-time 2 "http://$registry_endpoint/v2/" >/dev/null
+  remote_go="$registry_endpoint/laneway/test-$run_id:go"
+  remote_rust="$registry_endpoint/laneway/test-$run_id:rust"
+  for candidate in go rust; do
+    ref="$registry_endpoint/laneway/test-$run_id:$candidate"
+    VERSION="integration-$candidate" LANEWAY_DOCKER_PLUGIN_RUNTIME="$candidate" \
+      "$repo_root/deploy/docker-plugin/build-rootfs.sh" "$work/plugin-$candidate"
+    docker plugin create "$ref" "$work/plugin-$candidate"
+    docker plugin push "$ref"
+    docker plugin rm "$ref"
+  done
+  docker plugin install --alias "$plugin_ref" --grant-all-permissions "$remote_go"
+else
+  VERSION=integration "$repo_root/deploy/docker-plugin/build-rootfs.sh" "$work/plugin"
+  docker plugin create "$plugin_ref" "$work/plugin"
+  docker plugin enable "$plugin_ref"
+fi
+direct_id=$(docker network create --driver "$plugin_ref" --subnet 172.30.251.0/24 --gateway 172.30.251.1 --opt laneway.policy=direct laneway-plugin-test)
 docker run --rm --network laneway-plugin-test alpine:3.22 ip -4 address show dev eth0 | grep -F '172.30.251.'
 
 # Docker-managed propagated state survives a plugin process restart. Existing
@@ -87,7 +131,8 @@ fi
 # Exercise real policy routing, conntrack-mark, nftables, and exact cleanup
 # with a short-lived controller-style lease and a disposable tunnel device.
 plugin_id=$(docker plugin inspect --format '{{.ID}}' "$plugin_ref")
-plugin_state="/var/lib/docker/plugins/$plugin_id/propagated-mount"
+docker_root=$(docker info --format '{{.DockerRootDir}}')
+plugin_state="$docker_root/plugins/$plugin_id/propagated-mount"
 test -d "$plugin_state"
 write_grant() {
   local valid_until staged
@@ -99,7 +144,7 @@ EOF
   mv "$staged" "$plugin_state/controller-authorization-v1.json"
 }
 write_grant '+1 hour'
-if [[ "$runtime" == rust ]]; then
+if "$packet_test"; then
   ip netns add "$remote_ns"
   ip link add lane0 type veth peer name lanepeer
   ip link set dev lane0 alias "$link_alias"
@@ -116,16 +161,59 @@ ip link set dev lane0 up
 selective_id=$(docker network create --driver "$plugin_ref" --subnet 172.30.252.0/24 --gateway 172.30.252.1 \
   --opt laneway.policy=selective --opt laneway.egress-cidrs=198.51.100.0/24 laneway-plugin-selective)
 ip rule show | grep -F 'from 172.30.252.0/24 to 198.51.100.0/24'
-docker run --detach --name "$test_client" --network laneway-plugin-selective alpine:3.22 sleep 120
+docker run --detach --name "$test_client" --network laneway-plugin-selective alpine:3.22 sleep 180
 docker exec "$test_client" ip -4 address show dev eth0 | grep -F '172.30.252.'
-if [[ "$runtime" == rust ]]; then
+if "$packet_test"; then
   if iptables -w 5 -S FORWARD | grep -Fx -- '-P FORWARD DROP' >/dev/null; then
     bridge_hash=$(printf '%s' "$selective_id" | sha256sum)
     test_bridge="lwbr${bridge_hash:0:10}"
     test_host_firewall -I
   fi
-  probe() { docker exec "$test_client" ping -c 1 -W 1 198.51.100.2; }
+  probe() { docker exec "${1:-$test_client}" ping -c 1 -W 1 198.51.100.2; }
   probe
+fi
+if [[ "$upgrade" == 1 ]]; then
+  assert_runtime() {
+    curl --fail --silent --show-error --noproxy '*' --unix-socket "/run/docker/plugins/$plugin_id/laneway.sock" \
+      --max-time 5 -X POST http://localhost/status |
+      jq --exit-status --arg version "integration-$1" --argjson endpoints "$2" \
+        '.version == $version and .ready and .networks == 2 and .endpoints == $endpoints' >/dev/null
+  }
+  container_identity() {
+    docker inspect --format '{{.Id}} {{.State.Pid}} {{range .NetworkSettings.Networks}}{{.NetworkID}} {{.EndpointID}} {{.IPAddress}}{{end}}' "$1"
+  }
+  switch_to() {
+    local target=$1 ref=$2 endpoints=$3
+    docker plugin disable -f "$plugin_ref"
+    # The lab deliberately switches between two tags in its loopback registry.
+    docker plugin upgrade --grant-all-permissions --skip-remote-check "$plugin_ref" "$ref"
+    docker plugin enable "$plugin_ref"
+    [[ "$(docker plugin inspect --format '{{.ID}}' "$plugin_ref")" == "$plugin_id" ]]
+    [[ "$(stat -c '%d:%i' "$plugin_state")" == "$state_identity" ]]
+    assert_runtime "$target" "$endpoints"
+    docker network inspect "$direct_id" "$selective_id" >/dev/null
+    [[ "$(container_identity "$test_client")" == "$original_client" ]]
+    probe
+  }
+
+  assert_runtime go 1
+  state_identity=$(stat -c '%d:%i' "$plugin_state")
+  original_client=$(container_identity "$test_client")
+  switch_to rust "$remote_rust" 1
+  # Persist a new endpoint while Rust owns the journal. Go must recover it
+  # upon rollback without copying any files or reattaching either container.
+  docker run --detach --name "$rust_client" --network laneway-plugin-selective alpine:3.22 sleep 180
+  rust_identity=$(container_identity "$rust_client")
+  assert_runtime rust 2
+  probe "$rust_client"
+  switch_to go "$remote_go" 2
+  [[ "$(container_identity "$rust_client")" == "$rust_identity" ]]
+  probe "$rust_client"
+  docker rm -f "$rust_client"
+  assert_runtime go 1
+  echo 'Managed Go -> Rust -> Go upgrade preserved both networks and their shared journal'
+fi
+if [[ "$runtime" == rust ]]; then
   write_grant '+6 seconds'
   sleep 7
   # Verify the peer is still reachable on the host and that the existing

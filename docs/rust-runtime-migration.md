@@ -318,6 +318,26 @@ sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=rust \
   ./integration/docker-plugin.sh
 ```
 
+The same rootful ARM64 lab also exercised `docker plugin upgrade` from Go to
+Rust and back to Go using a loopback registry. Docker preserved the plugin ID,
+propagated mount, and both networks. The original container kept its process,
+endpoint ID, and address. Go then loaded and removed a second endpoint written
+by Rust after the upgrade. Both containers passed packet probes after rollback;
+this verifies state and post-switch traffic, not uninterrupted packet delivery
+during plugin disable/enable.
+
+Run the upgrade gate on an isolated host with `curl` and `jq` in addition to
+the forwarding test tools:
+
+```sh
+sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=go \
+  LANEWAY_DOCKER_PLUGIN_UPGRADE=1 ./integration/docker-plugin.sh
+```
+
+The workflow schedules this test on native AMD64 and ARM64. The lab run used
+an unexpired controller grant throughout; rolling back to Go also rolls back
+Rust's kernel-enforced grant expiry.
+
 ## Linux node image
 
 Build the opt-in `node` target and check the packaged entry point after the

@@ -62,3 +62,20 @@ jobs:
       - run: sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME="$PLUGIN_RUNTIME" ./integration/docker-plugin.sh
         env:
           PLUGIN_RUNTIME: ${{ matrix.runtime }}
+  migration:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64}
+          - {runner: ubuntu-24.04-arm, arch: arm64}
+    name: Managed plugin upgrade (${{ matrix.arch }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - run: sudo apt-get update && sudo apt-get install -y curl iproute2 iptables iputils-ping jq nftables
+      - run: sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=go LANEWAY_DOCKER_PLUGIN_UPGRADE=1 ./integration/docker-plugin.sh
