@@ -161,9 +161,17 @@ using the same configuration and state volume. Use the same order on
 rollback, and check a client packet round trip before reopening traffic.
 
 The existing Go installer does not select this overlay. For an active Rust
-stack, use `laneway-control --rust status` and `sudo laneway-control --rust
-backup NAME.age`. A Rust backup takes an online copy using the running
-controller, includes the Rust Compose inputs, and puts validated current
+stack, use the `laneway-control` and `recovery.sh` scripts from the same
+verified package. Run `sudo laneway-control --rust readiness METADATA_DIRECTORY`
+to check the signed digests against the rendered Compose config, the image
+IDs actually running, health, authenticated inventory and public HTTPS
+discovery. This check is read-only and creates no production approval marker.
+It does not verify external firewall reachability, an off-host backup, or
+rollback.
+
+Use `laneway-control --rust status` for routine inventory and
+`sudo laneway-control --rust backup NAME.age` for a backup. It takes an
+online copy using the running controller, includes the Rust Compose inputs, and puts validated current
 controller and relay certificates into the encrypted bundle as restore seeds
 without changing the originals. The public ACME cache is not archived.
 The wrapper refuses the Go lifecycle commands in Rust mode; do not use the Go

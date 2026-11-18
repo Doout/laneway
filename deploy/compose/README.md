@@ -42,6 +42,10 @@ installed. The command verifies the release and all three Compose image
 signatures before printing the Rust settings. It does not pull or deploy images.
 Use the [Rust cutover checklist](../../docs/rust-runtime-migration.md#compose-cutover-rehearsal)
 to apply those settings on a disposable deployment first.
+After starting the Rust stack, run
+`sudo laneway-control --rust readiness METADATA_DIRECTORY` to check the
+running image digests, health, authenticated inventory, and discovery.
+Rehearse backup, restore, and rollback separately.
 
 ## Administrator access
 

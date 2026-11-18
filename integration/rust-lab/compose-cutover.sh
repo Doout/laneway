@@ -17,7 +17,7 @@ project=laneway-cutover-${work##*.}
 project=${project,,}
 base="$work/deploy"
 mkdir -p "$base" "$work/bin" "$work/issuer"
-for file in compose.yaml compose.rust.yaml prepare.sh prepare-rust.py verify-rust-release.sh; do
+for file in compose.yaml compose.rust.yaml prepare.sh prepare-rust.py verify-rust-release.sh laneway-control; do
   cp "$root/deploy/compose/$file" "$base/"
 done
 export LANEWAY_LAB_FIXTURE_DIR="$work"
@@ -207,6 +207,12 @@ test "$(rust_compose exec -T controller /usr/local/bin/laneway-controller --vers
 assert_network "$network" baseline
 admin network create --network-id "$added" --name added-in-rust --ipv4-pool 100.115.19.0/24 >/dev/null
 assert_network "$added" added-in-rust
+if env COMPOSE_PROJECT_NAME="$project" LANEWAY_COSIGN_BIN="$work/bin/compose-cosign" \
+  sh ./laneway-control --rust readiness "$work/release" >"$work/wrong-running-image.out" 2>&1; then
+  echo 'Rust readiness accepted an unsigned local runtime image' >&2
+  exit 1
+fi
+grep -F 'controller: running container does not use the signed release image' "$work/wrong-running-image.out"
 # An internal Docker bridge suppresses published ports. Reach the same
 # HTTPS listener through the fixture's bridge address without enabling egress.
 relay_address=$(docker inspect --format "{{(index .NetworkSettings.Networks \"${project}_control\").IPAddress}}" \
@@ -216,9 +222,9 @@ port=8443
 public=(curl --noproxy '*' --fail --silent --show-error --max-time 5 --cacert generated/pki/public.crt
   --resolve "$name:$port:$relay_address")
 "${public[@]}" "https://$name:$port/.well-known/laneway/bootstrap.json" |
-  jq -e --arg id "$network" --arg prefix "$candidate_url/" '
-    any(.. | objects; .network_id? == $id)
-    and (.artifacts | length == 4 and all(.[]; .url | startswith($prefix)))' >/dev/null
+  jq -e --arg id "$network" --arg controller "$controller" --slurpfile staged generated/config/bootstrap.rust.json '
+    .network_id == $id and .controller.service_id == $controller and .artifacts == $staged[0].artifacts
+  ' >/dev/null
 "${public[@]}" "https://$name:$port/overview" | grep -Fq '<title>Laneway</title>'
 
 if (( ${#exit_overlay[@]} )); then

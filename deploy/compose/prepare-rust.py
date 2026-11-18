@@ -34,6 +34,11 @@ RELEASE_SETTINGS = {
     "LANEWAY_RUST_RELAY_IMAGE_DIGEST",
     "LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST",
 }
+RUST_SERVICES = {
+    "controller": "LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST",
+    "relay": "LANEWAY_RUST_RELAY_IMAGE_DIGEST",
+    "exit-node": "LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST",
+}
 
 
 def require(condition, reason):
@@ -121,7 +126,7 @@ def read_release_settings(text):
     return result
 
 
-def candidate_artifacts(base, metadata):
+def candidate_release(base, metadata):
     pinned = read_release_settings(read_config(base / ".env"))
     tag = f'v{pinned["LANEWAY_RUST_VERSION"]}'
     envelope = subprocess.run(
@@ -154,7 +159,78 @@ def candidate_artifacts(base, metadata):
                 and entry["sha256"] != "0" * 64
                 and type(entry["size_bytes"]) is int and entry["size_bytes"] > 0,
                 f"invalid signed artifact for {asset}")
-    return artifacts
+    return pinned, artifacts
+
+
+def command_output(argv):
+    return subprocess.run(argv, check=True, stdout=subprocess.PIPE, text=True).stdout
+
+
+def active_images(base, pinned):
+    compose = [
+        "docker", "compose", "--project-directory", str(base), "--env-file", str(base / ".env"),
+        "-f", str(base / "compose.yaml"), "-f", str(base / "compose.rust.yaml"), "--profile", "exit-node",
+    ]
+    plan = json.loads(command_output(compose + ["config", "--format", "json"]))["services"]
+    version = pinned["LANEWAY_RUST_VERSION"]
+    for role, key in RUST_SERVICES.items():
+        expected = f"ghcr.io/doout/laneway-{role}-rust:{version}@{pinned[key]}"
+        require(plan[role]["image"] == expected, f"{role}: Compose does not select the signed release image")
+        active = command_output(compose + ["ps", "--status", "running", "-q", role]).strip()
+        if not active and role == "exit-node":
+            print("exit-node: optional service not running", file=sys.stderr)
+            continue
+        require(re.fullmatch("[0-9a-f]{12,64}", active), f"{role}: expected one running container")
+        observed = json.loads(command_output(["docker", "inspect", "--type", "container", active]))
+        require(isinstance(observed, list) and len(observed) == 1,
+                f"{role}: could not identify the running container")
+        container = observed[0]
+        require(container["Config"]["Image"] == expected,
+                f"{role}: running container does not use the signed release image")
+        local_id = command_output(["docker", "image", "inspect", "--format", "{{.Id}}", expected]).strip()
+        require(re.fullmatch(r"sha256:[0-9a-f]{64}", local_id) and local_id == container["Image"],
+                f"{role}: running image content differs from the verified reference")
+        state = container["State"]
+        require(state["Running"] is True and state.get("Health", {}).get("Status") == "healthy",
+                f"{role}: release container is not healthy")
+        print(f"{role}: signed release image is healthy", file=sys.stderr)
+
+
+def check_public_discovery(base, artifacts):
+    wanted = {"LANEWAY_CONTROLLER_SERVER_NAME", "LANEWAY_RELAY_TCP_PORT", "LANEWAY_NETWORK_ID",
+              "LANEWAY_CONTROLLER_SERVICE_ID"}
+    settings = {}
+    for line in read_config(base / ".env").splitlines():
+        key, _, value = line.partition("=")
+        if key in wanted:
+            require(key not in settings, f"duplicate {key}")
+            settings[key] = value
+    require(settings.keys() == wanted, "missing public discovery settings in .env")
+    name = settings["LANEWAY_CONTROLLER_SERVER_NAME"]
+    port = settings["LANEWAY_RELAY_TCP_PORT"]
+    require(len(name) <= 253 and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                                     for label in name.split(".")), "invalid public controller DNS name")
+    require(re.fullmatch("[0-9]{1,5}", port) and 0 < int(port) <= 65535, "invalid public HTTPS port")
+    authority = name if port == "443" else f"{name}:{port}"
+    metadata = json.loads(command_output([
+        "curl", "--disable", "--noproxy", "*", "--proto", "=https", "--fail", "--silent", "--show-error",
+        "--connect-timeout", "5", "--max-time", "15", "--max-filesize", "1048576",
+        f"https://{authority}/.well-known/laneway/bootstrap.json",
+    ]))
+    require(metadata["network_id"] == settings["LANEWAY_NETWORK_ID"]
+            and metadata["controller"]["server_name"] == name
+            and metadata["controller"]["service_id"] == settings["LANEWAY_CONTROLLER_SERVICE_ID"],
+            "public discovery belongs to a different controller or network")
+    require(metadata.get("artifacts") == artifacts, "public discovery is not serving the signed release artifacts")
+    print("public HTTPS discovery: signed release artifacts and controller identity match", file=sys.stderr)
+
+
+def check_readiness(base, metadata):
+    pinned, artifacts = candidate_release(base, metadata)
+    profile = json.loads(read_config(base / "generated/config/bootstrap.rust.json"))
+    require(profile.get("artifacts") == artifacts, "staged Rust profile differs from the signed release")
+    active_images(base, pinned)
+    check_public_discovery(base, artifacts)
 
 
 def prepare(base, metadata):
@@ -166,7 +242,7 @@ def prepare(base, metadata):
                 "expected protected, real generated directories")
     profile, relay = convert(read_config(config / "controller.toml"), read_config(config / "relay.toml"))
     if metadata is not None:
-        profile["artifacts"] = candidate_artifacts(base, metadata)
+        _, profile["artifacts"] = candidate_release(base, metadata)
     workload = generated / "rust-relay-workload"
     outputs = {
         config / "bootstrap.rust.json": json.dumps(profile, indent=2) + "\n",
@@ -211,11 +287,17 @@ if __name__ == "__main__":
                                help="read signed artifact metadata for the verified release in .env")
         selection.add_argument("--lab", action="store_true",
                                help="reuse the Go bootstrap artifacts on an isolated, unsigned lab only")
+        selection.add_argument("--readiness", type=Path, metavar="DIRECTORY",
+                               help="verify the active Rust release without starting or changing services")
         args = parser.parse_args()
         require(os.geteuid() == 0, "run as root")
-        prepare(Path(__file__).resolve().parent, args.release_metadata)
+        base = Path(__file__).resolve().parent
+        if args.readiness is not None:
+            check_readiness(base, args.readiness)
+        else:
+            prepare(base, args.release_metadata)
+            print("Staged Rust Compose inputs; the running stack and Go configuration are unchanged.")
     except subprocess.CalledProcessError:
-        sys.exit("prepare Rust Compose: release verification failed")
-    except (OSError, ValueError, KeyError) as error:
-        sys.exit(f"prepare Rust Compose: {error}")
-    print("Staged Rust Compose inputs; the running stack and Go configuration are unchanged.")
+        sys.exit("Rust Compose: an external verification command failed")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        sys.exit(f"Rust Compose: {error}")

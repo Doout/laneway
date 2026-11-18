@@ -35,9 +35,10 @@ runtime=go
 
 usage() {
   cat >&2 <<'EOF'
-usage: laneway-control [--rust] <init|user-token|invite|route|status|administrator|update|production-check|backup|restore|upgrade|rollback> [options]
+usage: laneway-control [--rust] <init|user-token|invite|route|status|readiness|administrator|update|production-check|backup|restore|upgrade|rollback> [options]
 
-  --rust is supported with status, backup and restore.
+  --rust is supported with status, backup, restore and readiness.
+  laneway-control --rust readiness RELEASE_METADATA_DIRECTORY
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
@@ -1893,8 +1894,8 @@ fi
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 if [ "$runtime" = rust ]; then
   case "$command" in
-    status|backup|restore|help|-h|--help) ;;
-    *) die "--rust supports status, backup and restore; refusing the Go lifecycle workflow" ;;
+    status|backup|restore|readiness|help|-h|--help) ;;
+    *) die "--rust supports status, backup, restore and readiness; refusing the Go lifecycle workflow" ;;
   esac
 fi
 case "$command" in
@@ -1903,6 +1904,13 @@ case "$command" in
   invite) acquire_lock; run_invite "$@" ;;
   route) acquire_lock; run_route "$@" ;;
   status) run_status "$@" ;;
+  readiness)
+    [ "$runtime" = rust ] && [ "$#" -eq 1 ] || die "use --rust readiness RELEASE_METADATA_DIRECTORY"
+    [ "$(id -u)" -eq 0 ] || die "readiness must run as root"
+    python3 "$base_dir/prepare-rust.py" --readiness "$1"
+    run_status
+    echo "laneway-control: Rust readiness checks passed; verify recovery and rollback separately"
+    ;;
   administrator)
     [ "$(id -u)" -eq 0 ] || die "administrator lifecycle commands must run as root"
     acquire_lock
