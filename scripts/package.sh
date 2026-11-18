@@ -63,7 +63,11 @@ if [ "$package_goos" = linux ]; then
 		done
 		cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 		cp "$project_dir"/deploy/systemd/laneway-rust-updater.* "$package_dir/systemd/"
-		cp "$project_dir/deploy/examples/managed-updates-rust.toml" "$package_dir/examples/"
+		cp "$project_dir/deploy/systemd/lanewayd-rs.service" \
+		  "$project_dir/deploy/systemd/laneway-relay-rs.service" "$package_dir/systemd/"
+		cp "$project_dir/deploy/examples/managed-updates-rust.toml" \
+		  "$project_dir/deploy/examples/node-rust.toml" "$project_dir/deploy/examples/node-rust-controller.toml" \
+		  "$project_dir/deploy/examples/relay-rust.toml" "$package_dir/examples/"
 	fi
 elif [ -n "$package_rust_macos" ]; then
 	install -m 0755 "$package_rust_macos" "$package_dir/bin/lanewayd-rs"

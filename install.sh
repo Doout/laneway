@@ -93,8 +93,8 @@ usage: sh install.sh [--client | --rust-preview | --control-plane [--production]
 Without options, install the latest Laneway client and packaged files on Linux
 or macOS. On Linux, setting LANEWAY_DOMAIN runs the control-plane quick setup
 with non-interactive defaults. Use --client to force a client-only install.
-On macOS, --rust-preview also installs the optional Rust tunnel from a signed
-release archive. It requires Cosign. Go remains the default runtime.
+Use --rust-preview to install the optional Rust runtimes from a signed release
+archive. It requires Cosign. Go remains the default; no service is enabled.
 With --control-plane, select a stable release tag, verify its signed release,
 install it, and start the interactive hardened control-plane installer.
 The default quick profile warns on unavailable signature services and writes a
@@ -120,10 +120,6 @@ case "$(uname -s)" in
   Darwin) operating_system=darwin ;;
   *) echo "Laneway packages support Linux and macOS only" >&2; exit 1 ;;
 esac
-if [ "$rust_preview" = true ] && [ "$operating_system" != darwin ]; then
-  echo "--rust-preview requires macOS" >&2
-  exit 1
-fi
 if [ "$operating_system" = darwin ] && \
   { [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; }; then
   echo "control-plane installation is Linux-only; macOS installs the foreground client" >&2
@@ -144,7 +140,7 @@ for command in awk base64 curl date find grep mktemp readlink sed "$checksum_com
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 if [ "$rust_preview" = true ]; then
-  cosign_bin=$(command -v cosign 2>/dev/null) || add_missing "cosign (required to verify the macOS Rust preview release)"
+  cosign_bin=$(command -v cosign 2>/dev/null) || add_missing "cosign (required to verify the Rust preview release)"
 fi
 
 if [ "$operating_system" = darwin ] && \
@@ -253,7 +249,7 @@ if [ "$rust_preview" = true ]; then
     --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$release" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     "$download_dir/checksums.txt" >/dev/null; then
-    echo "macOS Rust preview: release checksum signature verification failed" >&2
+    echo "Rust preview: release checksum signature verification failed" >&2
     exit 1
   fi
 fi
@@ -324,10 +320,20 @@ if [ "$operating_system" = darwin ]; then
   exit 0
 fi
 
+set --
+if [ "$rust_preview" = true ]; then
+  if [ ! -x "$download_dir/laneway/sbin/lanewayd-rs" ] ||
+     [ ! -f "$download_dir/laneway/VERSION" ] ||
+     [ "$(sed -n '1p' "$download_dir/laneway/VERSION")" != "${release#v}" ]; then
+    echo "release $release does not provide the Linux Rust preview package" >&2
+    exit 1
+  fi
+  set -- --rust-preview
+fi
 if [ -z "${DESTDIR:-}" ] && [ "$(id -u)" -ne 0 ]; then
-  sudo env DESTDIR= PREFIX=/usr/local sh "$download_dir/laneway/install.sh"
+  sudo env DESTDIR= PREFIX=/usr/local sh "$download_dir/laneway/install.sh" "$@"
 else
-  env DESTDIR="${DESTDIR:-}" PREFIX=/usr/local sh "$download_dir/laneway/install.sh"
+  env DESTDIR="${DESTDIR:-}" PREFIX=/usr/local sh "$download_dir/laneway/install.sh" "$@"
 fi
 
 if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ]; then

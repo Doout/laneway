@@ -29,7 +29,12 @@ if [ "$(uname -s)" = Darwin ]; then
   exit 0
 fi
 
-[ "$#" -eq 0 ] || { echo "usage: sh install.sh (the Rust preview option is macOS-only)" >&2; exit 2; }
+rust_preview=false
+case "$#:${1:-}" in
+  0:) ;;
+  1:--rust-preview) rust_preview=true ;;
+  *) echo "usage: sh install.sh [--rust-preview]" >&2; exit 2 ;;
+esac
 
 if [ -z "$destination_root" ] && [ "$(id -u)" -ne 0 ]; then
   echo "run this installer as root, or set DESTDIR for a staged install" >&2
@@ -38,6 +43,30 @@ fi
 if [ "$prefix" != /usr/local ]; then
   echo "PREFIX must be /usr/local because the packaged systemd units use that path" >&2
   exit 1
+fi
+
+rust_commands='laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs'
+rust_units='lanewayd-rs.service laneway-relay-rs.service laneway-rust-updater.service laneway-rust-updater.timer'
+rust_examples='node-rust.toml node-rust-controller.toml relay-rust.toml managed-updates-rust.toml'
+if [ "$rust_preview" = true ]; then
+  version=$(cat "$script_dir/VERSION")
+  for command in $rust_commands; do
+    candidate=$script_dir/sbin/$command
+    if [ ! -f "$candidate" ] || [ -L "$candidate" ] || [ ! -x "$candidate" ] ||
+       ! candidate_version=$("$candidate" --version) || [ "$candidate_version" != "$version" ]; then
+      echo "the Linux Rust preview requires a packaged $command at version $version" >&2
+      exit 1
+    fi
+  done
+  # Complete the preview preflight before creating accounts or writing files.
+  for unit in $rust_units; do
+    [ -f "$script_dir/systemd/$unit" ] && [ ! -L "$script_dir/systemd/$unit" ] ||
+      { echo "missing Rust preview unit: $unit" >&2; exit 1; }
+  done
+  for example in $rust_examples; do
+    [ -f "$script_dir/examples/$example" ] && [ ! -L "$script_dir/examples/$example" ] ||
+      { echo "missing Rust preview example: $example" >&2; exit 1; }
+  done
 fi
 
 if [ -z "$destination_root" ]; then
@@ -95,7 +124,17 @@ install -m 0644 "$script_dir"/nftables/* "$sharedir/nftables/"
 cp -R "$script_dir/spec/." "$sharedir/spec/"
 cp -R "$script_dir/deploy/." "$sharedir/deploy/"
 cp -R "$script_dir/integration/." "$sharedir/integration/"
-install -m 0644 "$script_dir"/systemd/*.service "$unitdir/"
+for unit in lanewayd.service laneway-relay.service laneway-controller.service; do
+  install -m 0644 "$script_dir/systemd/$unit" "$unitdir/"
+done
+if [ "$rust_preview" = true ]; then
+  for command in $rust_commands; do
+    install -m 0755 "$script_dir/sbin/$command" "$sbindir/$command"
+  done
+  for unit in $rust_units; do
+    install -m 0644 "$script_dir/systemd/$unit" "$unitdir/"
+  done
+fi
 install -m 0644 "$script_dir/README.md" "$script_dir/SECURITY.md" \
   "$script_dir/LICENSE-MIT" "$script_dir/LICENSE-APACHE" \
   "$script_dir/VERSION" "$sharedir/"
@@ -105,6 +144,9 @@ if [ -z "$destination_root" ] && command -v systemctl >/dev/null 2>&1; then
 fi
 
 echo "Laneway $(cat "$script_dir/VERSION") installed."
+if [ "$rust_preview" = true ]; then
+  echo "Rust runtimes and service units installed. No Rust service or updater was enabled."
+fi
 echo "Examples: $prefix/share/laneway/examples"
 echo "Next for a managed Node: sudo laneway node install DOMAIN"
 echo "Compatibility alias: laneway-setup-node DOMAIN"

@@ -5,7 +5,7 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 work_dir=$(mktemp -d)
 trap 'find "$work_dir" -depth -delete' EXIT HUP INT TERM
 mkdir -p "$work_dir/bin" "$work_dir/fixture/darwin/laneway/bin" \
-  "$work_dir/fixture/linux/laneway"
+  "$work_dir/fixture/linux/laneway/sbin" "$work_dir/fixture/legacy"
 
 cat > "$work_dir/fixture/darwin/laneway/bin/laneway" <<'EOF'
 #!/bin/sh
@@ -17,11 +17,21 @@ cat > "$work_dir/fixture/linux/laneway/install.sh" <<'EOF'
 #!/bin/sh
 printf 'package install DESTDIR=%s PREFIX=%s\n' "$DESTDIR" "$PREFIX" \
   >> "$LANEWAY_INSTALLER_TEST_RECORD"
+if [ "$#" -gt 0 ]; then printf '%s\n' "$*" >> "$LANEWAY_INSTALLER_TEST_RECORD"; fi
 EOF
 chmod 0755 "$work_dir/fixture/linux/laneway/install.sh"
 printf '%s\n' '{"test":"signed fixture"}' > "$work_dir/fixture/checksums.sigstore.json"
 
 tar -C "$work_dir/fixture/darwin" -czf "$work_dir/fixture/laneway_darwin_arm64.tar.gz" laneway
+tar -C "$work_dir/fixture/linux" -czf "$work_dir/fixture/legacy/laneway_linux_arm64.tar.gz" laneway
+(
+  cd "$work_dir/fixture/legacy"
+  sha256sum laneway_linux_arm64.tar.gz > checksums.txt
+  cp ../checksums.sigstore.json .
+)
+printf '9.8.7\n' > "$work_dir/fixture/linux/laneway/VERSION"
+printf '#!/bin/sh\nexit 0\n' > "$work_dir/fixture/linux/laneway/sbin/lanewayd-rs"
+chmod 0755 "$work_dir/fixture/linux/laneway/sbin/lanewayd-rs"
 tar -C "$work_dir/fixture/linux" -czf "$work_dir/fixture/laneway_linux_arm64.tar.gz" laneway
 (
   cd "$work_dir/fixture"
@@ -157,5 +167,29 @@ env \
 
 grep -Fx "package install DESTDIR=$work_dir/linux-root PREFIX=/usr/local" \
   "$linux_record" >/dev/null
+
+linux_preview() {
+  env PATH="$work_dir/bin:$PATH" DESTDIR="$work_dir/linux-preview" LANEWAY_INSTALLER_TEST_OS=Linux \
+    LANEWAY_INSTALLER_TEST_FIXTURE="$1" LANEWAY_INSTALLER_TEST_RECORD="$2" \
+    LANEWAY_INSTALLER_TEST_BAD_SIGNATURE="${3:-0}" \
+    sh "$repo_dir/install.sh" --rust-preview
+}
+linux_preview "$work_dir/fixture" "$work_dir/linux-preview-record"
+expected=$(printf '%s\n' signature-verified \
+  "package install DESTDIR=$work_dir/linux-preview PREFIX=/usr/local" --rust-preview)
+test "$(cat "$work_dir/linux-preview-record")" = "$expected"
+if linux_preview "$work_dir/fixture" "$work_dir/linux-signature-record" 1 \
+    >"$work_dir/linux-bad-signature.out" 2>&1; then
+  echo 'Linux preview accepted a bad release signature' >&2
+  exit 1
+fi
+test ! -e "$work_dir/linux-signature-record"
+grep -F 'release checksum signature verification failed' "$work_dir/linux-bad-signature.out" >/dev/null
+if linux_preview "$work_dir/fixture/legacy" "$work_dir/linux-legacy-record" >"$work_dir/linux-legacy.out" 2>&1; then
+  echo 'Linux preview accepted a Go-only release' >&2
+  exit 1
+fi
+test "$(cat "$work_dir/linux-legacy-record")" = signature-verified
+grep -F 'does not provide the Linux Rust preview package' "$work_dir/linux-legacy.out" >/dev/null
 
 echo "one installer detects, verifies, and installs Laneway on macOS and Linux"

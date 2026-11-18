@@ -53,7 +53,21 @@ AMD64 and ARM64 runners and includes them in the signed archives as
 `sbin/lanewayd-rs`, `sbin/laneway-healthcheck-rs`, and
 `sbin/laneway-update-rs`. The Go binaries,
 the default `lanewayd` link, and the production image tags are unchanged.
-Shipping these files does not select them at runtime.
+On Linux, the signed installer accepts `--rust-preview` to install those five
+executables, the Rust node and relay units, and the managed updater unit and
+timer. It refuses a Go-only archive or a runtime from a different version.
+The installer does not start, stop, switch, or enable services. The ordinary
+install still selects Go.
+
+On an isolated host, first verify the release and pin its tag with
+`LANEWAY_VERSION` when running the signed download installer. With a locally
+verified archive already extracted, run `sudo sh install.sh --rust-preview`
+inside its `laneway` directory. To try the installed Rust node, prepare
+`/etc/laneway/node-rust.toml` with the same trusted identity and check it with
+`lanewayd-rs --config /etc/laneway/node-rust.toml --check-config`. Stop the Go
+node before starting `lanewayd-rs.service`; both use the same local socket and
+must not run together. Roll back by stopping the Rust unit before starting
+`lanewayd.service` with its unchanged Go configuration.
 
 To build and verify an unsigned preview on a Linux lab host, set `arch` to its
 native architecture:
@@ -71,8 +85,10 @@ sh integration/rust-release-package.sh "dist/laneway_linux_$arch.tar.gz" "$arch"
 ```
 
 The archive gate checks architecture and static linkage, executes each packaged
-binary to verify its build version, and checks the default daemon link. To test
-the archived binaries with real traffic, extract the `-rs` entries into
+binary to verify its build version, and exercises both installer modes in an
+isolated staging root. It checks that the Go link is unchanged, that the Rust
+units point to the Rust binaries, and that a partial preview creates no files.
+To test the archived binaries with real traffic, extract the `-rs` entries into
 a disposable directory and point `LANEWAY_NODE_TEST_RUST_RUNTIME_DIR` at that
 directory when running `integration/rust-controller-node-netns.sh` on the
 isolated host. The package alone does not satisfy the systemd or cutover gates.
@@ -80,7 +96,9 @@ isolated host. The package alone does not satisfy the systemd or cutover gates.
 The unsigned native AMD64 archive `0.0.9102` passed the package check at
 SHA-256 `b65960975cc6f38a7c694b88a5a89c4d7e33b5c1a085b98025046a153b1f531c`.
 All five packaged Rust binaries ran and reported that version. The default
-Go daemon link remained unchanged.
+Go daemon link remained unchanged. Staged installation later passed with
+the same Rust binaries on AMD64 and with the ARM64 `0.0.0-fleet-rust-lab`
+build, including refusal of an incomplete preview package.
 
 The release builds run `integration/rust-release-systemd.sh` on native AMD64
 and ARM64 runners. It extracts the actual archive binaries and runs the

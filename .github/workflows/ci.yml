@@ -183,6 +183,7 @@ jobs:
           bash -n deploy/ephemeral-exit/bootstrap.sh
           shellcheck deploy/ephemeral-exit/bootstrap.sh
           ./integration/release-contract.sh
+          ./integration/client-installer.sh
           sh integration/rust-compose-release.sh
           sh integration/rust-go-runtime-guard.sh
           ./integration/connector-updater.sh
