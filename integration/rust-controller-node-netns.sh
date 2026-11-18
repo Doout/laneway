@@ -1230,6 +1230,7 @@ gateway_pid="${last_pid}"
 wait_log "${gateway_pid}" "${work_dir}/gateway.log" "interface=lane0"
 wait_relay_sessions 2
 "${repo_root}/rust/target/debug/laneway-healthcheck" -unix "${work_dir}/rust.sock"
+"${repo_root}/rust/target/debug/lanewayd-rs" healthcheck -unix "${work_dir}/rust.sock"
 
 echo "==> approved route mutation is installed transactionally and carries a real packet"
 if ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q .; then

@@ -25,6 +25,7 @@ hex.workspace = true
 hickory-proto = "0.26.3"
 humantime-serde.workspace = true
 ipnet.workspace = true
+laneway-healthcheck = { path = "../laneway-healthcheck" }
 laneway-protocol = { path = "../laneway-protocol" }
 prost.workspace = true
 rcgen = { version = "0.14.8", default-features = false, features = ["ring","zeroize"] }

@@ -32,7 +32,7 @@ COPY rust/ ./rust/
 COPY api/ ./api/
 RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
-      -p lanewayd-rs --bin lanewayd-rs -p laneway-healthcheck --bin laneway-healthcheck
+      -p lanewayd-rs --bin lanewayd-rs
 
 FROM scratch AS go-connector
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -50,11 +50,10 @@ FROM scratch AS rust-connector
 COPY --from=rust-installer /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=rust-installer /out/laneway /usr/local/bin/laneway
 COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
-COPY --from=rust-runtime /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --from=rust-installer --chown=65532:65532 /out/connector-state /var/lib/laneway
 COPY --from=rust-installer --chown=65532:65532 /out/connector-run /run/laneway
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
-    CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
+    CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway"]
 CMD ["connector", "run"]

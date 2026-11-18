@@ -277,17 +277,21 @@ docker run --rm --network none --read-only --cap-drop ALL "${case_config[@]}" \
 
 start_gateway() {
   local image="$1" process="$2" carrier="${3:-}" status version
+  local -a probe=(/usr/local/bin/laneway-healthcheck)
+  if [[ "$process" == lanewayd-rs ]]; then
+    probe=(/usr/local/bin/lanewayd-rs healthcheck)
+  fi
   gateway_container="$(docker run -d --network "container:$lab" --read-only --user 65532:65532 \
     --cap-drop ALL --cap-add NET_ADMIN --device /dev/net/tun \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,mode=0700,uid=65532,gid=65532 \
     --tmpfs /run/laneway:rw,noexec,nosuid,nodev,mode=0700,uid=65532,gid=65532 \
     "${case_config[@]}" -v "$state:/var/lib/laneway" "$image" -config "$config")"
   for _ in {1..120}; do
-    if docker exec "$gateway_container" /usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock >/dev/null 2>&1; then break; fi
+    if docker exec "$gateway_container" "${probe[@]}" -unix /run/laneway/lanewayd.sock >/dev/null 2>&1; then break; fi
     [[ "$(docker inspect -f '{{.State.Running}}' "$gateway_container")" == true ]] || break
     sleep 0.25
   done
-  docker exec "$gateway_container" /usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock
+  docker exec "$gateway_container" "${probe[@]}" -unix /run/laneway/lanewayd.sock
   status="$(docker exec "$gateway_container" /usr/local/bin/laneway status -config "$config" -json)"
   version="$(docker exec -i "$lab" jq -er --arg node "$gateway" \
     'select(.node_id == $node and .exit.serving and .exit.nat_ready) | .product_version' <<<"$status")"

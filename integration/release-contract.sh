@@ -319,6 +319,7 @@ done
 require 'FROM scratch' "$connector_dockerfile"
 require 'HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6' "$connector_dockerfile"
 require 'CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
+require 'CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
 require 'ENTRYPOINT ["/usr/local/bin/laneway"]' "$connector_dockerfile"
 require 'CMD ["connector", "run"]' "$connector_dockerfile"
 if awk '/^FROM / { runtime = ($2 == "scratch") } runtime { print }' "$connector_dockerfile" |

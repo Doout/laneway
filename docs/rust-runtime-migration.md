@@ -723,9 +723,9 @@ bash integration/rust-lab/node-image.sh
 
 The image runs `lanewayd-rs` as UID 65532. It needs a readable Rust node
 configuration and identity, `/dev/net/tun`, and `NET_ADMIN` in its own network
-namespace. The default Docker healthcheck requests `/v1/status` on
-`/run/laneway/lanewayd.sock`; it measures local daemon readiness, not peer
-reachability. The fixture has no external network and uses a disposable test CA.
+namespace. Docker runs `lanewayd-rs healthcheck -unix /run/laneway/lanewayd.sock`.
+It measures local daemon readiness, not peer reachability. The fixture has no
+external network and uses a disposable test CA.
 Containerized systemd-resolved integration and automatic enrollment/update
 are separate gates.
 
@@ -823,8 +823,9 @@ The release builds the durable Docker Exit Node from the `rust-exit` target.
 On a fresh Rust control plane, the optional Compose profile uses that pinned
 image. Enroll it, render the packaged Exit Node template with the network and
 service identities, then request and approve its exit route. The container
-runs as a non-root user with only `NET_ADMIN`; the daemon and readiness probe
-are Rust. The Go CLI is used only for one-shot administration.
+runs as a non-root user with only `NET_ADMIN`; Compose invokes the Rust daemon's
+`healthcheck` subcommand for readiness. The Go CLI is used only for one-shot
+administration.
 
 Historical Go-to-Rust cutover experiments are not release requirements. The
 following gate checks the legacy NAT profile and its existing state layout:

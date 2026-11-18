@@ -24,7 +24,7 @@ COPY rust/ ./rust/
 COPY api/ ./api/
 RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
-      -p lanewayd-rs --bin lanewayd-rs -p laneway-healthcheck --bin laneway-healthcheck
+      -p lanewayd-rs --bin lanewayd-rs
 
 FROM alpine:3.23@sha256:469c9ea410b9215eaee7976ba6c0639039b444be8e5d638f7abbada189971eb2 AS base
 RUN apk add --no-cache \
@@ -52,7 +52,6 @@ CMD ["-config", "/etc/laneway/exit-node.toml"]
 
 FROM base AS rust-exit
 COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /usr/local/bin/lanewayd-rs
-COPY --from=rust-runtime /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --chmod=0755 deploy/containers/run-rust-exit /usr/local/bin/run-rust-exit
 ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/run-rust-exit"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]

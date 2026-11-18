@@ -1406,6 +1406,7 @@ dependencies = [
  "hickory-proto",
  "humantime-serde",
  "ipnet",
+ "laneway-healthcheck",
  "laneway-protocol",
  "laneway-relay",
  "libc",

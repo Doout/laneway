@@ -1,10 +1,20 @@
-use std::{env, future::Future, num::NonZeroU64, path::PathBuf};
+use std::{env, future::Future, num::NonZeroU64, path::PathBuf, process::ExitCode};
 
 use anyhow::{Context, Result, bail};
 use lanewayd_rs::{Agent, Config};
 use tracing_subscriber::EnvFilter;
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
+    if env::args_os().nth(1).is_some_and(|flag| flag == "healthcheck") {
+        return Ok(laneway_healthcheck::run(
+            "lanewayd-rs healthcheck",
+            env::args().skip(2),
+        ));
+    }
+    run_daemon().map(|()| ExitCode::SUCCESS)
+}
+
+fn run_daemon() -> Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if env::args_os()
         .nth(1)
