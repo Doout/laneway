@@ -228,6 +228,20 @@ event's timestamp and ID, so new events do not shift an in-progress page.
 The HTTPS compatibility gate traverses both implementations and checks
 that a cursor cannot be reused across scopes.
 
+Controller-managed Rust nodes publish bounded health to `PUT /v1/status`
+every 10 seconds. The client checks the exact controller identity in the
+TLS handshake before sending a report. Reports include no peer IDs,
+addresses, packets, or free-form diagnostics. Set
+`disable_status_reporting = true` under `[controller]` to opt out.
+Publication runs separately from forwarding and does not affect authority.
+
+The controller keeps one 30-second observation per Rust node. The existing
+`node.read` inventory exposes freshness: a current report can describe stale
+configuration, while expired or inactive nodes expose only the last report
+timestamps. The namespace gate waits for real Linux agent reports with active
+relay QUIC and applied routes. The HTTPS gate verifies Go/Rust interchange,
+expiry, revoked identity rejection and network scope.
+
 `POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
 invitations. It accepts owner or operator sessions with network access, the
 configured root bearer, or automation with `enrollment.issue` on that network.

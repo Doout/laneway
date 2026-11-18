@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/x509"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"runtime"
@@ -30,11 +32,12 @@ import (
 
 	"github.com/Doout/laneway/go/internal/exitnode"
 	"github.com/Doout/laneway/go/internal/identity"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: netprobe <udp-server|udp-client|udp-echo-server|udp-bench-client|tcp-server|tcp-client|metric|certificate-info|exit-client|exit-gateway> [flags]")
+		fatal("usage: netprobe <udp-server|udp-client|udp-echo-server|udp-bench-client|tcp-server|tcp-client|metric|certificate-info|endpoint-health|exit-client|exit-gateway> [flags]")
 	}
 	var err error
 	switch os.Args[1] {
@@ -54,6 +57,8 @@ func main() {
 		err = metric(os.Args[2:])
 	case "certificate-info":
 		err = certificateInfo(os.Args[2:])
+	case "endpoint-health":
+		err = endpointHealth(os.Args[2:])
 	case "exit-client":
 		err = exitClient(os.Args[2:])
 	case "exit-gateway":
@@ -64,6 +69,35 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
+}
+
+// endpointHealth verifies what the controller durably received from a live
+// agent, without minting another credential or a separate report.
+func endpointHealth(args []string) error {
+	fs := flag.NewFlagSet("endpoint-health", flag.ContinueOnError)
+	path := fs.String("database", "", "temporary controller database")
+	node := fs.String("node-id", "", "reporting node identity")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	id, err := identity.ParseNodeID(*node)
+	if err != nil || fs.NArg() != 0 || *path == "" {
+		return errors.New("endpoint-health requires -database and -node-id")
+	}
+	dsn := (&url.URL{Scheme: "file", Path: *path, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var carrier string
+	if err := db.QueryRow(`SELECT carrier_state FROM endpoint_status_latest
+		WHERE node_id=? AND platform='linux' AND configuration_state='current'
+		  AND route_state='ready' AND expires_at>unixepoch()`, id[:]).Scan(&carrier); err != nil {
+		return err
+	}
+	fmt.Println(carrier)
+	return nil
 }
 
 func certificateInfo(args []string) error {

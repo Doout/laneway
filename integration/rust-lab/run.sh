@@ -16,6 +16,7 @@ docker run --rm "${mounts[@]}" laneway-rust-lab:local sh -ec \
   'cargo fetch --locked --manifest-path rust/Cargo.toml; cd go && go mod download'
 docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
   --security-opt systempaths=unconfined --device /dev/net/tun \
+  -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
   -e LANEWAY_RUN_PRIVILEGED=1 "${mounts[@]}" laneway-rust-lab:local sh -ec '
     export PATH=/opt/rootless-lab:$PATH
     ./integration/rust-kernel-netns.sh

@@ -16,6 +16,7 @@ mod bearer;
 mod browser;
 pub use bearer::{RootCredential, bearer_inventory, bearer_network};
 pub use browser::auth_state;
+pub mod endpoint_status;
 pub mod enrollment;
 mod enrollment_tokens;
 mod management_write;

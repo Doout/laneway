@@ -24,6 +24,7 @@ mod relay;
 mod renewal;
 mod routing;
 mod state;
+mod status_report;
 mod tcp_fallback;
 mod tls;
 mod tun;

@@ -9,6 +9,7 @@ use std::{fmt, io, str::FromStr};
 use thiserror::Error;
 use x509_parser::{extensions::GeneralName, prelude::*};
 
+pub mod endpoint_status;
 pub mod policy;
 pub mod relay_endpoint;
 

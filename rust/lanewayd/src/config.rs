@@ -172,10 +172,13 @@ pub struct ControllerConfig {
     /// key. Requires a writable certificate directory owned by the node.
     #[serde(default)]
     pub auto_renew_certificate: bool,
-    /// HTTPS origin of the Go controller, without an API path.
+    /// Do not publish the bounded node-health report to the controller.
+    #[serde(default)]
+    pub disable_status_reporting: bool,
+    /// HTTPS origin of the controller, without an API path.
     pub endpoint: String,
     /// Required reliable mTLS QUIC controller endpoint in host:port form.
-    /// Authenticated snapshots use QUIC; HTTPS remains enrollment-only.
+    /// Authenticated snapshots use QUIC; enrollment and status use HTTPS.
     #[serde(default)]
     pub quic_endpoint: Option<String>,
     /// TLS DNS name; it must exactly equal the endpoint host.

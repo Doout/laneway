@@ -15,6 +15,7 @@ use std::{
 use tokio::sync::Semaphore;
 mod access_admin;
 mod audit;
+mod endpoint_status;
 mod enroll;
 mod form;
 mod login;
@@ -239,6 +240,9 @@ async fn dispatch(
     }
     if path == "/v1/configuration" && state.workload_mtls_enabled {
         return Ok(node_configuration::handle(req, state, id).await);
+    }
+    if path == "/v1/status" && state.workload_mtls_enabled {
+        return endpoint_status::handle(req, state, id).await;
     }
     if path == "/v1/relay/configuration" && state.workload_mtls_enabled {
         return Ok(relay_configuration::handle(req, state, id).await);

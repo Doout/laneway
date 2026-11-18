@@ -154,6 +154,51 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 		send(rustURL, "PUT", nodePath+"/capabilities", fmt.Sprintf(`{"enabled_capabilities":%d}`, c), cred, want)
 	}
 	before := epoch()
+	nodeReader := bot("node.read")
+	health := "/v1/admin/networks/" + net.String() + "/endpoint-statuses"
+	status := func(name string) map[string]any {
+		t.Helper()
+		a := send(goURL, "GET", health, "", nodeReader, 200)
+		b := send(rustURL, "GET", health, "", auditor, 200)
+		if !reflect.DeepEqual(a, b) {
+			t.Fatalf("endpoint status mismatch: Go=%#v Rust=%#v", a, b)
+		}
+		for _, raw := range b["endpoint_statuses"].([]any) {
+			record := raw.(map[string]any)
+			if record["node_name"] == name {
+				return record
+			}
+		}
+		t.Fatalf("endpoint status missing for %s", name)
+		return nil
+	}
+	report := func(epoch uint64, version string) string {
+		return fmt.Sprintf(`{"valid_for_seconds":30,"product_version":%q,"platform":"linux","certificate_state":"healthy",
+			"configuration_state":"current","carrier_state":"relay_quic","route_state":"ready","selected_exit_state":"not_selected",
+			"cleanup_failure_count":0,"configuration_epoch":%d}`, version, epoch)
+	}
+	publish := func(c *http.Client, base, data string, want int) {
+		t.Helper()
+		labManagementHTTP(t, c)(base, "PUT", "/v1/status", data, labCredentials{}, want)
+	}
+	send(rustURL, "GET", health, "", operatorBot, 403)
+	send(rustURL, "GET", "/v1/admin/networks/"+other.ID.String()+"/endpoint-statuses", "", nodeReader, 403)
+	if got := status("device-observer"); got["freshness"] != "never_reported" || got["report"] != nil {
+		t.Fatalf("node without a report did not remain unknown: %#v", got)
+	}
+	publish(client, rustURL, "not JSON", 401)
+	publish(fresh, rustURL, `{"node_id":"cannot claim another node"}`, 400)
+	publish(fresh, rustURL, report(before+1, "future"), 409)
+	publish(fresh, rustURL, report(before-1, "older"), 204)
+	staleHealth := status("device-target")
+	if staleHealth["freshness"] != "current" ||
+		staleHealth["report"].(map[string]any)["configuration_state"] != "stale" {
+		t.Fatalf("older epoch did not project stale configuration: %#v", staleHealth)
+	}
+	publish(fresh, goURL, report(before, "latest"), 204)
+	if got := status("device-target")["report"].(map[string]any)["product_version"]; got != "latest" {
+		t.Fatalf("latest report written through Go was not shown in Rust: %v", got)
+	}
 	caps(1, operator, 400)
 	caps(protocol.CapabilityExitNodeV1|protocol.CapabilitySubnetRouterV1, operatorBot, 200)
 	caps(protocol.CapabilityExitNodeV1|protocol.CapabilitySubnetRouterV1, operator, 200)
@@ -214,6 +259,16 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 	db, err := sql.Open("sqlite", f.dbPath)
 	must(err)
 	defer db.Close()
+	var reportsCount int
+	must(db.QueryRow("SELECT count(*) FROM endpoint_status_latest WHERE node_id=?", target[:]).Scan(&reportsCount))
+	if reportsCount != 1 {
+		t.Fatalf("expected a single retained observation, got %d", reportsCount)
+	}
+	_, err = db.Exec("UPDATE endpoint_status_latest SET observed_at=unixepoch()-30, expires_at=unixepoch() WHERE node_id=?", target[:])
+	must(err)
+	if got := status("device-target"); got["freshness"] != "expired" || got["report"] != nil || got["last_reported_at_unix_seconds"] == nil {
+		t.Fatalf("expired report leaked runtime health or lost its timestamp: %#v", got)
+	}
 	routeState := func(id identity.ID) string {
 		t.Helper()
 		var state string
@@ -235,6 +290,7 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 	}
 	doProto(targetClient, "GET", rustURL, probe+serial, nil, 403)
 	doProto(targetClient, "POST", rustURL, config, nil, 403)
+	publish(targetClient, rustURL, "not JSON", 403)
 	doProto(fresh, "GET", rustURL, probe+freshSerial, nil, 204)
 	doProto(outsider, "GET", rustURL, probe+serial, nil, 404)
 
@@ -252,6 +308,10 @@ func testRustDeviceManagement(t *testing.T, f fixture, client *http.Client, goUR
 	send(rustURL, "POST", nodePath+"/revoke", `{"reason":"retired"}`, operator, 409)
 	caps(0, operator, 404)
 	doProto(fresh, "GET", rustURL, probe+freshSerial, nil, 403)
+	publish(fresh, rustURL, report(epoch(), "revoked"), 403)
+	if got := status("device-target"); got["freshness"] != "node_inactive" || got["report"] != nil {
+		t.Fatalf("revoked node still displayed live health: %#v", got)
+	}
 	doProto(observer, "GET", rustURL, probe+freshSerial, nil, 200)
 	var addresses int
 	must(db.QueryRow("SELECT count(*) FROM overlay_addresses WHERE node_id=? AND released_at IS NULL", target[:]).Scan(&addresses))

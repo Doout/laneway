@@ -32,6 +32,7 @@ pub enum AccessError {
 
 pub enum Request {
     Inventory(Id),
+    EndpointStatuses(Id, usize),
     ListRoutes(Id, usize),
     AssignRoute(Id, Id, RouteSpec),
     ApproveRoute(Id),
@@ -112,6 +113,7 @@ impl Request {
         matches!(
             self,
             Self::Inventory(_)
+                | Self::EndpointStatuses(..)
                 | Self::ListAclRules(..)
                 | Self::ListRoutes(..)
                 | Self::ListCertificates(..)
@@ -121,6 +123,7 @@ impl Request {
     fn permission(&self) -> &'static str {
         match self {
             Self::ListRoutes(..) => "route.read",
+            Self::EndpointStatuses(..) => "node.read",
             Self::ListCertificates(..) => "certificate.read",
             Self::ListRelays(..) => "relay.read",
             Self::RegisterRelay { .. } | Self::UpdateRelay(..) | Self::DisableRelay(_) => {
@@ -138,6 +141,7 @@ impl Request {
     fn scope(&self, tx: &Transaction<'_>) -> Result<Scope> {
         let object = match self {
             Self::Inventory(net)
+            | Self::EndpointStatuses(net, _)
             | Self::ListRoutes(net, _)
             | Self::AssignRoute(net, ..)
             | Self::ListCertificates(net, _)
@@ -201,6 +205,9 @@ impl Request {
         };
         let data = match self {
             Self::Inventory(_) => inventory::read(tx, net),
+            Self::EndpointStatuses(_, limit) => {
+                crate::endpoint_status::inventory(tx, net, limit, now)
+            }
             Self::ListRoutes(_, limit) => editor.list_routes(limit),
             Self::AssignRoute(_, node, spec) => {
                 let (data, created) = editor.assign_route(node, spec)?;

@@ -308,6 +308,17 @@ impl Agent {
                 ]);
             };
             let client = Arc::new(client);
+            if !settings.disable_status_reporting {
+                let reporter = crate::status_report::Reporter {
+                    client: Arc::clone(&client),
+                    state: Arc::clone(&self.state),
+                    metrics: Arc::clone(&self.metrics),
+                    base: Arc::clone(&runtime_base),
+                    control_lock: Arc::clone(&control_lock),
+                    certificate: local_certificate.clone(),
+                };
+                tasks.spawn(reporter.run());
+            }
             if settings.auto_renew_certificate {
                 replacement = Box::pin(crate::renewal::when_due(
                     Arc::clone(&client),

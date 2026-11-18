@@ -321,8 +321,15 @@ if [[ "${node_controller}" == "rust" ]]; then
   node_endpoint="https://10.254.0.1:9443"
   node_quic_endpoint="10.254.0.1:9443"
   relay_metrics='metrics_listen = "127.0.0.1:6060"'
-  # Keep HTTPS loopback-only. Node and relay fetch production-format
-  # control snapshots over QUIC from a separate namespace.
+  # Keep HTTPS loopback-only. Allow just the lab node's HTTPS connection to
+  # reach that listener through TCP DNAT, without terminating its mTLS.
+  # Node and relay still fetch control snapshots over QUIC.
+  ip netns exec "${controller_ns}" sysctl -qw net.ipv4.conf.eth0.route_localnet=1
+  ip netns exec "${controller_ns}" nft add table ip lab_health
+  ip netns exec "${controller_ns}" nft add chain ip lab_health prerouting \
+    '{ type nat hook prerouting priority dstnat; policy accept; }'
+  ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
+    iifname eth0 ip saddr 10.254.0.3 ip daddr 10.254.0.1 tcp dport 9443 dnat to 127.0.0.1:9443
   start_process "${controller_ns}" "${work_dir}/native-controller.log" \
     "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
     "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
@@ -334,7 +341,7 @@ if [[ "${node_controller}" == "rust" ]]; then
   advertiser_namespace="${controller_ns}"
   advertiser_endpoint="https://127.0.0.1:9443"
   management_connection=(
-    --controller https://127.0.0.1:9443 --ca "${work_dir}/pki/ca.crt"
+    --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt"
     --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
     --admin-token-file "${work_dir}/admin.token"
   )
@@ -552,7 +559,24 @@ if [[ "${node_controller}" == "rust" ]]; then
     echo "ERROR: the request and reply did not use the Rust relay" >&2
     exit 1
   fi
+fi
 
+echo "==> live Rust node reports its authenticated carrier and routes"
+reported_carrier=""
+for _ in $(seq 1 150); do
+  reported_carrier="$("${work_dir}/netprobe" endpoint-health -database "${work_dir}/controller.db" -node-id "${rust_id}" 2>/dev/null || true)"
+  if [[ "${reported_carrier}" == "relay_quic" ]]; then
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${reported_carrier}" != "relay_quic" ]]; then
+  echo "ERROR: controller did not receive current Rust node relay health" >&2
+  tail -70 "${work_dir}/rust.log" >&2
+  exit 1
+fi
+
+if [[ "${node_controller}" == "rust" ]]; then
   echo "==> disabling the relay closes live sessions and stops forwarding"
   ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay disable \
     --relay-id "${relay_id}" "${management_connection[@]}" >"${work_dir}/relay-disable.json"

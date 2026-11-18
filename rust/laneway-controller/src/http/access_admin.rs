@@ -18,6 +18,7 @@ use serde::Deserialize;
 
 pub(super) enum Route<'a> {
     Inventory(&'a str),
+    EndpointStatuses(&'a str),
     ListRoutes(&'a str),
     AssignSubnet,
     ApproveAdvertisement(&'a str),
@@ -49,6 +50,7 @@ impl<'a> Route<'a> {
         use Route::*;
         Some(match parts {
             ["", "v1", "admin", "networks", id, "access-subjects"] => Inventory(id),
+            ["", "v1", "admin", "networks", id, "endpoint-statuses"] => EndpointStatuses(id),
             ["", "v1", "admin", "networks", id, "routes"] => ListRoutes(id),
             ["", "v1", "admin", "routes", "assign"] => AssignSubnet,
             ["", "v1", "admin", "routes", id, "approve"] => ApproveAdvertisement(id),
@@ -90,7 +92,10 @@ impl<'a> Route<'a> {
     }
     fn allow(&self) -> &'static str {
         match self {
-            Self::Inventory(_) | Self::ListRoutes(_) | Self::Certificates(_) => "GET, HEAD",
+            Self::Inventory(_)
+            | Self::ListRoutes(_)
+            | Self::Certificates(_)
+            | Self::EndpointStatuses(_) => "GET, HEAD",
             Self::NodeCapabilities(_) | Self::RelayUpdate(_) => "PUT",
             Self::RelayCollection(_) => "GET, HEAD, POST",
             Self::AclRules(_) => "GET, HEAD, POST",
@@ -299,6 +304,11 @@ pub(super) async fn handle(
 async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<Action, Failure> {
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
+        Route::EndpointStatuses(net) => Action::EndpointStatuses(
+            parse(net)?,
+            super::query_limit(req.uri().query())
+                .map_err(|_| malformed("limit must be an integer from 1 through 1000"))?,
+        ),
         Route::ListRoutes(net) => Action::ListRoutes(
             parse(net)?,
             super::query_limit(req.uri().query()).map_err(|_| malformed("invalid limit"))?,

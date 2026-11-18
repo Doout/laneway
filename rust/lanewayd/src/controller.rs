@@ -23,10 +23,14 @@ use laneway_protocol::{
 };
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
-use reqwest::{Certificate, Identity, StatusCode};
+use reqwest::StatusCode;
 use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    DigitallySignedStruct, RootCertStore, SignatureScheme,
+    client::{
+        WebPkiServerVerifier,
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    },
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
 };
 use tokio::sync::Mutex;
 
@@ -126,19 +130,14 @@ impl Client {
             !resolved.is_empty() && resolved.len() <= 16,
             "controller endpoint resolved outside the bounded 1..=16 address set"
         );
-        let mut identity = bounded_read(&options.certificate, 4 << 20, "node certificate")?;
-        identity.extend_from_slice(&bounded_read(
-            &options.private_key,
-            1 << 20,
-            "node private key",
-        )?);
-        let ca = bounded_read(&options.ca, 4 << 20, "controller CA")?;
+        let expected = expected_controller(options.network, options.service);
+        let mut https = controller_tls(&options, expected)?;
+        https.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let mut builder = reqwest::Client::builder()
             .https_only(true)
-            .identity(Identity::from_pem(&identity).context("load node controller identity")?)
-            .add_root_certificate(Certificate::from_pem(&ca).context("load controller CA")?)
-            .min_tls_version(reqwest::tls::Version::TLS_1_3)
-            .max_tls_version(reqwest::tls::Version::TLS_1_3)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .use_preconfigured_tls(https)
             .timeout(options.timeout)
             .tls_info(true);
         if host.parse::<IpAddr>().is_err() {
@@ -148,14 +147,7 @@ impl Client {
             .build()
             .context("build node controller HTTP client")?;
         let quic = if let Some(endpoint) = options.quic_endpoint.as_deref() {
-            Some(
-                QuicControl::new(
-                    endpoint,
-                    &options,
-                    expected_controller(options.network, options.service),
-                )
-                .await?,
-            )
+            Some(QuicControl::new(endpoint, &options, expected).await?)
         } else {
             None
         };
@@ -171,7 +163,7 @@ impl Client {
                 options.endpoint.trim_end_matches('/')
             ),
             http,
-            expected_controller: expected_controller(options.network, options.service),
+            expected_controller: expected,
             resolved,
             quic,
         })
@@ -179,6 +171,30 @@ impl Client {
 
     pub(crate) fn resolved_ips(&self) -> Vec<IpAddr> {
         self.resolved.iter().map(SocketAddr::ip).collect()
+    }
+
+    pub(crate) async fn report_status(
+        &self,
+        report: &laneway_protocol::endpoint_status::Report,
+    ) -> Result<()> {
+        report.validate().map_err(anyhow::Error::msg)?;
+        let response = self
+            .http
+            .put(format!(
+                "{}/v1/status",
+                self.options.endpoint.trim_end_matches('/')
+            ))
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(report)?)
+            .send()
+            .await
+            .context("send endpoint health report")?;
+        ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "controller endpoint health returned {}",
+            response.status()
+        );
+        Ok(())
     }
 
     pub(crate) async fn with_certificate(&self, path: PathBuf) -> Result<Self> {
@@ -298,6 +314,96 @@ fn expected_controller(network: Id, service: Id) -> AuthenticatedIdentity {
     }
 }
 
+#[derive(Debug)]
+struct PinnedController {
+    expected: AuthenticatedIdentity,
+    web: Arc<WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for PinnedController {
+    fn verify_server_cert(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        let valid = self
+            .web
+            .verify_server_cert(leaf, intermediates, server_name, ocsp, now)?;
+        // The normal chain and host checks are necessary but not sufficient.
+        // Verify the exact controller role/network/service before sending
+        // the client's certificate or any HTTP request body.
+        let identity = identity_from_certificate_der(leaf.as_ref()).map_err(|_| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+        })?;
+        if identity != self.expected {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(valid)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signed: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.web.verify_tls12_signature(message, cert, signed)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signed: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.web.verify_tls13_signature(message, cert, signed)
+    }
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.web.supported_verify_schemes()
+    }
+}
+
+fn controller_tls(
+    options: &ClientOptions,
+    expected: AuthenticatedIdentity,
+) -> Result<rustls::ClientConfig> {
+    let cert = bounded_read(&options.certificate, 4 << 20, "node certificate")?;
+    let certificates: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert.as_slice())
+        .collect::<std::result::Result<_, _>>()
+        .context("parse node controller certificate")?;
+    ensure!(
+        !certificates.is_empty(),
+        "node controller certificate chain is empty"
+    );
+    let key = bounded_read(&options.private_key, 1 << 20, "node private key")?;
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key.as_slice())
+        .context("parse node controller private key")?
+        .context("node controller private key is missing")?;
+    let ca = bounded_read(&options.ca, 4 << 20, "controller CA")?;
+    let roots_der: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut ca.as_slice())
+        .collect::<std::result::Result<_, _>>()
+        .context("parse controller CA")?;
+    let mut roots = RootCertStore::empty();
+    let (accepted, rejected) = roots.add_parsable_certificates(roots_der);
+    ensure!(
+        accepted > 0 && rejected == 0,
+        "controller CA contains an invalid certificate"
+    );
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+        .build()?;
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedController { expected, web }))
+        .with_client_auth_cert(certificates, key)
+        .context("load node controller identity")
+}
+
 impl QuicControl {
     async fn new(
         address: &str,
@@ -325,35 +431,7 @@ impl QuicControl {
             "controller QUIC endpoint resolved outside the bounded 1..=16 address set"
         );
 
-        let certificate_pem = bounded_read(&options.certificate, 4 << 20, "node certificate")?;
-        let mut cursor = std::io::Cursor::new(certificate_pem);
-        let certificates: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cursor)
-            .collect::<std::result::Result<_, _>>()
-            .context("parse node controller certificate")?;
-        ensure!(
-            !certificates.is_empty(),
-            "node controller certificate chain is empty"
-        );
-        let key_pem = bounded_read(&options.private_key, 1 << 20, "node private key")?;
-        let mut cursor = std::io::Cursor::new(key_pem);
-        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut cursor)
-            .context("parse node controller private key")?
-            .context("node controller private key is missing")?;
-        let ca_pem = bounded_read(&options.ca, 4 << 20, "controller CA")?;
-        let mut cursor = std::io::Cursor::new(ca_pem);
-        let roots_der: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cursor)
-            .collect::<std::result::Result<_, _>>()
-            .context("parse controller CA")?;
-        let mut roots = RootCertStore::empty();
-        let (accepted, rejected) = roots.add_parsable_certificates(roots_der);
-        ensure!(
-            accepted > 0 && rejected == 0,
-            "controller CA contains an invalid certificate"
-        );
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(certificates, key)
-            .context("load node QUIC controller identity")?;
+        let mut crypto = controller_tls(options, expected)?;
         crypto.alpn_protocols = vec![b"laneway-control/1".to_vec()];
         crypto.enable_early_data = false;
         let crypto = QuicClientConfig::try_from(crypto).context("build controller QUIC TLS")?;
@@ -1140,6 +1218,56 @@ mod tests {
 
     fn id(value: u8) -> Id {
         Id::new([value; 16]).unwrap()
+    }
+
+    #[test]
+    fn controller_requires_both_hostname_and_exact_service_identity() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            SanType,
+        };
+        let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let key = KeyPair::generate().unwrap();
+        let ca = ca_params.self_signed(&key).unwrap();
+        let issuer = Issuer::new(ca_params, key);
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.der().clone()).unwrap();
+        let web = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        let (network, service) = (id(1), id(2));
+        let pinned = PinnedController {
+            expected: expected_controller(network, service),
+            web,
+        };
+        let name = ServerName::try_from("controller.test").unwrap();
+        for (host, role, subject, accepted) in [
+            ("controller.test", "controller", service, true),
+            ("controller.test", "relay", service, false),
+            ("controller.test", "controller", id(3), false),
+            ("other.test", "controller", service, false),
+        ] {
+            let mut params = CertificateParams::new(vec![host.to_owned()]).unwrap();
+            params.subject_alt_names.push(SanType::URI(
+                format!("spiffe://laneway/network/{network}/{role}/{subject}")
+                    .try_into()
+                    .unwrap(),
+            ));
+            params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+            let leaf = params
+                .signed_by(&KeyPair::generate().unwrap(), &issuer)
+                .unwrap();
+            assert_eq!(
+                pinned
+                    .verify_server_cert(leaf.der(), &[], &name, &[], UnixTime::now())
+                    .is_ok(),
+                accepted
+            );
+        }
     }
 
     fn host(address: [u8; 4]) -> IpPrefix {
