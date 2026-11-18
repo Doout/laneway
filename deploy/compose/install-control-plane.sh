@@ -425,6 +425,7 @@ Laneway $tag is running on Rust. Useful commands:
   sudo laneway-control administrator bootstrap --username owner
   sudo laneway-control invite --name DEVICE --ephemeral
   sudo laneway-control backup
+  sudo laneway-control update
   initial encrypted backup: $destination/generated/recovery/$initial_backup
 EOF
 if [ "$automatic_issuer" = true ]; then

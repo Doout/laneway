@@ -72,8 +72,16 @@ administrator API requests to the controller over its authenticated internal
 connection. TCP+UDP `8443` is the private controller transport for Laneway
 identities; ordinary browsers must not connect to it directly.
 
-Do not use the legacy `update`, `upgrade`, or `rollback` commands on a Rust
-deployment. They target the Go runtime and refuse to operate here.
+For a fresh Rust deployment on the local Docker Engine, run
+`sudo laneway-control update` (or append a stable tag such as `v1.2.3`). The
+updater verifies the release, backs up state, and briefly stops services
+while copying the controller's volume. If the candidate does not come up
+healthy or fails authenticated inventory, the original release is restarted.
+The prior controller volume is retained after a successful update; keep the
+reported backup and review retained volumes before reclaiming disk space.
+This updates runtime images and discovery metadata, not host tools or
+Compose templates. The legacy `upgrade` and `rollback` commands remain
+unavailable on Rust.
 
 ## Docker Connector
 

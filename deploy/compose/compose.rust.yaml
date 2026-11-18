@@ -56,3 +56,6 @@ services:
     image: ghcr.io/doout/laneway-exit-node-rust:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST:?set the verified Rust exit digest}
     labels:
       io.laneway.control-runtime: rust
+volumes:
+  controller-state:
+    name: ${LANEWAY_RUST_CONTROLLER_STATE_VOLUME:-laneway-controller-state}

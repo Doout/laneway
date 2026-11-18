@@ -8,7 +8,7 @@ operator CLI and lab tools can still be used without running a Go server.
 ## Release handoff
 
 Fresh control planes, managed Linux nodes, and foreground Linux/macOS sessions
-select Rust. Before publishing or deploying, verify the following on the
+select Rust. Before promoting to production, verify the following on the
 signed candidate:
 
 1. Run the native release matrix on the release commit, including the Linux
@@ -18,7 +18,8 @@ signed candidate:
 2. On the fresh deployment, verify HTTPS, Dispatch authorization, client
    enrollment and connectivity, routes, certificate renewal and fleet
    operations. Back up the Rust deployment and restore it to a separate empty
-   lab volume. Keep one controller writing to each database.
+   lab volume. Verify a Rust-to-Rust update from a previous signed release
+   when one is available. Keep one controller writing to each database.
 3. Test one isolated workload before promoting. Verify the recovery procedure
    with the same Rust images that will serve the deployment.
 
@@ -27,6 +28,11 @@ images. The packaged host-tools install left no daemon or systemd units; the
 installer created an empty Rust deployment, verified authenticated inventory,
 generated a Rust shared-host exit invitation, and wrote an encrypted backup.
 Run `bash integration/rust-lab/installer-fresh.sh` on the marked lab to repeat.
+The same test updates the real lab services to a fixture release, checks
+that existing invitations survive, then starts a deliberately incompatible
+candidate and verifies that the previous controller state is available again.
+It exercises real Compose and encrypted recovery, but does not exercise live
+release signing and registry infrastructure.
 
 | Component | Starting point | Acceptance before switching the default |
 | --- | --- | --- |

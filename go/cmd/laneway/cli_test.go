@@ -108,6 +108,7 @@ func TestControlCommandsForwardExactArguments(t *testing.T) {
 		{"recover", []string{"administrator", "recover", "--username", "owner"}, []string{"administrator", "recover", "--username", "owner"}},
 		{"root token rotation", []string{"administrator", "root-token", "rotate"}, []string{"administrator", "root-token", "rotate"}},
 		{"readiness", []string{"readiness", "/trusted/release-metadata"}, []string{"readiness", "/trusted/release-metadata"}},
+		{"update selected release", []string{"update", "v1.2.3"}, []string{"update", "v1.2.3"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

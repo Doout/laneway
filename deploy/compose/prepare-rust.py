@@ -39,6 +39,9 @@ RUST_SERVICES = {
     "relay": "LANEWAY_RUST_RELAY_IMAGE_DIGEST",
     "exit-node": "LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST",
 }
+INSTALL_SETTINGS = RELEASE_SETTINGS | {
+    "LANEWAY_ADMIN_IMAGE_DIGEST", "LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST",
+}
 
 
 def require(condition, reason):
@@ -113,16 +116,16 @@ def convert(controller_text, relay_text):
     return profile, converted
 
 
-def read_release_settings(text):
+def read_release_settings(text, required=RELEASE_SETTINGS):
     result = {}
     for line in text.splitlines():
         raw_key, _, value = line.partition("=")
         key = re.sub(r"^export[ \t]+", "", raw_key.strip()).strip()
-        if key in RELEASE_SETTINGS:
+        if key in required:
             require(raw_key == key, f"expected canonical {key}=VALUE in .env")
             require(key not in result, f"duplicate {key}")
             result[key] = value
-    require(result.keys() == RELEASE_SETTINGS, "expected all four verified Rust release settings in .env")
+    require(result.keys() == required, "missing verified Rust release settings")
     return result
 
 
@@ -138,7 +141,11 @@ def candidate_release(base, metadata):
     require(len(fields) == 5, "verified release did not supply bootstrap artifacts")
     require(read_release_settings("\n".join(fields[:4])) == pinned,
             "Rust image settings do not match the signed release; update the staged .env")
-    contents = tomllib.loads(fields[4])
+    return pinned, bootstrap_artifacts(fields[4], tag)
+
+
+def bootstrap_artifacts(text, tag):
+    contents = tomllib.loads(text)
     bootstrap = contents.get("bootstrap")
     require(set(contents) == {"bootstrap"} and isinstance(bootstrap, dict)
             and set(bootstrap) == {"artifacts"}, "expected a signed bootstrap artifacts manifest")
@@ -159,7 +166,36 @@ def candidate_release(base, metadata):
                 and entry["sha256"] != "0" * 64
                 and type(entry["size_bytes"]) is int and entry["size_bytes"] > 0,
                 f"invalid signed artifact for {asset}")
-    return pinned, artifacts
+    return artifacts
+
+
+def stage_update(base, stage, tag, volume):
+    require(re.fullmatch(r"laneway-rust-update-[0-9a-f]{20}", volume), "invalid candidate volume name")
+    verified = command_output([
+        "/bin/sh", str(base / "verify-rust-release.sh"), "--install", tag, str(stage / "metadata"),
+    ])
+    updates = read_release_settings(verified, INSTALL_SETTINGS)
+    require(updates["LANEWAY_RUST_VERSION"] == tag[1:], "unexpected verified release version")
+    updates.update(LANEWAY_VERSION=tag[1:], LANEWAY_RUST_CONTROLLER_STATE_VOLUME=volume)
+    source_env = read_config(base / ".env")
+    updated = []
+    seen = set()
+    for line in source_env.splitlines():
+        key = re.sub(r"^export[ \t]+", "", line.partition("=")[0].strip()).strip()
+        require(key not in seen, f"duplicate {key} in .env")
+        if key in updates:
+            require(line.startswith(f"{key}="), f"expected canonical {key}=VALUE in .env")
+            updated.append(f"{key}={updates.pop(key)}")
+            seen.add(key)
+        else:
+            updated.append(line)
+    require(not (updates.keys() - {"LANEWAY_RUST_CONTROLLER_STATE_VOLUME"}),
+            "update requires a standard fresh Rust install with pinned image settings")
+    updated.extend(f"{key}={value}" for key, value in updates.items())
+    profile = json.loads(read_config(base / "generated/config/bootstrap.rust.json"))
+    profile["artifacts"] = bootstrap_artifacts(read_config(stage / "metadata/bootstrap-artifacts.toml"), tag)
+    (stage / "candidate.env").write_text("\n".join(updated) + "\n", encoding="utf-8")
+    (stage / "candidate.json").write_text(json.dumps(profile, indent=2) + "\n", encoding="utf-8")
 
 
 def command_output(argv):
@@ -289,11 +325,15 @@ if __name__ == "__main__":
                                help="reuse the Go bootstrap artifacts on an isolated, unsigned lab only")
         selection.add_argument("--readiness", type=Path, metavar="DIRECTORY",
                                help="verify the active Rust release without starting or changing services")
+        selection.add_argument("--stage-update", nargs=3, metavar=("DIRECTORY", "TAG", "VOLUME"))
         args = parser.parse_args()
         require(os.geteuid() == 0, "run as root")
         base = Path(__file__).resolve().parent
         if args.readiness is not None:
             check_readiness(base, args.readiness)
+        elif args.stage_update is not None:
+            stage, tag, volume = args.stage_update
+            stage_update(base, Path(stage), tag, volume)
         else:
             prepare(base, args.release_metadata)
             print("Staged Rust Compose inputs; the running stack and Go configuration are unchanged.")

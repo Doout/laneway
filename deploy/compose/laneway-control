@@ -47,7 +47,7 @@ usage: laneway-control [--rust] <init|user-token|invite|route|status|readiness|a
   administrator bootstrap --username USERNAME
   administrator recover --username USERNAME
   administrator root-token rotate
-  update
+  update [vMAJOR.MINOR.PATCH]  (Rust; defaults to the latest stable release)
   backup [NAME.age]
   restore BUNDLE.age --identity AGE_IDENTITY_FILE
 EOF
@@ -1616,6 +1616,233 @@ run_route() {
   admin "$@"
 }
 
+rust_candidate_compose() {
+  (env_file=$rust_update_work/candidate.env; compose --profile exit-node --profile tools "$@")
+}
+
+rust_volume_path() (
+  inspected_volume=$1
+  volume_document=$(docker volume inspect "$inspected_volume") || return 1
+  volume_path=$(printf '%s' "$volume_document" | jq -er --arg volume "$inspected_volume" --arg project "$rust_project" '
+    if length == 1 and .[0].Name == $volume and .[0].Driver == "local" and
+       ((.[0].Options // {}) == {}) and .[0].Labels["com.docker.compose.project"] == $project and
+       .[0].Labels["com.docker.compose.volume"] == "controller-state"
+    then .[0].Mountpoint else empty end
+  ') || return 1
+  [ "$volume_path" = "$rust_docker_volumes/$inspected_volume/_data" ] &&
+    [ "$(realpath -e -- "$volume_path")" = "$volume_path" ] && [ -d "$volume_path" ] || return 1
+  printf '%s\n' "$volume_path"
+)
+
+rust_stage_controller_state() (
+  # The source was stopped, so the copy includes a stable database, any
+  # remaining SQLite sidecars, and the controller's renewed service identity.
+  volume_users=$(docker ps -q --filter "volume=$rust_source_volume") || return 1
+  [ -z "$volume_users" ] || return 1
+  source_path=$(rust_volume_path "$rust_source_volume") || return 1
+  target_path=$(rust_volume_path "$rust_candidate_volume") || return 1
+  [ -f "$source_path/controller.db" ] && [ ! -L "$source_path/controller.db" ] &&
+    [ ! -e "$target_path/controller.db" ] || return 1
+  unsupported=$(find "$source_path" -xdev ! -type d ! -type f -print -quit) || return 1
+  [ -z "$unsupported" ] || return 1
+  cp -a --one-file-system -- "$source_path/." "$target_path/" &&
+    sync -f "$target_path"
+)
+
+rust_update_preflight() (
+  plan=$1; settings=$2; selected_volume=$3
+  version=$(read_setting "$settings" LANEWAY_RUST_VERSION)
+  controller_digest=$(read_setting "$settings" LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST)
+  relay_digest=$(read_setting "$settings" LANEWAY_RUST_RELAY_IMAGE_DIGEST)
+  exit_digest=$(read_setting "$settings" LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST)
+  admin_digest=$(read_setting "$settings" LANEWAY_ADMIN_IMAGE_DIGEST)
+  jq -e --arg volume "$selected_volume" \
+    --arg controller "ghcr.io/doout/laneway-controller-rust:$version@$controller_digest" \
+    --arg relay "ghcr.io/doout/laneway-relay-rust:$version@$relay_digest" \
+    --arg exit "ghcr.io/doout/laneway-exit-node-rust:$version@$exit_digest" \
+    --arg admin "ghcr.io/doout/laneway-admin:$version@$admin_digest" '
+      .services.controller.image == $controller and .services.relay.image == $relay and
+      .services["exit-node"].image == $exit and .services.admin.image == $admin and
+      ([.services.controller.volumes[] | select(.target == "/var/lib/laneway-controller") |
+        select(.type == "volume" and .source == "controller-state")] | length == 1) and
+      .volumes["controller-state"].name == $volume
+    ' "$plan" >/dev/null
+)
+
+rust_check_selected_container() (
+  role=$1; plan=$2; expected_volume=${3:-}
+  id=$(compose --profile exit-node ps --status running -q "$role") || exit 1
+  image=$(jq -er --arg role "$role" '.services[$role].image' "$plan") || exit 1
+  [ -n "$id" ] && docker inspect --type container "$id" |
+    jq -e --arg volume "$expected_volume" --arg image "$image" '
+      length == 1 and .[0].Config.Image == $image and .[0].State.Health.Status == "healthy" and
+      ($volume == "" or any(.[0].Mounts[]; .Type == "volume" and .Name == $volume and
+        .Destination == "/var/lib/laneway-controller" and .RW))
+    ' >/dev/null
+)
+
+rust_copy_selection_file() (
+  source_file=$1; destination_file=$2; mode=$3
+  [ -f "$destination_file" ] && [ ! -L "$destination_file" ] || return 1
+  staged_file=$(mktemp "$(dirname "$destination_file")/.rust-update.XXXXXX") || return 1
+  trap '[ ! -e "$staged_file" ] || find "$staged_file" -maxdepth 0 -delete' EXIT
+  install -m "$mode" -o 0 -g 0 "$source_file" "$staged_file" &&
+    sync -f "$staged_file" && mv -f -- "$staged_file" "$destination_file"
+)
+
+rust_publish_selection() {
+  selection_env=$1; selection_profile=$2; selection_metadata=$3
+  rust_copy_selection_file "$selection_profile" "$base_dir/generated/config/bootstrap.rust.json" 0444 || return 1
+  for rust_asset in $rust_release_assets; do
+    rust_copy_selection_file "$selection_metadata/$rust_asset" "$base_dir/release-metadata/$rust_asset" 0600 || return 1
+  done
+  rust_copy_selection_file "$selection_env" "$env_file" 0600
+}
+
+rust_start_and_check() (
+  plan=$1; selected_volume=$2
+  compose up --detach --pull never --wait --wait-timeout 100 controller relay || return 1
+  rust_check_selected_container controller "$plan" "$selected_volume" &&
+    rust_check_selected_container relay "$plan" || return 1
+  if [ "$rust_exit_running" = true ]; then
+    compose --profile exit-node up --detach --pull never --wait --wait-timeout 100 exit-node &&
+      rust_check_selected_container exit-node "$plan" || return 1
+  fi
+  run_status
+)
+
+run_rust_update() {
+  [ "$#" -le 1 ] || die "update accepts at most one stable release tag"
+  target_tag=${1:-}
+  [ "$(id -u)" -eq 0 ] || die "update must run as root"
+  for dependency in age cp curl docker jq openssl python3 realpath sync; do
+    command -v "$dependency" >/dev/null 2>&1 || die "update requires $dependency"
+  done
+  [ "${DOCKER_HOST:-}" = "" ] &&
+    [ "$(docker context inspect --format '{{.Endpoints.docker.Host}}')" = unix:///var/run/docker.sock ] ||
+    die "Rust updates require a local Docker Engine on the standard Unix socket"
+  acquire_lock
+  [ "$(stat -c '%a:%u:%g' "$state_dir")" = 700:0:0 ] ||
+    die "Rust updates require a root-owned lifecycle directory with mode 0700"
+  [ "$(read_setting "$env_file" LANEWAY_CONTROL_RUNTIME)" = rust ] ||
+    die "update requires a fresh Rust control-plane installation"
+  current_version=$(read_setting "$env_file" LANEWAY_RUST_VERSION)
+  [ "$(read_setting "$env_file" LANEWAY_VERSION)" = "$current_version" ] ||
+    die "the installed Rust release settings disagree"
+  if [ -z "$target_tag" ]; then
+    latest_url=$(curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error \
+      --connect-timeout 10 --max-time 30 --header 'Cache-Control: no-cache' --output /dev/null --write-out '%{url_effective}' \
+      "https://github.com/Doout/laneway/releases/latest?laneway_cache_bust=$(date +%s)") ||
+      die "could not resolve the latest stable Laneway release"
+    target_tag=${latest_url##*/}
+  fi
+  for stable_tag in "v$current_version" "$target_tag"; do
+    printf '%s\n' "$stable_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' ||
+      die "update requires a stable vMAJOR.MINOR.PATCH release"
+  done
+  if [ "$target_tag" = "v$current_version" ]; then
+    echo "laneway-control: Rust control plane is already current ($target_tag)"
+    return
+  fi
+  python3 -c 'import sys; version = lambda s: tuple(map(int, s.split("."))); sys.exit(version(sys.argv[1]) <= version(sys.argv[2]))' \
+    "${target_tag#v}" "$current_version" || die "$target_tag would downgrade the installed Rust release"
+
+  rust_update_work=$(mktemp -d "$state_dir/.rust-update.XXXXXX")
+  rust_keep_work=false
+  trap '[ "$rust_keep_work" = true ] || find "$rust_update_work" -depth -delete; release_lock' EXIT
+  rust_candidate_volume=laneway-rust-update-$(python3 -c 'import secrets; print(secrets.token_hex(10))')
+  cosign_command=$(cosign_verifier)
+  rust_release_assets='checksums.txt checksums.sigstore.json image-digests.txt bootstrap-artifacts.toml'
+  rust_release_url=${LANEWAY_RELEASE_BASE_URL:-https://github.com/Doout/laneway/releases/download/$target_tag}
+  install -d -m 0700 "$rust_update_work/metadata" "$rust_update_work/source"
+  [ -d "$base_dir/release-metadata" ] && [ ! -L "$base_dir/release-metadata" ] &&
+    [ "$(stat -c '%a:%u:%g' "$base_dir/release-metadata")" = 700:0:0 ] ||
+    die "the installation's release metadata directory is missing or unsafe"
+  for rust_asset in $rust_release_assets; do
+    [ -f "$base_dir/release-metadata/$rust_asset" ] && [ ! -L "$base_dir/release-metadata/$rust_asset" ] ||
+      die "the installation's $rust_asset is missing or unsafe"
+    install -m 0600 "$base_dir/release-metadata/$rust_asset" "$rust_update_work/source/$rust_asset"
+    curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error \
+      --connect-timeout 10 --max-time 60 --max-filesize 1048576 \
+      "${rust_release_url%/}/$rust_asset" -o "$rust_update_work/metadata/$rust_asset" ||
+      die "could not download $rust_asset for $target_tag"
+  done
+  run_step "Verify signed Rust release" env LANEWAY_COSIGN_BIN="$cosign_command" \
+    python3 "$base_dir/prepare-rust.py" --stage-update "$rust_update_work" "$target_tag" "$rust_candidate_volume" ||
+    die "signed release verification failed; running services unchanged"
+  install -m 0600 "$env_file" "$rust_update_work/source/selection.env"
+  install -m 0600 "$base_dir/generated/config/bootstrap.rust.json" "$rust_update_work/source/profile.json"
+  compose --profile exit-node --profile tools config --format json > "$rust_update_work/source-plan.json"
+  rust_candidate_compose config --format json > "$rust_update_work/candidate-plan.json"
+  rust_project=$(jq -er .name "$rust_update_work/source-plan.json")
+  rust_source_volume=$(jq -er '.volumes["controller-state"].name' "$rust_update_work/source-plan.json")
+  printf '%s\n' "$rust_source_volume" | grep -Eq '^(laneway-controller-state|laneway-rust-update-[0-9a-f]{20})$' ||
+    die "controller is not using a managed Rust deployment volume"
+  rust_docker_volumes=$(docker info --format '{{.DockerRootDir}}')/volumes
+  rust_volume_path "$rust_source_volume" >/dev/null || die "controller does not use a standard local Docker volume"
+  if ! rust_update_preflight "$rust_update_work/source-plan.json" "$env_file" "$rust_source_volume" ||
+    ! rust_update_preflight "$rust_update_work/candidate-plan.json" "$rust_update_work/candidate.env" "$rust_candidate_volume"; then
+    die "Compose must select the pinned release images and managed state (remove any exported release overrides)"
+  fi
+  if ! rust_check_selected_container controller "$rust_update_work/source-plan.json" "$rust_source_volume" ||
+    ! rust_check_selected_container relay "$rust_update_work/source-plan.json"; then
+    die "the running controller and relay must be healthy and match the installed Rust release"
+  fi
+  rust_exit_running=false
+  rust_exit_id=$(compose --profile exit-node ps --status running -q exit-node)
+  if [ -n "$rust_exit_id" ]; then
+    rust_check_selected_container exit-node "$rust_update_work/source-plan.json" ||
+      die "the running exit node is not healthy or does not match the installed Rust release"
+    rust_exit_running=true
+  fi
+  set -- controller relay admin
+  [ "$rust_exit_running" = false ] || set -- "$@" exit-node
+  run_step "Pull signed release images" rust_candidate_compose pull "$@" || die "Rust release image pull failed"
+  backup_name=pre-rust-update-$(date -u +%Y%m%dT%H%M%SZ)-${rust_candidate_volume##*-}.age
+  run_step "Create encrypted recovery backup" backup_recovery "$env_file" "$backup_name" ||
+    die "update recovery backup failed"
+
+  # Keep the prior selection on disk until the candidate has passed all health
+  # checks. The previous controller volume is never mounted in the candidate.
+  trap '' HUP INT TERM
+  rust_keep_work=true
+  printf 'source_volume=%s\ncandidate_volume=%s\nexit_was_running=%s\nbackup=%s\n' \
+    "$rust_source_volume" "$rust_candidate_volume" "$rust_exit_running" "$backup_name" > "$rust_update_work/transaction"
+  sync -f "$rust_update_work"
+  rust_volume_created=false
+  if docker volume inspect "$rust_candidate_volume" >/dev/null 2>&1; then
+    die "candidate volume already exists; running services unchanged"
+  fi
+  if docker volume create --driver local --label "com.docker.compose.project=$rust_project" \
+    --label com.docker.compose.volume=controller-state "$rust_candidate_volume" >/dev/null; then
+    rust_volume_created=true
+  fi
+  if [ "$rust_volume_created" = false ]; then die "could not create candidate volume; running services unchanged"; fi
+  if run_step "Stop current Rust services" compose --profile exit-node stop exit-node relay controller &&
+    run_step "Copy controller state to the candidate volume" rust_stage_controller_state &&
+    run_step "Select the verified Rust release" rust_publish_selection "$rust_update_work/candidate.env" \
+      "$rust_update_work/candidate.json" "$rust_update_work/metadata" &&
+    run_step "Check updated Rust services and authenticated inventory" rust_start_and_check \
+      "$rust_update_work/candidate-plan.json" "$rust_candidate_volume"; then
+    printf 'Rust control plane updated to %s.\nRecovery backup: generated/recovery/%s\n' "$target_tag" "$backup_name"
+    printf 'Previous controller volume retained: %s\nPrevious release settings: %s/source\n' "$rust_source_volume" "$rust_update_work"
+    return
+  fi
+
+  if run_step "Stop candidate services" compose --profile exit-node stop exit-node relay controller &&
+    run_step "Restore prior Rust release selection" rust_publish_selection "$rust_update_work/source/selection.env" \
+      "$rust_update_work/source/profile.json" "$rust_update_work/source" &&
+    run_step "Check restored Rust services and authenticated inventory" rust_start_and_check \
+      "$rust_update_work/source-plan.json" "$rust_source_volume"; then
+    if ! docker volume rm "$rust_candidate_volume" >/dev/null; then
+      echo "laneway-control: WARNING: candidate state volume retained: $rust_candidate_volume" >&2
+    fi
+    rust_keep_work=false
+    die "update failed; the previous Rust release and its original controller state are back online"
+  fi
+  die "update failed; automatic recovery incomplete. Previous selection: $rust_update_work/source; backup: generated/recovery/$backup_name"
+}
+
 run_update() {
   [ "$#" -eq 0 ] || die "update accepts no arguments"
   [ "$(id -u)" -eq 0 ] || die "update must run as root"
@@ -1956,7 +2183,7 @@ fi
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 if [ "$runtime" = rust ]; then
   case "$command" in
-    status|backup|restore|readiness|production-check|administrator|invite|user-token|api-token|route|help|-h|--help) ;;
+    status|backup|restore|readiness|production-check|administrator|invite|user-token|api-token|route|update|help|-h|--help) ;;
     *) die "refusing the Go lifecycle workflow on a Rust deployment" ;;
   esac
 fi
@@ -1983,7 +2210,7 @@ case "$command" in
     acquire_lock
     run_administrator "$@"
     ;;
-  update) run_update "$@" ;;
+  update) if [ "$runtime" = rust ]; then run_rust_update "$@"; else run_update "$@"; fi ;;
   production-check)
     if [ "$runtime" = rust ]; then die "use laneway-control readiness for Rust deployments"; fi
     acquire_lock

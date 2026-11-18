@@ -19,6 +19,7 @@ for image in "$controller_image" "$relay_image" "$admin_image"; do docker image 
 work=$(mktemp -d /tmp/laneway-fresh-installer.XXXXXX)
 project=laneway-install-${work##*.}
 project=${project,,}
+fixture_source=laneway-rust-update-$(openssl rand -hex 10)
 package="$work/package"
 destination="$work/deploy"
 source_dir="$package/deploy/compose"
@@ -42,6 +43,9 @@ cleanup() {
   if "$fixture_owned" && [[ -f "$destination/.env" ]]; then
     if (( result != 0 )); then compose logs --no-color --tail=25 controller relay >&2 || true; fi
     compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+    while IFS= read -r volume; do
+      [[ -z $volume ]] || /usr/bin/docker volume rm "$volume" >/dev/null 2>&1 || true
+    done < <(/usr/bin/docker volume ls -q --filter "label=com.docker.compose.project=$project")
   fi
   find "$work" -depth -delete
 }
@@ -49,6 +53,7 @@ trap cleanup EXIT
 for role in controller-state relay-public-certs exit-node-state; do
   if docker volume inspect "$project-$role" >/dev/null 2>&1; then exit 2; fi
 done
+if docker volume inspect "$fixture_source" >/dev/null 2>&1; then exit 2; fi
 test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$project")"
 fixture_owned=true
 
@@ -56,7 +61,8 @@ sed -i -e "s/name: laneway-/name: $project-/" \
   -e "s|^    image: ghcr.io/doout/laneway-admin:.*|    image: $admin_image|" \
   -e '/^    driver: bridge$/a\    internal: true' "$source_dir/compose.yaml"
 sed -i -e "s|^    image: ghcr.io/doout/laneway-controller-rust:.*|    image: $controller_image|" \
-  -e "s|^    image: ghcr.io/doout/laneway-relay-rust:.*|    image: $relay_image|" "$source_dir/compose.rust.yaml"
+  -e "s|^    image: ghcr.io/doout/laneway-relay-rust:.*|    image: $relay_image|" \
+  -e "s|:-laneway-controller-state}|:-$fixture_source}|" "$source_dir/compose.rust.yaml"
 
 # Stage only the operator CLI and Compose files via the real archive installer.
 admin_source=$(docker create --network none "$admin_image")
@@ -87,22 +93,28 @@ cat > "$work/bin/curl" <<'EOF'
 set -eu
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    https://release.invalid/v0.0.9104/*) asset=${1##*/}; shift ;;
+    https://release.invalid/v0.0.91[0-9][0-9]/*) asset=${1##*/}; tag=${1%/*}; tag=${tag##*/}; shift ;;
     -o) output=$2; shift 2 ;;
     *) shift ;;
   esac
 done
-cp "$LANEWAY_INSTALLER_FIXTURE/release/$asset" "$output"
+directory=$LANEWAY_INSTALLER_FIXTURE/release
+[ "$tag" = v0.0.9104 ] || directory=$LANEWAY_INSTALLER_FIXTURE/release-$tag
+cp "$directory/$asset" "$output"
 EOF
 cat > "$work/bin/cosign" <<'EOF'
 #!/bin/sh
 set -eu
-identity=https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v0.0.9104
 case "$1" in
-  verify-blob) test "$5" = "$identity" && test "$(cat "$3")" = installer-fixture ;;
-  verify) test "$3" = "$identity" && grep -Fxq "$6" "$LANEWAY_INSTALLER_FIXTURE/release/image-digests.txt" ;;
+  verify-blob) identity=$5; test "$(cat "$3")" = installer-fixture ;;
+  verify) identity=$3 ;;
   *) exit 1 ;;
 esac
+tag=${identity##*/}
+test "$identity" = "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag"
+directory=$LANEWAY_INSTALLER_FIXTURE/release
+[ "$tag" = v0.0.9104 ] || directory=$LANEWAY_INSTALLER_FIXTURE/release-$tag
+[ "$1" = verify-blob ] || grep -Fxq "$6" "$directory/image-digests.txt"
 EOF
 cat > "$work/bin/getent" <<'EOF'
 #!/bin/sh
@@ -156,3 +168,100 @@ test -s "$bundle"
 age --decrypt -i "$work/recovery-kit/laneway-recovery.identity" "$bundle" |
   tar -xOf - FORMAT | grep -Fxq 'LANEWAY_RECOVERY_VERSION=2'
 echo 'PASS: the default installer staged only host tools, started Rust, and produced an encrypted initial recovery bundle.'
+
+# Orchestration uses real local containers, Compose, named volumes, and
+# SQLite/age. Translate fixture image references only: no registry or signing
+# infrastructure is needed. A deliberately broken controller triggers recovery.
+for tag in v0.0.9105 v0.0.9106; do
+  release="$work/release-$tag"
+  mkdir "$release"
+  cp "$work/release/"{checksums.sigstore.json,image-digests.txt} "$release/"
+  sed "s/v0.0.9104/$tag/g" "$work/release/bootstrap-artifacts.toml" > "$release/bootstrap-artifacts.toml"
+  (cd "$release" && sha256sum image-digests.txt bootstrap-artifacts.toml > checksums.txt)
+done
+docker_fixture=$(docker volume inspect --format '{{.Mountpoint}}' "$fixture_source")
+# Use the VM's actual loopback port for the authenticated health check. The
+# original install ran isolated from external networks; no public DNS or ACME
+# verification is part of this fixture.
+compose down
+sed -i '/^    internal: true$/d' "$destination/compose.yaml"
+compose up --detach --wait controller relay
+
+export LANEWAY_UPDATE_TEST_PROJECT="$project" LANEWAY_UPDATE_TEST_DEPLOY="$destination"
+cat > "$work/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+envfile=$LANEWAY_UPDATE_TEST_DEPLOY/.env
+action=
+for ((i=1; i<=$#; i++)); do
+  arg=${!i}
+  case "$arg" in
+    --env-file) next=$((i+1)); envfile=${!next} ;;
+    config|pull|up) [[ $1 != compose ]] || action=$arg ;;
+  esac
+done
+version=$(sed -n 's/^LANEWAY_RUST_VERSION=//p' "$envfile")
+digest="sha256:$(printf '%064d' 1)"
+if [[ $1 == compose && $action == config && " $* " == *' --profile tools '* && " $* " == *' --format json '* ]]; then
+  /usr/bin/docker "$@" | jq --arg v "$version" --arg d "$digest" '
+    .services.controller.image = ("ghcr.io/doout/laneway-controller-rust:" + $v + "@" + $d) |
+    .services.relay.image = ("ghcr.io/doout/laneway-relay-rust:" + $v + "@" + $d) |
+    .services["exit-node"].image = ("ghcr.io/doout/laneway-exit-node-rust:" + $v + "@" + $d) |
+    .services.admin.image = ("ghcr.io/doout/laneway-admin:" + $v + "@" + $d)'
+elif [[ $1 == compose && $action == pull ]]; then
+  /usr/bin/docker image inspect laneway-rust-controller:fresh-init-lab laneway-rust-relay:0.0.9100-lab \
+    laneway-go-admin:compose-cutover-lab >/dev/null
+elif [[ $1 == compose && $action == up && $version == 0.0.9106 ]]; then
+  # Use real Compose but inject an incompatible controller start command.
+  broken="$LANEWAY_UPDATE_TEST_DEPLOY/.broken-controller.yaml"
+  printf 'services:\n  controller:\n    command: [incompatible-test-command]\n' > "$broken"
+  args=()
+  for arg; do
+    if [[ $arg == up ]]; then args+=(-f "$broken"); fi
+    args+=("$arg")
+  done
+  exec /usr/bin/docker "${args[@]}"
+elif [[ $1 == inspect && ${2:-} == --type && ${3:-} == container ]]; then
+  /usr/bin/docker "$@" | jq --arg v "$version" --arg d "$digest" --arg project "$LANEWAY_UPDATE_TEST_PROJECT" '
+    map(if .Config.Labels["com.docker.compose.project"] == $project and
+      (.Config.Image == "laneway-rust-controller:fresh-init-lab" or .Config.Image == "laneway-rust-relay:0.0.9100-lab")
+      then .Config.Image = ("ghcr.io/doout/laneway-" + .Config.Labels["com.docker.compose.service"] + "-rust:" + $v + "@" + $d)
+      else . end)'
+else
+  exec /usr/bin/docker "$@"
+fi
+EOF
+chmod 0700 "$work/bin/docker"
+/usr/bin/docker compose --project-directory "$destination" --env-file "$destination/.env" \
+  -f "$destination/compose.yaml" -f "$destination/compose.rust.yaml" config --quiet
+count_invitations() {
+  python3 -c 'import sqlite3, sys; print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute("SELECT count(*) FROM enrollment_tokens").fetchone()[0])' "$1/controller.db"
+}
+invitations=$(count_invitations "$docker_fixture")
+(( invitations > 0 ))
+LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.0.9105 "$control_link" update v0.0.9105
+active_volume=$(compose config --format json | jq -er '.volumes["controller-state"].name')
+[[ $active_volume != "$fixture_source" && $active_volume == laneway-rust-update-* ]]
+active_database=$(docker volume inspect --format '{{.Mountpoint}}' "$active_volume")
+test "$(count_invitations "$active_database")" = "$invitations"
+grep -Fxq LANEWAY_RUST_VERSION=0.0.9105 "$destination/.env"
+grep -Fq /v0.0.9105/ "$destination/generated/config/bootstrap.rust.json"
+test -s "$docker_fixture/controller.db"
+bundle=$(find "$destination/generated/recovery" -maxdepth 1 -name 'pre-rust-update-*.age' -type f)
+age --decrypt -i "$work/recovery-kit/laneway-recovery.identity" "$bundle" |
+  tar -xOf - FORMAT | grep -Fxq 'LANEWAY_RECOVERY_VERSION=2'
+if LANEWAY_RELEASE_BASE_URL=https://release.invalid/v0.0.9106 "$control_link" update v0.0.9106 > "$work/failure" 2>&1; then
+  echo 'broken fixture was not rejected' >&2
+  exit 1
+fi
+grep -F 'the previous Rust release and its original controller state are back online' "$work/failure"
+test "$(compose config --format json | jq -er '.volumes["controller-state"].name')" = "$active_volume"
+test "$(count_invitations "$active_database")" = "$invitations"
+grep -Fxq LANEWAY_RUST_VERSION=0.0.9105 "$destination/.env"
+grep -Fq /v0.0.9105/ "$destination/generated/config/bootstrap.rust.json"
+"$control_link" status > "$work/restored-status"
+grep -Fxq controller=healthy "$work/restored-status"
+"$control_link" update v0.0.9105 | grep -Fq 'already current'
+if "$control_link" update v0.0.9104 > "$work/downgrade" 2>&1; then exit 1; fi
+grep -Fq 'would downgrade' "$work/downgrade"
+echo 'PASS: signed-release fixture updated the real Rust services, preserved state, and recovered from a broken candidate.'

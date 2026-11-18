@@ -21,10 +21,19 @@ off the control-plane host. Laneway does not manage the host firewall.
 ```sh
 sudo laneway control status
 sudo laneway control backup
+sudo laneway control update
 ```
 
-`status` exits nonzero when a required service is unhealthy. This branch
-does not yet enable `laneway control update` on a Rust control plane.
+`status` exits nonzero when a required service is unhealthy. On a fresh Rust
+Compose install, `update` selects the latest stable release; pass `vX.Y.Z` to
+select an exact release. It verifies release and image signatures, creates an
+encrypted backup, and brings the release up against a separate copy of the
+controller state. If startup or authenticated inventory fails, it restarts
+the previous release against the original state. Plan a maintenance window:
+the controller and relay stop briefly, and changes accepted by a failed
+candidate are discarded. The command reports the retained source volume
+and settings. It does not migrate Go deployments, perform downgrades, or
+replace host CLI and Compose templates.
 
 Connector identities persist in named Docker volumes. Do not remove the volume
 during an upgrade. From the Connector host, use the updater in the signed
