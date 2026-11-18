@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Exercise both connector images in a private loopback-only network namespace.
+# Exercise Connector enrollment or historical cutover in a loopback-only namespace.
 set -euo pipefail
 
 fixture() {
   umask 077
   work="$(mktemp -d)"
+  # shellcheck disable=SC2154 # The trap assigns log in its for loop.
   trap 'result=$?; if [ "$result" -ne 0 ]; then
     for log in "$work/controller.log" "$work/relay.log"; do
       if [ -f "$log" ]; then tail -n 20 "$log" >&2; fi
@@ -120,9 +121,18 @@ if [ "${1:-}" = --prime-cache ]; then
     -w /src/go "$lab_image" go mod download
   exit
 fi
+fresh_only=false
+if [ "${1:-}" = --fresh ]; then
+  fresh_only=true
+  shift
+fi
 go_image="${1:-lane-edge:go-migration-lab}"
 rust_image="${2:-lane-edge:rust-migration-lab}"
 carrier="${3:-relay-quic}"
+if "$fresh_only"; then
+  rust_image="${1:?expected a Rust Connector image}"
+  carrier="${2:-relay-quic}"
+fi
 case "$carrier" in relay-quic|tcp-fallback) ;; *) echo "invalid lab carrier" >&2; exit 1 ;; esac
 original="$(docker volume create --label laneway.test=connector-cutover)"
 fresh="$(docker volume create --label laneway.test=connector-cutover)"
@@ -175,7 +185,7 @@ start() {
 }
 
 identity_bytes() {
-  docker exec "$lab" sh -ec 'cd /original/connector; sha256sum ca.crt node.crt node.key wireguard.key connector.toml'
+  docker exec "$lab" sh -ec 'cd "$1/connector"; sha256sum ca.crt node.crt node.key wireguard.key connector.toml' sh "${1:-/original}"
 }
 
 read_node() {
@@ -202,6 +212,34 @@ read_node() {
     sed -n 's/^[[:space:]]*"node_id": "\([0-9a-f]\{32\}\)"[,]*$/\1/p'
 }
 
+check_rust_process() {
+  docker top "$active" -eo pid,comm | awk 'NR > 1 { if ($2 != "lanewayd-rs") exit 1; seen++ } END { if (seen != 1) exit 1 }'
+}
+
+check_fresh_enrollment() {
+  local version="$1" node_id identity
+  stage="enrolling a new Rust Connector"
+  start "$rust_image" "$fresh" -e SETUP_TOKEN_FILE=/var/lib/laneway/setup.token
+  node_id="$(read_node "$version")"
+  [[ -n "$node_id" && "$node_id" != "${original_id:-}" ]]
+  check_rust_process
+  identity="$(identity_bytes /fresh)"
+  docker exec "$lab" rm -- /fresh/setup.token
+  stage="restarting the Rust Connector with only its saved identity"
+  docker stop --time 5 "$active" >/dev/null
+  start "$rust_image" "$fresh"
+  [ "$(read_node "$version")" = "$node_id" ]
+  check_rust_process
+  [ "$(identity_bytes /fresh)" = "$identity" ]
+}
+
+rust_version="$(docker run --rm --pull never --network none "$rust_image" version)"
+if "$fresh_only"; then
+  check_fresh_enrollment "$rust_version"
+  echo "PASS: fresh Rust Connector enrollment and restart over $carrier"
+  exit
+fi
+
 stage="enrolling and reading the Go Connector"
 start "$go_image" "$original" -e SETUP_TOKEN_FILE=/var/lib/laneway/setup.token
 old="$active"
@@ -222,12 +260,11 @@ docker stop --time 5 "$old" >/dev/null
 
 stage="starting the Rust replacement with the original identity"
 start "$rust_image" "$original"
-rust_version="$(docker run --rm --pull never --network none "$rust_image" version)"
 [ "$(read_node "$rust_version")" = "$original_id" ]
 sleep 1
 docker exec "$active" /usr/local/bin/laneway status --socket /run/laneway/lanewayd.sock --json |
   grep -Eq '"selected_path":[[:space:]]*"'"$carrier"'"'
-docker top "$active" -eo pid,comm | awk 'NR > 1 { if ($2 != "lanewayd-rs") exit 1; seen++ } END { if (seen != 1) exit 1 }'
+check_rust_process
 [ "$(identity_bytes)" = "$before" ]
 docker stop --time 5 "$active" >/dev/null
 
@@ -242,13 +279,5 @@ done
 [ "$(read_node)" = "$original_id" ]
 [ "$(identity_bytes)" = "$before" ]
 
-stage="enrolling and restarting a new Rust-backed Connector"
-start "$rust_image" "$fresh" -e SETUP_TOKEN_FILE=/var/lib/laneway/setup.token
-fresh_id="$(read_node "$rust_version")"
-[ -n "$fresh_id" ] && [ "$fresh_id" != "$original_id" ]
-docker top "$active" -eo pid,comm | awk 'NR > 1 { if ($2 != "lanewayd-rs") exit 1; seen++ } END { if (seen != 1) exit 1 }'
-docker exec "$lab" rm -- /fresh/setup.token
-docker stop --time 5 "$active" >/dev/null
-start "$rust_image" "$fresh"
-[ "$(read_node "$rust_version")" = "$fresh_id" ]
+check_fresh_enrollment "$rust_version"
 echo "PASS: Go-to-Rust cutover, offline preflight, rollback, and new enrollment over $carrier"

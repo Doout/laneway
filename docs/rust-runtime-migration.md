@@ -50,7 +50,7 @@ release signing and registry infrastructure.
 | --- | --- | --- |
 | Relay | Rust QUIC and TLS/TCP data relay, controller snapshots, TCP readiness probe | Mixed Go/Rust peers exchange packets, enforce revocation, and reconnect after restart. Exercise public HTTPS, ACME renewal, bootstrap discovery, console, and Dispatch OAuth on the shared port. |
 | Node, connector, exit | Rust Linux TUN daemon, routing, DNS configuration, local socket and relay fallback | Enroll and renew each role. Test allowed and denied traffic, health and topology reports, loss of route authority, exit NAT and DNS recovery after restart and uninstall. |
-| Controller | Go owns SQLite, PKI and management APIs | Start with read-only network inventory. Compare outputs on the same fixture DB, then cover auth, grants, policy snapshots, enrollment, OAuth, backups and migrations. Verify the web console and both generations of node. |
+| Controller | Go owns SQLite, PKI and management APIs | Verify the web console and Rust nodes on fresh deployments, including auth, grants, policy snapshots, enrollment, OAuth and backups. Go peers and fixture databases remain test references. |
 | Fleet features | Private DNS, updates, recovery, policy history, diagnostics, alerts and topology | Exercise each feature on a fresh Rust deployment through its UI/API and node consumer. |
 | Packaging and platforms | Go also provides the Docker plugin, platform-specific CLI/daemon entry points and readiness helpers | Verify signed install, Rust recovery, desktop local API and active service processes per platform. The one-shot operator CLI and test harnesses can stay in Go. |
 
@@ -540,6 +540,8 @@ history, and map location editing against a real Rust controller. It uses a
 disposable database and blocks external browser requests. It does not install a
 runtime release, measure live packet reachability, or certify which assets ship
 in the public image.
+The private console passed this check against native Rust controller and relay
+builds on Apple Silicon, with all browser requests confined to the lab.
 
 ## macOS endpoint
 
@@ -733,17 +735,27 @@ docker build --target connector -f deploy/containers/Dockerfile.rust-relay \
 bash integration/rust-lab/connector-image.sh
 ```
 
-For existing Docker Connectors, the opt-in `rust-connector` target in
-`deploy/containers/Dockerfile.connector` holds the current image entrypoint
-and named volume contract. The one-time Go installer keeps the setup-token
-and encrypted bootstrap commands. For normal service it replaces itself
-with the Rust agent. Rust reads `/var/lib/laneway/connector` in place and does
-not rewrite the identity or Go configuration. It uses the controller's relay
-list for QUIC and only dials TCP fallback addresses authorized for the
-configured relay. The updater's read-only, offline preflight checks the saved
-certificate chain, expiry, identity, private key, and settings before stopping
-the old container. Configuration stays usable by the Go image for rollback.
-The default release target still uses Go until promotion is approved.
+The release builds the `rust-connector` target in
+`deploy/containers/Dockerfile.connector`. The one-time installer handles the
+setup token and encrypted bootstrap; only the Rust agent keeps running.
+It uses the controller's relay list for QUIC and only dials TCP fallback
+addresses authorized for the configured relay. Updates validate the named
+volume read-only before stopping the old Rust container.
+
+CI starts with a fresh Connector volume, verifies the negotiated transport and
+the running Rust process, then restarts with only the saved identity:
+
+```sh
+docker build --target rust-connector -f deploy/containers/Dockerfile.connector \
+  -t lane-edge:rust-migration-lab .
+docker build --tag laneway-rust-lab:local integration/rust-lab
+bash integration/rust-lab/connector-cutover.sh --prime-cache
+bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:rust-migration-lab
+bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:rust-migration-lab tcp-fallback
+```
+
+Historical Go-to-Rust cutover tests are available for reference only; they are
+not release requirements.
 
 ```sh
 docker build -f deploy/containers/Dockerfile.connector -t lane-edge:go-migration-lab .

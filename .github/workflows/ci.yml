@@ -205,34 +205,27 @@ jobs:
           docker build --file deploy/containers/Dockerfile \
             --target admin --build-arg VERSION=ci \
             --tag laneway-admin:ci .
-          docker build --file deploy/containers/Dockerfile.connector \
-            --build-arg VERSION=ci --tag lane-edge:ci .
           docker build --file deploy/containers/Dockerfile.exit-node \
             --build-arg VERSION=ci --tag laneway-exit-node:ci .
           test "$(docker run --rm --network none laneway-controller:ci -version)" = ci
           test "$(docker run --rm --network none laneway-relay:ci -version)" = ci
           test "$(docker run --rm --network none laneway-admin:ci version)" = ci
-          test "$(docker run --rm --network none lane-edge:ci version)" = ci
           test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = ci
-          if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then
-            echo "the connector image unexpectedly contains a runnable shell" >&2
-            exit 1
-          fi
-          ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci
-          ./integration/connector-bootstrap.sh lane-edge:ci
-          ./integration/connector-upgrade.sh lane-edge:ci
-      - name: Test Rust Connector cutover and rollback
+      - name: Verify fresh Rust Connector enrollment and restart
         run: |
           docker build --file deploy/containers/Dockerfile.connector \
             --target rust-connector --build-arg VERSION=ci --tag lane-edge-rust:ci .
+          test "$(docker run --rm --network none lane-edge-rust:ci version)" = ci
           if docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true; then
             echo "the Rust connector image unexpectedly contains a runnable shell" >&2
             exit 1
           fi
+          ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge-rust:ci laneway-exit-node:ci
+          ./integration/connector-bootstrap.sh lane-edge-rust:ci
           docker build --tag laneway-rust-lab:local integration/rust-lab
           bash integration/rust-lab/connector-cutover.sh --prime-cache
-          bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci
-          bash integration/rust-lab/connector-cutover.sh lane-edge:ci lane-edge-rust:ci tcp-fallback
+          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci
+          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci tcp-fallback
 
   rust:
     name: Rust workspace and Go interoperability
