@@ -59,6 +59,7 @@ EOF
 cat > "$work_dir/bin/cosign" <<'EOF'
 #!/bin/sh
 set -eu
+if [ "$1" = version ]; then printf '%s\n' '{"gitVersion":"v3.1.3"}'; exit 0; fi
 test "$1" = verify-blob
 test "$2" = --bundle
 test -s "$3"
@@ -165,8 +166,9 @@ env \
   LANEWAY_INSTALLER_TEST_RECORD="$linux_record" \
   sh "$repo_dir/install.sh"
 
-grep -Fx "package install DESTDIR=$work_dir/linux-root PREFIX=/usr/local" \
-  "$linux_record" >/dev/null
+expected=$(printf '%s\n' signature-verified \
+  "package install DESTDIR=$work_dir/linux-root PREFIX=/usr/local" --rust-preview)
+test "$(cat "$linux_record")" = "$expected"
 
 linux_preview() {
   env PATH="$work_dir/bin:$PATH" DESTDIR="$work_dir/linux-preview" LANEWAY_INSTALLER_TEST_OS=Linux \
@@ -190,6 +192,6 @@ if linux_preview "$work_dir/fixture/legacy" "$work_dir/linux-legacy-record" >"$w
   exit 1
 fi
 test "$(cat "$work_dir/linux-legacy-record")" = signature-verified
-grep -F 'does not provide the Linux Rust preview package' "$work_dir/linux-legacy.out" >/dev/null
+grep -F 'does not provide the Linux Rust package' "$work_dir/linux-legacy.out" >/dev/null
 
 echo "one installer detects, verifies, and installs Laneway on macOS and Linux"

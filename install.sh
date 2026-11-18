@@ -93,12 +93,12 @@ usage: sh install.sh [--client | --rust-preview | --control-plane [--production]
 Without options, install the latest Laneway client and packaged files on Linux
 or macOS. On Linux, setting LANEWAY_DOMAIN runs the control-plane quick setup
 with non-interactive defaults. Use --client to force a client-only install.
-Use --rust-preview to install the optional Rust runtimes from a signed release
-archive. It requires Cosign. Go remains the default; no service is enabled.
+Linux clients use the signed Rust release archive. Nothing is started until
+enrollment. On macOS, use --rust-preview to install the Rust runtime.
 With --control-plane, select a stable release tag, verify its signed release,
 install it, and start the interactive hardened control-plane installer.
-The default quick profile warns on unavailable signature services and writes a
-production checklist. Add --production to make all signature checks fail closed.
+Both control-plane install profiles require valid signatures and write a
+production checklist.
 With --prepare-control-plane, create a recovery kit and the limited input that
 may be copied to a separate production control-plane server.
 With --upgrade-control-plane, safely upgrade an existing /opt/laneway control
@@ -133,13 +133,17 @@ case "$(uname -m)" in
     exit 1
     ;;
 esac
+if [ "$operating_system" = linux ] &&
+  [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
+  rust_preview=true
+fi
 missing=
 checksum_command=sha256sum
 if [ "$operating_system" = darwin ]; then checksum_command=shasum; fi
 for command in awk base64 curl date find grep mktemp readlink sed "$checksum_command" tar wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
-if [ "$rust_preview" = true ]; then
+if [ "$rust_preview" = true ] && [ "$operating_system" = darwin ]; then
   cosign_bin=$(command -v cosign 2>/dev/null) || add_missing "cosign (required to verify the Rust preview release)"
 fi
 
@@ -236,6 +240,10 @@ fi
 download_dir=$(mktemp -d)
 trap 'find "$download_dir" -depth -delete' EXIT HUP INT TERM
 
+if [ "$rust_preview" = true ] && [ "$operating_system" = linux ] && ! select_cosign; then
+  echo "Laneway Linux install requires a working pinned signature verifier." >&2
+  exit 1
+fi
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   if ! select_cosign && { [ "$install_control_plane" = true ] || [ "$production_mode" = true ]; }; then
     echo "Laneway control-plane install requires a working pinned signature verifier." >&2
@@ -331,7 +339,7 @@ if [ "$rust_preview" = true ]; then
   if [ ! -x "$download_dir/laneway/sbin/lanewayd-rs" ] ||
      [ ! -f "$download_dir/laneway/VERSION" ] ||
      [ "$(sed -n '1p' "$download_dir/laneway/VERSION")" != "${release#v}" ]; then
-    echo "release $release does not provide the Linux Rust preview package" >&2
+    echo "release $release does not provide the Linux Rust package" >&2
     exit 1
   fi
   set -- --rust-preview
@@ -342,7 +350,7 @@ else
   env DESTDIR="${DESTDIR:-}" PREFIX=/usr/local sh "$download_dir/laneway/install.sh" "$@"
 fi
 
-if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ]; then
+if [ "$cosign_is_fallback" = true ] && [ -n "$cosign_bin" ] && [ "$rust_preview" = false ]; then
   install -D -m 0755 -o 0 -g 0 "$cosign_bin" /usr/local/libexec/laneway/cosign-v3.1.3
   cosign_bin=/usr/local/libexec/laneway/cosign-v3.1.3
 fi

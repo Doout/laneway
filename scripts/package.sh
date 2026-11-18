@@ -85,7 +85,11 @@ ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$versio
 			CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
 				go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/$command" "./cmd/$command"
 		done
-		ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
+		if [ -n "$package_rust_runtime_dir" ] || [ -n "$package_rust_node" ]; then
+			ln -s lanewayd-rs "$package_dir/sbin/lanewayd"
+		else
+			ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
+		fi
 	fi
 )
 

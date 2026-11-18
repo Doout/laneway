@@ -49,6 +49,8 @@ test_systemd="${LANEWAY_NODE_WIREGUARD_SYSTEMD:-0}"
 test_invitation="${LANEWAY_NODE_WIREGUARD_INVITATION:-0}"
 packaged_node="${LANEWAY_NODE_TEST_PACKAGED_INSTALL:-}"
 packaged_relay="${LANEWAY_NODE_TEST_PACKAGED_RELAY:-0}"
+managed_invitation="${LANEWAY_NODE_TEST_MANAGED_INVITATION:-0}"
+snapshot_seconds=2
 if [[ -n "${packaged_node}" ]]; then
   [[ "${packaged_node}" == /* && "${test_wireguard}:${test_durable_exit}" == 0:0 &&
      ( "${node_controller}:${packaged_relay}" == go:0 || "${node_controller}:${packaged_relay}" == rust:1 ) &&
@@ -61,6 +63,11 @@ if [[ -n "${packaged_node}" ]]; then
 elif [[ "${packaged_relay}" != 0 ]]; then
   echo 'Packaged relay mode requires an installed package fixture' >&2
   exit 1
+fi
+if [[ "${managed_invitation}" != 0 ]]; then
+  [[ "${managed_invitation}:${packaged_relay}" == 1:1 && -n "${packaged_node}" ]] ||
+    { echo 'Managed invitation gate requires packaged Rust node and relay units' >&2; exit 1; }
+  snapshot_seconds=10
 fi
 if [[ "${test_dns}" == "1" ]]; then
   [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
@@ -75,7 +82,6 @@ if [[ "${test_topology}" == "1" ]]; then
   topology_config='topology_reporting = true'
 fi
 credential_dir=""
-snapshot_seconds=2
 if [[ "${test_drain}" == "1" ]]; then
   [[ "${test_wireguard}:${wireguard_native}" == "1:1" ]] || { echo "Drain requires native WireGuard" >&2; exit 1; }
   snapshot_seconds=30
@@ -430,7 +436,7 @@ gateway_token="$(printf '%s\n' "${gateway_token_json}" | json_string_field enrol
 (umask 077; printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token")
 
 rust_join=""
-if [[ "${test_invitation}" != "1" ]]; then
+if [[ "${test_invitation}:${managed_invitation}" == "0:0" ]]; then
   rust_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
     --network-id "${network_id}" --label rust-node --expires-in 10m "${rust_role[@]}" "${admin_connection[@]}")"
   rust_token="$(printf '%s\n' "${rust_token_json}" | json_string_field enrollment_token)"
@@ -461,7 +467,7 @@ gateway_overlay="$(printf '%s\n' "${gateway_join}" | sed -n 's/.* overlay=\([^, 
 rust_address="${rust_overlay%/32}"
 gateway_address="${gateway_overlay%/32}"
 if [[ ! "${gateway_id}" =~ ^[0-9a-f]{32}$ || -z "${gateway_address}" ]] ||
-  { [[ "${test_invitation}" != "1" ]] && [[ ! "${rust_id}" =~ ^[0-9a-f]{32}$ || -z "${rust_address}" ]]; }; then
+  { [[ "${test_invitation}:${managed_invitation}" == "0:0" ]] && [[ ! "${rust_id}" =~ ^[0-9a-f]{32}$ || -z "${rust_address}" ]]; }; then
   echo "ERROR: failed to parse enrollment results" >&2
   printf '%s\n%s\n' "${rust_join}" "${gateway_join}" >&2
   exit 1
@@ -514,13 +520,17 @@ if [[ "${node_controller}" == "rust" ]]; then
       iifname eth0 ip saddr 81.2.69.140 ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
   fi
   discovery_args=()
-  if [[ "${test_invitation}" == "1" ]]; then
+  if [[ "${test_invitation}" == "1" || "${managed_invitation}" == "1" ]]; then
     # Rust is the only controller once the fixture database is provisioned.
     stop_process "${controller_pid}"
     gateway_config_endpoint="${node_endpoint}"
     gateway_quic_endpoint="${node_quic_endpoint}"
+    case "$(uname -m)" in x86_64) lab_arch=amd64 ;; aarch64) lab_arch=arm64 ;; *) exit 2 ;; esac
     jq -n --arg https "${node_endpoint}" --arg quic "${node_quic_endpoint}" --arg name "${discovery_name}" \
-      '{enrollment_endpoint:$https, quic_endpoint:$quic, server_name:$name}' >"${work_dir}/bootstrap-profile.json"
+      --arg arch "${lab_arch}" --arg sha "$(printf '%064d' 1)" \
+      '{enrollment_endpoint:$https, quic_endpoint:$quic, server_name:$name,
+        artifacts:[{os:"linux",arch:$arch,url:"https://release.invalid/node.tar.gz",sha256:$sha,size_bytes:123}]}' \
+      >"${work_dir}/bootstrap-profile.json"
     discovery_args=(--bootstrap-profile "${work_dir}/bootstrap-profile.json")
   fi
   if [[ "${test_topology}" == "1" ]]; then
@@ -621,7 +631,7 @@ output_interface = "lan1"
 enabled = false
 EOF
 
-if [[ "${test_invitation}" != "1" ]]; then
+if [[ "${test_invitation}:${managed_invitation}" == "0:0" ]]; then
   cat >"${work_dir}/rust.toml" <<EOF
 mode = "node"
 socket_path = "${work_dir}/rust.sock"

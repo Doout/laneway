@@ -36,8 +36,8 @@ for name in $rust_commands; do
   done
 done
 if ! tar -tvzf "$archive" laneway/sbin/lanewayd |
-  grep -F 'laneway/sbin/lanewayd -> ../bin/laneway' >/dev/null; then
-  echo "the Rust preview must not change the default Go daemon link" >&2
+  grep -F 'laneway/sbin/lanewayd -> lanewayd-rs' >/dev/null; then
+  echo "the Linux archive must select the Rust daemon" >&2
   exit 1
 fi
 for member in examples/managed-updates-rust.toml systemd/laneway-rust-updater.service systemd/laneway-rust-updater.timer \
@@ -61,12 +61,13 @@ test ! -e "$control_root/etc/laneway"
 destination=$probe_dir/installed
 DESTDIR="$destination" PREFIX=/usr/local sh "$package/install.sh" >/dev/null
 installed=$destination/usr/local
-test "$(readlink "$installed/sbin/lanewayd")" = ../bin/laneway
-test ! -e "$installed/sbin/lanewayd-rs"
-test ! -e "$installed/lib/systemd/system/lanewayd-rs.service"
-
-DESTDIR="$destination" PREFIX=/usr/local sh "$package/install.sh" --rust-preview >/dev/null
-test "$(readlink "$installed/sbin/lanewayd")" = ../bin/laneway
+test "$(readlink "$installed/sbin/lanewayd")" = lanewayd-rs
+for command in laneway-controller laneway-relay; do
+  test ! -e "$installed/sbin/$command"
+done
+for unit in lanewayd.service laneway-controller.service laneway-relay.service; do
+  test ! -e "$installed/lib/systemd/system/$unit"
+done
 for name in $rust_commands; do
   cmp "$probe_dir/$name" "$installed/sbin/$name"
   test "$("$installed/sbin/$name" --version)" = "$expected_version"
@@ -79,11 +80,11 @@ test -z "$(find "$units" -type l -print -quit)"
 test ! -e "$destination/etc/laneway"
 
 mv "$package/sbin/lanewayd-rs" "$probe_dir/missing-rust-node"
-if DESTDIR="$probe_dir/rejected" PREFIX=/usr/local sh "$package/install.sh" --rust-preview >"$probe_dir/rejected.log" 2>&1; then
-  echo 'partial Rust preview unexpectedly installed' >&2
+if DESTDIR="$probe_dir/rejected" PREFIX=/usr/local sh "$package/install.sh" >"$probe_dir/rejected.log" 2>&1; then
+  echo 'partial Linux Rust package unexpectedly installed' >&2
   exit 1
 fi
 grep -F 'requires a packaged lanewayd-rs' "$probe_dir/rejected.log" >/dev/null
 test ! -e "$probe_dir/rejected"
-printf 'Verified five static Rust %s runtimes at %s, preview installation, and daemon-free control-plane tools.\n' \
+printf 'Verified five static Rust %s runtimes at %s, default installation, and daemon-free control-plane tools.\n' \
   "$architecture" "$expected_version"

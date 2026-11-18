@@ -29,11 +29,10 @@ if [ "$(uname -s)" = Darwin ]; then
   exit 0
 fi
 
-rust_preview=false
 control_tools=false
 case "$#:${1:-}" in
   0:) ;;
-  1:--rust-preview) rust_preview=true ;;
+  1:--rust-preview) ;;
   1:--control-tools) control_tools=true ;;
   *) echo "usage: sh install.sh [--rust-preview | --control-tools]" >&2; exit 2 ;;
 esac
@@ -65,26 +64,24 @@ fi
 rust_commands='laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs'
 rust_units='lanewayd-rs.service laneway-relay-rs.service laneway-rust-updater.service laneway-rust-updater.timer'
 rust_examples='node-rust.toml node-rust-controller.toml relay-rust.toml managed-updates-rust.toml'
-if [ "$rust_preview" = true ]; then
-  version=$(cat "$script_dir/VERSION")
-  for command in $rust_commands; do
+version=$(cat "$script_dir/VERSION")
+for command in $rust_commands; do
     candidate=$script_dir/sbin/$command
     if [ ! -f "$candidate" ] || [ -L "$candidate" ] || [ ! -x "$candidate" ] ||
        ! candidate_version=$("$candidate" --version) || [ "$candidate_version" != "$version" ]; then
-      echo "the Linux Rust preview requires a packaged $command at version $version" >&2
+      echo "the Linux package requires a packaged $command at version $version" >&2
       exit 1
     fi
-  done
-  # Complete the preview preflight before creating accounts or writing files.
-  for unit in $rust_units; do
+done
+# Check the entire Rust package before creating accounts or writing files.
+for unit in $rust_units; do
     [ -f "$script_dir/systemd/$unit" ] && [ ! -L "$script_dir/systemd/$unit" ] ||
-      { echo "missing Rust preview unit: $unit" >&2; exit 1; }
-  done
-  for example in $rust_examples; do
+      { echo "missing Rust unit: $unit" >&2; exit 1; }
+done
+for example in $rust_examples; do
     [ -f "$script_dir/examples/$example" ] && [ ! -L "$script_dir/examples/$example" ] ||
-      { echo "missing Rust preview example: $example" >&2; exit 1; }
-  done
-fi
+      { echo "missing Rust example: $example" >&2; exit 1; }
+done
 
 if [ -z "$destination_root" ]; then
   if ! getent group laneway >/dev/null 2>&1; then
@@ -128,10 +125,7 @@ install -d -m 0755 "$bindir" "$sbindir" "$sharedir/examples" \
 	"$sharedir/deploy" "$sharedir/integration" "$unitdir"
 install -m 0755 "$script_dir/bin/laneway" "$bindir/laneway"
 ln -sfn laneway "$bindir/lane"
-for command in laneway-relay laneway-controller; do
-  install -m 0755 "$script_dir/sbin/$command" "$sbindir/$command"
-done
-ln -sfn ../bin/laneway "$sbindir/lanewayd"
+ln -sfn lanewayd-rs "$sbindir/lanewayd"
 install -m 0755 "$script_dir/sbin/laneway-setup-node" "$sbindir/laneway-setup-node"
 install -m 0755 "$script_dir/deploy/containers/update-connector.sh" \
   "$sbindir/laneway-update-connector"
@@ -141,17 +135,12 @@ install -m 0644 "$script_dir"/nftables/* "$sharedir/nftables/"
 cp -R "$script_dir/spec/." "$sharedir/spec/"
 cp -R "$script_dir/deploy/." "$sharedir/deploy/"
 cp -R "$script_dir/integration/." "$sharedir/integration/"
-for unit in lanewayd.service laneway-relay.service laneway-controller.service; do
+for command in $rust_commands; do
+  install -m 0755 "$script_dir/sbin/$command" "$sbindir/$command"
+done
+for unit in $rust_units; do
   install -m 0644 "$script_dir/systemd/$unit" "$unitdir/"
 done
-if [ "$rust_preview" = true ]; then
-  for command in $rust_commands; do
-    install -m 0755 "$script_dir/sbin/$command" "$sbindir/$command"
-  done
-  for unit in $rust_units; do
-    install -m 0644 "$script_dir/systemd/$unit" "$unitdir/"
-  done
-fi
 install -m 0644 "$script_dir/README.md" "$script_dir/SECURITY.md" \
   "$script_dir/LICENSE-MIT" "$script_dir/LICENSE-APACHE" \
   "$script_dir/VERSION" "$sharedir/"
@@ -161,9 +150,7 @@ if [ -z "$destination_root" ] && command -v systemctl >/dev/null 2>&1; then
 fi
 
 echo "Laneway $(cat "$script_dir/VERSION") installed."
-if [ "$rust_preview" = true ]; then
-  echo "Rust runtimes and service units installed. No Rust service or updater was enabled."
-fi
+echo "Rust runtimes and service units installed. No service or updater was enabled."
 echo "Examples: $prefix/share/laneway/examples"
 echo "Next for a managed Node: sudo laneway node install DOMAIN"
 echo "Compatibility alias: laneway-setup-node DOMAIN"

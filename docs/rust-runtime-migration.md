@@ -7,8 +7,8 @@ operator CLI and lab tools can still be used without running a Go server.
 
 ## Release handoff
 
-This branch's fresh control-plane installer selects Rust. Before publishing
-or deploying it, verify the following on the signed candidate:
+Fresh control-plane and managed Linux node installs select Rust. Before
+publishing or deploying them, verify the following on the signed candidate:
 
 1. Run the native release matrix on the release commit, including the Linux
    systemd packet tests and the installed macOS helper on Intel and Apple
@@ -46,32 +46,33 @@ The local ARM64 lab built all four new image targets and verified that
 their non-root Rust binaries reported the pinned build version. The tagged
 AMD64 build, signing, and publication were not exercised locally.
 
-## Linux release preview
+## Linux managed nodes
 
-The Linux release workflow builds the Rust runtime candidates on native
+The Linux release workflow builds the Rust runtimes on native
 AMD64 and ARM64 runners and includes them in the signed archives as
 `sbin/laneway-controller-rs`, `sbin/laneway-relay-rs`,
 `sbin/lanewayd-rs`, `sbin/laneway-healthcheck-rs`, and
-`sbin/laneway-update-rs`. The Go binaries,
-the default `lanewayd` link, and the production image tags are unchanged.
-On Linux, the signed installer accepts `--rust-preview` to install those five
-executables, the Rust node and relay units, and the managed updater unit and
-timer. It refuses a Go-only archive or a runtime from a different version.
-The installer does not start, stop, switch, or enable services. The ordinary
-install still selects Go.
+`sbin/laneway-update-rs`. The signed Linux installer installs the matching
+Rust executables and systemd units. `lanewayd` points to the Rust daemon;
+`laneway` remains the one-shot operator CLI. Installing the package does not
+enable or start services or the updater. Go-only and mixed-version archives
+are rejected. The macOS helper still uses its separate preview procedure.
 
-On an isolated host, first verify the release and pin its tag with
-`LANEWAY_VERSION` when running the signed download installer. With a locally
-verified archive already extracted, run `sudo sh install.sh --rust-preview`
-inside its `laneway` directory. To try the installed Rust node, prepare
-`/etc/laneway/node-rust.toml` with the same trusted identity. For automatic
-renewal, use a leaf certificate owned by `laneway:laneway` in a private
-directory beneath `/var/lib/laneway`. Keep the private key and CA readable by
-the service but protected from writes under `/etc/laneway`. Check it with
-`lanewayd-rs --config /etc/laneway/node-rust.toml --check-config`. Stop the Go
-node before starting `lanewayd-rs.service`; both use the same local socket and
-must not run together. Roll back by stopping the Rust unit before starting
-`lanewayd.service` with its unchanged Go configuration.
+On an isolated Linux host, pin the release tag with `LANEWAY_VERSION` when
+using the signed download installer. With an already verified archive, run
+`sudo sh install.sh` inside its extracted `laneway` directory. Then enroll
+with `sudo laneway node install DOMAIN --token-file /path/to/invitation`.
+Add `--no-start` to enroll without enabling the unit. To start that install
+later, run the same command with the same node options but without the token
+file or `--no-start`. Use `sudo laneway node status` to inspect the install
+and `sudo laneway node uninstall` to remove it.
+
+The CLI writes `/etc/laneway/node-rust.toml` and configures `lanewayd-rs.service`.
+The daemon renews its certificate automatically in `/var/lib/laneway/identity`;
+its private key and CA are protected from daemon writes under `/etc/laneway`.
+The installer refuses to overwrite an unmanaged configuration or to start
+alongside another node service. It does not migrate old installations.
+
 For a controller-managed standalone relay, base `/etc/laneway/relay-rust.toml`
 on the packaged `relay-controller.toml` example. For native workload
 renewal, add `renewal_dir = "/var/lib/laneway-relay/workload"` to its TLS
@@ -95,8 +96,9 @@ sh integration/rust-release-package.sh "dist/laneway_linux_$arch.tar.gz" "$arch"
 
 The archive gate checks architecture and static linkage, executes each packaged
 binary to verify its build version, and exercises both installer modes in an
-isolated staging root. It checks that the Go link is unchanged, that the Rust
-units point to the Rust binaries, and that a partial preview creates no files.
+isolated staging root. It checks the Rust daemon link and units, confirms
+that control-plane tools install no host daemon, and rejects a partial package
+before it creates files.
 To test the archived binaries with real traffic, extract the `-rs` entries into
 a disposable directory and point `LANEWAY_NODE_TEST_RUST_RUNTIME_DIR` at that
 directory when running `integration/rust-controller-node-netns.sh` on the
@@ -104,10 +106,10 @@ isolated host. The package alone does not satisfy the systemd or cutover gates.
 
 The unsigned native AMD64 archive `0.0.9102` passed the package check at
 SHA-256 `b65960975cc6f38a7c694b88a5a89c4d7e33b5c1a085b98025046a153b1f531c`.
-All five packaged Rust binaries ran and reported that version. The default
-Go daemon link remained unchanged. Staged installation later passed with
+All five packaged Rust binaries ran and reported that version. Staged
+installation later passed with
 the same Rust binaries on AMD64 and with the ARM64 `0.0.0-fleet-rust-lab`
-build, including refusal of an incomplete preview package.
+build, including refusal of an incomplete package.
 
 The release builds run `integration/rust-release-systemd.sh` on native AMD64
 and ARM64 runners. It extracts the actual archive binaries and runs the
@@ -123,6 +125,13 @@ Both installed units passed on native Linux AMD64 and ARM64 with unsigned
 lab builds and left no service account or credentials behind. AMD64 used
 the `0.0.9102` archive for all Rust services; ARM64 paired the packaged node
 and relay with a newer `0.0.9100` Rust controller.
+
+The managed node gate exercises the default `node install` with a real
+invitation and verifies startup without a second token, the actual Rust
+process and health socket, and packet transfer through the Rust relay. It
+also checks that uninstall removes the node's credentials, socket, and
+tunnel without removing unrelated state. This passed on the ARM64 lab using
+locally staged unsigned binaries; the signed release matrix is still pending.
 
 The release gate also redeems a real one-use invitation through Rust HTTPS discovery and
 enrollment, rejects a replay, and forwards traffic using the configuration
