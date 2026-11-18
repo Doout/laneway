@@ -47,6 +47,16 @@ test_drain="${LANEWAY_NODE_WIREGUARD_DRAIN:-0}"
 test_credentials="${LANEWAY_NODE_WIREGUARD_CREDENTIALS:-0}"
 test_systemd="${LANEWAY_NODE_WIREGUARD_SYSTEMD:-0}"
 test_invitation="${LANEWAY_NODE_WIREGUARD_INVITATION:-0}"
+packaged_node="${LANEWAY_NODE_TEST_PACKAGED_INSTALL:-}"
+if [[ -n "${packaged_node}" ]]; then
+  [[ "${packaged_node}" == /* && "${node_controller}:${test_wireguard}:${test_durable_exit}" == go:0:0 &&
+     "$(cat /proc/1/comm)" == systemd &&
+     -f /run/.laneway-isolated-systemd-lab && ! -L /run/.laneway-isolated-systemd-lab &&
+     "$(stat -c '%u:%a' /run/.laneway-isolated-systemd-lab)" == 0:600 ]] ||
+    { echo "Packaged node gate requires a marked disposable systemd VM and the Go compatibility fixture" >&2; exit 1; }
+  # shellcheck source=integration/rust-lab/packaged-node.sh
+  source "${repo_root}/integration/rust-lab/packaged-node.sh"
+fi
 if [[ "${test_dns}" == "1" ]]; then
   [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
     { echo "Private DNS gate requires the default node profile and Rust controller" >&2; exit 1; }
@@ -96,6 +106,14 @@ case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller
 work_dir="$(mktemp -d -t laneway-rust-controller.XXXXXX)"
 
 cleanup() {
+  local result=$?
+  if [[ -n "${packaged_node}" ]]; then
+    if [[ $result != 0 && $packaged_node_owned == true ]]; then
+      tail -n 40 /var/lib/laneway/fixture.log 2>/dev/null || true
+      systemctl status --no-pager lanewayd-rs.service >&2 || true
+    fi
+    cleanup_packaged_node || true
+  fi
   if [[ "${test_systemd}" == "1" ]]; then
     cleanup_systemd_exit || true
   fi
@@ -119,7 +137,9 @@ cleanup() {
     rm -rf -- "${work_dir}"
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start_process() {
   local namespace="$1" log="$2"
@@ -967,6 +987,11 @@ EOF
     fi
   done
   echo "PASS: the ephemeral Rust peer and durable Go peer exchange encrypted kernel traffic across the ${node_controller} relay"
+  exit 0
+fi
+
+if [[ -n "${packaged_node}" ]]; then
+  check_packaged_node
   exit 0
 fi
 

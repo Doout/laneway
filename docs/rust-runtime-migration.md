@@ -63,7 +63,10 @@ On an isolated host, first verify the release and pin its tag with
 `LANEWAY_VERSION` when running the signed download installer. With a locally
 verified archive already extracted, run `sudo sh install.sh --rust-preview`
 inside its `laneway` directory. To try the installed Rust node, prepare
-`/etc/laneway/node-rust.toml` with the same trusted identity and check it with
+`/etc/laneway/node-rust.toml` with the same trusted identity. For automatic
+renewal, use a leaf certificate owned by `laneway:laneway` in a private
+directory beneath `/var/lib/laneway`. Keep the private key and CA readable by
+the service but protected from writes under `/etc/laneway`. Check it with
 `lanewayd-rs --config /etc/laneway/node-rust.toml --check-config`. Stop the Go
 node before starting `lanewayd-rs.service`; both use the same local socket and
 must not run together. Roll back by stopping the Rust unit before starting
@@ -103,6 +106,12 @@ build, including refusal of an incomplete preview package.
 The release builds run `integration/rust-release-systemd.sh` on native AMD64
 and ARM64 runners. It extracts the actual archive binaries and runs the
 isolated systemd packet gate against both the Go and Rust controller/relay.
+It also stages the package with its installer and runs the ordinary
+`lanewayd-rs.service` with its packaged sandbox and service account. The
+ordinary-node test requires certificate renewal, traffic to a Go peer,
+an authenticated local health probe, and socket and tunnel cleanup.
+The packaged ordinary-node unit passed on both native Linux architectures
+with unsigned lab archives and left no service account or credentials behind.
 It also redeems a real one-use invitation through Rust HTTPS discovery and
 enrollment, rejects a replay, and forwards traffic using the configuration
 and protected credentials produced by the packaged Go enrollment CLI. It

@@ -9,7 +9,9 @@ network_id = "000102030405060708090a0b0c0d0e0f"
 node_id = "101112131415161718191a1b1c1d1e1f"
 
 [tls]
-certificate = "/etc/laneway/node.crt"
+# Put the renewable leaf in a laneway-owned 0700 directory under
+# StateDirectory. Keep the private key and CA in the read-only configuration.
+certificate = "/var/lib/laneway/identity/node.crt"
 private_key = "/etc/laneway/node.key"
 ca = "/etc/laneway/ca.crt"
 
@@ -21,6 +23,7 @@ endpoint = "https://controller.example.com:8443"
 quic_endpoint = "controller.example.com:8443"
 server_name = "controller.example.com"
 service_id = "404142434445464748494a4b4c4d4e4f"
+auto_renew_certificate = true
 poll_interval = "30s"
 timeout = "10s"
 
