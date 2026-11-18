@@ -10,11 +10,12 @@ use crate::{Id, v1};
 #[derive(Clone, Debug)]
 pub struct CompiledPolicy {
     default_accept: bool,
-    rules: Vec<Rule>,
+    rules: Vec<CompiledRule>,
 }
 
+/// One validated stable-v1 rule in an immutable policy snapshot.
 #[derive(Clone, Debug)]
-struct Rule {
+pub struct CompiledRule {
     id: Id,
     priority: u32,
     accept: bool,
@@ -81,7 +82,7 @@ impl CompiledPolicy {
                 }
                 destination_ports.push((port.first as u16, port.last as u16));
             }
-            rules.push(Rule {
+            rules.push(CompiledRule {
                 id,
                 priority: input.priority,
                 accept: action(input.action)?,
@@ -120,9 +121,54 @@ impl CompiledPolicy {
     pub const fn default_accepts(&self) -> bool {
         self.default_accept
     }
+
+    /// Validated selectors in first-match order for native policy backends.
+    pub fn rules(&self) -> &[CompiledRule] {
+        &self.rules
+    }
 }
 
-impl Rule {
+impl CompiledRule {
+    /// Rule identity for audit and native rule labels.
+    pub fn id(&self) -> Id {
+        self.id
+    }
+
+    /// True for accept, false for deny.
+    pub fn accepts(&self) -> bool {
+        self.accept
+    }
+
+    /// Exact node allowlist for the source (empty means any node).
+    pub fn source_nodes(&self) -> &[Id] {
+        &self.source_nodes
+    }
+
+    /// Exact node allowlist for the destination (empty means any node).
+    pub fn destination_nodes(&self) -> &[Id] {
+        &self.destination_nodes
+    }
+
+    /// Source prefix alternatives, in addition to any node selector.
+    pub fn source_prefixes(&self) -> &[IpNet] {
+        &self.source_prefixes
+    }
+
+    /// Destination prefix alternatives, in addition to any node selector.
+    pub fn destination_prefixes(&self) -> &[IpNet] {
+        &self.destination_prefixes
+    }
+
+    /// Stable-v1 IP protocol selector.
+    pub fn protocol(&self) -> v1::IpProtocol {
+        self.protocol
+    }
+
+    /// Inclusive TCP/UDP destination port ranges (empty means any port).
+    pub fn destination_ports(&self) -> &[(u16, u16)] {
+        &self.destination_ports
+    }
+
     fn matches(&self, source: Id, destination: Id, packet: Packet) -> bool {
         (self.source_nodes.is_empty() || self.source_nodes.contains(&source))
             && (self.destination_nodes.is_empty() || self.destination_nodes.contains(&destination))

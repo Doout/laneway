@@ -32,12 +32,39 @@ pub(crate) trait CommandRunner: Send + Sync {
     fn run(&self, command: &str, arguments: &[String], input: Option<&[u8]>) -> Result<Vec<u8>>;
 }
 
-struct ExecRunner {
+pub(crate) struct ExecRunner {
     timeout: Duration,
 }
 
 impl CommandRunner for ExecRunner {
     fn run(&self, command: &str, arguments: &[String], input: Option<&[u8]>) -> Result<Vec<u8>> {
+        self.exec(command, arguments, input, false)
+    }
+}
+
+impl ExecRunner {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn sensitive(
+        &self,
+        program: &str,
+        args: &[String],
+        input: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.exec(program, args, Some(input), true)
+    }
+
+    fn exec(
+        &self,
+        command: &str,
+        arguments: &[String],
+        input: Option<&[u8]>,
+        sensitive: bool,
+    ) -> Result<Vec<u8>> {
         let mut child = Command::new(command)
             .args(arguments)
             .stdin(if input.is_some() {
@@ -46,20 +73,24 @@ impl CommandRunner for ExecRunner {
                 Stdio::null()
             })
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(if sensitive {
+                Stdio::null()
+            } else {
+                Stdio::piped()
+            })
             .spawn()
             .with_context(|| format!("run {command} {}", arguments.join(" ")))?;
-        if let Some(input) = input {
-            child
-                .stdin
-                .take()
-                .context("command stdin missing")?
-                .write_all(input)
-                .context("write command input")?;
-        }
+        let stdin = child.stdin.take();
         let mut stdout = child.stdout.take().context("command stdout missing")?;
-        let mut stderr = child.stderr.take().context("command stderr missing")?;
-        let (status, stdout, stderr) = std::thread::scope(|scope| -> Result<_> {
+        let stderr = child.stderr.take();
+        let (status, stdout, stderr, written) = std::thread::scope(|scope| -> Result<_> {
+            let writer = scope.spawn(move || match (stdin, input) {
+                (Some(mut stdin), Some(input)) => {
+                    stdin.write_all(input).context("write command input")
+                }
+                (None, None) => Ok(()),
+                _ => bail!("command stdin missing"),
+            });
             let stdout = scope.spawn(move || {
                 let mut output = Vec::new();
                 stdout.read_to_end(&mut output)?;
@@ -67,7 +98,9 @@ impl CommandRunner for ExecRunner {
             });
             let stderr = scope.spawn(move || {
                 let mut output = Vec::new();
-                stderr.read_to_end(&mut output)?;
+                if let Some(mut stderr) = stderr {
+                    stderr.read_to_end(&mut output)?;
+                }
                 std::io::Result::Ok(output)
             });
             let status = match child
@@ -89,14 +122,16 @@ impl CommandRunner for ExecRunner {
                 status,
                 stdout.join().expect("stdout reader panicked")?,
                 stderr.join().expect("stderr reader panicked")?,
+                writer.join().expect("stdin writer panicked"),
             ))
         })?;
         ensure!(
             status.success(),
-            "{command} {} failed: {}",
+            "{command} {} failed ({status}): {}",
             arguments.join(" "),
             String::from_utf8_lossy(&stderr).trim()
         );
+        written?;
         Ok(stdout)
     }
 }
@@ -1124,6 +1159,7 @@ fn exit_rules(config: &Config, output: &str, prefix: IpNet) -> Vec<Rule> {
             chain: NAT_CHAIN.to_owned(),
             comment: "laneway-rust-exit-nat".to_owned(),
             expressions: vec![
+                match_meta("iifname", &config.tun.name),
                 match_meta("oifname", output),
                 match_prefix(
                     protocol,

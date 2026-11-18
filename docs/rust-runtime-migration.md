@@ -307,8 +307,32 @@ It checks that a same-epoch heartbeat extends only the lease, and that revocatio
 retires the authority without waiting for a timeout. The unit gate also checks
 terminal expiry while a request is stalled.
 
-The separate kernel packet gate requires `wireguard-tools`, a WireGuard-capable
-Linux kernel and isolated network namespaces:
+The encrypted Linux runtime owns a kernel WireGuard link and installs a
+default-deny nftables policy before bringing it up. Policy-only updates replace
+the firewall in a single transaction without recreating the device. The
+relay carries only encrypted UDP messages. Optional NAT opens only with live
+controller approval, for authorized overlay sources and the configured uplink;
+both directions still pass through the decrypted traffic ACL.
+
+In a dedicated Linux network namespace with `ip`, `nft`, `wg` and
+`CAP_NET_ADMIN`, run the opt-in profile with a native node TOML and an existing
+raw WireGuard private key (owned by the service user, mode 0600 or 0640):
+
+```sh
+lanewayd-rs --wireguard-config /etc/laneway/node-rust.toml \
+  --wireguard-key /run/laneway/node.wireguard.key
+# For an ephemeral Exit, also pass --exit-generation with its enrollment generation.
+```
+
+Use `--check-config` to validate the files without joining or creating a link.
+Keep automatic certificate renewal, exit selection on this node and diagnostics
+disabled in the native node TOML for this profile. Enabling gateway NAT requires
+`forwarding.exit_gateway = true`, `forwarding.exit_gateway_controller_sources = true`
+and an explicit `forwarding.exit_output_interface`. The kernel must provide
+WireGuard. Existing links and firewall tables are not adopted; discard or
+clean up the isolated namespace after an unclean kill.
+
+The packet gate requires the same tools and isolated network namespaces:
 
 ```sh
 sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_WIREGUARD=1 \
@@ -316,14 +340,15 @@ sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_WIREGUARD=1 \
 # Repeat with LANEWAY_NODE_TEST_CONTROLLER=rust for the Rust controller and relay.
 ```
 
-The test provisions a disposable ephemeral identity and sends kernel WireGuard
-packets to a Go peer through the Rust carrier. It exercises negotiated QUIC and
-forced TLS/TCP, including ciphertext larger than the legacy raw-IP ceiling.
-It also revokes the live identity and verifies that traffic stops. The carrier
-checks live peer keys and never falls back to raw IP. The fixture
-configures the kernel device and verifies overlay traffic only: it does not
-exercise Internet forwarding, connection draining, or shutdown of the shared-host
-credential sandbox. Keep using the existing launcher until those gates pass.
+The test provisions a disposable ephemeral identity and starts the actual Rust
+executable against a Go peer. It exercises QUIC and forced TLS/TCP, including
+ciphertext larger than the legacy raw-IP ceiling. It checks a live ACL change,
+source NAT through the approved exit, route withdrawal, live revocation and
+device cleanup. Set `LANEWAY_NODE_WIREGUARD_NATIVE=0` to run just the
+fixture-managed encrypted transport gate. This does not validate connection
+draining, routed-only egress, IPv6 NAT on the encrypted profile, or the
+shared-host credential sandbox. Keep using the existing launcher for those
+profiles until their gates pass.
 
 ### Verified on the local ARM64 Linux VM
 

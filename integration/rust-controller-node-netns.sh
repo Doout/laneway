@@ -36,6 +36,7 @@ link_index=0
 node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
 test_durable_exit="${LANEWAY_NODE_TEST_DURABLE_EXIT:-0}"
 test_wireguard="${LANEWAY_NODE_TEST_WIREGUARD:-0}"
+wireguard_native="${LANEWAY_NODE_WIREGUARD_NATIVE:-1}"
 case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 
 cleanup() {
@@ -499,10 +500,12 @@ EOF
 
 if [[ "${test_wireguard}" == "1" ]]; then
   command -v wg >/dev/null || { echo "ERROR: wireguard-tools is required" >&2; exit 1; }
-  fixture_binary="$(cargo test --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+  if [[ "${wireguard_native}" != "1" ]]; then
+    fixture_binary="$(cargo test --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
     -p lanewayd-rs --test wireguard_packet_lab --no-run --message-format=json |
     jq -ser '[.[] | select(.target.name=="wireguard_packet_lab" and .executable!=null) | .executable]
       | if length==1 then .[0] else error("expected one WireGuard test executable") end')"
+  fi
   cat >>"${work_dir}/relay.toml" <<'EOF'
 [tcp_fallback]
 listen = "10.254.0.2:4435"
@@ -529,20 +532,52 @@ EOF
   wait_log "${last_pid}" "${work_dir}/gateway.log" "interface=lane0"
 
   rust_key="$(base64 -w0 <"${work_dir}/pki/rust.wireguard.key" | wg pubkey)"
-  gateway_key="$(base64 -w0 <"${work_dir}/pki/gateway.wireguard.key" | wg pubkey)"
   rust_generation="$(sed -n 's/.* generation=\([0-9]\+\)$/\1/p' <<<"${rust_join}")"
   [[ "${rust_generation}" =~ ^[1-9][0-9]*$ ]]
-  ip -n "${rust_ns}" link add dev lane0 type wireguard
-  base64 -w0 <"${work_dir}/pki/rust.wireguard.key" | ip netns exec "${rust_ns}" wg set lane0 \
-    private-key /dev/stdin listen-port 57001 peer "${gateway_key}" \
-    allowed-ips "${gateway_overlay}" endpoint 127.0.0.1:57002
-  ip -n "${rust_ns}" addr add "${rust_overlay}" dev lane0
-  ip -n "${rust_ns}" link set dev lane0 mtu 1280 up
-  ip -n "${rust_ns}" route add "${gateway_overlay}" dev lane0
   cat >>"${work_dir}/rust.toml" <<'EOF'
 [tcp_fallback]
 address = "10.254.0.2:4435"
 EOF
+  if [[ "${wireguard_native}" == "1" ]]; then
+    sed '/^auto_renew_certificate = /d' "${work_dir}/rust.toml" >"${work_dir}/wireguard-native.toml"
+    # A separate underlay makes the service exercise real forwarding and NAT.
+    ip link add "wr$$" type veth peer name "wl$$"
+    ip link set "wr$$" netns "${rust_ns}"
+    ip link set "wl$$" netns "${lan_ns}"
+    ip -n "${rust_ns}" link set "wr$$" name wgwan
+    ip -n "${lan_ns}" link set "wl$$" name wgout
+    ip -n "${rust_ns}" address add 203.0.113.1/24 dev wgwan
+    ip -n "${lan_ns}" address add 203.0.113.2/24 dev wgout
+    ip -n "${rust_ns}" link set wgwan up
+    ip -n "${lan_ns}" link set wgout up
+    ip netns exec "${rust_ns}" sysctl -qw net.ipv4.ip_forward=0
+    cat >>"${work_dir}/wireguard-native.toml" <<'EOF'
+[forwarding]
+exit_gateway = true
+exit_gateway_controller_sources = true
+exit_output_interface = "wgwan"
+EOF
+    bridge_command=("${work_dir}/rust-node" --wireguard-config "${work_dir}/wireguard-native.toml"
+      --wireguard-key "${work_dir}/pki/rust.wireguard.key" --exit-generation "${rust_generation}")
+    ip netns exec "${rust_ns}" "${bridge_command[@]}" --check-config
+    if ip -n "${rust_ns}" link show dev lane0 >/dev/null 2>&1; then
+      echo "ERROR: configuration check created a WireGuard interface" >&2
+      exit 1
+    fi
+  else
+    gateway_key="$(base64 -w0 <"${work_dir}/pki/gateway.wireguard.key" | wg pubkey)"
+    ip -n "${rust_ns}" link add dev lane0 type wireguard
+    base64 -w0 <"${work_dir}/pki/rust.wireguard.key" | ip netns exec "${rust_ns}" wg set lane0 \
+      private-key /dev/stdin listen-port 57001 peer "${gateway_key}" \
+      allowed-ips "${gateway_overlay}" endpoint 127.0.0.1:57002
+    ip -n "${rust_ns}" addr add "${rust_overlay}" dev lane0
+    ip -n "${rust_ns}" link set dev lane0 mtu 1280 up
+    ip -n "${rust_ns}" route add "${gateway_overlay}" dev lane0
+    bridge_command=(env LANEWAY_WG_CONFIG="${work_dir}/rust.toml" LANEWAY_WG_LOCAL_PUBLIC="${rust_key}"
+      LANEWAY_WG_PEER_PUBLIC="${gateway_key}" LANEWAY_WG_PEER_ID="${gateway_id}"
+      LANEWAY_WG_EXIT_GENERATION="${rust_generation}"
+      "${fixture_binary}" --ignored --exact --nocapture kernel_relay_bridge)
+  fi
 
   for transport in quic tcp; do
     if [[ "${transport}" == tcp ]]; then
@@ -554,11 +589,7 @@ EOF
       connected="Rust agent relay connected"
     fi
     echo "==> kernel WireGuard packets cross the ${node_controller} relay over ${transport}"
-    start_process "${rust_ns}" "${work_dir}/wg-rust-${transport}.log" env RUST_LOG=info \
-      LANEWAY_WG_CONFIG="${work_dir}/rust.toml" LANEWAY_WG_LOCAL_PUBLIC="${rust_key}" \
-      LANEWAY_WG_PEER_PUBLIC="${gateway_key}" LANEWAY_WG_PEER_ID="${gateway_id}" \
-      LANEWAY_WG_EXIT_GENERATION="${rust_generation}" \
-      "${fixture_binary}" --ignored --exact --nocapture kernel_relay_bridge
+    start_process "${rust_ns}" "${work_dir}/wg-rust-${transport}.log" env RUST_LOG=info "${bridge_command[@]}"
     bridge_pid="${last_pid}"
     wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "${connected}"
     wait_relay_sessions 2
@@ -572,6 +603,109 @@ EOF
     done
     ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
       -target "${gateway_address}:9791" -message "wireguard-${transport}-verified" -timeout 5s
+    ip netns exec "${rust_ns}" wg show lane0 latest-handshakes | awk '$2 > 0 { found = 1 } END { exit !found }'
+    if [[ "${transport}" == quic && "${wireguard_native}" == "1" ]]; then
+      echo "==> update the decrypted UDP policy while the service is running"
+      wg_ifindex="$(ip -n "${rust_ns}" -j link show dev lane0 | jq -er '.[0].ifindex')"
+      denied_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl add \
+        --network-id "${network_id}" --priority 10 --action deny \
+        --selector '{"ip_protocol":"IP_PROTOCOL_UDP","destination_ports":[{"first":9790,"last":9792}]}' \
+        --description rust-wireguard-deny "${management_connection[@]}")"
+      denied_id="$(printf '%s\n' "${denied_json}" | json_string_field rule_id)"
+      [[ "${denied_id}" =~ ^[0-9a-f]{32}$ ]] || { echo "ERROR: no policy rule ID returned" >&2; exit 1; }
+      wg_table="lw_wg_6c616e6530"
+      for _ in $(seq 1 150); do
+        if ip netns exec "${rust_ns}" nft list table inet "${wg_table}" 2>/dev/null | grep -Fq "lw-wg-${denied_id}"; then break; fi
+        sleep 0.05
+      done
+      if ! ip netns exec "${rust_ns}" nft list table inet "${wg_table}" | grep -F "lw-wg-${denied_id}" >/dev/null; then
+        echo "ERROR: Rust did not install the new decrypted traffic rule ${denied_id}" >&2
+        ip netns exec "${rust_ns}" nft list table inet "${wg_table}" >&2 || true
+        exit 1
+      fi
+      if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+        -target "${gateway_address}:9791" -message policy-denied -timeout 2s; then
+        echo "ERROR: decrypted traffic bypassed the new WireGuard policy" >&2
+        exit 1
+      fi
+      if ! ip netns exec "${rust_ns}" nft -j list table inet "${wg_table}" |
+        jq -e --arg comment "lw-wg-${denied_id}" \
+          'any(.nftables[].rule?; .chain=="outbound" and .comment==$comment and any(.expr[]; (.counter.packets // 0)>0))' >/dev/null; then
+        echo "ERROR: native nftables did not count the denied datagram" >&2
+        ip netns exec "${rust_ns}" nft list table inet "${wg_table}" >&2
+        exit 1
+      fi
+      ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl delete \
+        --rule-id "${denied_id}" "${management_connection[@]}" >/dev/null
+      policy_restored=0
+      for _ in $(seq 1 150); do
+        if rust_acl="$(ip netns exec "${rust_ns}" nft list table inet "${wg_table}" 2>/dev/null)" &&
+          go_acl="$(ip netns exec "${gateway_ns}" nft list table inet laneway_wg 2>/dev/null)" &&
+          [[ "${rust_acl}" != *"${denied_id}"* && "${go_acl}" != *"${denied_id}"* ]]; then
+          policy_restored=1
+          break
+        fi
+        sleep 0.05
+      done
+      [[ "${policy_restored}" == "1" ]]
+      start_process "${rust_ns}" "${work_dir}/wg-reverse-probe.log" \
+        "${work_dir}/netprobe" udp-echo-server -listen "${rust_address}:9794"
+      reverse_pid="${last_pid}"
+      wait_log "${reverse_pid}" "${work_dir}/wg-reverse-probe.log" "ready=udp-echo-server"
+      # A legacy peer resets its WireGuard session on any configuration
+      # update. Initiating from that peer rekeys without waiting for its timer.
+      for _ in $(seq 1 12); do
+        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+          -target "${rust_address}:9794" -message policy-rekeyed -timeout 1s; then break; fi
+      done
+      stop_process "${reverse_pid}"
+      ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+        -target "${gateway_address}:9791" -message policy-restored-verified -timeout 5s
+      [[ "$(ip -n "${rust_ns}" -j link show dev lane0 | jq -er '.[0].ifindex')" == "${wg_ifindex}" ]]
+
+      echo "==> the invite-approved default enables scoped NAT until withdrawal"
+      wg_route_id="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route list \
+        --network-id "${network_id}" "${management_connection[@]}" |
+        jq -er --arg id "${rust_id}" '.routes[] | select(.node_id==$id and .kind=="exit" and .state=="approved" and .prefix=="0.0.0.0/0") | .route_id')"
+      [[ "${wg_route_id}" =~ ^[0-9a-f]{32}$ ]]
+      ip netns exec "${rust_ns}" nft list table inet laneway_rs_exit |
+        grep -F "ip saddr ${gateway_address}" >/dev/null
+      start_process "${lan_ns}" "${work_dir}/wg-nat-probe.log" \
+        "${work_dir}/netprobe" udp-server -listen 203.0.113.2:9793 -max-packets 8
+      nat_pid="${last_pid}"
+      wait_log "${nat_pid}" "${work_dir}/wg-nat-probe.log" "ready=udp-server"
+      # Point only this disposable destination at the Go peer's existing
+      # encrypted relay socket. This needs no host resolver or default route.
+      ip netns exec "${gateway_ns}" wg set lane0 peer "${rust_key}" \
+        allowed-ips "${rust_overlay},203.0.113.2/32"
+      ip -n "${gateway_ns}" route add 203.0.113.2/32 dev lane0
+      for _ in $(seq 1 8); do
+        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+          -target 203.0.113.2:9793 -message native-wireguard-nat -timeout 1s; then break; fi
+      done
+      grep -Eq 'remote=203\.0\.113\.1:[0-9]+ payload=native-wireguard-nat' "${work_dir}/wg-nat-probe.log"
+      [[ "$(ip netns exec "${rust_ns}" sysctl -n net.ipv4.ip_forward)" == "1" ]]
+      ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
+        --route-id "${wg_route_id}" --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+        --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+        --cert "${work_dir}/pki/rust.crt" --key "${work_dir}/pki/rust.key" >/dev/null
+      for _ in $(seq 1 150); do
+        if [[ "$(ip netns exec "${rust_ns}" sysctl -n net.ipv4.ip_forward)" == "0" ]]; then break; fi
+        sleep 0.05
+      done
+      [[ "$(ip netns exec "${rust_ns}" sysctl -n net.ipv4.ip_forward)" == "0" ]]
+      if ip netns exec "${rust_ns}" nft list table inet laneway_rs_exit >/dev/null 2>&1; then
+        echo "ERROR: withdrawn WireGuard exit left NAT rules installed" >&2
+        exit 1
+      fi
+      if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+        -target 203.0.113.2:9793 -message withdrawn-wireguard-nat -timeout 2s; then
+        echo "ERROR: withdrawn WireGuard Exit still forwards underlay traffic" >&2
+        exit 1
+      fi
+      ip -n "${gateway_ns}" route del 203.0.113.2/32 dev lane0
+      stop_process "${nat_pid}"
+    fi
     if [[ "${transport}" == tcp ]]; then
       # A 1280-byte inner IPv4 packet produces 1312 bytes of ciphertext,
       # which must not hit the legacy 1280-byte raw-IP record ceiling.
@@ -588,10 +722,15 @@ EOF
         exit 1
       fi
     fi
-    ip netns exec "${rust_ns}" wg show lane0 latest-handshakes | awk '$2 > 0 { found = 1 } END { exit !found }'
     stop_process "${echo_pid}"
     stop_process "${bridge_pid}"
-    if [[ "${transport}" == quic ]]; then
+    if [[ "${wireguard_native}" == "1" ]]; then
+      if ip -n "${rust_ns}" link show dev lane0 >/dev/null 2>&1 ||
+        ip netns exec "${rust_ns}" nft list table inet lw_wg_6c616e6530 >/dev/null 2>&1; then
+        echo "ERROR: native WireGuard link or ACL survived shutdown" >&2
+        exit 1
+      fi
+    elif [[ "${transport}" == quic ]]; then
       grep -Fq 'test kernel_relay_bridge ... ok' "${work_dir}/wg-rust-${transport}.log"
     fi
   done

@@ -1204,6 +1204,10 @@ impl Snapshot {
         expired(self.valid_until)
     }
 
+    pub(crate) fn wireguard_authority_expired(&self) -> bool {
+        self.expired() || expired(self.certificate_not_after)
+    }
+
     pub(crate) fn renew(&self, valid_until: u64) -> Result<Self> {
         ensure!(
             self.ephemeral_exit.is_none(),

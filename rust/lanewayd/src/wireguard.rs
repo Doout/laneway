@@ -1,7 +1,13 @@
 //! Encrypted relay transport. The kernel/device caller owns keys and applies
 //! cryptographic peer routes and the decrypted firewall before joining.
 
-use std::{future::Future, num::NonZeroU64, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    num::NonZeroU64,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
@@ -20,6 +26,13 @@ use crate::{
     state::State,
     tls,
 };
+
+#[cfg(target_os = "linux")]
+mod native;
+#[cfg(target_os = "linux")]
+mod plan;
+#[cfg(target_os = "linux")]
+pub use native::WireGuardNode;
 
 pub(crate) const MAX_WIREGUARD_DATAGRAM: usize = 2048;
 
@@ -109,8 +122,25 @@ impl WireGuardRelay {
     /// negotiation and live controller ownership for the datagram's peer key.
     pub async fn run_until(
         self,
+        from_device: mpsc::Receiver<WireGuardDatagram>,
+        to_device: mpsc::Sender<WireGuardDatagram>,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
+        self.run(
+            from_device,
+            to_device,
+            #[cfg(target_os = "linux")]
+            None,
+            shutdown,
+        )
+        .await
+    }
+
+    async fn run(
+        self,
         mut from_device: mpsc::Receiver<WireGuardDatagram>,
         to_device: mpsc::Sender<WireGuardDatagram>,
+        #[cfg(target_os = "linux")] native: Option<Arc<native::NativeKernel>>,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
         let (network, node) = self.config.ids()?;
@@ -120,6 +150,9 @@ impl WireGuardRelay {
             .as_ref()
             .context("missing WireGuard controller")?;
         let cert = tls::local_certificate_health(&self.config.tls)?;
+        let cert_deadline = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(cert.not_after))
+            .context("invalid WireGuard certificate deadline")?;
         let client = Arc::new(
             Client::new(ClientOptions {
                 endpoint: control.endpoint.clone(),
@@ -136,7 +169,16 @@ impl WireGuardRelay {
             .await?,
         );
         let _control_guard = ControlGuard(Arc::clone(&client));
-        let PollResult::Modified(initial) = client.poll(0).await? else {
+        tokio::pin!(shutdown);
+        let initial = tokio::select! {
+            biased;
+            _ = &mut shutdown => {
+                client.close_quic().await;
+                return Ok(());
+            }
+            initial = client.poll(0) => initial?,
+        };
+        let PollResult::Modified(initial) = initial else {
             bail!("missing initial WireGuard authority snapshot");
         };
         let initial = Arc::new(
@@ -150,13 +192,15 @@ impl WireGuardRelay {
             state: Arc::clone(&state),
             node,
             local_key: self.local_key,
+            #[cfg(target_os = "linux")]
+            native,
         });
         applier.apply(Arc::clone(&initial)).await?;
         authority.seed(initial)?;
         let runner = Runner::new(
             Arc::clone(&client),
             authority,
-            applier,
+            Arc::clone(&applier),
             network,
             node,
             cert,
@@ -199,14 +243,22 @@ impl WireGuardRelay {
         let result = tokio::select! {
             biased;
             _ = shutdown => Ok(()),
+            _ = tokio::time::sleep(cert_deadline.duration_since(SystemTime::now()).unwrap_or_default()) =>
+                Err(anyhow::anyhow!("WireGuard node certificate expired")),
             result = runner.run() => result,
             result = carrier.run(from_kernel) => result,
             result = pump => result,
         };
         state.fail_close();
         endpoint.close(0_u32.into(), b"WireGuard relay ended");
+        let cleanup = applier.fail_close().await;
         client.close_quic().await;
-        result
+        match (result, cleanup) {
+            (Ok(()), result) | (result, Ok(())) => result,
+            (Err(error), Err(cleanup)) => {
+                Err(error.context(format!("WireGuard shutdown failed: {cleanup:#}")))
+            }
+        }
     }
 }
 
@@ -222,6 +274,32 @@ struct CarrierAuthority {
     state: Arc<State>,
     node: Id,
     local_key: [u8; 32],
+    #[cfg(target_os = "linux")]
+    native: Option<Arc<native::NativeKernel>>,
+}
+
+impl CarrierAuthority {
+    async fn publish(&self, snapshot: Arc<Snapshot>, _renewed: bool) -> Result<()> {
+        if snapshot.wireguard_authority_expired()
+            || snapshot.local_certificate_revoked
+            || snapshot.peers.get(&self.node).and_then(|p| p.wireguard_key) != Some(self.local_key)
+        {
+            self.fail_close().await?;
+            bail!("live controller does not bind the local WireGuard key");
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(native) = &self.native {
+            if !_renewed {
+                self.state.suspend_wireguard_authority();
+            }
+            if let Err(error) = native.apply(Arc::clone(&snapshot), _renewed).await {
+                self.state.fail_close();
+                return Err(error);
+            }
+        }
+        self.state.publish_authority(snapshot);
+        Ok(())
+    }
 }
 
 impl SnapshotApplier for CarrierAuthority {
@@ -229,23 +307,16 @@ impl SnapshotApplier for CarrierAuthority {
         &self,
         snapshot: Arc<Snapshot>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            if snapshot.expired()
-                || snapshot.local_certificate_revoked
-                || snapshot.peers.get(&self.node).and_then(|p| p.wireguard_key)
-                    != Some(self.local_key)
-            {
-                self.state.fail_close();
-                bail!("live controller does not bind the local WireGuard key");
-            }
-            self.state.publish_authority(snapshot);
-            Ok(())
-        })
+        Box::pin(self.publish(snapshot, false))
     }
 
     fn fail_close(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         Box::pin(async {
             self.state.fail_close();
+            #[cfg(target_os = "linux")]
+            if let Some(native) = &self.native {
+                native.fail_close().await?;
+            }
             Ok(())
         })
     }
@@ -254,6 +325,6 @@ impl SnapshotApplier for CarrierAuthority {
         &self,
         snapshot: Arc<Snapshot>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-        self.apply(snapshot)
+        Box::pin(self.publish(snapshot, true))
     }
 }

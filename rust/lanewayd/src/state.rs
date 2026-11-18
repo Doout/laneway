@@ -106,6 +106,13 @@ impl State {
         self.authority.load_full()
     }
 
+    /// Stop encrypted packets during device reconciliation. Relay session
+    /// handles are unchanged; every packet rechecks the published peer key.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn suspend_wireguard_authority(&self) {
+        self.authority.store(None);
+    }
+
     pub(crate) fn wireguard_peer_key(
         &self,
         local: Id,
@@ -114,7 +121,7 @@ impl State {
     ) -> Option<[u8; 32]> {
         let snapshot = self.authority.load_full()?;
         if local == peer
-            || snapshot.expired()
+            || snapshot.wireguard_authority_expired()
             || snapshot.local_certificate_revoked
             || snapshot.peers.get(&local)?.wireguard_key.as_ref() != Some(local_key)
         {

@@ -1260,6 +1260,7 @@ dependencies = [
  "ipnet",
  "laneway-protocol",
  "laneway-relay",
+ "libc",
  "prost",
  "quinn",
  "rcgen 0.14.8",
@@ -1280,6 +1281,7 @@ dependencies = [
  "tracing-subscriber",
  "wait-timeout",
  "x509-parser",
+ "zeroize",
 ]
 
 [[package]]
