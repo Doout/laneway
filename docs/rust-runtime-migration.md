@@ -221,7 +221,21 @@ assets while running with its non-root UID and no network.
 helper. It receives a verified `utun` file descriptor over the inherited Unix
 socket, reads and writes IPv4/IPv6 packets in Rust, and asks the helper to
 replace and restore only ordinary routes. Node credentials stay in the Rust
-process. The preview does not change the installed client or its package.
+process after onboarding. The existing Go runtime remains the default, and
+the current signed macOS package does not include the Rust binary.
+
+To test the foreground CLI on an isolated Mac, build the Go `laneway` CLI and
+the native Rust `lanewayd-rs`, install the matching CLI and helper with the
+existing `laneway configure` command, and install the Rust binary as
+`/Library/Application Support/Laneway/lanewayd-rs` (root-owned, mode `0755`,
+with real root-owned parent directories not writable by group or other).
+Run `laneway connect DOMAIN --rust` as your normal user. Add `--ephemeral`
+for a one-time login, or repeat `--route PREFIX` for an exact controller
+advertisement. Remembered logins use policy-derived private routes by
+default; ephemeral logins default to overlay-only. Both preserve the packet
+policy from the controller, and loss of a requested route withdraws the
+session's route authority. The wrapper waits for tunnel cleanup before it
+rotates a remembered credential and reconnects.
 
 On an isolated Mac with the existing Laneway helper installed at
 `/Library/PrivilegedHelperTools/laneway-network-helper`, use a native node
@@ -231,9 +245,9 @@ built Rust binary as the regular user. Exit routing and DNS switching remain
 with the existing client. A changed overlay address requires reconnecting;
 losing controller authority withdraws the ordinary routes.
 
-The native CI matrix runs the unprivileged stream-framing and descriptor tests
-on Apple Silicon and Intel. It also installs the existing helper on disposable
-runners and exercises a real `utun` with a benchmark-only IPv4 route, a packet,
+The native CI matrix runs the unprivileged stream-framing and credential
+handoff tests on Apple Silicon and Intel. It also installs the existing helper
+on disposable runners and exercises a real `utun` with a benchmark-only IPv4 route, a packet,
 authority withdrawal, and cleanup. That lab test does not exercise desktop
 onboarding, public relay reachability, or the signed macOS package.
 

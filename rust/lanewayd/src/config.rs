@@ -16,6 +16,8 @@ use serde::Deserialize;
 mod installed_state;
 
 const MAX_CONFIG_BYTES: u64 = 1 << 20;
+const MAX_SOCKET_PATH_BYTES: usize = if cfg!(target_os = "macos") { 103 } else { 107 };
+pub(crate) const MAX_FOREGROUND_ROUTES: usize = 1024;
 
 fn default_mtu() -> u16 {
     1280
@@ -134,6 +136,9 @@ pub struct Config {
     /// peers, policy, capabilities, and revocations come only from its lease.
     #[serde(default)]
     pub controller: Option<ControllerConfig>,
+    /// Optional route scope selected by a foreground user session.
+    #[serde(default)]
+    pub foreground_routes: Option<ForegroundRoutes>,
     /// Linux TUN interface settings.
     pub tun: TunConfig,
     /// Unprivileged TCP/UDP subnet forwarding in place of Linux TUN.
@@ -159,6 +164,18 @@ pub struct Config {
     /// Optional loopback-only diagnostics listener.
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
+}
+
+/// Foreground routes are a subset of controller authority, not additional grants.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForegroundRoutes {
+    /// Keep policy-derived private routes in addition to the overlay.
+    #[serde(default)]
+    pub policy_private: bool,
+    /// Explicit controller-advertised subnet prefixes, if requested by the user.
+    #[serde(default)]
+    pub requested: Vec<IpNet>,
 }
 
 /// Local Prometheus diagnostics endpoint.
@@ -616,7 +633,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.mode == "node", "mode must be \"node\"");
         ensure!(
-            valid_absolute_path(&self.socket_path, 107),
+            valid_absolute_path(&self.socket_path, MAX_SOCKET_PATH_BYTES),
             "socket_path must be an absolute bounded path"
         );
         ensure!(
@@ -680,6 +697,26 @@ impl Config {
                 );
             }
             Id::from_str(&controller.service_id).context("controller.service_id")?;
+        }
+        if let Some(scope) = &self.foreground_routes {
+            ensure!(
+                self.controller.is_some()
+                    && !self.connector.userspace
+                    && !self.forwarding.subnet_router
+                    && !self.forwarding.exit_gateway
+                    && !self.forwarding.exit_client.authorized
+                    && !self.forwarding.exit_client.enabled
+                    && (!scope.policy_private || scope.requested.is_empty())
+                    && scope.requested.len() <= MAX_FOREGROUND_ROUTES,
+                "foreground route scope needs a controller-backed split-tunnel endpoint"
+            );
+            let mut seen = HashSet::new();
+            for prefix in &scope.requested {
+                ensure!(
+                    prefix.prefix_len() != 0 && *prefix == prefix.trunc() && seen.insert(prefix),
+                    "foreground routes must be unique canonical non-default prefixes"
+                );
+            }
         }
         let carries_ipv6 = self
             .tun

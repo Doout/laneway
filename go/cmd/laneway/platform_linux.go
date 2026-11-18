@@ -14,6 +14,10 @@ const credentialDescriptorDirectory = "/proc/self/fd"
 
 func connectPlatformPreflight() error { return nil }
 
+func platformConnectRustRuntime() (string, error) {
+	return "", errors.New("the Rust foreground runtime preview is available only on macOS")
+}
+
 func addPlatformConnectFlags(fs *flag.FlagSet, options *connectPlatformOptions) {
 	fs.StringVar(&options.exitSelector, "exit", "", "controller-authorized exit node name or NodeID")
 	fs.StringVar(&options.failureMode, "failure-mode", "closed", "exit path failure behavior: closed or open")

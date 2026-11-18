@@ -51,6 +51,7 @@ type runtimeCredentialFiles struct {
 type connectPlatformOptions struct {
 	exitSelector, failureMode string
 	dns, localLAN             []string
+	rust                      bool
 }
 
 func (f *runtimeCredentialFiles) add(directory, label string, contents []byte) (string, error) {
@@ -133,6 +134,14 @@ func runConnect(args []string) error {
 	if err := connectPlatformPreflight(); err != nil {
 		return err
 	}
+	var rustRuntime string
+	if options.rust {
+		var err error
+		rustRuntime, err = platformConnectRustRuntime()
+		if err != nil {
+			return err
+		}
+	}
 	routes, err := parseConnectPrefixes(routeValues, false)
 	if err != nil {
 		return fmt.Errorf("--route: %w", err)
@@ -190,7 +199,7 @@ func runConnect(args []string) error {
 		if err == nil {
 			keyPath, err = credentials.add(runtimeDir, "private-key", enrollment.privateKeyPEM)
 		}
-		if err == nil {
+		if err == nil && rustRuntime == "" {
 			wireGuardKeyPath, err = credentials.add(runtimeDir, "wireguard-key", enrollment.wireGuardPrivateKey.Bytes())
 		}
 		if err != nil {
@@ -247,6 +256,60 @@ func runConnect(args []string) error {
 		enrollment.class = lanewayv1.EnrollmentClass_ENROLLMENT_CLASS_REMEMBERED_USER
 		caPath, certPath, keyPath, wireGuardKeyPath = profileFiles.ca, profileFiles.certificate, profileFiles.privateKey, profileFiles.wireGuardKey
 		savedProfile, savedProfileFiles = profile, profileFiles
+	}
+	renewLogin := func() error {
+		discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 20*time.Second)
+		defer cancelDiscovery()
+		refreshed, err := bootstrap.Fetch(discoveryCtx, authority)
+		if err != nil {
+			return fmt.Errorf("refresh discovery before login renewal: %w", err)
+		}
+		if err := validateProfileMetadata(savedProfile, savedProfileFiles, refreshed); err != nil {
+			return err
+		}
+		renewCtx, cancelRenew := context.WithTimeout(ctx, 30*time.Second)
+		defer cancelRenew()
+		profile, files, err := renewUserProfile(renewCtx, savedProfile, savedProfileFiles, refreshed)
+		if err != nil {
+			return err
+		}
+		metadata, savedProfile, savedProfileFiles = refreshed, profile, files
+		caPath, certPath, keyPath, wireGuardKeyPath = files.ca, files.certificate, files.privateKey, files.wireGuardKey
+		fmt.Printf("laneway refreshed saved login network=%s node=%s; reconnecting authorized routes\n", profile.NetworkID, profile.NodeID)
+		return nil
+	}
+	if rustRuntime != "" {
+		for {
+			sessionCtx := ctx
+			cancelSession := func() {}
+			if usingSavedLogin {
+				_, renewAt, err := profileRenewalDue(savedProfileFiles.certificate, time.Now())
+				if err != nil {
+					return err
+				}
+				sessionCtx, cancelSession = context.WithDeadline(ctx, renewAt)
+			}
+			credentialPaths := rustConnectCredentials{caPath, certPath, keyPath}
+			var inherited []*os.File
+			if !usingSavedLogin {
+				// ExtraFiles are renumbered consecutively from 3 by os/exec.
+				// The WireGuard key is not used by this split-tunnel runtime.
+				inherited = credentials.files
+				credentialPaths = rustConnectCredentials{"/dev/fd/3", "/dev/fd/4", "/dev/fd/5"}
+			}
+			runErr := runRustConnect(sessionCtx, rustRuntime, runtimeDir, metadata, enrollment.identity, credentialPaths, inherited, routes, usingSavedLogin)
+			cancelSession()
+			if runErr != nil {
+				return runErr
+			}
+			if ctx.Err() != nil || !usingSavedLogin {
+				fmt.Println("laneway disconnected; temporary networking restored")
+				return nil
+			}
+			if err := renewLogin(); err != nil {
+				return err
+			}
+		}
 	}
 	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
 	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
@@ -346,28 +409,14 @@ func runConnect(args []string) error {
 		// The foreground runtime has restored its temporary routes before key
 		// rotation. Refresh discovery, rotate the saved credential atomically,
 		// and reconnect without asking for another token.
-		discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 20*time.Second)
-		metadata, err = bootstrap.Fetch(discoveryCtx, authority)
-		cancelDiscovery()
-		if err != nil {
-			return fmt.Errorf("refresh discovery before login renewal: %w", err)
-		}
-		if err := validateProfileMetadata(savedProfile, savedProfileFiles, metadata); err != nil {
+		if err := renewLogin(); err != nil {
 			return err
 		}
-		renewCtx, cancelRenew := context.WithTimeout(ctx, 30*time.Second)
-		savedProfile, savedProfileFiles, err = renewUserProfile(renewCtx, savedProfile, savedProfileFiles, metadata)
-		cancelRenew()
-		if err != nil {
-			return err
-		}
-		caPath, certPath, keyPath, wireGuardKeyPath = savedProfileFiles.ca, savedProfileFiles.certificate, savedProfileFiles.privateKey, savedProfileFiles.wireGuardKey
 		cfg, err = connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, options.failureMode, dns, localLAN)
 		if err != nil {
 			return err
 		}
 		lastPath = ""
-		fmt.Printf("laneway refreshed saved login network=%s node=%s; reconnecting authorized routes\n", savedProfile.NetworkID, savedProfile.NodeID)
 	}
 }
 

@@ -15,6 +15,7 @@ mod diagnostics;
 mod direct;
 mod dns;
 mod exit_intent;
+mod foreground_routes;
 mod kernel;
 mod local_api;
 mod metrics;
@@ -34,8 +35,8 @@ mod wireguard;
 pub use agent::Agent;
 pub use config::{
     Config, ConnectorConfig, ControllerConfig, DiagnosticsConfig, DirectConfig, DirectPeerConfig,
-    ForwardingConfig, IdentityConfig, RelayConfig, RouteConfig, RouteKind, TcpFallbackConfig,
-    TlsConfig, TunConfig,
+    ForegroundRoutes, ForwardingConfig, IdentityConfig, RelayConfig, RouteConfig, RouteKind,
+    TcpFallbackConfig, TlsConfig, TunConfig,
 };
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};

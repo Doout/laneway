@@ -16,6 +16,10 @@ func connectPlatformPreflight() error {
 	return errors.New("foreground connect currently requires Linux or macOS")
 }
 
+func platformConnectRustRuntime() (string, error) {
+	return "", errors.New("the Rust foreground runtime preview is available only on macOS")
+}
+
 func addPlatformConnectFlags(*flag.FlagSet, *connectPlatformOptions) {}
 
 func validatePlatformArtifact(metadata bootstrap.Metadata) error {

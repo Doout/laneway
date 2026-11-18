@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZeroU64,
     path::PathBuf,
@@ -25,13 +24,15 @@ use laneway_protocol::{
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
 use reqwest::StatusCode;
+#[cfg(test)]
+use rustls::RootCertStore;
 use rustls::{
-    DigitallySignedStruct, RootCertStore, SignatureScheme,
+    DigitallySignedStruct, SignatureScheme,
     client::{
         WebPkiServerVerifier,
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
     },
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    pki_types::{CertificateDer, ServerName, UnixTime},
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -440,28 +441,9 @@ fn controller_tls(
     options: &ClientOptions,
     expected: AuthenticatedIdentity,
 ) -> Result<rustls::ClientConfig> {
-    let cert = bounded_read(&options.certificate, 4 << 20, "node certificate")?;
-    let certificates: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert.as_slice())
-        .collect::<std::result::Result<_, _>>()
-        .context("parse node controller certificate")?;
-    ensure!(
-        !certificates.is_empty(),
-        "node controller certificate chain is empty"
-    );
-    let key = bounded_read(&options.private_key, 1 << 20, "node private key")?;
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key.as_slice())
-        .context("parse node controller private key")?
-        .context("node controller private key is missing")?;
-    let ca = bounded_read(&options.ca, 4 << 20, "controller CA")?;
-    let roots_der: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut ca.as_slice())
-        .collect::<std::result::Result<_, _>>()
-        .context("parse controller CA")?;
-    let mut roots = RootCertStore::empty();
-    let (accepted, rejected) = roots.add_parsable_certificates(roots_der);
-    ensure!(
-        accepted > 0 && rejected == 0,
-        "controller CA contains an invalid certificate"
-    );
+    let certificates = crate::tls::load_certificates(&options.certificate)?;
+    let key = crate::tls::load_private_key(&options.private_key)?;
+    let roots = crate::tls::root_store(&options.ca)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let web = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
         .build()?;
@@ -1414,13 +1396,6 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn bounded_read(path: &std::path::Path, maximum: u64, label: &str) -> Result<Vec<u8>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("stat {label} {}", path.display()))?;
-    ensure!(metadata.len() <= maximum, "{label} exceeds size limit");
-    fs::read(path).with_context(|| format!("read {label} {}", path.display()))
 }
 
 fn parse_host_prefix(raw: Vec<u8>) -> Result<IpNet> {

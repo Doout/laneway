@@ -58,6 +58,8 @@ impl Agent {
                 && !config.forwarding.exit_client.enabled,
             "macOS Rust preview supports ordinary node routes only; use the installed client for exit routing"
         );
+        #[cfg(target_os = "macos")]
+        tls::protect_inherited_credentials(&config.tls)?;
         let (network, node) = config.ids()?;
         tls::validate_local(&config.tls, network, node)?;
         let routes = RoutingTable::compile(&config.routes)?;
@@ -120,18 +122,21 @@ impl Agent {
             authority_base.exit_intent_path.clone(),
         ));
         let userspace = authority_base.connector.userspace;
-        let intent_persisted =
-            if cfg!(target_os = "linux") && authority_base.controller.is_some() && !userspace {
-                let loaded = exit_intent
-                    .load(&mut authority_base)
-                    .context("load explicit exit selection")?;
-                authority_base
-                    .validate()
-                    .context("validate persisted exit selection")?;
-                loaded
-            } else {
-                false
-            };
+        let intent_persisted = if cfg!(target_os = "linux")
+            && authority_base.controller.is_some()
+            && !userspace
+            && authority_base.foreground_routes.is_none()
+        {
+            let loaded = exit_intent
+                .load(&mut authority_base)
+                .context("load explicit exit selection")?;
+            authority_base
+                .validate()
+                .context("validate persisted exit selection")?;
+            loaded
+        } else {
+            false
+        };
         let bootstrap = self.controller_bootstrap().await?;
         if let Some((client, snapshot, _, _)) = &bootstrap {
             if snapshot
@@ -156,7 +161,7 @@ impl Agent {
                 .exit_client
                 .controller_bypass
                 .dedup();
-            let effective = controller_effective_config(&authority_base, snapshot, self.node);
+            let effective = controller_effective_config(&authority_base, snapshot, self.node)?;
             self.config = Arc::new(effective);
         }
         let mut owned = self.config.tun.addresses.clone();
@@ -418,7 +423,11 @@ impl Agent {
             self.config
                 .controller
                 .as_ref()
-                .filter(|_| !userspace && cfg!(target_os = "linux"))
+                .filter(|_| {
+                    !userspace
+                        && cfg!(target_os = "linux")
+                        && self.config.foreground_routes.is_none()
+                })
                 .map(|_| {
                     Arc::new(move |selection| {
                         let control = Arc::clone(&exit_control);
@@ -779,7 +788,7 @@ impl RuntimeControl {
         let authority = self.state.authority_snapshot();
         let effective = authority
             .as_ref()
-            .map(|snapshot| controller_effective_config(&base, snapshot, self.node))
+            .and_then(|snapshot| controller_effective_config(&base, snapshot, self.node).ok())
             .unwrap_or_else(|| {
                 if base.controller.is_some() {
                     controller_disabled_config(&base)
@@ -845,7 +854,14 @@ impl RuntimeControl {
             daemon_instance_id: String::new(),
             api_revision: 0,
             running: true,
-            actor: if serving_exit { "exit-node" } else { "node" }.to_owned(),
+            actor: if base.foreground_routes.is_some() {
+                "user"
+            } else if serving_exit {
+                "exit-node"
+            } else {
+                "node"
+            }
+            .to_owned(),
             product_version: crate::product_version().to_owned(),
             control_version: "1.0".to_owned(),
             packet_version: 1,
@@ -990,13 +1006,14 @@ impl RuntimeControl {
         ensure!(!snapshot.expired(), "controller authority is expired");
         let previous = self.base_config.load_full();
         let next = prepare_exit_base(&previous, &snapshot, self.node, &selection)?;
-        let effective = Arc::new(controller_effective_config(&next, &snapshot, self.node));
+        let effective = Arc::new(controller_effective_config(&next, &snapshot, self.node)?);
         ensure!(
             !selection.enabled || effective.forwarding.exit_client.enabled,
             "selected exit has no usable controller route"
         );
-        let previous_effective =
-            Arc::new(controller_effective_config(&previous, &snapshot, self.node));
+        let previous_effective = Arc::new(controller_effective_config(
+            &previous, &snapshot, self.node,
+        )?);
         let was_persisted = *self
             .intent_persisted
             .lock()
@@ -1204,6 +1221,28 @@ struct RuntimeApplier {
     control_lock: Arc<Mutex<()>>,
 }
 
+impl RuntimeApplier {
+    async fn withdraw(&self, base: &Config) -> Result<()> {
+        self.state.fail_close();
+        Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
+        Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
+        Metrics::set(&self.metrics.exit_forwarding_ready, false);
+        Metrics::set(&self.metrics.exit_nat_ready, false);
+        if let Err(error) = reconcile_kernel(
+            &self.kernel,
+            &self.dynamic_bypasses,
+            Arc::new(controller_disabled_config(base)),
+        ) {
+            Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
+            return Err(error.context("fail close controller-owned kernel state"));
+        }
+        if let Some(tun) = &self.tun {
+            tun.lock().await.apply_controller(&[], &[], &[]).await?;
+        }
+        Ok(())
+    }
+}
+
 impl SnapshotApplier for RuntimeApplier {
     fn apply<'a>(
         &'a self,
@@ -1217,29 +1256,21 @@ impl SnapshotApplier for RuntimeApplier {
             );
             let base = self.base_config.load_full();
             if let Err(error) = validate_controller_relay(&base, &snapshot) {
-                self.state.fail_close();
-                Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
-                Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
-                Metrics::set(&self.metrics.exit_forwarding_ready, false);
-                Metrics::set(&self.metrics.exit_nat_ready, false);
-                if let Err(cleanup) = reconcile_kernel(
-                    &self.kernel,
-                    &self.dynamic_bypasses,
-                    Arc::new(controller_disabled_config(&base)),
-                ) {
-                    Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
-                    return Err(cleanup.context("fail close withdrawn relay authority"));
-                }
-                if let Some(tun) = &self.tun {
-                    tun.lock().await.apply_controller(&[], &[], &[]).await?;
-                }
+                self.withdraw(&base).await?;
                 return Err(error.context("controller withdrew configured relay authority"));
             }
-            let effective = Arc::new(controller_effective_config(&base, &snapshot, self.node));
+            let effective = match controller_effective_config(&base, &snapshot, self.node) {
+                Ok(effective) => Arc::new(effective),
+                Err(error) => {
+                    self.withdraw(&base).await?;
+                    return Err(error);
+                }
+            };
             let rollback_config = self
                 .state
                 .authority_snapshot()
-                .map(|previous| Arc::new(controller_effective_config(&base, &previous, self.node)))
+                .and_then(|previous| controller_effective_config(&base, &previous, self.node).ok())
+                .map(Arc::new)
                 .unwrap_or_else(|| Arc::new(controller_disabled_config(&base)));
             let routes = effective.routes.clone();
             let compiled = RoutingTable::compile(&routes)?;
@@ -1284,24 +1315,8 @@ impl SnapshotApplier for RuntimeApplier {
     fn fail_close<'a>(&'a self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let _guard = self.control_lock.lock().await;
-            self.state.fail_close();
-            Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
-            Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
-            Metrics::set(&self.metrics.exit_forwarding_ready, false);
-            Metrics::set(&self.metrics.exit_nat_ready, false);
             let base = self.base_config.load_full();
-            if let Err(error) = reconcile_kernel(
-                &self.kernel,
-                &self.dynamic_bypasses,
-                Arc::new(controller_disabled_config(&base)),
-            ) {
-                Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
-                return Err(error.context("fail close controller-owned kernel state"));
-            }
-            if let Some(tun) = &self.tun {
-                tun.lock().await.apply_controller(&[], &[], &[]).await?;
-            }
-            Ok(())
+            self.withdraw(&base).await
         })
     }
 
@@ -1314,6 +1329,10 @@ impl SnapshotApplier for RuntimeApplier {
             ensure!(
                 !snapshot.expired(),
                 "controller renewed an expired snapshot"
+            );
+            ensure!(
+                self.state.authority_snapshot().is_some(),
+                "controller must reapply routes before restoring withdrawn authority"
             );
             publish_controller_metrics(&self.metrics, &snapshot);
             self.state.publish_authority(snapshot);
@@ -1473,10 +1492,16 @@ fn publish_controller_metrics(metrics: &Metrics, snapshot: &Snapshot) {
     Metrics::set(&metrics.controller_certificate_renewal_forced, false);
 }
 
-fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) -> Config {
+fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) -> Result<Config> {
     let mut effective = base.clone();
     effective.tun.addresses = snapshot.overlays.clone();
-    effective.routes = route_configs(snapshot, local);
+    effective.routes = match &base.foreground_routes {
+        Some(scope) => route_configs(
+            &crate::foreground_routes::select(scope, snapshot, local)?,
+            local,
+        ),
+        None => route_configs(&snapshot.routes, local),
+    };
     effective.forwarding.exit_client.controller_bypass.extend(
         snapshot
             .relays
@@ -1586,12 +1611,14 @@ fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) ->
             .routes
             .retain(|route| route.kind != crate::config::RouteKind::Exit);
     }
-    effective
+    Ok(effective)
 }
 
-fn route_configs(snapshot: &Snapshot, local: Id) -> Vec<crate::config::RouteConfig> {
-    snapshot
-        .routes
+fn route_configs(
+    routes: &[crate::controller::Route],
+    local: Id,
+) -> Vec<crate::config::RouteConfig> {
+    routes
         .iter()
         .filter(|route| route.via != local)
         .map(|route| crate::config::RouteConfig {
@@ -1811,7 +1838,7 @@ mod tests {
             certificate_renew_after: u64::MAX - 1,
             certificate_not_after: u64::MAX,
         };
-        let effective = controller_effective_config(&base, &snapshot, local);
+        let effective = controller_effective_config(&base, &snapshot, local).unwrap();
         assert!(effective.forwarding.subnet_router);
         assert!(effective.forwarding.exit_gateway);
         assert!(
@@ -1863,14 +1890,14 @@ mod tests {
                 v1::RouteAdvertisementMode::Routed,
             ),
         ]);
-        let effective = controller_effective_config(&dynamic, &scoped, local);
+        let effective = controller_effective_config(&dynamic, &scoped, local).unwrap();
         assert!(effective.forwarding.exit_gateway);
         assert_eq!(
             effective.forwarding.exit_gateway_sources,
             ["100.96.0.2/32".parse::<IpNet>().unwrap()]
         );
         scoped.routes.last_mut().unwrap().mode = v1::RouteAdvertisementMode::Nat;
-        let effective = controller_effective_config(&dynamic, &scoped, local);
+        let effective = controller_effective_config(&dynamic, &scoped, local).unwrap();
         assert_eq!(
             effective.forwarding.exit_gateway_sources,
             [
@@ -1883,6 +1910,7 @@ mod tests {
             .retain(|route| route.kind != v1::RouteKind::Exit);
         assert!(
             !controller_effective_config(&dynamic, &scoped, local)
+                .unwrap()
                 .forwarding
                 .exit_gateway
         );
@@ -1932,7 +1960,7 @@ mod tests {
         let mut withdrawn = snapshot;
         withdrawn.enabled_capabilities = 0;
         withdrawn.routes.clear();
-        let effective = controller_effective_config(&base, &withdrawn, local);
+        let effective = controller_effective_config(&base, &withdrawn, local).unwrap();
         assert!(!effective.forwarding.subnet_router);
         assert!(effective.forwarding.subnet_routes.is_empty());
         assert!(!effective.forwarding.exit_gateway);

@@ -283,6 +283,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --lib
       - run: cargo build --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+      - name: Check the macOS CLI handoff to the Rust binary
+        run: |
+          cd go
+          LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" go test ./cmd/laneway -run '^TestRustForeground' -count=1
       - name: Verify real utun traffic and route cleanup with the installed helper
         run: |
           set -euo pipefail

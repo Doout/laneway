@@ -422,6 +422,7 @@ impl Stored {
             listen.parse().context("invalid saved UDP bind address")?
         };
         let config = Config {
+            foreground_routes: None,
             mode: self.mode,
             socket_path: self.socket_path,
             exit_intent_path: state_dir.join("exit-intent-v1.json"),
