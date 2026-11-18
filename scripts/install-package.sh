@@ -10,15 +10,26 @@ sharedir="$destination_root$prefix/share/laneway"
 unitdir="$destination_root$prefix/lib/systemd/system"
 
 if [ "$(uname -s)" = Darwin ]; then
+  case "$#:${1:-}" in
+    0:) set -- ;;
+    1:--rust-preview) set -- --with-rust ;;
+    *) echo "usage: sudo sh install.sh [--rust-preview]" >&2; exit 2 ;;
+  esac
   [ -z "$destination_root" ] || { echo "DESTDIR is not supported by the macOS client installer" >&2; exit 1; }
   [ "$(id -u)" -eq 0 ] || { echo "run this installer with sudo" >&2; exit 1; }
-  "$script_dir/bin/laneway" configure --yes
+  "$script_dir/bin/laneway" configure --yes "$@"
+  "$script_dir/bin/laneway" configure --check "$@"
   ln -sfn laneway "$bindir/lane"
   echo "Laneway $(cat "$script_dir/VERSION") macOS client installed."
   echo "Run as your normal user: laneway login DOMAIN"
   echo "Then connect in the foreground: laneway connect DOMAIN"
+  if [ "$#" -ne 0 ]; then
+    echo "To try the Rust tunnel: laneway connect DOMAIN --rust"
+  fi
   exit 0
 fi
+
+[ "$#" -eq 0 ] || { echo "usage: sh install.sh (the Rust preview option is macOS-only)" >&2; exit 2; }
 
 if [ -z "$destination_root" ] && [ "$(id -u)" -ne 0 ]; then
   echo "run this installer as root, or set DESTDIR for a staged install" >&2

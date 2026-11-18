@@ -166,9 +166,11 @@ fi
 for value in \
   'os: linux, arch: amd64, runner: ubuntu-24.04' \
   'os: linux, arch: arm64, runner: ubuntu-24.04-arm' \
-  'os: darwin, arch: amd64, runner: ubuntu-24.04' \
-  'os: darwin, arch: arm64, runner: ubuntu-24.04' \
+  'os: darwin, arch: amd64, runner: macos-15-intel' \
+  'os: darwin, arch: arm64, runner: macos-15' \
   'PACKAGE_RUST_RUNTIME_DIR=' \
+  'PACKAGE_RUST_MACOS=' \
+  'integration/rust-release-macos.sh' \
   'integration/rust-release-systemd.sh' \
 	"dist/laneway_\${{ matrix.os }}_\${{ matrix.arch }}" \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \

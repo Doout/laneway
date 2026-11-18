@@ -8,6 +8,7 @@ package_goos=${PACKAGE_GOOS:-$(cd "$project_dir/go" && go env GOOS)}
 package_goarch=${PACKAGE_GOARCH:-$(cd "$project_dir/go" && go env GOARCH)}
 package_rust_node=${PACKAGE_RUST_NODE:-}
 package_rust_runtime_dir=${PACKAGE_RUST_RUNTIME_DIR:-}
+package_rust_macos=${PACKAGE_RUST_MACOS:-}
 
 case "$package_goos" in linux|darwin) ;; *) echo "unsupported package operating system: $package_goos" >&2; exit 1;; esac
 case "$package_goarch" in
@@ -34,6 +35,10 @@ if [ -n "$package_rust_node" ]; then
     awk -F: -v expected="$rust_machine" '$1 ~ /^[[:space:]]*Machine$/ {gsub(/^[[:space:]]+/, "", $2); if ($2 == expected) valid=1} END {exit !valid}' ||
     { echo "PACKAGE_RUST_NODE architecture does not match the package" >&2; exit 1; }
 fi
+if [ -n "$package_rust_macos" ]; then
+  [ "$package_goos" = darwin ] || { echo "PACKAGE_RUST_MACOS is macOS-only" >&2; exit 1; }
+  sh "$script_dir/verify-rust-macos-runtime.sh" "$package_rust_macos" "$package_goarch"
+fi
 case "$version" in
   *[!0-9A-Za-z._+-]*)
     echo "version contains unsupported characters" >&2
@@ -58,6 +63,9 @@ if [ "$package_goos" = linux ]; then
 		done
 		cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 	fi
+elif [ -n "$package_rust_macos" ]; then
+	install -m 0755 "$package_rust_macos" "$package_dir/bin/lanewayd-rs"
+	cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 fi
 
 ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$version"
@@ -128,11 +136,24 @@ if [ "$package_goos" = linux ]; then
 		"$package_dir"/deploy/compose/laneway-control \
 		"$package_dir"/deploy/containers/update-connector.sh \
 		"$package_dir"/deploy/ephemeral-exit/bootstrap.sh
+elif [ -n "$package_rust_macos" ]; then
+	chmod 0755 "$package_dir/bin/lanewayd-rs"
 fi
 
 tmp_archive="$staging_dir/$archive"
-tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-  -C "$staging_dir" -cf - laneway | gzip -n > "$tmp_archive"
+if [ "$(uname -s)" = Darwin ]; then
+	(
+		cd "$staging_dir"
+		TZ=UTC find laneway -exec touch -h -t 197001010000.00 {} +
+		find laneway -print | LC_ALL=C sort > members
+		COPYFILE_DISABLE=1 /usr/bin/tar -cf payload.tar --format ustar --no-recursion \
+			--uid 0 --gid 0 --uname root --gname wheel -T members
+	)
+else
+	tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+		-C "$staging_dir" -cf "$staging_dir/payload.tar" laneway
+fi
+gzip -n < "$staging_dir/payload.tar" > "$tmp_archive"
 mv "$tmp_archive" "$project_dir/dist/$archive"
 if [ "$package_goos" = darwin ]; then
 	cp "$package_dir/bin/laneway" "$project_dir/dist/$standalone"
@@ -140,6 +161,10 @@ if [ "$package_goos" = darwin ]; then
 fi
 (
   cd "$project_dir/dist"
-  sha256sum "$archive" > "$archive.sha256"
+  if [ "$(uname -s)" = Darwin ]; then
+    shasum -a 256 "$archive" > "$archive.sha256"
+  else
+    sha256sum "$archive" > "$archive.sha256"
+  fi
 )
 echo "$project_dir/dist/$archive"

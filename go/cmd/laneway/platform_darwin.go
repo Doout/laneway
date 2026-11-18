@@ -3,14 +3,19 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Doout/laneway/go/internal/bootstrap"
+	"github.com/Doout/laneway/go/internal/buildinfo"
 	"github.com/Doout/laneway/go/internal/nethelper"
 )
 
@@ -30,19 +35,33 @@ func addPlatformConnectFlags(fs *flag.FlagSet, options *connectPlatformOptions) 
 }
 
 func platformConnectRustRuntime() (string, error) {
-	for path := macRustRuntimePath; ; path = filepath.Dir(path) {
+	if err := trustedMacRuntimePath(macRustRuntimePath, false); err != nil {
+		return "", fmt.Errorf("Rust runtime preview is unavailable: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, macRustRuntimePath, "--version").Output()
+	if err != nil || strings.TrimSpace(string(output)) != buildinfo.Version {
+		return "", fmt.Errorf("the Rust runtime must match Laneway %s; reinstall the matching macOS preview archive", buildinfo.Version)
+	}
+	return macRustRuntimePath, nil
+}
+
+func trustedMacRuntimePath(first string, directory bool) error {
+	for path := first; ; path = filepath.Dir(path) {
 		info, err := os.Lstat(path)
 		if err != nil {
-			return "", fmt.Errorf("Rust runtime preview is not installed at %s: %w", macRustRuntimePath, err)
+			return err
 		}
+		expectsDirectory := directory || path != first
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != 0 || info.Mode().Perm()&0o022 != 0 ||
-			(path == macRustRuntimePath && (!info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0)) ||
-			(path != macRustRuntimePath && !info.IsDir()) {
-			return "", fmt.Errorf("Rust runtime path %s must be root-owned and not writable by group or others", path)
+			(!expectsDirectory && (!info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0)) ||
+			(expectsDirectory && !info.IsDir()) {
+			return fmt.Errorf("Rust runtime path %s must be root-owned and not writable by group or others", path)
 		}
 		if path == "/" {
-			return macRustRuntimePath, nil
+			return nil
 		}
 	}
 }

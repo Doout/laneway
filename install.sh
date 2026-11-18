@@ -8,6 +8,7 @@ prepare_control_plane=false
 upgrade_control_plane=false
 production_mode=false
 quick_control_plane=false
+rust_preview=false
 cosign_bin=
 cosign_is_fallback=false
 
@@ -75,6 +76,7 @@ case "${1:-}" in
     fi
     ;;
   --client) shift ;;
+  --rust-preview) rust_preview=true; shift ;;
   --control-plane)
     install_control_plane=true; shift
     if [ "${1:-}" = --production ]; then production_mode=true; shift; fi
@@ -86,11 +88,13 @@ case "${1:-}" in
     ;;
   -h|--help)
     cat <<'EOF'
-usage: sh install.sh [--client | --control-plane [--production] | --prepare-control-plane | --upgrade-control-plane [--production]]
+usage: sh install.sh [--client | --rust-preview | --control-plane [--production] | --prepare-control-plane | --upgrade-control-plane [--production]]
 
 Without options, install the latest Laneway client and packaged files on Linux
 or macOS. On Linux, setting LANEWAY_DOMAIN runs the control-plane quick setup
 with non-interactive defaults. Use --client to force a client-only install.
+On macOS, --rust-preview also installs the optional Rust tunnel from a signed
+release archive. It requires Cosign. Go remains the default runtime.
 With --control-plane, select a stable release tag, verify its signed release,
 install it, and start the interactive hardened control-plane installer.
 The default quick profile warns on unavailable signature services and writes a
@@ -116,6 +120,10 @@ case "$(uname -s)" in
   Darwin) operating_system=darwin ;;
   *) echo "Laneway packages support Linux and macOS only" >&2; exit 1 ;;
 esac
+if [ "$rust_preview" = true ] && [ "$operating_system" != darwin ]; then
+  echo "--rust-preview requires macOS" >&2
+  exit 1
+fi
 if [ "$operating_system" = darwin ] && \
   { [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; }; then
   echo "control-plane installation is Linux-only; macOS installs the foreground client" >&2
@@ -135,6 +143,9 @@ if [ "$operating_system" = darwin ]; then checksum_command=shasum; fi
 for command in awk base64 curl date find grep mktemp readlink sed "$checksum_command" tar wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
+if [ "$rust_preview" = true ]; then
+  cosign_bin=$(command -v cosign 2>/dev/null) || add_missing "cosign (required to verify the macOS Rust preview release)"
+fi
 
 if [ "$operating_system" = darwin ] && \
   [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
@@ -235,6 +246,17 @@ curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$base_url/$asset" -o "$download_dir/$asset"
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
   "$base_url/checksums.txt" -o "$download_dir/checksums.txt"
+if [ "$rust_preview" = true ]; then
+  curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    "$base_url/checksums.sigstore.json" -o "$download_dir/checksums.sigstore.json"
+  if ! "$cosign_bin" verify-blob --bundle "$download_dir/checksums.sigstore.json" \
+    --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$release" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$download_dir/checksums.txt" >/dev/null; then
+    echo "macOS Rust preview: release checksum signature verification failed" >&2
+    exit 1
+  fi
+fi
 if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] || [ "$upgrade_control_plane" = true ]; then
   curl --fail --location --silent --show-error \
     "$base_url/checksums.sigstore.json" -o "$download_dir/checksums.sigstore.json"
@@ -264,7 +286,7 @@ if [ "$install_control_plane" = true ] || [ "$prepare_control_plane" = true ] ||
 fi
 (
   cd "$download_dir"
-  grep "  $asset\$" checksums.txt > selected-checksum.txt
+  awk -v asset="$asset" 'NF == 2 && $2 == asset { print $1 "  " $2 }' checksums.txt > selected-checksum.txt
   test "$(wc -l < selected-checksum.txt)" -eq 1
   if [ "$operating_system" = darwin ]; then
     shasum -a 256 -c selected-checksum.txt
@@ -285,12 +307,20 @@ if [ "$upgrade_control_plane" = true ] && \
   exit 1
 fi
 if [ "$operating_system" = darwin ]; then
-  "$download_dir/laneway/bin/laneway" configure --yes
-  "$download_dir/laneway/bin/laneway" configure --check
+  if [ "$rust_preview" = true ]; then
+    "$download_dir/laneway/bin/laneway" configure --yes --with-rust
+    "$download_dir/laneway/bin/laneway" configure --check --with-rust
+  else
+    "$download_dir/laneway/bin/laneway" configure --yes
+    "$download_dir/laneway/bin/laneway" configure --check
+  fi
   echo "Laneway $release is ready."
   echo "Next: ask your administrator for a user token, then run:"
   echo "  laneway login ${LANEWAY_DOMAIN:-YOUR_DOMAIN}"
   echo "  laneway connect ${LANEWAY_DOMAIN:-YOUR_DOMAIN}"
+  if [ "$rust_preview" = true ]; then
+    echo "To try the Rust tunnel: laneway connect ${LANEWAY_DOMAIN:-YOUR_DOMAIN} --rust"
+  fi
   exit 0
 fi
 

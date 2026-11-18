@@ -20,8 +20,8 @@ The Linux release workflow builds the four Rust runtime candidates on native
 AMD64 and ARM64 runners. The existing signed Linux archive carries them as
 `sbin/laneway-controller-rs`, `sbin/laneway-relay-rs`,
 `sbin/lanewayd-rs`, and `sbin/laneway-healthcheck-rs`. The Go binaries,
-the default `lanewayd` link, the production image tags, and the macOS packages
-are unchanged. Shipping these files does not select them at runtime.
+the default `lanewayd` link, and the production image tags are unchanged.
+Shipping these files does not select them at runtime.
 
 To build and verify an unsigned preview on a Linux lab host, set `arch` to its
 native architecture:
@@ -221,14 +221,31 @@ assets while running with its non-root UID and no network.
 helper. It receives a verified `utun` file descriptor over the inherited Unix
 socket, reads and writes IPv4/IPv6 packets in Rust, and asks the helper to
 replace and restore only ordinary routes. Node credentials stay in the Rust
-process after onboarding. The existing Go runtime remains the default, and
-the current signed macOS package does not include the Rust binary.
+process after onboarding. The release workflow builds the native binary for
+Apple Silicon and Intel and includes `bin/lanewayd-rs` in each macOS archive
+covered by the release's signed checksums. The standalone Go download and
+default runtime stay the same.
 
-To test the foreground CLI on an isolated Mac, build the Go `laneway` CLI and
-the native Rust `lanewayd-rs`, install the matching CLI and helper with the
-existing `laneway configure` command, and install the Rust binary as
-`/Library/Application Support/Laneway/lanewayd-rs` (root-owned, mode `0755`,
-with real root-owned parent directories not writable by group or other).
+On an isolated Mac, run the release's `install.sh --rust-preview` with Cosign
+on `PATH`. The installer verifies the tag's release signature and archive
+checksum before running the bundled CLI. For an archive you verified yourself,
+run `sudo sh install.sh --rust-preview` inside its extracted `laneway` directory.
+The optional binary is installed at `/Library/Application Support/Laneway/lanewayd-rs`.
+Repeat the preview installation after a version upgrade; `laneway update`
+continues to update the standalone Go client and helper only. `--rust` refuses
+a mismatched version before using any credentials.
+
+To build and check an unsigned local archive on native macOS without installing it:
+
+```sh
+version=0.0.0-lab
+arch=$(go env GOARCH)
+LANEWAY_PRODUCT_VERSION="$version" cargo build --locked --release \
+  --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+PACKAGE_RUST_MACOS="$PWD/rust/target/release/lanewayd-rs" make package VERSION="$version"
+sh integration/rust-release-macos.sh "dist/laneway_darwin_$arch.tar.gz" "$arch" "$version"
+```
+
 Run `laneway connect DOMAIN --rust` as your normal user. Add `--ephemeral`
 for a one-time login, or repeat `--route PREFIX` for an exact controller
 advertisement. Remembered logins use policy-derived private routes by
@@ -247,9 +264,11 @@ losing controller authority withdraws the ordinary routes.
 
 The native CI matrix runs the unprivileged stream-framing and credential
 handoff tests on Apple Silicon and Intel. It also installs the existing helper
-on disposable runners and exercises a real `utun` with a benchmark-only IPv4 route, a packet,
-authority withdrawal, and cleanup. That lab test does not exercise desktop
-onboarding, public relay reachability, or the signed macOS package.
+on disposable runners and exercises a real `utun` with a benchmark-only IPv4
+route, a packet, authority withdrawal, and cleanup. The release package gate
+checks both binaries, preserves the standalone Go artifact, and stages and
+verifies the installed sidecar on disposable native runners. Release checksum
+signing is separate from Apple Developer ID signing or notarization.
 
 ## Linux node image
 

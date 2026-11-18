@@ -283,21 +283,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --lib
       - run: cargo build --locked --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+        env:
+          LANEWAY_PRODUCT_VERSION: 0.0.0-ci
       - name: Check the macOS CLI handoff to the Rust binary
         run: |
           cd go
-          LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" go test ./cmd/laneway -run '^TestRustForeground' -count=1
-      - name: Verify real utun traffic and route cleanup with the installed helper
+          LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" go test ./cmd/laneway -run '^Test(RustForeground|MacRustRuntime)' -count=1
+      - name: Install the preview archive and verify real utun traffic and cleanup
         run: |
           set -euo pipefail
-          helper=/Library/PrivilegedHelperTools/laneway-network-helper
-          test ! -e "$helper" && test ! -L "$helper"
-          (cd go && go build -trimpath -o "$RUNNER_TEMP/laneway-network-helper" ./cmd/laneway)
-          sudo -n install -d -m 0755 -o root -g wheel /Library/PrivilegedHelperTools
-          sudo -n install -m 0755 -o root -g wheel "$RUNNER_TEMP/laneway-network-helper" "$helper"
-          trap 'sudo -n rm -f "$helper"' EXIT
-          LANEWAY_MACOS_UTUN_TEST=1 cargo test --locked --manifest-path rust/Cargo.toml \
-            -p lanewayd-rs --lib darwin_installed_helper_routes_and_restores_real_utun -- --ignored
+          arch=$(go env GOARCH)
+          PACKAGE_RUST_MACOS="$GITHUB_WORKSPACE/rust/target/debug/lanewayd-rs" make package VERSION=0.0.0-ci
+          LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 sh integration/rust-release-macos.sh \
+            "dist/laneway_darwin_$arch.tar.gz" "$arch" 0.0.0-ci
 
   rust-linux-package:
     name: Static Rust Linux package preview

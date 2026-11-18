@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,32 @@ func rustForegroundFixture(t *testing.T) (bootstrap.Metadata, identity.NodeIdent
 			QUICEndpoint: "controller.example:443", ServerName: "controller.example", ServiceID: "202122232425262728292a2b2c2d2e2f"},
 		Relays: []bootstrap.Relay{{Endpoint: "relay.example:443", ServiceID: "303132333435363738393a3b3c3d3e3f"}},
 	}, identity.NodeIdentity{NetworkID: network, NodeID: node}
+}
+
+func TestMacRustRuntimeCandidateRequiresNativeExecutable(t *testing.T) {
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The Go test executable has the same thin native Mach-O contract as the
+	// Rust executable. The archive gate separately runs the actual Rust binary.
+	if err := inspectMacRustCandidate(path, runtime.GOARCH); err != nil {
+		t.Fatal(err)
+	}
+	wrongArch := "amd64"
+	if runtime.GOARCH == wrongArch {
+		wrongArch = "arm64"
+	}
+	if err := inspectMacRustCandidate(path, wrongArch); err == nil {
+		t.Fatal("accepted executable for a different architecture")
+	}
+	link := filepath.Join(t.TempDir(), "lanewayd-rs")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := inspectMacRustCandidate(link, runtime.GOARCH); err == nil {
+		t.Fatal("accepted a symlink as the packaged Rust binary")
+	}
 }
 
 func TestRustForegroundSessionConfigAndCredentialHandoff(t *testing.T) {

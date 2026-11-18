@@ -30,6 +30,7 @@ jobs:
       - name: Check scripts
         run: |
           python3 -m unittest discover -s deploy/compose -p test_service_certificate_renewal.py
+          shellcheck integration/rust-release-macos.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
       - name: Check release tag and source
         run: |
@@ -57,8 +58,8 @@ jobs:
         include:
           - {os: linux, arch: amd64, runner: ubuntu-24.04}
           - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
-          - {os: darwin, arch: amd64, runner: ubuntu-24.04}
-          - {os: darwin, arch: arm64, runner: ubuntu-24.04}
+          - {os: darwin, arch: amd64, runner: macos-15-intel}
+          - {os: darwin, arch: arm64, runner: macos-15}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -77,11 +78,26 @@ jobs:
             --build-arg VERSION="${GITHUB_REF_NAME#v}" --file deploy/containers/Dockerfile.rust-release \
             --target artifacts --output "type=local,dest=$output" .
           printf 'PACKAGE_RUST_RUNTIME_DIR=%s\n' "$output" >> "$GITHUB_ENV"
+      - name: Build the native macOS Rust runtime candidate
+        if: matrix.os == 'darwin'
+        run: |
+          rustup toolchain install 1.91.1 --profile minimal
+          LANEWAY_PRODUCT_VERSION="${GITHUB_REF_NAME#v}" cargo +1.91.1 build --locked --release \
+            --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+          printf 'PACKAGE_RUST_MACOS=%s\n' "$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" >> "$GITHUB_ENV"
       - name: Build reproducible package
         env:
           PACKAGE_GOOS: ${{ matrix.os }}
           PACKAGE_GOARCH: ${{ matrix.arch }}
         run: make package VERSION="${GITHUB_REF_NAME#v}"
+      - name: Test the macOS release archive on its native architecture
+        if: matrix.os == 'darwin'
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: |
+          RUSTUP_TOOLCHAIN=1.91.1 LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 \
+            sh integration/rust-release-macos.sh \
+            "dist/laneway_darwin_$PACKAGE_GOARCH.tar.gz" "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
       - name: Test the Linux release archive under systemd
         if: matrix.os == 'linux'
         env:

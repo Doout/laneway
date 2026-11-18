@@ -6,6 +6,8 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"debug/macho"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,11 +35,12 @@ func runMacConfigure(args []string) error {
 	fs := flag.NewFlagSet("configure", flag.ContinueOnError)
 	checkOnly := fs.Bool("check", false, "verify the installed client and helper without changing them")
 	yes := fs.Bool("yes", false, "install without the confirmation prompt")
+	withRust := fs.Bool("with-rust", false, "include the Rust runtime from this macOS release archive")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 || (*checkOnly && *yes) {
-		return errors.New("usage: laneway configure [--check | --yes]")
+		return errors.New("usage: laneway configure [--check | --yes] [--with-rust]")
 	}
 	source, err := currentExecutable()
 	if err != nil {
@@ -46,7 +49,23 @@ func runMacConfigure(args []string) error {
 	if err := preflightMacInstall(source); err != nil {
 		return err
 	}
-	if err := macConfigurationStatus(source); err == nil {
+	var rustSource string
+	if *withRust {
+		rustSource = filepath.Join(filepath.Dir(source), "lanewayd-rs")
+		if err := inspectMacRustCandidate(rustSource, runtime.GOARCH); err != nil {
+			return err
+		}
+	}
+	status := func() error {
+		if err := macConfigurationStatus(source); err != nil {
+			return err
+		}
+		if *withRust {
+			return macRustConfigurationStatus(rustSource)
+		}
+		return nil
+	}
+	if err := status(); err == nil {
 		fmt.Printf("macOS client configured cli=%s helper=%s\n", macClientPath, macHelperPath)
 		return nil
 	} else if *checkOnly {
@@ -65,17 +84,101 @@ func runMacConfigure(args []string) error {
 				return errors.New("macOS configuration cancelled; no changes were made")
 			}
 		}
-		process := exec.Command("sudo", source, "configure", "--yes")
+		arguments := []string{source, "configure", "--yes"}
+		if *withRust {
+			arguments = append(arguments, "--with-rust")
+		}
+		process := exec.Command("sudo", arguments...)
 		process.Stdin, process.Stdout, process.Stderr = os.Stdin, os.Stdout, os.Stderr
 		return process.Run()
+	}
+	var rustStage string
+	if *withRust {
+		rustStage, err = stageMacRustRuntime(rustSource)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(rustStage)
 	}
 	if err := installMacBinary(source); err != nil {
 		return err
 	}
-	if err := macConfigurationStatus(macClientPath); err != nil {
+	if rustStage != "" {
+		if err := os.Rename(rustStage, macRustRuntimePath); err != nil {
+			return fmt.Errorf("install the macOS Rust preview: %w", err)
+		}
+	}
+	if err := status(); err != nil {
 		return fmt.Errorf("verify macOS configuration: %w", err)
 	}
 	fmt.Printf("macOS client configured cli=%s helper=%s\n", macClientPath, macHelperPath)
+	return nil
+}
+
+func inspectMacRustCandidate(source, arch string) error {
+	file, err := openMacBinary(source)
+	if err != nil {
+		return fmt.Errorf("macOS Rust preview requires an executable bin/lanewayd-rs: %w", err)
+	}
+	defer file.Close()
+	// Check only the fixed native Mach-O header. Do not parse unbounded load
+	// commands in the privileged installer or execute a candidate as root.
+	var header [16]byte
+	if _, err := io.ReadFull(file, header[:]); err != nil {
+		return fmt.Errorf("read native Rust runtime header: %w", err)
+	}
+	var cpu macho.Cpu
+	switch arch {
+	case "arm64":
+		cpu = macho.CpuArm64
+	case "amd64":
+		cpu = macho.CpuAmd64
+	default:
+		return fmt.Errorf("unsupported macOS Rust runtime architecture %s", arch)
+	}
+	if binary.LittleEndian.Uint32(header[0:4]) != macho.Magic64 ||
+		macho.Cpu(binary.LittleEndian.Uint32(header[4:8])) != cpu ||
+		macho.Type(binary.LittleEndian.Uint32(header[12:16])) != macho.TypeExec {
+		return errors.New("Rust runtime must be a native macOS executable matching the client architecture")
+	}
+	return nil
+}
+
+func stageMacRustRuntime(source string) (string, error) {
+	directory := filepath.Dir(macRustRuntimePath)
+	if err := trustedMacRuntimePath(filepath.Dir(directory), true); err != nil {
+		return "", err
+	}
+	if err := ensureMacDirectory(directory, true); err != nil {
+		return "", err
+	}
+	if err := trustedMacRuntimePath(macRustRuntimePath, false); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	staged, err := stageMacBinary(source, macRustRuntimePath)
+	if err != nil {
+		return "", err
+	}
+	// Never execute the staged program as root, even to query its version.
+	if err := inspectMacRustCandidate(staged, runtime.GOARCH); err != nil {
+		_ = os.Remove(staged)
+		return "", err
+	}
+	return staged, nil
+}
+
+func macRustConfigurationStatus(source string) error {
+	if err := trustedMacRuntimePath(macRustRuntimePath, false); err != nil {
+		return err
+	}
+	want, err := fileSHA256(source)
+	if err != nil {
+		return err
+	}
+	installed, err := fileSHA256(macRustRuntimePath)
+	if err != nil || installed != want {
+		return errors.New("installed Rust runtime differs from this macOS release archive")
+	}
 	return nil
 }
 
@@ -281,7 +384,7 @@ func ensureMacDirectory(directory string, privileged bool) error {
 }
 
 func stageMacBinary(source, destination string) (string, error) {
-	input, err := os.Open(source)
+	input, err := openMacBinary(source)
 	if err != nil {
 		return "", err
 	}
@@ -298,15 +401,15 @@ func stageMacBinary(source, destination string) (string, error) {
 			_ = os.Remove(name)
 		}
 	}()
-	if err := output.Chmod(0o755); err != nil {
-		return "", err
-	}
 	if err := output.Chown(0, 0); err != nil {
 		return "", err
 	}
 	written, err := io.Copy(output, io.LimitReader(input, macBinaryLimit+1))
 	if err != nil || written <= 0 || written > macBinaryLimit {
 		return "", errors.New("copy macOS binary exceeded the allowed size")
+	}
+	if err := output.Chmod(0o755); err != nil {
+		return "", err
 	}
 	if err := output.Sync(); err != nil {
 		return "", err
@@ -316,6 +419,20 @@ func stageMacBinary(source, destination string) (string, error) {
 	}
 	ok = true
 	return name, nil
+}
+
+func openMacBinary(path string) (*os.File, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 || info.Size() <= 0 || info.Size() > macBinaryLimit {
+		_ = file.Close()
+		return nil, errors.New("candidate is not a bounded regular executable")
+	}
+	return file, nil
 }
 
 func macConfigurationStatus(source string) error {
