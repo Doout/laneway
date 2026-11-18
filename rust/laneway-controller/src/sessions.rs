@@ -51,6 +51,14 @@ struct StoredSession {
     absolute: i64,
 }
 
+fn check_network(tx: &Transaction<'_>, principal: Id, network: Id) -> Result<()> {
+    let allowed: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM administrator_principal_networks WHERE principal_id=?1 AND network_id=?2)",
+        (principal.as_bytes(),network.as_bytes()), |r|r.get(0))?;
+    ensure!(allowed, SessionError::Denied);
+    Ok(())
+}
+
 impl SessionStore {
     pub fn check_database(path: &Path) -> Result<()> {
         let mut store = Self::open(path)?;
@@ -77,13 +85,7 @@ impl SessionStore {
             ensure!((1..=1000).contains(&limit), ListError::Limit);
             let restricted = (!all).then_some(principal);
             if let (Some(principal), Some(network)) = (restricted, network) {
-                let allowed: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM administrator_principal_networks
-                WHERE principal_id=?1 AND network_id=?2)",
-                    (principal.as_bytes(), network.as_bytes()),
-                    |r| r.get(0),
-                )?;
-                ensure!(allowed, SessionError::Denied);
+                check_network(tx, principal, network)?;
             }
             Ok(match network {
                 None => InventoryList::Networks(read_networks(
@@ -103,6 +105,20 @@ impl SessionStore {
     ) -> Result<SessionReply<serde_json::Value>> {
         self.with_session(token, true, |tx, principal, session, all, _| {
             crate::browser::session_view(tx, principal, session, all, csrf)
+        })
+    }
+
+    pub fn network(
+        &mut self,
+        token: &str,
+        id: Result<Id, ListError>,
+    ) -> Result<SessionReply<crate::Network>> {
+        self.with_session(token, true, |tx, principal, _, all, _| {
+            let id = id?;
+            if !all {
+                check_network(tx, principal, id)?
+            }
+            crate::read_network(tx, id)
         })
     }
 

@@ -121,11 +121,13 @@ laneway-healthcheck -tcp 127.0.0.1:9443 -tls-ca /lab/ca.crt -tls-server-name 127
 ```
 
 The listener requires loopback and TLS 1.3. It serves GET and HEAD for
-`/v1/admin/networks` and `/v1/admin/networks/{id}/nodes`, using sessions
+`/v1/admin/networks`, `/v1/admin/networks/{id}` and
+`/v1/admin/networks/{id}/nodes`, using sessions
 issued by Go or Rust. A successful browser inventory request renews the session; the TLS probe
 only checks the handshake and server identity. Go-issued automation tokens
-can also read inventory: listing networks requires `network.list`; listing
-nodes requires `node.read` and access to that network. Reads recheck the
+can also read inventory: listing networks requires `network.list`; reading
+one network requires `network.read`; listing nodes requires `node.read`.
+Both detail and nodes require access to that network. Reads recheck the
 token, principal, permissions and network scope in one SQLite snapshot.
 
 Root access is off unless you append `--root-token-file /lab/root.token` to
@@ -134,7 +136,8 @@ contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
 contexts or when combined with a session cookie. Bootstrap, recovery, and
-resource management writes still require Go. Do not route production traffic here.
+resource management writes other than network creation still require Go.
+Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
 or `sign_in`. The lab listener limits that public lookup to 30 requests per
@@ -162,5 +165,16 @@ Both mutations require the CSRF cookie and header as well as same-origin checks.
 The HTTPS fixture signs in on one implementation and restores the session on
 the other, and tests rotation and logout in both directions. It injects audit
 failures to verify that failed mutations do not create or revoke sessions.
-Next: port the authenticated network management operations, preserving role
-checks, network scope, configuration epochs and audit records.
+
+`POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
+required), the configured root bearer, or an automation token explicitly
+granted `network.create`. The Rust transaction creates the IPv4 or dual-stack
+network at epoch 1 and records the authenticated actor. Go and Rust can read
+each other's networks without migrating the database. The gate also enrolls a
+node through the Go store, checks both allocated addresses and the resulting
+epoch through Rust, checks forbidden and
+revoked subjects, and verifies rollback if the audit insert fails. When Go
+and Rust race to create the same ID, exactly one succeeds and emits an audit event.
+
+Next: port enrollment-token issuance and consumption, including certificate
+issuance, address allocation, expiry and one-time use on the mixed node lab.

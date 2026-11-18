@@ -14,7 +14,7 @@ pub(super) const DENIED: Failure = Failure(
     false,
 );
 
-fn csrf_proof(headers: &HeaderMap) -> Option<String> {
+pub(super) fn csrf_proof(headers: &HeaderMap) -> Option<String> {
     let cookie = cookie(headers, CSRF).ok()??;
     let mut values = headers.get_all("x-laneway-csrf").iter();
     let proof = values.next()?.as_bytes();

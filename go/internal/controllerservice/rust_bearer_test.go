@@ -56,7 +56,7 @@ func testRustBearerInventory(t *testing.T, f fixture, cookie string, check func(
 		}
 		return tok.AccessToken, tok.Token.TokenID, p.PrincipalID
 	}
-	scoped, tid, _ := issue("scoped-inventory", false, []string{"network.list", "node.read"})
+	scoped, tid, _ := issue("scoped-inventory", false, []string{"network.list", "network.read", "node.read"})
 	all, _, pid := issue("all-inventory", true, []string{"network.list"})
 	bearerHeader := func(token string) http.Header { return http.Header{"Authorization": {"Bearer " + token}} }
 	l := check("scoped list", networks+"?limit=1", bearerHeader(scoped), 200)
@@ -65,6 +65,9 @@ func testRustBearerInventory(t *testing.T, f fixture, cookie string, check func(
 		t.Fatal("scope must filter before limit")
 	}
 	check("allowed nodes", networks+"/"+other.ID.String()+"/nodes", bearerHeader(scoped), 200)
+	check("allowed network", networks+"/"+other.ID.String(), bearerHeader(scoped), 200)
+	check("network outside scope", networks+"/"+f.network.ID.String(), bearerHeader(scoped), 403)
+	check("list permission does not imply detail", networks+"/"+other.ID.String(), bearerHeader(all), 403)
 	check("denied network", networks+"/"+f.network.ID.String()+"/nodes", bearerHeader(scoped), 403)
 	check("denied permission", networks+"/"+other.ID.String()+"/nodes", bearerHeader(all), 403)
 	check("all networks", networks, bearerHeader(all), 200)

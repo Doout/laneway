@@ -98,27 +98,31 @@ fn automation_proof(token: &str) -> Result<(Id, [u8; 32]), SessionError> {
     ))
 }
 
-pub fn bearer_inventory(
-    database: &Path,
+pub(crate) struct BearerActor {
+    pub(crate) id: Id,
+    root: bool,
+    all: bool,
+}
+
+pub(crate) fn authenticate(
+    tx: &Transaction<'_>,
     header: &str,
     root: Option<&RootCredential>,
-    network: Result<Option<Id>, ListError>,
-    limit: Result<usize, ListError>,
-) -> Result<InventoryList> {
+) -> Result<BearerActor> {
     let (scheme, token) = header.split_once(' ').ok_or(SessionError::Invalid)?;
-    let mut db = open_existing(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let tx = db.transaction()?;
-    check_snapshot(&tx)?;
-    let root = root.filter(|r| r.matches(header));
-    let (network, scope) = if let Some(root) = root {
-        ensure!(root.principal == root_id(&tx)?, SessionError::Invalid);
-        (network?, None)
-    } else {
-        ensure!(scheme.eq_ignore_ascii_case("bearer"), SessionError::Invalid);
-        let (token_id, proof) = automation_proof(token)?;
-        // Authenticate, authorize and read from the same SQLite snapshot. The
-        // schema enforces valid principal names, operation names and distinct grants.
-        let (id, stored, all): ([u8;16], [u8;32], bool) = tx.query_row(
+    if let Some(root) = root.filter(|r| r.matches(header)) {
+        ensure!(root.principal == root_id(tx)?, SessionError::Invalid);
+        return Ok(BearerActor {
+            id: root.principal,
+            root: true,
+            all: true,
+        });
+    }
+    ensure!(scheme.eq_ignore_ascii_case("bearer"), SessionError::Invalid);
+    let (token_id, proof) = automation_proof(token)?;
+    // Authenticate, authorize and read from the same SQLite snapshot. The
+    // schema enforces valid principal names, operation names and distinct grants.
+    let (id, stored, all): ([u8;16], [u8;32], bool) = tx.query_row(
             "SELECT p.id,t.token_hash,p.all_networks FROM automation_service_access_tokens t
              JOIN automation_service_principals p ON p.id=t.principal_id
              WHERE t.id=?1 AND t.revoked_at IS NULL AND t.created_at<=unixepoch() AND t.expires_at>unixepoch()
@@ -129,22 +133,57 @@ pub fn bearer_inventory(
                    = EXISTS(SELECT 1 FROM automation_service_principal_permissions WHERE principal_id=p.id
                        AND operation NOT IN ('network.create','bootstrap_bundle.create','audit.read_global'))",
             [token_id.as_bytes()], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?.ok_or(SessionError::Invalid)?;
-        ensure!(bool::from(stored.ct_eq(&proof)), SessionError::Invalid);
-        let principal = Id::new(id)?;
-        let network = network?;
-        let op = if network.is_some() {
-            "node.read"
-        } else {
-            "network.list"
-        };
+    ensure!(bool::from(stored.ct_eq(&proof)), SessionError::Invalid);
+    Ok(BearerActor {
+        id: Id::new(id)?,
+        root: false,
+        all,
+    })
+}
+
+impl BearerActor {
+    pub(crate) fn authorize(
+        &self,
+        tx: &Transaction<'_>,
+        op: &str,
+        network: Option<Id>,
+    ) -> Result<()> {
+        if self.root {
+            return Ok(());
+        }
+        let principal = self.id;
         let granted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM automation_service_principal_permissions WHERE principal_id=?1 AND operation=?2)", (principal.as_bytes(), op), |r|r.get(0))?;
         ensure!(granted, SessionError::Denied);
-        if let Some(n) = network.filter(|_| !all) {
+        if let Some(n) = network.filter(|_| !self.all) {
             let allowed:bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM automation_service_principal_networks WHERE principal_id=?1 AND network_id=?2)",(principal.as_bytes(), n.as_bytes()), |r|r.get(0))?;
             ensure!(allowed, SessionError::Denied);
         }
-        (network, (!all).then_some(Scope::Automation(principal)))
-    };
+        Ok(())
+    }
+}
+
+pub fn bearer_inventory(
+    database: &Path,
+    header: &str,
+    root: Option<&RootCredential>,
+    network: Result<Option<Id>, ListError>,
+    limit: Result<usize, ListError>,
+) -> Result<InventoryList> {
+    let mut db = open_existing(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tx = db.transaction()?;
+    check_snapshot(&tx)?;
+    let actor = authenticate(&tx, header, root)?;
+    let network = network?;
+    actor.authorize(
+        &tx,
+        if network.is_some() {
+            "node.read"
+        } else {
+            "network.list"
+        },
+        network,
+    )?;
+    let scope = (!actor.all).then_some(Scope::Automation(actor.id));
     let limit = limit?;
     ensure!((1..=1000).contains(&limit), ListError::Limit);
     let list = match network {
@@ -153,4 +192,21 @@ pub fn bearer_inventory(
     };
     tx.commit()?;
     Ok(list)
+}
+
+pub fn bearer_network(
+    database: &Path,
+    header: &str,
+    root: Option<&RootCredential>,
+    id: Result<Id, ListError>,
+) -> Result<crate::Network> {
+    let mut db = open_existing(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let tx = db.transaction()?;
+    check_snapshot(&tx)?;
+    let actor = authenticate(&tx, header, root)?;
+    let id = id?;
+    actor.authorize(&tx, "network.read", Some(id))?;
+    let result = crate::read_network(&tx, id)?;
+    tx.commit()?;
+    Ok(result)
 }

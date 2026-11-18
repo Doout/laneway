@@ -8,13 +8,15 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use laneway_protocol::Id;
-use rusqlite::{Connection, OpenFlags, Transaction};
+use rusqlite::{Connection, OpenFlags, Row, Transaction};
 use serde::Serialize;
 mod bearer;
 mod browser;
-pub use bearer::{RootCredential, bearer_inventory};
+pub use bearer::{RootCredential, bearer_inventory, bearer_network};
 pub use browser::auth_state;
+mod network_create;
 mod nodes;
+pub use network_create::{CreateNetwork, NetworkError};
 pub mod password;
 mod session_lifecycle;
 pub use session_lifecycle::IssuedSession;
@@ -100,13 +102,20 @@ enum Scope {
     Automation(Id),
 }
 
+const NETWORK_COLUMNS: &str = "SELECT n.id,n.name,n.ipv4_address,n.ipv4_prefix_length,
+            n.ipv6_address,n.ipv6_prefix_length,n.configuration_epoch,n.created_at FROM networks n";
+
+fn read_network(tx: &Transaction<'_>, id: Id) -> Result<Network> {
+    let mut stmt = tx.prepare(&format!("{NETWORK_COLUMNS} WHERE n.id=?1"))?;
+    let mut rows = stmt.query([id.as_bytes()])?;
+    network_row(rows.next()?.ok_or(ListError::Missing)?)
+}
+
 fn read_networks(
     tx: &Transaction<'_>,
     limit: usize,
     restricted: Option<Scope>,
 ) -> Result<Vec<Network>> {
-    const COLUMNS: &str = "SELECT n.id,n.name,n.ipv4_address,n.ipv4_prefix_length,
-            n.ipv6_address,n.ipv6_prefix_length,n.configuration_epoch,n.created_at FROM networks n";
     let scope_join = match restricted {
         Some(Scope::Browser(_)) => {
             " JOIN administrator_principal_networks g ON g.network_id=n.id AND g.principal_id=?2"
@@ -117,7 +126,7 @@ fn read_networks(
         None => "",
     };
     let mut stmt = tx.prepare(&format!(
-        "{COLUMNS}{scope_join} ORDER BY n.created_at,n.id LIMIT ?1"
+        "{NETWORK_COLUMNS}{scope_join} ORDER BY n.created_at,n.id LIMIT ?1"
     ))?;
     let mut rows = match &restricted {
         Some(Scope::Browser(id) | Scope::Automation(id)) => {
@@ -127,38 +136,42 @@ fn read_networks(
     };
     let mut result = Vec::new();
     while let Some(row) = rows.next()? {
-        let id = Id::new(row.get(0)?)?;
-        let v4 = Ipv4Addr::from(row.get::<_, [u8; 4]>(2)?);
-        let v4bits: u8 = row.get(3)?;
-        ensure!(
-            (8..=30).contains(&v4bits),
-            "invalid network IPv4 prefix length"
-        );
-        let ipv6_pool = match (
-            row.get::<_, Option<[u8; 16]>>(4)?,
-            row.get::<_, Option<u8>>(5)?,
-        ) {
-            (None, None) => None,
-            (Some(bytes), Some(bits @ 64..=120)) => {
-                let addr = Ipv6Addr::from(bytes);
-                ensure!(
-                    addr.to_ipv4_mapped().is_none(),
-                    "invalid mapped IPv6 network"
-                );
-                Some(format!("{addr}/{bits}"))
-            }
-            _ => bail!("invalid network IPv6 pool"),
-        };
-        result.push(Network {
-            network_id: id.to_string(),
-            name: row.get(1)?,
-            ipv4_pool: format!("{v4}/{v4bits}"),
-            ipv6_pool,
-            configuration_epoch: u64::try_from(row.get::<_, i64>(6)?)?,
-            created_at_unix_seconds: row.get(7)?,
-        });
+        result.push(network_row(row)?);
     }
     Ok(result)
+}
+
+fn network_row(row: &Row<'_>) -> Result<Network> {
+    let id = Id::new(row.get(0)?)?;
+    let v4 = Ipv4Addr::from(row.get::<_, [u8; 4]>(2)?);
+    let v4bits: u8 = row.get(3)?;
+    ensure!(
+        (8..=30).contains(&v4bits),
+        "invalid network IPv4 prefix length"
+    );
+    let ipv6_pool = match (
+        row.get::<_, Option<[u8; 16]>>(4)?,
+        row.get::<_, Option<u8>>(5)?,
+    ) {
+        (None, None) => None,
+        (Some(bytes), Some(bits @ 64..=120)) => {
+            let addr = Ipv6Addr::from(bytes);
+            ensure!(
+                addr.to_ipv4_mapped().is_none(),
+                "invalid mapped IPv6 network"
+            );
+            Some(format!("{addr}/{bits}"))
+        }
+        _ => bail!("invalid network IPv6 pool"),
+    };
+    Ok(Network {
+        network_id: id.to_string(),
+        name: row.get(1)?,
+        ipv4_pool: format!("{v4}/{v4bits}"),
+        ipv6_pool,
+        configuration_epoch: u64::try_from(row.get::<_, i64>(6)?)?,
+        created_at_unix_seconds: row.get(7)?,
+    })
 }
 
 #[cfg(test)]

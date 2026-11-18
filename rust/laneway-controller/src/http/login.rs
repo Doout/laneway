@@ -1,5 +1,4 @@
-use super::{AUTH, COOKIE, Failure, INTERNAL, Reply, State, cookie, malformed, mutations};
-use http_body_util::BodyExt;
+use super::{AUTH, COOKIE, Failure, INTERNAL, Reply, State, cookie, form::json_form, mutations};
 use hyper::{Request, StatusCode, body::Incoming, header};
 use laneway_controller::{SessionError, SessionStore, password::Busy};
 use serde::Deserialize;
@@ -46,52 +45,24 @@ pub(super) async fn handle(
     if !crate::origin::same_origin(h) {
         return Err(mutations::DENIED);
     }
-    let media = h
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<mime::Mime>().ok());
-    if media
-        .as_ref()
-        .is_none_or(|m| m.essence_str() != "application/json")
-    {
-        return Err(Failure(
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "ERROR_CODE_MALFORMED",
-            "Content-Type must be application/json",
-            false,
-        ));
-    }
     let forwarded = h.contains_key("x-laneway-public-client-ip");
-    let mut body = req.into_body();
-    let mut data = Zeroizing::new(Vec::new());
-    while let Some(frame) = body.frame().await {
-        if let Ok(bytes) = frame
-            .map_err(|_| malformed("could not read request body"))?
-            .into_data()
-        {
-            if bytes.len() > 131072 - data.len() {
-                return Err(Failure(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "ERROR_CODE_RESOURCE_EXHAUSTED",
-                    "request body exceeds limit",
-                    false,
-                ));
-            }
-            data.extend_from_slice(&bytes);
-        }
-    }
-    let mut de = serde_json::Deserializer::from_slice(&data);
-    let form = Option::<Form>::deserialize(&mut de)
-        .map_err(|_| malformed("malformed JSON request"))?
-        .unwrap_or_default();
+    let form = json_form::<Form>(req).await?;
     let password = Zeroizing::new(form.password.unwrap_or_default().into_bytes());
-    de.end()
-        .map_err(|_| malformed("request must contain one JSON value"))?;
-    drop(data);
     if forwarded {
         return Err(AUTH);
     }
     let username = form.username.unwrap_or_default();
+    authenticate(state, id, peer, previous, username, password).await
+}
+
+async fn authenticate(
+    state: State,
+    id: &str,
+    peer: IpAddr,
+    previous: Option<String>,
+    username: String,
+    password: Zeroizing<Vec<u8>>,
+) -> Result<Reply, Failure> {
     let attempt =
         state
             .logins

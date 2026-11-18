@@ -232,6 +232,10 @@ func TestRustControllerHTTPS(t *testing.T) {
 	}{
 		{"networks", "GET", networks + "?limit=1", []string{cookie}, false, 200},
 		{"nodes", "GET", networks + "/" + f.network.ID.String() + "/nodes", []string{cookie}, false, 200},
+		{"network-detail", "GET", networks + "/" + f.network.ID.String() + "?limit=ignored", []string{cookie}, false, 200},
+		{"head-network-detail", "HEAD", networks + "/" + f.network.ID.String(), []string{cookie}, false, 200},
+		{"invalid-network-detail", "GET", networks + "/invalid", []string{cookie}, false, 400},
+		{"missing-network-detail", "GET", networks + "/ffffffffffffffffffffffffffffffff", []string{cookie}, false, 404},
 		{"head", "HEAD", networks, []string{cookie}, false, 200},
 		{"missing-cookie", "GET", networks, nil, false, 401},
 		{"invalid-session-before-invalid-query", "GET", networks + "?limit=no", []string{"invalid"}, false, 401},
@@ -284,6 +288,7 @@ func TestRustControllerHTTPS(t *testing.T) {
 		return b.body
 	}
 	testRustBearerInventory(t, f, cookie, check)
+	t.Run("network-management", func(t *testing.T) { testRustNetworkManagement(t, f, client, goServer.URL, rustURL, cookie, csrf) })
 	if err := f.store.LogoutAdministratorSession(t.Context(), adminauth.SessionSubject(session.PrincipalID, session.ID)); err != nil {
 		t.Fatal(err)
 	}

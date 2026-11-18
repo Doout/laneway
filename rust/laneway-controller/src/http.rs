@@ -1,4 +1,4 @@
-//! The lab listener exposes authenticated inventory only. Never dispatch to
+//! The lab listener exposes authenticated management operations. Never dispatch to
 //! the unrestricted operator commands, including when a credential is absent.
 use bytes::Bytes;
 use http_body_util::Full;
@@ -13,8 +13,10 @@ use std::{
     },
 };
 use tokio::sync::Semaphore;
+mod form;
 mod login;
 mod mutations;
+mod network;
 
 const COOKIE: &str = "__Host-laneway_admin_session";
 const CSRF: &str = "__Host-laneway_admin_csrf";
@@ -45,6 +47,8 @@ impl State {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{2}")]
 struct Failure(StatusCode, &'static str, &'static str, bool);
 const AUTH: Failure = Failure(
     StatusCode::UNAUTHORIZED,
@@ -204,6 +208,8 @@ async fn dispatch(
     peer: std::net::IpAddr,
 ) -> Result<Reply, Failure> {
     let path = req.uri().path();
+    let network_collection = path == "/v1/admin/networks";
+    let create_network = network_collection && req.method() == Method::POST;
     if path.contains('%')
         || path.contains("//")
         || path.ends_with('/')
@@ -218,9 +224,11 @@ async fn dispatch(
     let login = path == "/v1/admin/auth/login";
     let discovery = path == "/v1/admin/auth/state";
     let session_view = path == "/v1/admin/auth/session";
+    let network_detail = matches!(pieces.as_slice(), ["", "v1", "admin", "networks", _]);
     let network = match pieces.as_slice() {
         _ if root_probe || discovery || session_view || logout || rotate || login => None,
         ["", "v1", "admin", "networks"] => None,
+        ["", "v1", "admin", "networks", network] => Some(*network),
         ["", "v1", "admin", "networks", network, "nodes"] => Some(*network),
         _ => {
             return Err(Failure(
@@ -243,16 +251,27 @@ async fn dispatch(
             .insert(header::ALLOW, "POST".parse().unwrap());
         return Ok(r);
     }
-    if !(logout || rotate || login || head) && req.method() != Method::GET {
-        return Err(Failure(
+    if !(logout || rotate || login || create_network || head) && req.method() != Method::GET {
+        let error = Failure(
             StatusCode::METHOD_NOT_ALLOWED,
             "ERROR_CODE_MALFORMED",
             "method not allowed",
             false,
-        ));
+        );
+        if network_collection {
+            let mut reply = error.reply(id, head);
+            reply
+                .headers_mut()
+                .insert(header::ALLOW, "GET, HEAD, POST".parse().unwrap());
+            return Ok(reply);
+        }
+        return Err(error);
     }
     if login {
         return login::handle(req, state, id, peer).await;
+    }
+    if create_network {
+        return network::create_network(req, state, id).await;
     }
     if discovery {
         // This loopback listener does not authenticate relay client certificates.
@@ -347,6 +366,23 @@ async fn dispatch(
     let (list, metadata) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
         match credential {
+            Credential::Session(token) if network_detail => {
+                let r = SessionStore::open(&state.database)?
+                    .network(&token, network.and_then(|n| n.ok_or(ListError::NetworkId)))?;
+                Ok((
+                    serde_json::to_vec(&r.list)?,
+                    Some((r.id, r.idle, r.absolute)),
+                ))
+            }
+            Credential::Bearer(header) if network_detail => Ok((
+                serde_json::to_vec(&laneway_controller::bearer_network(
+                    &state.database,
+                    &header,
+                    state.root.as_deref(),
+                    network.and_then(|n| n.ok_or(ListError::NetworkId)),
+                )?)?,
+                None,
+            )),
             Credential::Session(token) if session_view => {
                 let mut r = SessionStore::open(&state.database)?.view(&token, csrf.as_deref())?;
                 r.list["idle_expires_at_unix_seconds"] = json!(r.idle);
@@ -402,7 +438,13 @@ async fn dispatch(
             None => INTERNAL,
         }
     })?;
-    let mut reply = response(StatusCode::OK, id, list, head);
+    with_session_headers(response(StatusCode::OK, id, list, head), metadata)
+}
+
+fn with_session_headers(
+    mut reply: Reply,
+    metadata: Option<(laneway_protocol::Id, i64, i64)>,
+) -> Result<Reply, Failure> {
     let Some((session, idle, absolute)) = metadata else {
         return Ok(reply);
     };
