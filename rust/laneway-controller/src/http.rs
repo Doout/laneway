@@ -14,6 +14,7 @@ use std::{
 };
 use tokio::sync::Semaphore;
 mod access_admin;
+mod administrators;
 mod audit;
 mod endpoint_status;
 mod enroll;
@@ -308,6 +309,9 @@ async fn dispatch(
     }
     if let Some(route) = recovery::Route::parse(&pieces) {
         return recovery::handle(req, state, id, peer, route).await;
+    }
+    if let Some(route) = administrators::Route::parse(&pieces) {
+        return administrators::handle(req, state, id, route).await;
     }
     let root_probe = path == "/v1/admin/auth/root";
     let logout = path == "/v1/admin/auth/logout";

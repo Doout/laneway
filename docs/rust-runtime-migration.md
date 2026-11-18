@@ -135,8 +135,7 @@ the serve command. Use a private file (e.g. mode 0600); never pass its
 contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
-contexts or when combined with a session cookie. OAuth and root-token
-rotation audit markers still require Go.
+contexts or when combined with a session cookie. OAuth still requires Go.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -175,6 +174,19 @@ Recovery replaces the password, revokes the owner's sessions and outstanding
 grants, and writes audit records in one transaction. The HTTPS fixture
 checks Go/Rust grant and password compatibility and verifies rollback
 when the recovery audit write fails.
+
+The existing operator client can record root-token rotation with
+`POST /v1/admin/auth/root-token-rotations/{id}/begin` and `/complete`.
+The operator still replaces the protected token file and restarts the
+controller. Both calls require the currently loaded root credential;
+completion requires an existing begin marker. Retries do not duplicate audit
+events. The lab gate verifies the replacement through a real restart and
+checks that the old credential is rejected.
+
+Administrator and session inventory is available to the root bearer and
+owner browser sessions. Exact username lookup is limited to the root bearer.
+The responses contain no credential hashes or plaintext. General
+administrator writes and explicit session revocation still require Go.
 
 `POST /v1/admin/networks` accepts an owner session (same-origin and CSRF
 required), the configured root bearer, or an automation token explicitly

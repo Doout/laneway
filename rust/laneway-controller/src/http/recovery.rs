@@ -162,7 +162,7 @@ async fn issue(
             Credential::Bearer(header) => {
                 db.issue_recovery_grant(&header, state.root.as_deref(), target)
             }
-            Credential::Session(session) => db.deny_session_recovery_issuance(&session),
+            Credential::Session(session) => db.deny_root_only_session(&session),
         }
     })
     .await

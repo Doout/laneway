@@ -16,6 +16,25 @@ pub(crate) enum BrowserWrite {
 }
 
 impl SessionStore {
+    pub fn deny_root_only_session<T>(&mut self, token: &str) -> Result<T> {
+        self.with_session(token, false, |_, _, _, _, _| {
+            Err(SessionError::Denied.into())
+        })
+        .map(|reply| reply.list)
+    }
+
+    pub(crate) fn root_write<T>(
+        &mut self,
+        header: &str,
+        root: Option<&RootCredential>,
+        write: impl FnOnce(&Transaction<'_>, Id, i64) -> Result<T>,
+    ) -> Result<T> {
+        self.bearer_write(header, root, |tx, actor, now| {
+            actor.require_root()?;
+            write(tx, actor.id, now)
+        })
+    }
+
     pub(crate) fn browser_write<T>(
         &mut self,
         token: &str,

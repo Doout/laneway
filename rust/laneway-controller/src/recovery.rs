@@ -293,21 +293,13 @@ fn recover(tx: &Transaction<'_>, grant: &Grant, hash: &PasswordHash, now: i64) -
 }
 
 impl SessionStore {
-    pub fn deny_session_recovery_issuance(&mut self, session: &str) -> Result<IssuedGrant> {
-        self.with_session(session, false, |_, _, _, _, _| {
-            Err(SessionError::Denied.into())
-        })
-        .map(|reply| reply.list)
-    }
-
     pub fn issue_recovery_grant(
         &mut self,
         header: &str,
         root: Option<&RootCredential>,
         target: Option<Id>,
     ) -> Result<IssuedGrant> {
-        self.bearer_write(header, root, |tx, actor, now| {
-            actor.require_root()?;
+        self.root_write(header, root, |tx, principal, now| {
             let (generation, bootstrapped): (i64, bool) = tx.query_row(
                 "SELECT recovery_generation,initial_owner_principal_id IS NOT NULL
                  FROM administrator_auth_state WHERE singleton=1",
@@ -322,7 +314,7 @@ impl SessionStore {
                 ensure!(!bootstrapped, RecoveryError::BootstrapComplete);
                 (Purpose::Bootstrap, None)
             };
-            let actor = AuditActor("service_principal", Some(*actor.id.as_bytes()));
+            let actor = AuditActor("service_principal", Some(*principal.as_bytes()));
             let superseded = tx.prepare(
                 "SELECT id,created_at,expires_at<=?3 FROM administrator_recovery_grants
                  WHERE consumed_at IS NULL AND revoked_at IS NULL
