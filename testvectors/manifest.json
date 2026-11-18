@@ -299,6 +299,22 @@
       "stored_byte_length": 2183,
       "sha256": "8024d5ff4589b11d1157bfc9bf4167b7abf9c547c049be615c3455db11f96144",
       "expected": "matches_go_rust_and_desktop"
+    },
+    {
+      "path": "docker-plugin/authorization-v1.json",
+      "kind": "docker-network-plugin-v1:controller-authorization",
+      "encoding": "json-utf8",
+      "stored_byte_length": 182,
+      "sha256": "706846b3e78ffa12446858f146c3bf4581f56272776ca2c27680fda7a58dc282",
+      "expected": "matches_go_and_rust_docker_authorization"
+    },
+    {
+      "path": "docker-plugin/state-v1.json",
+      "kind": "docker-network-plugin-v1:ownership-journal",
+      "encoding": "json-utf8",
+      "stored_byte_length": 807,
+      "sha256": "5b158357f0ded5f3e44661c22b1dc1e5bdc40b1dd7cf3be260d57ce0ea814eb1",
+      "expected": "matches_go_and_rust_docker_ownership"
     }
   ]
 }
