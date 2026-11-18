@@ -13,7 +13,14 @@ use serde::Serialize;
 mod nodes;
 mod sessions;
 pub use nodes::Node;
-pub use sessions::{SessionError, SessionStore};
+pub use sessions::{ListError, SessionError, SessionReply, SessionStore};
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InventoryList {
+    Networks(Vec<Network>),
+    Nodes(Vec<Node>),
+}
 
 const SCHEMA_VERSION: i64 = 18;
 
@@ -41,7 +48,8 @@ impl Inventory {
 
     fn snapshot(&mut self, limit: usize) -> Result<Transaction<'_>> {
         let tx = self.db.transaction()?;
-        check_snapshot(&tx, limit)?;
+        ensure!((1..=1000).contains(&limit), "limit must be 1..1000");
+        check_snapshot(&tx)?;
         Ok(tx)
     }
 
@@ -65,8 +73,7 @@ fn open_existing(path: &Path, flags: OpenFlags) -> Result<Connection> {
     Ok(db)
 }
 
-fn check_snapshot(tx: &Transaction<'_>, limit: usize) -> Result<()> {
-    ensure!((1..=1000).contains(&limit), "limit must be 1..1000");
+fn check_snapshot(tx: &Transaction<'_>) -> Result<()> {
     // Check inside the read snapshot. A migration racing the query cannot
     // switch its schema between validation and data access.
     let versions: (i64, i64, i64) = tx.query_row(

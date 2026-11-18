@@ -45,7 +45,7 @@ pub(super) fn read_nodes(
         [network.as_bytes()],
         |r| r.get(0),
     )?;
-    ensure!(exists, "network not found");
+    ensure!(exists, super::ListError::Missing);
     let mut stmt = tx.prepare(
         "SELECT n.id,n.user_id,n.name,n.enabled_capabilities,n.created_at,n.revoked_at,
               n.enrollment_class,n.lease_expires_at,n.wireguard_public_key,

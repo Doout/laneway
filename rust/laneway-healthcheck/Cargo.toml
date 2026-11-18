@@ -8,6 +8,9 @@ description = "Local readiness checks for Laneway runtime images"
 
 [dependencies]
 tokio.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
 tempfile = "3.26.0"

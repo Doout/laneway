@@ -109,5 +109,29 @@ credentials or listen on a network socket.
 The Go/Rust gate also checks scoped and all-network visibility, live changes
 to grants, disabled principals, revoked credentials, logout, idle and absolute
 expiry, and clock regression. An audit write failure must roll back expiry.
-The next service gate is an authenticated HTTP transport, including cookie and
-bearer selection and compatibility of error envelopes.
+
+### Serve browser inventory over HTTPS (lab only)
+
+Run this against a writable **disposable** schema-18 database, with a lab
+certificate whose subject alternative names include the host used by the probe:
+
+```sh
+laneway-controller serve /lab/controller.db 127.0.0.1:9443 /lab/controller.crt /lab/controller.key
+laneway-healthcheck -tcp 127.0.0.1:9443 -tls-ca /lab/ca.crt -tls-server-name 127.0.0.1
+```
+
+The listener requires loopback and TLS 1.3. It serves GET and HEAD for
+`/v1/admin/networks` and `/v1/admin/networks/{id}/nodes`, using sessions
+issued by Go. A successful request renews the session; the TLS probe only
+checks the handshake and server identity. Other APIs, sign-in and bearer
+credentials are not supported. Do not route production traffic here.
+
+The optional non-root image can be built with
+`docker build --target controller -f deploy/containers/Dockerfile.rust-relay -t laneway-rust-controller:migration-lab .`.
+It does not replace a release image or change Compose. The interop gate
+compares real Go and Rust HTTPS responses including error bodies, session
+deadlines and request IDs; it also tests hostname verification in the probe.
+After warming the lab toolchain and Go module cache, run
+`bash integration/rust-lab/controller-image.sh` to repeat the gate using the
+scratch image's binaries as UID 65532 with external networking disabled.
+Next: authenticated inventory for scoped automation and root bearer credentials.

@@ -25,6 +25,15 @@ CMD ["--config", "/etc/laneway/node.toml"]
 FROM build AS relay-build
 RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-relay
 
+FROM build AS controller-build
+RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-controller
+
+FROM scratch AS controller
+COPY --from=controller-build /src/rust/target/release/laneway-controller /usr/local/bin/laneway-controller
+COPY --from=build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/laneway-controller"]
+
 FROM scratch AS relay
 COPY --from=relay-build /src/rust/target/release/laneway-relay /usr/local/bin/laneway-relay
 COPY --from=build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck

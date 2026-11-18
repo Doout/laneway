@@ -1,20 +1,16 @@
 use anyhow::{Context, Result, ensure};
-use laneway_controller::{Inventory, Network, Node, SessionStore};
-use serde::Serialize;
+use laneway_controller::{Inventory, InventoryList as Response, SessionStore};
 use std::io::{IsTerminal, Read};
 use std::{env, io, path::Path};
 
-#[derive(Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Response {
-    Networks(Vec<Network>),
-    Nodes(Vec<Node>),
-}
+mod http;
+mod server;
 
 fn main() -> Result<()> {
     let mut args = env::args_os().skip(1);
     const USAGE: &str = "usage: laneway-controller {inventory|session-inventory} {networks DATABASE | nodes DATABASE NETWORK_ID} [LIMIT]";
     let scoped = match args.next().as_deref().and_then(|a| a.to_str()) {
+        Some("serve") => return server::start(args),
         Some("inventory") => false,
         Some("session-inventory") => true,
         _ => anyhow::bail!(USAGE),
@@ -47,10 +43,7 @@ fn main() -> Result<()> {
             .or_else(|| input.strip_suffix('\n'))
             .unwrap_or(&input);
         let mut store = SessionStore::open(Path::new(&path))?;
-        match network {
-            None => Response::Networks(store.networks(token, limit)?),
-            Some(network) => Response::Nodes(store.nodes(token, network, limit)?),
-        }
+        store.inventory(token, Ok((network, limit)))?.list
     } else {
         let mut store = Inventory::open(Path::new(&path))?;
         match network {

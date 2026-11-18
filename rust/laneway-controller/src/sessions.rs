@@ -1,6 +1,6 @@
 //! Browser-session inventory for the active controller. Unlike local inventory,
 //! an authenticated read slides the idle deadline and may record an expiry.
-use crate::{Network, Node, check_snapshot, nodes::read_nodes, open_existing, read_networks};
+use crate::{InventoryList, check_snapshot, nodes::read_nodes, open_existing, read_networks};
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use laneway_protocol::Id;
@@ -19,6 +19,23 @@ pub enum SessionError {
     Denied,
 }
 
+#[derive(Debug, Error)]
+pub enum ListError {
+    #[error("invalid network_id")]
+    NetworkId,
+    #[error("limit must be an integer from 1 through 1000")]
+    Limit,
+    #[error("record not found")]
+    Missing,
+}
+
+pub struct SessionReply {
+    pub list: InventoryList,
+    pub id: Id,
+    pub idle: i64,
+    pub absolute: i64,
+}
+
 /// Opens only an existing database. Nothing here can create a principal or
 /// grant a permission. Session-owned operations must not use local inventory.
 pub struct SessionStore {
@@ -35,38 +52,31 @@ struct StoredSession {
 }
 
 impl SessionStore {
+    pub fn check_database(path: &Path) -> Result<()> {
+        let mut store = Self::open(path)?;
+        let tx = store.db.transaction()?;
+        check_snapshot(&tx)?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn open(path: &Path) -> Result<Self> {
         Ok(Self {
             db: open_existing(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?,
         })
     }
 
-    pub fn networks(&mut self, token: &str, limit: usize) -> Result<Vec<Network>> {
-        self.read(token, limit, None, |tx, restricted| {
-            read_networks(tx, limit, restricted)
-        })
-    }
-
-    pub fn nodes(&mut self, token: &str, network: Id, limit: usize) -> Result<Vec<Node>> {
-        self.read(token, limit, Some(network), |tx, _| {
-            read_nodes(tx, network, limit)
-        })
-    }
-
-    fn read<T>(
+    pub fn inventory(
         &mut self,
         token: &str,
-        limit: usize,
-        network: Option<Id>,
-        inventory: impl FnOnce(&Transaction<'_>, Option<Id>) -> Result<T>,
-    ) -> Result<T> {
+        query: Result<(Option<Id>, usize), ListError>,
+    ) -> Result<SessionReply> {
         let digest = session_digest(token)?;
         // Acquire the write lock before reading the clock or permissions. A
         // revocation and a read have an unambiguous order, including in WAL.
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        check_snapshot(&tx, limit)?;
+        check_snapshot(&tx)?;
         let now: i64 = tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?;
         let StoredSession { id, principal, credential, last_seen, idle, absolute } = tx.query_row(
             "SELECT id,principal_id,credential_id,last_seen_at,idle_expires_at,absolute_expires_at
@@ -75,7 +85,7 @@ impl SessionStore {
                 last_seen:r.get(3)?, idle:r.get(4)?, absolute:r.get(5)? }))
             .optional()?.ok_or(SessionError::Invalid)?;
         let principal = Id::new(principal)?;
-        Id::new(id)?;
+        let session_id = Id::new(id)?;
         Id::new(credential)?;
         ensure!(now >= last_seen, SessionError::Invalid);
         if now >= idle || now >= absolute {
@@ -110,6 +120,10 @@ impl SessionStore {
             tx.commit()?;
             return Err(SessionError::Invalid.into());
         };
+        // Match Go management middleware: authenticate before reporting a
+        // malformed resource identifier or list limit, without touching it.
+        let (network, limit) = query?;
+        ensure!((1..=1000).contains(&limit), ListError::Limit);
         let restricted = (!all).then_some(principal);
         if let (Some(principal), Some(network)) = (restricted, network) {
             let allowed: bool = tx.query_row(
@@ -120,19 +134,28 @@ impl SessionStore {
             )?;
             ensure!(allowed, SessionError::Denied);
         }
-        let value = inventory(&tx, restricted)?;
+        let list = match network {
+            None => InventoryList::Networks(read_networks(&tx, limit, restricted)?),
+            Some(id) => InventoryList::Nodes(read_nodes(&tx, id, limit)?),
+        };
         // Only a successful authorized read can extend the idle deadline.
-        ensure!(
-            tx.execute(
+        let idle = tx
+            .query_row(
                 "UPDATE administrator_sessions SET last_seen_at=?1,
                  idle_expires_at=min(?1+idle_lifetime_seconds,absolute_expires_at)
-                 WHERE id=?2 AND revoked_at IS NULL",
-                (now, &id)
-            )? == 1,
-            SessionError::Invalid
-        );
+                 WHERE id=?2 AND revoked_at IS NULL RETURNING idle_expires_at",
+                (now, &id),
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(SessionError::Invalid)?;
         tx.commit()?;
-        Ok(value)
+        Ok(SessionReply {
+            list,
+            id: session_id,
+            idle,
+            absolute,
+        })
     }
 }
 

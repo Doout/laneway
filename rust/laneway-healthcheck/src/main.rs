@@ -8,6 +8,7 @@ use tokio::{net::TcpStream, time::timeout};
 
 enum Target {
     Tcp(SocketAddrV4),
+    Tls(SocketAddrV4, String, rustls::pki_types::ServerName<'static>),
     #[cfg(unix)]
     Unix(String),
 }
@@ -15,18 +16,31 @@ enum Target {
 fn target(mut args: impl Iterator<Item = String>) -> Option<Target> {
     let flag = args.next()?;
     let value = args.next()?;
-    if args.next().is_some() {
-        return None;
-    }
     match flag.as_str() {
         "-tcp" => {
             let address: SocketAddrV4 = value.parse().ok()?;
-            (address.ip() == &Ipv4Addr::LOCALHOST && address.port() != 0)
-                .then_some(Target::Tcp(address))
+            if address.ip() != &Ipv4Addr::LOCALHOST || address.port() == 0 {
+                return None;
+            }
+            match args.next().as_deref() {
+                None => Some(Target::Tcp(address)),
+                Some("-tls-ca") => {
+                    let ca = args.next()?;
+                    if ca.is_empty() || args.next().as_deref() != Some("-tls-server-name") {
+                        return None;
+                    }
+                    let name = rustls::pki_types::ServerName::try_from(args.next()?).ok()?;
+                    args.next()
+                        .is_none()
+                        .then_some(Target::Tls(address, ca, name))
+                }
+                _ => None,
+            }
         }
         #[cfg(unix)]
         "-unix"
-            if value.starts_with('/')
+            if args.next().is_none()
+                && value.starts_with('/')
                 && value.len() <= 4096
                 && !value.contains('\0')
                 && value[1..]
@@ -63,6 +77,7 @@ async fn probe(target: Target, deadline: Duration) -> io::Result<()> {
     timeout(deadline, async {
         match target {
             Target::Tcp(address) => TcpStream::connect(address).await.map(drop),
+            Target::Tls(address, ca, name) => tls_probe(address, &ca, name).await,
             #[cfg(unix)]
             Target::Unix(path) => status(&path).await,
         }
@@ -70,10 +85,48 @@ async fn probe(target: Target, deadline: Duration) -> io::Result<()> {
     .await?
 }
 
+async fn tls_probe(
+    address: SocketAddrV4,
+    ca: &str,
+    name: rustls::pki_types::ServerName<'static>,
+) -> io::Result<()> {
+    use std::{io::Read, sync::Arc};
+    let file = std::fs::File::open(ca)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("CA bundle must be a regular file"));
+    }
+    let mut data = Vec::new();
+    file.take(65537).read_to_end(&mut data)?;
+    if data.len() > 65536 {
+        return Err(io::Error::other("CA bundle too large"));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut data.as_slice()) {
+        roots.add(cert?).map_err(io::Error::other)?;
+    }
+    if roots.is_empty() {
+        return Err(io::Error::other("no trust anchors in CA bundle"));
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(io::Error::other)?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let stream = TcpStream::connect(address).await?;
+    tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(name, stream)
+        .await
+        .map(drop)
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let Some(target) = target(env::args().skip(1)) else {
-        eprintln!("usage: laneway-healthcheck (-tcp 127.0.0.1:PORT | -unix /absolute/socket)");
+        eprintln!(
+            "usage: laneway-healthcheck (-tcp 127.0.0.1:PORT [-tls-ca PATH -tls-server-name NAME] | -unix /absolute/socket)"
+        );
         return ExitCode::FAILURE;
     };
     match probe(target, Duration::from_secs(2)).await {
