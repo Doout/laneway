@@ -9,6 +9,14 @@ if [[ $(id -u) != 0 || ! -f "$marker" || -L "$marker" ||
   echo 'Run as root on a marked disposable Docker VM with a local Docker socket.' >&2
   exit 2
 fi
+dispatch_test=false
+if [[ -n ${LANEWAY_INSTALLED_DISPATCH_TEST:-} || -n ${LANEWAY_DISPATCH_PROBE:-} ]]; then
+  if [[ ! -x ${LANEWAY_INSTALLED_DISPATCH_TEST:-} || ! -x ${LANEWAY_DISPATCH_PROBE:-} ]]; then
+    echo 'Set both LANEWAY_INSTALLED_DISPATCH_TEST and LANEWAY_DISPATCH_PROBE to executable lab binaries.' >&2
+    exit 2
+  fi
+  dispatch_test=true
+fi
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 control_link=/usr/local/sbin/laneway-control
 [[ ! -e "$control_link" && ! -L "$control_link" ]]
@@ -199,6 +207,10 @@ printf '\ncertificate = "/run/laneway-secrets/public.crt"\nprivate_key = "/run/l
 sed -i '/^  relay:$/,/^  exit-node:$/ { /    volumes:$/a\      - ./generated/pki/public.crt:/run/laneway-secrets/public.crt:ro\n      - ./generated/pki/public.key:/run/laneway-secrets/public.key:ro
 }' "$destination/compose.rust.yaml"
 compose up --detach --wait controller relay
+if [[ $dispatch_test == true ]]; then
+  LANEWAY_INSTALLED_DISPATCH_DEPLOY="$destination" "$LANEWAY_INSTALLED_DISPATCH_TEST" \
+    -test.run '^TestRustInstalledDispatch$' -test.v -test.timeout 90s
+fi
 
 export LANEWAY_UPDATE_TEST_PROJECT="$project" LANEWAY_UPDATE_TEST_DEPLOY="$destination"
 cat > "$work/bin/docker" <<'EOF'

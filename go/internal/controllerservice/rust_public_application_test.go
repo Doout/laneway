@@ -47,7 +47,8 @@ func (p dispatchClientProbe) run(t *testing.T, step string, fields map[string]st
 	}
 }
 
-func testRustPublicApplication(t *testing.T, f fixture, foreign identity.NetworkID, public publicApplicationHTTP,
+func testRustPublicApplication(t *testing.T, networkID, foreign identity.NetworkID,
+	makeRouter func(identity.NetworkID, string) identity.NodeID, public publicApplicationHTTP,
 	direct *http.Client, directURL string, browser http.Header, root string, probe dispatchClientProbe,
 ) {
 	t.Helper()
@@ -59,7 +60,7 @@ func testRustPublicApplication(t *testing.T, f fixture, foreign identity.Network
 	const setupState = "registration + test/~"
 	const state = "installation + test/~"
 	scopes := []string{"network.read", "node.read", "enrollment.issue", "route.read", "route.manage"}
-	network := "/v1/admin/networks/" + f.network.ID.String()
+	network := "/v1/admin/networks/" + networkID.String()
 	other := "/v1/admin/networks/" + foreign.String()
 	form := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}}
 	jsonHeader := http.Header{"Content-Type": {"application/json"}}
@@ -190,29 +191,14 @@ func testRustPublicApplication(t *testing.T, f fixture, foreign identity.Network
 	sort.Strings(wantScopes)
 	sort.Strings(actual)
 	if token.Access == "" || token.Refresh == "" || token.Kind != "Bearer" || token.Install.ID == "" ||
-		token.Install.App != app.ApplicationID || token.Install.Network.ID != f.network.ID.String() ||
+		token.Install.App != app.ApplicationID || token.Install.Network.ID != networkID.String() ||
 		strings.Join(actual, " ") != strings.Join(wantScopes, " ") {
 		t.Fatal("public token grant is not bound to the approved application, network and five scopes")
 	}
 
 	bearer := func(value string) http.Header { return http.Header{"Authorization": {"Bearer " + value}} }
 	active := bearer(token.Access)
-	makeRouter := func(net identity.NetworkID, name string) identity.NodeID {
-		t.Helper()
-		grant, err := f.store.IssueEnrollmentToken(t.Context(), net, name, time.Now().Add(time.Hour))
-		if err != nil {
-			t.Fatal(err)
-		}
-		router, err := f.store.EnrollNode(t.Context(), grant.Secret, name, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := f.store.SetNodeCapabilities(t.Context(), router.ID, protocol.CapabilitySubnetRouterV1); err != nil {
-			t.Fatal(err)
-		}
-		return router.ID
-	}
-	router := makeRouter(f.network.ID, "dispatch-router")
+	router := makeRouter(networkID, "dispatch-router")
 	foreignRouter := makeRouter(foreign, "other-router")
 	for _, suffix := range []string{"", "/nodes?limit=500", "/endpoint-statuses?limit=500", "/routes?limit=500"} {
 		public("GET", network+suffix, nil, active, 200).Body.Close()
@@ -235,18 +221,18 @@ func testRustPublicApplication(t *testing.T, f fixture, foreign identity.Network
 		return jsonBody(map[string]any{"network_id": net, "node_id": node, "prefix": prefix, "mode": "nat", "metric": 22})
 	}
 	public("POST", "/v1/admin/routes/assign", assign(foreign, foreignRouter, "198.51.100.0/24"), appJSON, 403).Body.Close()
-	public("POST", "/v1/admin/routes/assign", assign(f.network.ID, foreignRouter, "198.51.100.0/24"), appJSON, 404).Body.Close()
+	public("POST", "/v1/admin/routes/assign", assign(networkID, foreignRouter, "198.51.100.0/24"), appJSON, 404).Body.Close()
 	var route struct {
 		ID     string `json:"route_id"`
 		NodeID string `json:"node_id"`
 	}
-	read(public("POST", "/v1/admin/routes/assign", assign(f.network.ID, router, "198.51.100.0/24"), appJSON, 201), &route)
+	read(public("POST", "/v1/admin/routes/assign", assign(networkID, router, "198.51.100.0/24"), appJSON, 201), &route)
 	if route.ID == "" || route.NodeID != router.String() {
 		t.Fatal("route assignment did not select the approved network's node")
 	}
 	if probe.binary != "" {
 		probe.run(t, "inventory-write", map[string]string{
-			"Network": f.network.ID.String(), "Node": router.String(), "Access": token.Access,
+			"Network": networkID.String(), "Node": router.String(), "Access": token.Access,
 		}, nil)
 	}
 	public("GET", network+"/application-installations", nil, active, 401).Body.Close()
@@ -260,7 +246,7 @@ func testRustPublicApplication(t *testing.T, f fixture, foreign identity.Network
 	private(directURL, "GET", network, "", rootAuth, 200)
 	public("GET", network, nil, bearer(root), 401).Body.Close()
 	principal := private(directURL, "POST", "/v1/admin/service-principals",
-		fmt.Sprintf(`{"name":"private-network-reader","permissions":["network.read"],"network_ids":[%q]}`, f.network.ID), rootAuth, 201)["principal_id"].(string)
+		fmt.Sprintf(`{"name":"private-network-reader","permissions":["network.read"],"network_ids":[%q]}`, networkID), rootAuth, 201)["principal_id"].(string)
 	automation := private(directURL, "POST", "/v1/admin/service-principals/"+principal+"/tokens",
 		fmt.Sprintf(`{"label":"private only","expires_at_unix_seconds":%d}`, time.Now().Add(time.Hour).Unix()), rootAuth, 201)["access_token"].(string)
 	private(directURL, "GET", network, "", labCredentials{bearer: automation}, 200)
@@ -304,4 +290,22 @@ func testRustPublicApplication(t *testing.T, f fixture, foreign identity.Network
 		t.Log("real Dispatch client passed registration, token exchange, inventory, installer and route writes, refresh, and revocation")
 	}
 	public("GET", network, nil, bearer(rotated.Access), 401).Body.Close()
+}
+
+func storeApplicationRouter(t *testing.T, f fixture) func(identity.NetworkID, string) identity.NodeID {
+	return func(network identity.NetworkID, name string) identity.NodeID {
+		t.Helper()
+		grant, err := f.store.IssueEnrollmentToken(t.Context(), network, name, time.Now().Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		router, err := f.store.EnrollNode(t.Context(), grant.Secret, name, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.store.SetNodeCapabilities(t.Context(), router.ID, protocol.CapabilitySubnetRouterV1); err != nil {
+			t.Fatal(err)
+		}
+		return router.ID
+	}
 }

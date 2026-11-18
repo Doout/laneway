@@ -328,7 +328,8 @@ private_key = %q
 			binary: os.Getenv("LANEWAY_DISPATCH_PROBE"), address: tcp, authority: "https://" + publicName,
 			caPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: publicRoot.Raw})),
 		}
-		testRustPublicApplication(t, f, foreign.ID, request, client, base, browser, publicFixtureRoot, probe)
+		testRustPublicApplication(t, f.network.ID, foreign.ID, storeApplicationRouter(t, f),
+			request, client, base, browser, publicFixtureRoot, probe)
 		// Node fallback chooses the Laneway certificate even if HTTP is also
 		// offered, and does not finish a working session without a client key.
 		nodeTLS := &tls.Config{RootCAs: roots, ServerName: workloadName, MinVersion: tls.VersionTLS13,

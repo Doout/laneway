@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Build and test the real Dispatch client against two local Rust services.
+# Build and test the real Dispatch client against local Rust services.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
-dispatch="${1:?usage: dispatch.sh DISPATCH_CHECKOUT [REVISION]}"
+installed=false
+if [[ ${1:-} == --installed ]]; then installed=true; shift; fi
+dispatch="${1:?usage: dispatch.sh [--installed] DISPATCH_CHECKOUT [REVISION]}"
 revision="$(git -C "$dispatch" rev-parse --verify --end-of-options "${2:-HEAD}^{commit}")"
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/laneway-dispatch-XXXXXXXX")"
 dispatch_volume=""
@@ -16,6 +18,13 @@ git -C "$dispatch" archive "$revision" go.mod go.sum internal/laneway |
 mkdir -p "$scratch/cmd/laneway-lab"
 cp "$root/integration/rust-lab/dispatch-client/main.go" "$scratch/cmd/laneway-lab/main.go"
 echo "Using Dispatch client $revision"
+if [[ $installed == true ]]; then
+  CGO_ENABLED=0 go -C "$scratch" build -mod=readonly -o "$scratch/dispatch-probe" ./cmd/laneway-lab
+  CGO_ENABLED=0 go -C "$root/go" test -c -tags=rustinterop -o "$scratch/installed-test" ./internal/controllerservice
+  sudo env PATH="$PATH" LANEWAY_DISPATCH_PROBE="$scratch/dispatch-probe" \
+    LANEWAY_INSTALLED_DISPATCH_TEST="$scratch/installed-test" bash "$root/integration/rust-lab/installer-fresh.sh"
+  exit
+fi
 dispatch_volume="$(docker volume create --label laneway.test=dispatch-client)"
 COPYFILE_DISABLE=1 tar --no-xattrs -cf - -C "$scratch" . |
   docker run --rm -i --network none -v "$dispatch_volume:/dispatch" -w /dispatch \

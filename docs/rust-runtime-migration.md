@@ -418,6 +418,16 @@ The script builds the client from a temporary source snapshot. The browser
 approval is driven by the Laneway fixture; the Dispatch client performs the
 backend calls. This does not run the Dispatch server or test its deployment.
 
+On the marked Docker lab host, use `dispatch.sh --installed` with the same
+arguments to run the contract on a fresh Compose install. The test signs the
+first owner in through the relay on port 443 and checks the registration
+and OAuth flow with the real Dispatch client. It provisions test networks
+and router identities through Rust APIs, without inserting rows directly.
+The disposable relay uses a lab certificate; it does not contact public ACME.
+On ARM64 this passed with Dispatch revision `27be92b`, including the token
+exchange through port 443, cross-network denials, connector installer and
+route requests, token refresh, and revocation.
+
 ### Internal controller TLS renewal
 
 Add `--renew-controller-tls /var/lib/laneway-controller/tls-renewal` to
