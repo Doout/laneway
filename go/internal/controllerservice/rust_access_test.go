@@ -282,6 +282,9 @@ func testRustAccessManagement(t *testing.T, f fixture, client *http.Client, goUR
 	if strings.Contains(fmt.Sprint(remaining), "rollback") {
 		t.Fatal("failed audit left a managed object behind")
 	}
+	t.Run("traffic rules", func(t *testing.T) {
+		testRustTrafficRules(t, f, client, goURL, rustURL, other.ID, operator, auditor, reader, writer, writeBot)
+	})
 }
 
 func mustAccessID(t *testing.T, raw string) []byte {

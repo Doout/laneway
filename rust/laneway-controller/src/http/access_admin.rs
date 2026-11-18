@@ -9,7 +9,8 @@ use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
     SessionError, SessionStore,
     access_admin::{
-        AccessError, Port, Request as Action, ResourceTarget, ServiceProtocol, Subject, Target,
+        AccessError, AclRule, AclSelector, Port, Request as Action, ResourceTarget,
+        ServiceProtocol, Subject, Target,
     },
 };
 use laneway_protocol::Id;
@@ -17,6 +18,8 @@ use serde::Deserialize;
 
 pub(super) enum Route<'a> {
     Inventory(&'a str),
+    AclRules(&'a str),
+    AclRule(&'a str),
     UserCreate(&'a str),
     UserUpdate(&'a str),
     TeamCreate(&'a str),
@@ -35,6 +38,8 @@ impl<'a> Route<'a> {
         use Route::*;
         Some(match parts {
             ["", "v1", "admin", "networks", id, "access-subjects"] => Inventory(id),
+            ["", "v1", "admin", "networks", id, "acl-rules"] => AclRules(id),
+            ["", "v1", "admin", "acl-rules", id] => AclRule(id),
             ["", "v1", "admin", "networks", id, "users"] => UserCreate(id),
             ["", "v1", "admin", "users", id] => UserUpdate(id),
             ["", "v1", "admin", "networks", id, "teams"] => TeamCreate(id),
@@ -55,6 +60,8 @@ impl<'a> Route<'a> {
     fn allow(&self) -> &'static str {
         match self {
             Self::Inventory(_) => "GET, HEAD",
+            Self::AclRules(_) => "GET, HEAD, POST",
+            Self::AclRule(_) => "DELETE, PUT",
             Self::UserCreate(_)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
@@ -77,6 +84,23 @@ struct NameForm {
 #[serde(default, deny_unknown_fields)]
 struct EnabledForm {
     enabled: Option<bool>,
+}
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AclCreateForm {
+    priority: u32,
+    action: String,
+    selector: Option<AclSelector>,
+    description: String,
+}
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AclUpdateForm {
+    priority: u32,
+    action: String,
+    selector: Option<AclSelector>,
+    description: String,
+    enabled: bool,
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -145,7 +169,7 @@ pub(super) async fn handle(
         return Ok(r);
     }
     let auth = credential(req.headers())?;
-    let read = matches!(route, Route::Inventory(_));
+    let read = matches!(req.method().clone(), Method::GET | Method::HEAD);
     let post = req.method() == Method::POST;
     let put = req.method() == Method::PUT;
     let proof = (!read)
@@ -187,6 +211,39 @@ pub(super) async fn handle(
 async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<Action, Failure> {
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
+        Route::AclRules(net) if req.method() == Method::POST => {
+            let id = parse(net)?;
+            let f = json_form::<AclCreateForm>(req).await?;
+            Action::CreateAclRule(
+                id,
+                AclRule {
+                    priority: f.priority,
+                    action: f.action,
+                    selector: f.selector.ok_or(malformed("selector is required"))?,
+                    description: f.description,
+                    enabled: true,
+                },
+            )
+        }
+        Route::AclRules(net) => Action::ListAclRules(
+            parse(net)?,
+            super::query_limit(req.uri().query()).map_err(|_| malformed("invalid limit"))?,
+        ),
+        Route::AclRule(id) if put => {
+            let id = parse(id)?;
+            let f = json_form::<AclUpdateForm>(req).await?;
+            Action::UpdateAclRule(
+                id,
+                AclRule {
+                    priority: f.priority,
+                    action: f.action,
+                    selector: f.selector.ok_or(malformed("selector is required"))?,
+                    description: f.description,
+                    enabled: f.enabled,
+                },
+            )
+        }
+        Route::AclRule(id) => Action::DeleteAclRule(parse(id)?),
         Route::UserCreate(net) => {
             Action::CreateUser(parse(net)?, json_form::<NameForm>(req).await?.name)
         }

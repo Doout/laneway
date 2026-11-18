@@ -264,6 +264,13 @@ writes require same-origin CSRF proof; scoped automation uses `acl.read`
 or `acl.manage`. Each policy change, epoch advance, and audit entry commits
 together. Other controller APIs are still pending; keep Go serving production.
 
+Traffic rules can be listed, created, updated, and deleted through the same
+Rust HTTPS listener. The controller validates canonical prefixes and port
+ranges, and publishes rules in priority and ID order. The Rust network-namespace
+gate uses the existing Go CLI against the Rust ACL API to prove that removing
+the allow rule blocks a real routed packet and adding it back restores traffic.
+The fixture still uses Go for route administration.
+
 ### Renew a Rust node at a Go or Rust controller (lab only)
 
 Set `auto_renew_certificate = true` in the node's `[controller]` section.

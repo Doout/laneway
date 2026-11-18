@@ -10,8 +10,8 @@ use laneway_protocol::{
 };
 use prost::Message;
 use rusqlite::Transaction;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Deserializer, de::Error as _};
+use serde_json::{Value, json};
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -88,7 +88,23 @@ fn prefixes(v: Option<Vec<Prefix>>) -> Result<Vec<IpPrefix>> {
 fn parse(raw: &str) -> Result<TrafficSelector> {
     // Do not deserialize through a Value map: duplicate selector fields
     // would otherwise silently change the scope of authorization.
-    let v: Selector = serde_json::from_str(raw)?;
+    serde_json::from_str::<AclSelector>(raw)
+        .map(|selector| selector.0)
+        .map_err(Into::into)
+}
+
+pub struct AclSelector(TrafficSelector);
+
+impl<'de> Deserialize<'de> for AclSelector {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let fields = Selector::deserialize(d)?;
+        selector_from_fields(fields)
+            .map(Self)
+            .map_err(D::Error::custom)
+    }
+}
+
+fn selector_from_fields(v: Selector) -> Result<TrafficSelector> {
     let ip_protocol = match v.ip_protocol {
         Value::String(v) => IpProtocol::from_str_name(&v).context("unknown ACL protocol")? as i32,
         v => i32::try_from(number(&v)?)?,
@@ -111,6 +127,73 @@ fn parse(raw: &str) -> Result<TrafficSelector> {
             })
             .collect::<Result<_>>()?,
     })
+}
+
+impl AclSelector {
+    pub(crate) fn canonical_management_json(self) -> Result<Value> {
+        let v = self.0;
+        let protocol = IpProtocol::try_from(v.ip_protocol)?;
+        ensure!(
+            protocol != IpProtocol::Unspecified,
+            "selector ip_protocol must be explicit"
+        );
+        let mut result = json!({"ip_protocol":protocol.as_str_name()});
+        for (name, nodes) in [
+            ("source_node_ids", v.source_node_ids),
+            ("destination_node_ids", v.destination_node_ids),
+        ] {
+            if nodes.is_empty() {
+                continue;
+            }
+            let values = nodes
+                .iter()
+                .map(|id| {
+                    Id::from_slice(id)?;
+                    Ok(b64::STANDARD.encode(id))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            result[name] = json!(values);
+        }
+        for (name, prefixes) in [
+            ("source_prefixes", v.source_prefixes),
+            ("destination_prefixes", v.destination_prefixes),
+        ] {
+            if prefixes.is_empty() {
+                continue;
+            }
+            let values = prefixes
+                .into_iter()
+                .map(|p| {
+                    laneway_protocol::policy::prefix_from_wire(p.clone())?;
+                    let mut encoded = json!({"address":b64::STANDARD.encode(p.address)});
+                    if p.prefix_length != 0 {
+                        encoded["prefix_length"] = json!(p.prefix_length);
+                    }
+                    Ok(encoded)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            result[name] = json!(values);
+        }
+        if !v.destination_ports.is_empty() {
+            ensure!(
+                matches!(protocol, IpProtocol::Tcp | IpProtocol::Udp),
+                "destination ports require TCP or UDP"
+            );
+            let ports = v
+                .destination_ports
+                .into_iter()
+                .map(|p| {
+                    ensure!(
+                        p.first > 0 && p.first <= p.last && p.last <= 65535,
+                        "invalid port range"
+                    );
+                    Ok(json!({"first":p.first,"last":p.last}))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            result["destination_ports"] = json!(ports);
+        }
+        Ok(result)
+    }
 }
 
 pub(super) fn compile(tx: &Transaction<'_>, net: Id, epoch: u64) -> Result<PolicySnapshot> {

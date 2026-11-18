@@ -6,7 +6,7 @@ mod maintenance;
 mod managed_policy;
 pub mod relay_configuration;
 pub mod renewal;
-mod snapshot_policy;
+pub(crate) mod snapshot_policy;
 
 use crate::enrollment_tokens::{EXIT, ROUTER};
 use crate::{

@@ -157,12 +157,14 @@ fn action(value: i32) -> Result<bool, PolicyError> {
 
 fn ids_from_wire(values: &[Vec<u8>]) -> Result<Vec<Id>, PolicyError> {
     let mut output = Vec::with_capacity(values.len());
+    let mut seen = std::collections::HashSet::with_capacity(values.len());
     for value in values {
         let id = Id::from_slice(value).map_err(|_| PolicyError::Selector)?;
-        if output.contains(&id) {
-            return Err(PolicyError::Selector);
+        // A repeated selector ID has no effect on membership. Go can persist
+        // these selectors; compile them without rejecting an otherwise live policy.
+        if seen.insert(id) {
+            output.push(id);
         }
-        output.push(id);
     }
     Ok(output)
 }
@@ -297,7 +299,12 @@ mod tests {
                     priority: 10,
                     action: v1::PolicyAction::Accept as i32,
                     selector: Some(TrafficSelector {
-                        source_node_ids: vec![source.as_bytes().to_vec()],
+                        // Repeated IDs in Go-stored selectors are redundant,
+                        // not a change in scope.
+                        source_node_ids: vec![
+                            source.as_bytes().to_vec(),
+                            source.as_bytes().to_vec(),
+                        ],
                         destination_node_ids: vec![destination.as_bytes().to_vec()],
                         source_prefixes: vec![prefix([100, 96, 0, 0], 24)],
                         destination_prefixes: vec![prefix([100, 96, 0, 2], 32)],

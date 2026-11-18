@@ -216,7 +216,7 @@ chmod 600 "${work_dir}/admin.token"
 "${work_dir}/laneway" pki init -out-dir "${work_dir}/pki" >/dev/null
 "${work_dir}/laneway" pki controller \
   -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
-  -network-id "${network_id}" -service-id "${controller_service}" -ip 10.254.0.1 \
+  -network-id "${network_id}" -service-id "${controller_service}" -ip 10.254.0.1,127.0.0.1 \
   -out-cert "${work_dir}/pki/controller.crt" -out-key "${work_dir}/pki/controller.key"
 "${work_dir}/laneway" pki relay \
   -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
@@ -316,21 +316,12 @@ if [[ ! "${rust_id}" =~ ^[0-9a-f]{32}$ || ! "${gateway_id}" =~ ^[0-9a-f]{32}$ ||
 fi
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
   --node-id "${gateway_id}" --subnet-router "${admin_connection[@]}" >"${work_dir}/capabilities.json"
-acl_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl add \
-  --network-id "${network_id}" --priority 100 --action accept \
-  --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description rust-live-allow \
-  "${admin_connection[@]}")"
-acl_id="$(printf '%s\n' "${acl_json}" | json_string_field rule_id)"
-if [[ ! "${acl_id}" =~ ^[0-9a-f]{32}$ ]]; then
-  echo "ERROR: failed to parse ACL rule ID" >&2
-  exit 1
-fi
-
 node_endpoint="${controller_endpoint}"
 node_quic_endpoint="${controller_quic_endpoint}"
 node_server_name="10.254.0.1"
 native_controller_pid=""
 relay_metrics=""
+acl_connection=("${admin_connection[@]}")
 if [[ "${node_controller}" == "rust" ]]; then
   node_endpoint="https://10.254.0.1:9443"
   node_quic_endpoint="10.254.0.1:9443"
@@ -341,9 +332,25 @@ if [[ "${node_controller}" == "rust" ]]; then
     "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
     "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
     --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
+    --root-token-file "${work_dir}/admin.token" \
     --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity 2
   native_controller_pid="${last_pid}"
   wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
+  acl_connection=(
+    --controller https://127.0.0.1:9443 --ca "${work_dir}/pki/ca.crt"
+    --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
+    --admin-token-file "${work_dir}/admin.token"
+  )
+fi
+
+acl_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl add \
+  --network-id "${network_id}" --priority 100 --action accept \
+  --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description rust-live-allow \
+  "${acl_connection[@]}")"
+acl_id="$(printf '%s\n' "${acl_json}" | json_string_field rule_id)"
+if [[ ! "${acl_id}" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "ERROR: failed to parse ACL rule ID" >&2
+  exit 1
 fi
 
 cat >"${work_dir}/relay.toml" <<EOF
@@ -536,7 +543,7 @@ fi
 
 echo "==> deleting the only ACL rule leaves the route present but fails traffic closed"
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl delete \
-  --rule-id "${acl_id}" "${admin_connection[@]}" >"${work_dir}/acl-delete.json"
+  --rule-id "${acl_id}" "${acl_connection[@]}" >"${work_dir}/acl-delete.json"
 sleep 0.6
 ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q 'dev lane0'
 udp_denied 9702 rust-acl-denied
@@ -545,7 +552,7 @@ echo "==> an explicit replacement ACL restores the same authorized route"
 replacement_acl="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl add \
   --network-id "${network_id}" --priority 100 --action accept \
   --selector '{"ip_protocol":"IP_PROTOCOL_ANY"}' --description rust-live-restored \
-  "${admin_connection[@]}")"
+  "${acl_connection[@]}")"
 replacement_acl_id="$(printf '%s\n' "${replacement_acl}" | json_string_field rule_id)"
 if [[ ! "${replacement_acl_id}" =~ ^[0-9a-f]{32}$ ]]; then
   echo "ERROR: replacement ACL was not created" >&2

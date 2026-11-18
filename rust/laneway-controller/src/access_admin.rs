@@ -1,12 +1,15 @@
 //! Managed-access administration against the existing controller database.
+mod acl;
 mod inventory;
 mod named;
 pub(crate) mod service_ports;
 mod subjects;
+pub use crate::enrollment::snapshot_policy::AclSelector;
 use crate::{
     RootCredential, SessionError, SessionReply, SessionStore, management_write::BrowserWrite,
     sessions::check_network,
 };
+pub use acl::AclRule;
 use anyhow::{Result, ensure};
 use laneway_protocol::Id;
 use rusqlite::{OptionalExtension, Transaction};
@@ -25,6 +28,10 @@ pub enum AccessError {
 
 pub enum Request {
     Inventory(Id),
+    ListAclRules(Id, usize),
+    CreateAclRule(Id, AclRule),
+    UpdateAclRule(Id, AclRule),
+    DeleteAclRule(Id),
     CreateUser(Id, String),
     SetUserEnabled(Id, bool),
     CreateTeam(Id, String),
@@ -75,7 +82,7 @@ struct Actor {
 
 impl Request {
     pub fn is_read(&self) -> bool {
-        matches!(self, Self::Inventory(_))
+        matches!(self, Self::Inventory(_) | Self::ListAclRules(..))
     }
     fn permission(&self) -> &'static str {
         if self.is_read() {
@@ -87,6 +94,8 @@ impl Request {
     fn scope(&self, tx: &Transaction<'_>) -> Result<Scope> {
         let object = match self {
             Self::Inventory(net)
+            | Self::ListAclRules(net, _)
+            | Self::CreateAclRule(net, _)
             | Self::CreateUser(net, _)
             | Self::CreateTeam(net, _)
             | Self::CreateResource(net, ..)
@@ -101,6 +110,9 @@ impl Request {
             Self::SetUserEnabled(id, _) => ("SELECT network_id FROM access_users WHERE id=?", id),
             Self::SetMember(id, _, _) => ("SELECT network_id FROM access_teams WHERE id=?", id),
             Self::DeleteGrant(id) => ("SELECT network_id FROM access_grants WHERE id=?", id),
+            Self::UpdateAclRule(id, _) | Self::DeleteAclRule(id) => {
+                ("SELECT network_id FROM acl_rules WHERE id=?", id)
+            }
             Self::SetResourceEnabled(id, _) => {
                 ("SELECT network_id FROM access_resources WHERE id=?", id)
             }
@@ -130,6 +142,10 @@ impl Request {
         };
         match self {
             Self::Inventory(_) => inventory::read(tx, net),
+            Self::ListAclRules(_, limit) => editor.list_acl_rules(limit),
+            Self::CreateAclRule(_, rule) => editor.write_acl_rule(None, rule),
+            Self::UpdateAclRule(id, rule) => editor.write_acl_rule(Some(id), rule),
+            Self::DeleteAclRule(id) => editor.delete_acl_rule(id),
             Self::CreateUser(_, name) => editor.create_subject(&name, false),
             Self::CreateTeam(_, name) => editor.create_subject(&name, true),
             Self::SetUserEnabled(id, on) => editor.set_user_enabled(id, on),
