@@ -58,10 +58,12 @@ if [ "$package_goos" = linux ]; then
 	if [ -n "$package_rust_node" ]; then
 		install -m 0755 "$package_rust_node" "$package_dir/sbin/lanewayd-rs"
 	elif [ -n "$package_rust_runtime_dir" ]; then
-		for runtime in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs lanewayd-rs; do
+		for runtime in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs; do
 			install -m 0755 "$package_rust_runtime_dir/$runtime" "$package_dir/sbin/$runtime"
 		done
 		cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
+		cp "$project_dir"/deploy/systemd/laneway-rust-updater.* "$package_dir/systemd/"
+		cp "$project_dir/deploy/examples/managed-updates-rust.toml" "$package_dir/examples/"
 	fi
 elif [ -n "$package_rust_macos" ]; then
 	install -m 0755 "$package_rust_macos" "$package_dir/bin/lanewayd-rs"

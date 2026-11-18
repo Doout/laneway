@@ -16,10 +16,11 @@ Keep one controller writing to each database.
 
 ## Linux release preview
 
-The Linux release workflow builds the four Rust runtime candidates on native
+The Linux release workflow builds the Rust runtime candidates on native
 AMD64 and ARM64 runners. The existing signed Linux archive carries them as
 `sbin/laneway-controller-rs`, `sbin/laneway-relay-rs`,
-`sbin/lanewayd-rs`, and `sbin/laneway-healthcheck-rs`. The Go binaries,
+`sbin/lanewayd-rs`, `sbin/laneway-healthcheck-rs`, and
+`sbin/laneway-update-rs`. The Go binaries,
 the default `lanewayd` link, and the production image tags are unchanged.
 Shipping these files does not select them at runtime.
 
@@ -40,7 +41,7 @@ sh integration/rust-release-package.sh "dist/laneway_linux_$arch.tar.gz" "$arch"
 
 The archive gate checks architecture and static linkage, executes each packaged
 binary to verify its build version, and checks the default daemon link. To test
-the archived binaries with real traffic, extract the four `-rs` entries into
+the archived binaries with real traffic, extract the `-rs` entries into
 a disposable directory and point `LANEWAY_NODE_TEST_RUST_RUNTIME_DIR` at that
 directory when running `integration/rust-controller-node-netns.sh` on the
 isolated host. The package alone does not satisfy the systemd or cutover gates.
@@ -1058,7 +1059,7 @@ gate uses the existing Go CLI against the Rust ACL API to prove that removing
 the allow rule blocks a real routed packet and adding it back restores traffic.
 The fixture still uses Go for route administration.
 
-### Managed fleet update controller (lab only)
+### Managed fleet updates (lab only)
 
 Schema 19 supports the existing Fleet Updates console API. Listing requires
 `node.read`; creating, promoting, and cancelling require `node.manage` for
@@ -1072,9 +1073,48 @@ certificate. The runtime node and network identifiers in the request must
 match that certificate. A running claim survives cancellation, and retrying a
 terminal report does not repeat the state change or audit. The controller
 returns a release tag, not a binary, executable command, or download URL.
-This phase does not install or enable a Rust updater. Signed artifact
-verification, runtime identity checks, and rollback need their own Linux
-install/restart gate before it can execute assignments.
+
+Linux amd64 and arm64 archives include the native opt-in updater for the
+standard `lanewayd-rs.service` installation. It uses the root-owned
+`/etc/laneway/node-rust.toml` for the controller identity, node certificate,
+and local status socket. Its CA file and parent directories must be
+root-owned and not writable by the daemon. The updater uses the existing pinned Cosign verifier
+at `/usr/local/libexec/laneway/cosign-v3.1.3`, requires the exact tagged
+`Doout/laneway` release workflow identity, and extracts only
+`laneway/sbin/lanewayd-rs` after checking the archive's signed digest.
+It does not update Go nodes, standalone exit profiles, or containerized
+connectors, and does not change installed config, CA, or private keys.
+
+Install the updater binary and its service and timer from a verified package.
+Copy `examples/managed-updates-rust.toml` to
+`/etc/laneway/managed-updates-rust.toml` (root-owned, mode 0600). Do not
+run the legacy updater on this service. After verifying the installation and
+rollback in the lab, tests may opt in with `enabled = true` and
+`systemctl enable --now laneway-rust-updater.timer`. Installing the files or
+upgrading the controller does not enable the timer.
+
+If a request or activation is interrupted, the updater does not claim again or
+reinstall. Stop the timer, inspect the durable `rust-journal.json` under
+`/var/lib/laneway-updater`, and verify the runtime's authenticated controller
+lease. A terminal ACK can be retried by rerunning the worker. For unresolved
+claims, inspect the installed executable and any
+`/usr/local/sbin/.lanewayd-rs-update-{previous,next}` before moving those
+markers out of the installation directory. With the known daemon healthy,
+run `laneway-update-rs --reconcile UPDATE_ID vTARGET vPREVIOUS`; the
+controller rechecks the exact claimed node and versions. Do not enable this
+on production without the signed release and real systemd rollback gate.
+
+The optional `TestRustControllerFleetUpdates/managed-worker` lab case uses
+the actual controller and Rust daemon over mTLS and the local Unix socket.
+Set `LANEWAY_RUST_UPDATER`, `LANEWAY_RUST_CONTROLLER`, and
+`LANEWAY_RUST_NODE` to the three Linux binaries in a disposable, root-run
+Docker container without existing Laneway installation paths. Run
+`go test -tags=rustinterop ./internal/controllerservice -run '^TestRustControllerFleetUpdates$'`
+from the `go` directory. The test claims a release already running locally:
+it verifies opt-in, credential binding, and terminal acknowledgment without
+needing release network access. Local activation tests exercise atomic
+replacement and rollback separately; neither test substitutes for a signed
+update and bad-release rollback against a running systemd service.
 
 ### Recover an expired Rust node credential (lab only)
 

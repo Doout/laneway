@@ -1,6 +1,41 @@
 //! JSON contract shared by the fleet controller and opt-in update agents.
 use serde::{Deserialize, Serialize};
 
+/// Atomic claim/presence endpoint on the node mTLS API.
+pub const POLL_PATH: &str = "/v1/node/fleet-updates/poll";
+
+/// Return the terminal-evidence endpoint for a canonical assignment ID.
+pub fn result_path(id: crate::Id) -> String {
+    format!("/v1/node/fleet-updates/{id}/result")
+}
+
+/// Fields an update agent uses from an assigned plan.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Assignment {
+    /// Opaque canonical update ID.
+    pub id: String,
+    /// Exact stable release tag.
+    pub version: String,
+    /// Installation kind.
+    pub component: Component,
+    /// Configured opt-in lane.
+    pub channel: Channel,
+}
+
+/// No assignment is represented as an explicit JSON null.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PollReply {
+    /// Newly claimed assignment, if there is eligible work.
+    #[serde(deserialize_with = "present_assignment")]
+    pub update: Option<Assignment>,
+}
+
+fn present_assignment<'de, D: serde::Deserializer<'de>>(
+    de: D,
+) -> Result<Option<Assignment>, D::Error> {
+    Option::deserialize(de)
+}
+
 /// The controller only assigns releases in the locally configured lane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +153,17 @@ pub fn valid_version(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_update_is_not_no_work() {
+        assert!(serde_json::from_str::<PollReply>("{}").is_err());
+        assert!(
+            serde_json::from_str::<PollReply>(r#"{"update":null}"#)
+                .unwrap()
+                .update
+                .is_none()
+        );
+    }
 
     #[test]
     fn only_exact_bounded_stable_tags() {

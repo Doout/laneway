@@ -235,6 +235,51 @@ impl Client {
         crate::private_dns::Catalog::decode(&read_response(response).await?, self.options.network)
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn claim_update(
+        &self,
+        poll: &laneway_protocol::fleet_updates::Poll,
+    ) -> Result<laneway_protocol::fleet_updates::PollReply> {
+        let response = self
+            .update_request(laneway_protocol::fleet_updates::POLL_PATH, poll)
+            .await?;
+        ensure!(response.status() == StatusCode::OK, "update poll rejected");
+        Ok(serde_json::from_slice(&read_response(response).await?)?)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn acknowledge_update(
+        &self,
+        id: Id,
+        result: &laneway_protocol::fleet_updates::Report,
+    ) -> Result<()> {
+        let response = self
+            .update_request(&laneway_protocol::fleet_updates::result_path(id), result)
+            .await?;
+        ensure!(
+            response.status() == StatusCode::NO_CONTENT,
+            "update result rejected"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn update_request(
+        &self,
+        path: &str,
+        body: &impl serde::Serialize,
+    ) -> Result<reqwest::Response> {
+        let response = self
+            .http
+            .post(self.http_origin.join(path)?)
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(body)?)
+            .send()
+            .await?;
+        self.check_response_identity(&response)?;
+        Ok(response)
+    }
+
     fn check_response_identity(&self, response: &reqwest::Response) -> Result<()> {
         let peer = response
             .extensions()
@@ -419,6 +464,7 @@ async fn https_transport(
         .https_only(true)
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
         .use_preconfigured_tls(tls)
         .timeout(timeout)
         .tls_info(true);

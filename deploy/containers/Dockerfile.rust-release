@@ -20,7 +20,9 @@ RUN --network=none set -eu; \
       -p lanewayd-rs -p laneway-controller -p laneway-relay -p laneway-healthcheck; \
     out="rust/target/$target/release"; \
     mkdir /artifacts; \
-    install -m 0755 "$out/lanewayd-rs" /artifacts/lanewayd-rs; \
+    for name in lanewayd-rs laneway-update-rs; do \
+      install -m 0755 "$out/$name" "/artifacts/$name"; \
+    done; \
     for name in laneway-controller laneway-relay laneway-healthcheck; do \
       install -m 0755 "$out/$name" "/artifacts/$name-rs"; \
     done; \

@@ -5,10 +5,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 description = "Native Laneway node dataplane"
+default-run = "lanewayd-rs"
 
 [[bin]]
 name = "lanewayd-rs"
 path = "src/main.rs"
+
+[[bin]]
+name = "laneway-update-rs"
+path = "src/managed_update_main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -44,8 +49,11 @@ x509-parser.workspace = true
 zeroize = "1.9.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+flate2 = "1.1.11"
 tokio-tun.workspace = true
 libc = "0.2.189"
+tar = { version = "0.4.46", default-features = false }
+tokio = { workspace = true, features = ["fs", "process"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

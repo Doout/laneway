@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a scheduled Laneway Rust node update
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+RandomizedDelaySec=30s
+Unit=laneway-rust-updater.service
+
+[Install]
+WantedBy=timers.target

@@ -15,6 +15,8 @@ mod diagnostics;
 mod direct;
 mod dns;
 mod exit_intent;
+#[cfg(target_os = "linux")]
+pub mod fleet_update;
 mod foreground_routes;
 mod kernel;
 mod local_api;

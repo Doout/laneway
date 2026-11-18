@@ -1,0 +1,24 @@
+[Unit]
+Description=Laneway Rust node managed update
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/laneway/managed-updates-rust.toml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/laneway-update-rs
+TimeoutStartSec=15min
+User=root
+Group=root
+UMask=0077
+StateDirectory=laneway-updater
+StateDirectoryMode=0700
+ReadWritePaths=/usr/local/sbin
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

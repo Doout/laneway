@@ -12,7 +12,7 @@ case "$2" in
   arm64) machine='AArch64' ;;
   *) echo "unsupported Rust runtime architecture: $2" >&2; exit 2 ;;
 esac
-for name in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs lanewayd-rs; do
+for name in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs; do
   binary="$directory/$name"
   if [ ! -f "$binary" ] || [ -L "$binary" ] || [ ! -x "$binary" ]; then
     echo "the Rust runtime is missing an executable regular file: $name" >&2

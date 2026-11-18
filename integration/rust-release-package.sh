@@ -17,7 +17,7 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 probe_dir=$(mktemp -d)
 trap 'find "$probe_dir" -depth -delete' EXIT HUP INT TERM
 listing=$(tar -tzf "$archive")
-for name in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs lanewayd-rs; do
+for name in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs; do
   member="laneway/sbin/$name"
   count=$(printf '%s\n' "$listing" | grep -Fxc "$member" || true)
   test "$count" -eq 1 || { echo "expected a single $member in the Linux archive" >&2; exit 1; }
@@ -25,7 +25,7 @@ for name in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs lanewa
   chmod 0755 "$probe_dir/$name"
 done
 sh "$root/scripts/verify-rust-release-runtime.sh" "$probe_dir" "$architecture"
-for name in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs lanewayd-rs; do
+for name in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs; do
   for flag in --version -version; do
     observed=$("$probe_dir/$name" "$flag")
     if [ "$observed" != "$expected_version" ]; then
@@ -39,5 +39,8 @@ if ! tar -tvzf "$archive" laneway/sbin/lanewayd |
   echo "the Rust preview must not change the default Go daemon link" >&2
   exit 1
 fi
-printf 'Verified all four static Rust %s runtimes at version %s; default daemon link unchanged.\n' \
+for member in examples/managed-updates-rust.toml systemd/laneway-rust-updater.service systemd/laneway-rust-updater.timer; do
+  printf '%s\n' "$listing" | grep -Fx "laneway/$member" >/dev/null
+done
+printf 'Verified all five static Rust %s runtimes at version %s; default daemon link unchanged.\n' \
   "$architecture" "$expected_version"

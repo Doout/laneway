@@ -4,11 +4,13 @@ package controllerservice
 
 import (
 	"context"
+	"crypto"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -108,9 +110,8 @@ func TestRustControllerFleetUpdates(t *testing.T) {
 	}
 	caKey := write("ca.key", issueKey)
 	rootFile := write("root.token", []byte(testRootBearer+"\n"))
-	start := func() (string, func()) {
-		endpoint, _, stop := startControllerTLSLab(t, f.dbPath, certPath, keyPath, "--root-token-file", rootFile, "--node-issuer", ca, caKey, "3600", "--node-client-ca", ca, "--node-quic")
-		return endpoint, stop
+	start := func() (string, string, func()) {
+		return startControllerTLSLab(t, f.dbPath, certPath, keyPath, "--root-token-file", rootFile, "--node-issuer", ca, caKey, "3600", "--node-client-ca", ca, "--node-quic")
 	}
 	owner := labCredentials{session: session, csrf: csrf}
 	root := labCredentials{bearer: testRootBearer}
@@ -122,7 +123,7 @@ func TestRustControllerFleetUpdates(t *testing.T) {
 		return fmt.Sprintf(`{"runtime_node_id":%q,"runtime_network_id":%q,"component":"node","channel":%q,"current_version":"v1.2.0"}`, node, netID.String(), lane)
 	}
 	send := labManagementHTTP(t, client())
-	endpoint, stop := start()
+	endpoint, quic, stop := start()
 	send(endpoint, "GET", path, "", owner, 404)
 	labManagementHTTP(t, c)(endpoint, "POST", pollPath, pollBody(canary, "stable"), anon, 404)
 	stop()
@@ -130,7 +131,7 @@ func TestRustControllerFleetUpdates(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("migrate fleet: %v %s", err, output)
 	}
-	endpoint, stop = start()
+	endpoint, quic, stop = start()
 	defer stop()
 	epoch := send(endpoint, "GET", base, "", owner, 200)["configuration_epoch"]
 	bot := func(permission string) labCredentials {
@@ -280,4 +281,184 @@ func TestRustControllerFleetUpdates(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM audit_events WHERE action='fleet_update.result' AND actor_kind='node'").Scan(&count); err != nil || count != 5 {
 		t.Fatalf("expected one audit per terminal update: %d %v", count, err)
 	}
+	if updater := os.Getenv("LANEWAY_RUST_UPDATER"); updater != "" {
+		t.Run("managed-worker", func(t *testing.T) {
+			send := labManagementHTTP(t, client())
+			relayID, err := identity.NewID()
+			if err != nil {
+				t.Fatal(err)
+			}
+			send(endpoint, "POST", base+"/relays", fmt.Sprintf(`{"service_id":%q,"name":"lab relay","endpoint":"127.0.0.1:4433"}`, relayID.String()), root, 201)
+			worker := startRustFleetUpdateNode(t, dir, endpoint, quic, ca, netID.String(), serviceID.String(), canary, c)
+			nodeVersion, err := exec.CommandContext(t.Context(), worker, "--version").Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tag := "v" + strings.TrimPrefix(strings.TrimSpace(string(nodeVersion)), "v")
+			run := func() {
+				t.Helper()
+				if out, err := exec.CommandContext(t.Context(), updater).CombinedOutput(); err != nil {
+					t.Fatalf("run native worker: %v %s", err, out)
+				}
+			}
+			update := send(endpoint, "POST", path, strings.ReplaceAll(plan(canary), "v1.2.1", tag), manager, 201)["id"].(string)
+			assertWorkerState := func(want string) {
+				t.Helper()
+				for _, row := range send(endpoint, "GET", path, "", reader, 200)["fleet_updates"].([]any) {
+					plan := row.(map[string]any)
+					if plan["id"] == update && plan["state"] == want {
+						return
+					}
+				}
+				t.Fatalf("native worker's update did not reach %s", want)
+			}
+			run() // Opt-out must not claim or report.
+			assertWorkerState("canary")
+			const config = "/etc/laneway/managed-updates-rust.toml"
+			if err := os.WriteFile(config, []byte("enabled=true\nchannel=\"stable\"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			const trust = "/etc/laneway/ca.crt"
+			if err := os.Chmod(trust, 0666); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.CommandContext(t.Context(), updater).Run(); err == nil {
+				t.Fatal("native worker trusted a CA writable by the daemon")
+			}
+			assertWorkerState("canary")
+			if err := os.Chmod(trust, 0600); err != nil {
+				t.Fatal(err)
+			}
+			run()
+			assertWorkerState("complete")
+			run() // Next timer invocation finds no outstanding work.
+			var claims int
+			if err := db.QueryRow("SELECT count(*) FROM audit_events WHERE action='fleet_update.claim' AND lower(hex(target_id))=?", update).Scan(&claims); err != nil || claims != 1 {
+				t.Fatalf("native worker did not claim exactly once: count=%d %v", claims, err)
+			}
+			if _, err := os.Stat("/var/lib/laneway-updater/rust-journal.json"); !os.IsNotExist(err) {
+				t.Fatalf("confirmed ACK did not clear the journal: %v", err)
+			}
+		})
+	}
+}
+
+// Exercise the unchanged worker binary, the real Unix health API, and pinned
+// client/server mTLS. The assigned version is already serving, so the test
+// uses no public downloads and does not need a service manager.
+func startRustFleetUpdateNode(t *testing.T, dir, endpoint, quic, ca, network, service, node string, tlsClient *http.Client) string {
+	t.Helper()
+	const installed = "/usr/local/sbin/lanewayd-rs"
+	const settings = "/etc/laneway/managed-updates-rust.toml"
+	const config = "/etc/laneway/node-rust.toml"
+	const trust = "/etc/laneway/ca.crt"
+	if os.Geteuid() != 0 {
+		t.Fatal("native updater lab requires root in a disposable Linux container")
+	}
+	if _, err := os.Stat("/.dockerenv"); err != nil {
+		t.Fatal("native updater lab refuses to use installed paths outside Docker")
+	}
+	for _, path := range []string{installed, "/etc/laneway", "/var/lib/laneway-updater"} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("native updater lab refuses existing path %s", path)
+		}
+	}
+	src, err := os.Open(os.Getenv("LANEWAY_RUST_NODE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(installed, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(installed) })
+	_, copyErr := io.Copy(dst, src)
+	if err := dst.Close(); copyErr != nil || err != nil {
+		t.Fatalf("stage disposable runtime: %v %v", copyErr, err)
+	}
+	if err := os.Mkdir("/etc/laneway", 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, path := range []string{config, settings, trust, "/etc/laneway",
+			"/var/lib/laneway-updater/rust-journal.json", "/var/lib/laneway-updater/lock", "/var/lib/laneway-updater"} {
+			_ = os.Remove(path)
+		}
+	})
+	write := func(path string, content []byte) {
+		t.Helper()
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	credential := tlsClient.Transport.(*http.Transport).TLSClientConfig.Certificates[0]
+	certFile, keyFile := filepath.Join(dir, "worker-client.crt"), filepath.Join(dir, "worker-client.key")
+	key, err := pki.PrivateKeyPEM(credential.PrivateKey.(crypto.Signer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(certFile, pki.CertificatePEM(credential.Certificate[0]))
+	write(keyFile, key)
+	trustPEM, err := os.ReadFile(ca)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(trust, trustPEM)
+	socket := filepath.Join(dir, "worker.sock")
+	write(settings, []byte("enabled=false\nchannel=\"stable\"\n"))
+	write(config, fmt.Appendf(nil, `mode = "node"
+socket_path = %q
+exit_intent_path = %q
+[identity]
+node_id = %q
+network_id = %q
+[tls]
+certificate = %q
+private_key = %q
+ca = %q
+[controller]
+endpoint = %q
+quic_endpoint = %q
+service_id = %q
+server_name = "127.0.0.1"
+poll_interval = "1s"
+[tun]
+name = "lane-test"
+[relay]
+server_name = "unused.test"
+service_id = %q
+[connector]
+userspace = true
+`, socket, filepath.Join(dir, "worker-exit.json"), node, network, certFile, keyFile, trust, endpoint, quic, service, service))
+	cmd := exec.CommandContext(t.Context(), installed, "--config", config)
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	local := &http.Client{Timeout: time.Second, Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		},
+	}}
+	t.Cleanup(local.CloseIdleConnections)
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(30 * time.Millisecond) {
+		resp, err := local.Get("http://lanewayd/v1/status")
+		if err != nil {
+			continue
+		}
+		var state struct {
+			Controller struct {
+				Until uint64 `json:"configuration_lease_valid_until_unix_seconds"`
+			}
+		}
+		parseErr := json.NewDecoder(resp.Body).Decode(&state)
+		resp.Body.Close()
+		if resp.StatusCode == 200 && parseErr == nil && state.Controller.Until > uint64(time.Now().Unix()) {
+			return installed
+		}
+	}
+	t.Fatal("disposable native node did not gain controller health")
+	return ""
 }
