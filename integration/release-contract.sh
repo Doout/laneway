@@ -159,6 +159,14 @@ require 'ephemeral-exit' "$package_workflow"
 require 'verify-rust-release-runtime.sh' "$package_workflow"
 require 'verify-rust-release.sh' "$package_workflow"
 require 'sh deploy/compose/verify-rust-release.sh --publish "$GITHUB_REF_NAME" dist' "$workflow"
+require 'bash integration/rust-release-install.sh dist "$GITHUB_REF_NAME"' "$workflow"
+if ! awk '/cosign sign-blob/ { signed=1 }
+  /bash integration\/rust-release-install\.sh/ { installed=signed }
+  /gh release create/ { if (!installed) exit 1; published=1 }
+  END { if (!published || !installed) exit 1 }' "$workflow"; then
+  echo 'release must install the signed candidate before publishing' >&2
+  exit 1
+fi
 require 'set -- --control-tools' "$client_installer"
 require 'sh integration/rust-compose-release.sh' "$ci_workflow"
 require 'verified release does not contain the Rust Exit runtime' "$ephemeral_exit_bootstrap"

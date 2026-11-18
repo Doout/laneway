@@ -30,7 +30,7 @@ jobs:
       - name: Check scripts
         run: |
           python3 -m unittest discover -s deploy/compose -p 'test_*.py'
-          shellcheck integration/rust-release-macos.sh
+          shellcheck integration/rust-release-macos.sh integration/rust-release-install.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
           sh integration/rust-compose-release.sh
           sh integration/rust-go-runtime-guard.sh
@@ -333,6 +333,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Verify the complete Rust release image set before publishing
         run: sh deploy/compose/verify-rust-release.sh --publish "$GITHUB_REF_NAME" dist >/dev/null
+      - name: Install and recover the signed Rust candidate before publishing
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age jq
+          if ! getent ahostsv4 laneway-release.localhost >/dev/null; then
+            printf '%s\n' '127.0.0.1 laneway-release.localhost' | sudo tee -a /etc/hosts >/dev/null
+          fi
+          sudo install -m 0600 /dev/null /run/.laneway-isolated-signed-release-lab
+          sudo env PATH="$PATH" DOCKER_CONFIG="${DOCKER_CONFIG:-$HOME/.docker}" \
+            bash integration/rust-release-install.sh dist "$GITHUB_REF_NAME"
       - name: Attest release artifact provenance
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:

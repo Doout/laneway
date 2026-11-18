@@ -23,6 +23,15 @@ signed candidate:
 3. Test one isolated workload before promoting. Verify the recovery procedure
    with the same Rust images that will serve the deployment.
 
+The tagged publish job now runs `integration/rust-release-install.sh` before
+creating the GitHub release. It installs the exact signed AMD64 archive using
+the release installer, verifies the running digest-pinned services and HTTPS
+discovery, and restores its encrypted backup into a separate, empty controller
+volume. Download transport and the relay's public certificate are local to
+the disposable runner; release signature verification and image pulls are real.
+The same gate passed an ARM64 rehearsal using fixture signatures and local
+images; the actual tagged workflow is still required.
+
 The isolated ARM64 installer rehearsal used fixture signatures and local
 images. The packaged host-tools install left no daemon or systemd units; the
 installer created an empty Rust deployment, verified authenticated inventory,
