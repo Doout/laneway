@@ -36,6 +36,8 @@ pub(super) enum Route<'a> {
     RelayDisable(&'a str),
     AclRules(&'a str),
     AclRule(&'a str),
+    PolicyHistory(&'a str),
+    RestorePolicy(&'a str, &'a str),
     UserCreate(&'a str),
     UserUpdate(&'a str),
     TeamCreate(&'a str),
@@ -80,6 +82,17 @@ impl<'a> Route<'a> {
             ["", "v1", "admin", "relays", id, "disable"] => RelayDisable(id),
             ["", "v1", "admin", "networks", id, "acl-rules"] => AclRules(id),
             ["", "v1", "admin", "acl-rules", id] => AclRule(id),
+            ["", "v1", "admin", "networks", id, "policy-history"] => PolicyHistory(id),
+            [
+                "",
+                "v1",
+                "admin",
+                "networks",
+                id,
+                "policy-history",
+                revision,
+                "restore",
+            ] => RestorePolicy(id, revision),
             ["", "v1", "admin", "networks", id, "users"] => UserCreate(id),
             ["", "v1", "admin", "users", id] => UserUpdate(id),
             ["", "v1", "admin", "networks", id, "teams"] => TeamCreate(id),
@@ -101,6 +114,7 @@ impl<'a> Route<'a> {
         match self {
             Self::Inventory(_)
             | Self::PrivateDns(_)
+            | Self::PolicyHistory(_)
             | Self::ListRoutes(_)
             | Self::Certificates(_)
             | Self::EndpointStatuses(_)
@@ -117,6 +131,7 @@ impl<'a> Route<'a> {
             | Self::RevokeCertificate(..)
             | Self::RevokeNode(_)
             | Self::RelayDisable(_)
+            | Self::RestorePolicy(..)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
             | Self::ResourceCreate(_)
@@ -198,6 +213,11 @@ struct AclUpdateForm {
     selector: Option<AclSelector>,
     description: String,
     enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyRestoreForm {
+    expected_configuration_epoch: i64,
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -334,6 +354,19 @@ async fn decode(
     Ok(match route {
         Route::Inventory(net) => Action::Inventory(parse(net)?),
         Route::PrivateDns(net) => Action::PrivateDns(parse(net)?),
+        Route::PolicyHistory(net) => Action::PolicyHistory(
+            parse(net)?,
+            super::list_limit(req.uri().query(), 50).map_err(|_| malformed("invalid limit"))?,
+        ),
+        Route::RestorePolicy(net, revision) => {
+            let revision = revision
+                .parse::<i64>()
+                .ok()
+                .filter(|count| *count > 0)
+                .ok_or_else(|| malformed("invalid revision"))?;
+            let form = required_json_form::<PolicyRestoreForm>(req).await?;
+            Action::RestorePolicy(parse(net)?, revision, form.expected_configuration_epoch)
+        }
         Route::EndpointStatuses(net) => Action::EndpointStatuses(
             parse(net)?,
             super::query_limit(req.uri().query())

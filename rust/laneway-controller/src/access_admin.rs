@@ -3,6 +3,7 @@ mod acl;
 mod devices;
 mod inventory;
 mod named;
+mod policy_history;
 mod relays;
 mod routes;
 pub(crate) mod service_ports;
@@ -55,6 +56,8 @@ pub enum Request {
     UpdateRelay(Id, String, String, bool),
     DisableRelay(Id),
     ListAclRules(Id, usize),
+    PolicyHistory(Id, usize),
+    RestorePolicy(Id, i64, i64),
     CreateAclRule(Id, AclRule),
     UpdateAclRule(Id, AclRule),
     DeleteAclRule(Id),
@@ -120,6 +123,7 @@ impl Request {
                 | Self::EndpointStatuses(..)
                 | Self::NodeLocations(..)
                 | Self::ListAclRules(..)
+                | Self::PolicyHistory(..)
                 | Self::ListRoutes(..)
                 | Self::ListCertificates(..)
                 | Self::ListRelays(..)
@@ -158,6 +162,8 @@ impl Request {
             | Self::RegisterRelay { net, .. }
             | Self::RevokeCertificate(net, ..)
             | Self::ListAclRules(net, _)
+            | Self::PolicyHistory(net, _)
+            | Self::RestorePolicy(net, ..)
             | Self::CreateAclRule(net, _)
             | Self::CreateUser(net, _)
             | Self::CreateTeam(net, _)
@@ -253,6 +259,8 @@ impl Request {
                 .set_node_capabilities(id, capabilities)
                 .map(epoch_reply),
             Self::ListAclRules(_, limit) => editor.list_acl_rules(limit),
+            Self::PolicyHistory(_, limit) => editor.policy_history(limit),
+            Self::RestorePolicy(_, revision, epoch) => editor.restore_policy(revision, epoch),
             Self::CreateAclRule(_, rule) => editor.write_acl_rule(None, rule),
             Self::UpdateAclRule(id, rule) => editor.write_acl_rule(Some(id), rule),
             Self::DeleteAclRule(id) => editor.delete_acl_rule(id),

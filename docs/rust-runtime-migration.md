@@ -957,9 +957,31 @@ controller) queries the running daemon over UDP after certificate renewal,
 blocks its HTTPS path while QUIC remains available, then checks SERVFAIL and
 recovery without restarting the node. It does not configure OS split DNS.
 
-The local fleet source adds a migration after public schema 18; Rust still
-rejects unsupported schema histories. Private fleet console integration and
-validation against the deployed fleet database are separate promotion gates.
+### Fleet schema and policy history (lab only)
+
+Rust accepts public schema 18 and the exact additive schema 19 defined by
+the local Go fleet source. It checks the version history and each named fleet
+table and index before serving; unknown layouts and newer versions are rejected.
+Serving never migrates a database automatically. To exercise the migration,
+stop the writer, take a backup, and run this command against a disposable copy:
+
+```sh
+laneway-controller migrate-fleet /path/to/disposable-controller.db
+```
+
+The migration is transactional and a second run on the same layout is a no-op.
+The lab read backups and restored copies from the Go fleet controller and
+verified that Go fleet code can reopen a Rust-migrated database. Rollback on
+schema 19 requires a Go **fleet** build; public schema-18 Go is not a fallback.
+
+On schema 19, Rust records the manual ACL policy before and after every ACL
+mutation. The history API requires network-scoped `acl.read`. Restoring a saved
+revision requires `acl.manage` and the current configuration epoch. It compiles
+the restored policy and commits the ACLs, epoch, history, and audit together.
+The HTTPS fixture verifies permissions, stale epochs, and rollback on a failed
+audit write. These checks do not cover policy preview, backup/restore in the
+Rust runtime, other fleet workflows, the private console, or the deployed
+production database; do not promote the controller on schema support alone.
 
 Traffic rules can be listed, created, updated, and deleted through the same
 Rust HTTPS listener. The controller validates canonical prefixes and port

@@ -58,6 +58,10 @@ impl Editor<'_, '_> {
             stored.len() <= MAX_SELECTOR_BYTES,
             AccessError::Invalid("ACL selector exceeds limit")
         );
+        let fleet = crate::schema::is_fleet(self.tx)?;
+        if fleet {
+            self.capture_policy()?;
+        }
         let (id, on, epoch) = if let Some(id) = id {
             ensure!(self.tx.execute("UPDATE acl_rules SET priority=?1,action=?2,selector_json=?3,description=?4,enabled=?5,updated_at=?6
                 WHERE id=?7 AND network_id=?8",(rule.priority,&rule.action,&stored,&rule.description,rule.enabled,self.now,id.as_bytes(),self.net.as_bytes()))?==1,AccessError::Missing);
@@ -82,6 +86,9 @@ impl Editor<'_, '_> {
                 self.record("acl_rule.create", "acl_rule", id, json!({}))?,
             )
         };
+        if fleet {
+            self.capture_policy()?;
+        }
         Ok(
             json!({"rule_id":id.to_string(),"network_id":self.net.to_string(),"priority":rule.priority,"action":rule.action,
             "selector":selector,"description":rule.description,"enabled":on,"configuration_epoch":epoch}),
@@ -89,6 +96,10 @@ impl Editor<'_, '_> {
     }
 
     pub(super) fn delete_acl_rule(&self, id: Id) -> Result<Value> {
+        let fleet = crate::schema::is_fleet(self.tx)?;
+        if fleet {
+            self.capture_policy()?;
+        }
         ensure!(
             self.tx.execute(
                 "DELETE FROM acl_rules WHERE id=? AND network_id=?",
@@ -96,11 +107,10 @@ impl Editor<'_, '_> {
             )? == 1,
             AccessError::Missing
         );
-        Ok(epoch_reply(self.record(
-            "acl_rule.delete",
-            "acl_rule",
-            id,
-            json!({}),
-        )?))
+        let epoch = self.record("acl_rule.delete", "acl_rule", id, json!({}))?;
+        if fleet {
+            self.capture_policy()?;
+        }
+        Ok(epoch_reply(epoch))
     }
 }

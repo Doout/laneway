@@ -196,7 +196,7 @@ impl AclSelector {
     }
 }
 
-pub(super) fn compile(tx: &Transaction<'_>, net: Id, epoch: u64) -> Result<PolicySnapshot> {
+pub(crate) fn compile(tx: &Transaction<'_>, net: Id, epoch: u64) -> Result<PolicySnapshot> {
     let mut stmt=tx.prepare("SELECT id,priority,action,selector_json,description FROM acl_rules WHERE network_id=? AND enabled=1 ORDER BY priority,id LIMIT 4097")?;
     let mut rows = stmt.query([net.as_bytes()])?;
     let mut policy = PolicySnapshot {

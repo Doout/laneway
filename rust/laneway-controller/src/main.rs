@@ -21,6 +21,25 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Some("serve") => return server::start(args),
+        Some("migrate-fleet") => {
+            let path = args
+                .next()
+                .context("usage: laneway-controller migrate-fleet DATABASE")?;
+            ensure!(
+                args.next().is_none(),
+                "usage: laneway-controller migrate-fleet DATABASE"
+            );
+            let applied = laneway_controller::migrate_fleet(Path::new(&path))?;
+            println!(
+                "fleet schema 19 {}",
+                if applied {
+                    "applied"
+                } else {
+                    "already present"
+                }
+            );
+            return Ok(());
+        }
         Some("inventory") => false,
         Some("session-inventory") => true,
         _ => anyhow::bail!(USAGE),

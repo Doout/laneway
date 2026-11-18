@@ -33,6 +33,8 @@ mod nodes;
 pub use network_create::{CreateNetwork, NetworkError};
 pub mod password;
 pub mod recovery;
+mod schema;
+pub use schema::migrate_fleet;
 mod session_lifecycle;
 pub use session_lifecycle::IssuedSession;
 mod sessions;
@@ -46,7 +48,6 @@ pub enum InventoryList {
     Nodes(Vec<Node>),
 }
 
-const SCHEMA_VERSION: i64 = 18;
 const DB_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Inventory {
@@ -99,17 +100,7 @@ fn open_existing(path: &Path, flags: OpenFlags) -> Result<Connection> {
 }
 
 fn check_snapshot(tx: &Transaction<'_>) -> Result<()> {
-    // Check inside the read snapshot. A migration racing the query cannot
-    // switch its schema between validation and data access.
-    let versions: (i64, i64, i64) = tx.query_row(
-            "SELECT count(*),coalesce(min(version),0),coalesce(max(version),0) FROM schema_versions",
-            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
-        ).context("read controller migration history")?;
-    ensure!(
-        versions == (SCHEMA_VERSION, 1, SCHEMA_VERSION),
-        "unsupported controller migration history {versions:?}"
-    );
-    Ok(())
+    schema::check(tx)
 }
 
 #[derive(Clone, Copy)]
@@ -193,6 +184,7 @@ fn network_row(row: &Row<'_>) -> Result<Network> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::PUBLIC_VERSION;
     use tempfile::tempdir;
 
     #[test]
@@ -214,7 +206,7 @@ mod tests {
             ipv6_address BLOB, ipv6_prefix_length INTEGER, configuration_epoch INTEGER, created_at INTEGER);").unwrap();
         let mut reader = Inventory::open(&path).unwrap();
         assert!(reader.networks(1).is_err());
-        for version in 1..=SCHEMA_VERSION {
+        for version in 1..=PUBLIC_VERSION {
             writer
                 .execute("INSERT INTO schema_versions VALUES (?)", [version])
                 .unwrap();
@@ -235,7 +227,7 @@ mod tests {
         writer
             .execute(
                 "INSERT INTO schema_versions VALUES (?)",
-                [SCHEMA_VERSION + 1],
+                [PUBLIC_VERSION + 1],
             )
             .unwrap();
         assert!(reader.networks(1).is_err());
