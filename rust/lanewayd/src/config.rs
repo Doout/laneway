@@ -12,8 +12,8 @@ use ipnet::IpNet;
 use laneway_protocol::Id;
 use serde::Deserialize;
 
-#[path = "connector_state.rs"]
-mod connector_state;
+#[path = "installed_state.rs"]
+mod installed_state;
 
 const MAX_CONFIG_BYTES: u64 = 1 << 20;
 
@@ -196,7 +196,7 @@ pub struct ControllerConfig {
     /// Authenticated snapshots use QUIC; enrollment and status use HTTPS.
     #[serde(default)]
     pub quic_endpoint: Option<String>,
-    /// TLS DNS name; it must exactly equal the endpoint host.
+    /// Verified TLS hostname. A DNS name can differ from the private dial host.
     pub server_name: String,
     /// Exact controller service ID pinned from its SPIFFE URI SAN.
     pub service_id: String,
@@ -336,8 +336,8 @@ pub struct RelayConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpFallbackConfig {
-    /// Relay TCP fallback host and port. DNS names are allowed only for a
-    /// controller-managed userspace connector.
+    /// Relay TCP fallback host and port. DNS names require controller
+    /// authority; each resolved address is checked before use.
     pub address: String,
     /// TLS handshake deadline.
     #[serde(default = "default_handshake_timeout", with = "humantime_serde")]
@@ -743,8 +743,7 @@ impl Config {
                 (tcp.address
                     .parse::<SocketAddr>()
                     .is_ok_and(|addr| addr.port() != 0)
-                    || (self.connector.userspace
-                        && self.controller.is_some()
+                    || (self.controller.is_some()
                         && laneway_protocol::relay_endpoint::canonical_host_port(&tcp.address)
                             .is_some()))
                     && tcp.handshake_timeout <= Duration::from_secs(300)

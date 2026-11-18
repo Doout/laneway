@@ -79,6 +79,7 @@ func endpointHealth(args []string) error {
 	node := fs.String("node-id", "", "reporting node identity")
 	ip := fs.String("public-ip", "", "expected node transport address")
 	location := fs.String("location", "", "expected automatic location label")
+	version := fs.String("product-version", "", "expected node runtime version")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -98,8 +99,9 @@ func endpointHealth(args []string) error {
 		WHERE s.node_id=? AND s.platform='linux' AND s.configuration_state='current'
 		  AND s.route_state='ready' AND s.expires_at>unixepoch() AND l.observed_at>unixepoch()-30
 		  AND (?='' OR l.public_ip=?)
-		  AND (?='' OR json_extract(l.automatic_json,'$.label')=?)`,
-		id[:], *ip, *ip, *location, *location).Scan(&carrier); err != nil {
+		  AND (?='' OR json_extract(l.automatic_json,'$.label')=?)
+		  AND (?='' OR s.product_version=?)`,
+		id[:], *ip, *ip, *location, *location, *version, *version).Scan(&carrier); err != nil {
 		return err
 	}
 	fmt.Println(carrier)

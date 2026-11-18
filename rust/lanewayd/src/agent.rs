@@ -125,6 +125,13 @@ impl Agent {
         };
         let bootstrap = self.controller_bootstrap().await?;
         if let Some((client, snapshot, _, _)) = &bootstrap {
+            if snapshot
+                .overlays
+                .iter()
+                .any(|address| address.addr().is_ipv6())
+            {
+                authority_base.tun.mtu = authority_base.tun.mtu.max(1280);
+            }
             authority_base
                 .forwarding
                 .exit_client
@@ -633,6 +640,11 @@ impl Agent {
         ensure!(
             !snapshot.local_certificate_revoked,
             "local node certificate is revoked"
+        );
+        ensure!(
+            !self.config.forwarding.exit_gateway_controller_sources
+                || snapshot.identity_lease_expires_at == 0,
+            "controller-managed exit forwarding requires a non-ephemeral identity"
         );
         validate_controller_relay(&self.config, &snapshot)?;
         Ok(Some((
@@ -1478,8 +1490,11 @@ fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) ->
             exit_v6
         }
     };
-    effective.forwarding.exit_gateway =
-        base.forwarding.exit_gateway && exit_capability && (exit_v4 || exit_v6);
+    effective.forwarding.exit_gateway = base.forwarding.exit_gateway
+        && (!base.forwarding.exit_gateway_controller_sources
+            || snapshot.identity_lease_expires_at == 0)
+        && exit_capability
+        && (exit_v4 || exit_v6);
     if effective.forwarding.exit_gateway {
         let sources = &mut effective.forwarding.exit_gateway_sources;
         if base.forwarding.exit_gateway_controller_sources {

@@ -1,4 +1,4 @@
-//! Read the installed Connector identity without editing its Go configuration.
+//! Read installed Docker node roles without editing their Go configuration.
 use super::*;
 use laneway_protocol::{Role, relay_endpoint::canonical_host_port};
 use rustls::pki_types::ServerName;
@@ -7,6 +7,9 @@ use std::io::Read;
 #[derive(Deserialize)]
 struct Stored {
     mode: String,
+    #[serde(default = "legacy_state_dir")]
+    state_dir: PathBuf,
+    #[serde(default = "default_socket_path")]
     socket_path: PathBuf,
     tls: StoredTls,
     node: StoredNode,
@@ -59,9 +62,9 @@ struct StoredController {
     poll_interval: Duration,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Deserialize)]
+#[serde(default)]
 struct StoredDirect {
-    #[serde(default)]
     enabled: bool,
     #[serde(default)]
     listen: String,
@@ -77,6 +80,20 @@ struct StoredDirect {
     rendezvous_interval: Option<Duration>,
 }
 
+impl Default for StoredDirect {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: String::new(),
+            allow_loopback: false,
+            allow_link_local: false,
+            probe_interval: None,
+            probe_timeout: None,
+            rendezvous_interval: None,
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 struct StoredRouting {
     #[serde(default)]
@@ -84,7 +101,7 @@ struct StoredRouting {
     #[serde(default)]
     output_interface: String,
     #[serde(default)]
-    nat: bool,
+    nat: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -133,6 +150,15 @@ fn legacy_poll() -> Duration {
     Duration::from_secs(30)
 }
 
+fn legacy_state_dir() -> PathBuf {
+    PathBuf::from("/var/lib/laneway")
+}
+
+enum InstalledRole<'a> {
+    Connector(&'a Path),
+    ExitGateway,
+}
+
 impl Config {
     /// Loads a previously activated Docker Connector into the Rust runtime.
     /// No network or write is needed: authentication uses the saved CA, key,
@@ -149,23 +175,7 @@ impl Config {
         // Kept for rollback but never read or copied by the Rust runtime.
         regular(directory, "wireguard.key")?;
         let config_path = regular(directory, "connector.toml")?;
-        let mut source = String::new();
-        fs::File::open(config_path)?
-            .take(MAX_CONFIG_BYTES + 1)
-            .read_to_string(&mut source)
-            .context("read installed Connector configuration")?;
-        ensure!(
-            source.len() as u64 <= MAX_CONFIG_BYTES,
-            "connector configuration is too large"
-        );
-        // Do not include raw configuration text in an error that might reach
-        // container logs.
-        let stored: Stored = toml::from_str(&source).map_err(|error| {
-            anyhow::anyhow!(
-                "invalid installed Connector configuration: {}",
-                error.message()
-            )
-        })?;
+        let stored = Stored::read(&config_path)?;
         ensure!(
             stored.tls.certificate == certificate
                 && stored.tls.private_key == private_key
@@ -178,25 +188,71 @@ impl Config {
                 private_key,
                 ca,
             },
-            directory,
+            InstalledRole::Connector(directory),
         )
+    }
+
+    /// Load the durable Docker Exit Node's existing read-only Go configuration.
+    pub fn load_exit_config(path: impl AsRef<Path>) -> Result<Self> {
+        let stored = Stored::read(path.as_ref())?;
+        let tls = TlsConfig {
+            certificate: stored.tls.certificate.clone(),
+            private_key: stored.tls.private_key.clone(),
+            ca: stored.tls.ca.clone(),
+        };
+        for path in [&tls.certificate, &tls.private_key, &tls.ca] {
+            ensure!(
+                valid_absolute_path(path, 4096) && fs::symlink_metadata(path)?.is_file(),
+                "exit TLS paths must refer to absolute regular files"
+            );
+        }
+        stored.convert(tls, InstalledRole::ExitGateway)
     }
 }
 
 impl Stored {
-    fn convert(self, tls: TlsConfig, directory: &Path) -> Result<Config> {
+    fn read(path: &Path) -> Result<Self> {
+        ensure!(
+            fs::symlink_metadata(path)?.is_file(),
+            "installed node configuration is not a regular file"
+        );
+        let mut source = String::new();
+        fs::File::open(path)?
+            .take(MAX_CONFIG_BYTES + 1)
+            .read_to_string(&mut source)
+            .context("read installed node configuration")?;
+        ensure!(
+            source.len() as u64 <= MAX_CONFIG_BYTES,
+            "installed node configuration is too large"
+        );
+        // Do not include raw configuration text in an error that might reach
+        // container logs.
+        toml::from_str(&source).map_err(|error| {
+            anyhow::anyhow!("invalid installed node configuration: {}", error.message())
+        })
+    }
+
+    fn convert(self, tls: TlsConfig, role: InstalledRole<'_>) -> Result<Config> {
+        let nat = self
+            .routing
+            .nat
+            .unwrap_or(!self.routing.output_interface.is_empty());
         let modern = self.connector.userspace
             && !self.exit.serve
             && self.routing.output_interface.is_empty()
-            && !self.routing.nat;
+            && !nat;
         let legacy = !self.connector.userspace
             && self.exit.serve
-            && self.routing.nat
+            && nat
             && !self.routing.output_interface.is_empty()
             && self.direct.enabled;
+        let (userspace, state_dir, supported) = match role {
+            InstalledRole::Connector(directory) => (true, directory, modern || legacy),
+            InstalledRole::ExitGateway => (false, self.state_dir.as_path(), legacy),
+        };
         ensure!(
             self.mode == "node"
-                && (modern || legacy)
+                && supported
                 && !self.wireguard.enabled
                 && !self.exit.enabled
                 && self.exit.selected_node_id.is_empty()
@@ -204,44 +260,34 @@ impl Stored {
                 && self.peers.is_empty()
                 && self.node.overlay_addresses.is_empty()
                 && self.routing.advertise.is_empty(),
-            "saved configuration is not a supported Docker Connector"
+            "saved configuration does not match the requested Docker node role"
         );
-        let identity = crate::tls::verify_installed_connector(&tls)?;
         ensure!(
-            identity.role == Role::Node,
-            "installed Connector leaf is not a node"
+            valid_absolute_path(state_dir, 4096),
+            "installed state_dir must be absolute"
         );
+        let identity = crate::tls::verify_installed_node(&tls)?;
+        ensure!(identity.role == Role::Node, "installed leaf is not a node");
         let network = identity.network_id.to_string();
         ensure!(
             network == self.node.relay_network_id && network == self.controller.network_id,
-            "installed Connector network differs from certificate identity"
+            "installed node network differs from certificate identity"
         );
         let controller_name = self.controller.server_name;
-        let endpoint = reqwest::Url::parse(&self.controller.endpoint)
-            .context("invalid Connector controller origin")?;
-        ensure!(
-            endpoint.scheme() == "https"
-                && endpoint.host_str() == Some(controller_name.as_str())
-                && endpoint.path() == "/"
-                && endpoint.query().is_none()
-                && endpoint.fragment().is_none()
-                && endpoint.username().is_empty()
-                && endpoint.password().is_none(),
-            "Connector controller origin does not match the pinned TLS host"
-        );
+        crate::controller::controller_origins(&self.controller.endpoint, &controller_name)?;
         let quic_endpoint = canonical_host_port(&self.controller.quic_endpoint)
-            .context("invalid Connector controller QUIC endpoint")?;
+            .context("invalid installed controller QUIC endpoint")?;
         let relay = canonical_host_port(&self.node.relay_address)
-            .context("invalid saved Connector relay endpoint")?;
+            .context("invalid saved relay endpoint")?;
         let relay_name = self.tls.server_name;
-        ServerName::try_from(relay_name.as_str()).context("invalid Connector relay TLS name")?;
+        ServerName::try_from(relay_name.as_str()).context("invalid relay TLS name")?;
         let tcp = self.tcp_fallback;
         let tcp_fallback = if tcp.address.is_empty() {
             None
         } else {
             Some(TcpFallbackConfig {
                 address: canonical_host_port(&tcp.address)
-                    .context("invalid Connector TCP fallback endpoint")?,
+                    .context("invalid TCP fallback endpoint")?,
                 handshake_timeout: tcp
                     .handshake_timeout
                     .unwrap_or_else(default_handshake_timeout),
@@ -251,19 +297,23 @@ impl Stored {
                 queue_depth: tcp.queue_depth.unwrap_or_else(default_tcp_queue_depth),
             })
         };
-        let listen =
-            if legacy || !self.direct.enabled || matches!(self.direct.listen.as_str(), "" | ":0") {
-                default_direct_listen()
+        let listen = if (userspace && legacy)
+            || !self.direct.enabled
+            || matches!(self.direct.listen.as_str(), "" | ":0")
+        {
+            default_direct_listen()
+        } else {
+            let listen = if self.direct.listen.starts_with(':') {
+                format!("0.0.0.0{}", self.direct.listen)
             } else {
-                self.direct
-                    .listen
-                    .parse()
-                    .context("invalid saved Connector UDP bind address")?
+                self.direct.listen
             };
+            listen.parse().context("invalid saved UDP bind address")?
+        };
         let config = Config {
             mode: self.mode,
             socket_path: self.socket_path,
-            exit_intent_path: directory.join("exit-intent-v1.json"),
+            exit_intent_path: state_dir.join("exit-intent-v1.json"),
             identity: IdentityConfig {
                 network_id: network,
                 node_id: identity.subject_id.to_string(),
@@ -280,12 +330,14 @@ impl Stored {
                 timeout: default_controller_timeout(),
             }),
             tun: TunConfig {
-                name: "userspace".to_owned(),
-                mtu: 1280,
+                name: if userspace { "userspace" } else { "lane0" }.to_owned(),
+                // Match the old Go TUN limit on IPv4-only networks. An
+                // initial IPv6 overlay raises it to the IPv6 minimum.
+                mtu: if userspace { 1280 } else { 1200 },
                 addresses: vec![],
-                configure: false,
+                configure: !userspace,
             },
-            connector: ConnectorConfig { userspace: true },
+            connector: ConnectorConfig { userspace },
             relay: RelayConfig {
                 address: relay.parse().ok(), // DNS relay targets are resolved from live controller authority.
                 server_name: relay_name,
@@ -322,7 +374,16 @@ impl Stored {
             },
             routes: vec![],
             direct_peers: vec![],
-            forwarding: ForwardingConfig::default(),
+            forwarding: if userspace {
+                ForwardingConfig::default()
+            } else {
+                ForwardingConfig {
+                    exit_gateway: true,
+                    exit_gateway_controller_sources: true,
+                    exit_output_interface: Some(self.routing.output_interface),
+                    ..ForwardingConfig::default()
+                }
+            },
             diagnostics: DiagnosticsConfig::default(),
         };
         config.validate()?;
@@ -449,6 +510,64 @@ listen = ":0"
         fs::set_permissions(&wrong_key, fs::Permissions::from_mode(0o400))?;
         fs::rename(wrong_key, fixture.path().join("node.key"))?;
         assert!(Config::load_connector_state(fixture.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn supports_the_existing_durable_exit_profile_without_editing_its_files() -> Result<()> {
+        let fixture = tempfile::tempdir()?;
+        write_fixture(fixture.path())?;
+        let deployed =
+            include_str!("../../../deploy/compose/generated/config/exit-node.toml.example")
+                .replace(
+                    "/run/laneway-secrets/exit-node.",
+                    &format!("{}/node.", fixture.path().display()),
+                )
+                .replace(
+                    "/run/laneway-secrets/ca.crt",
+                    &format!("{}/ca.crt", fixture.path().display()),
+                )
+                .replace("REPLACE_NETWORK_ID", NETWORK)
+                .replace(
+                    "REPLACE_RELAY_SERVICE_ID",
+                    "71000000000000000000000000000003",
+                )
+                .replace(
+                    "REPLACE_CONTROLLER_SERVICE_ID",
+                    "71000000000000000000000000000004",
+                );
+        let path = fixture.path().join("exit-node.toml");
+        fs::write(&path, &deployed)?;
+        let key = fs::read(fixture.path().join("node.key"))?;
+        let config = Config::load_exit_config(&path)?;
+        assert_eq!(config.identity.node_id, NODE);
+        assert_eq!(config.socket_path, Path::new("/run/laneway/lanewayd.sock"));
+        assert_eq!(config.direct.listen, "0.0.0.0:4434".parse().unwrap());
+        assert_eq!(
+            config.controller.unwrap().server_name,
+            "controller.example.com"
+        );
+        assert_eq!(config.tcp_fallback.unwrap().address, "relay:8443");
+        assert!(config.tun.configure);
+        assert_eq!(config.tun.mtu, 1200);
+        assert!(!config.connector.userspace);
+        assert!(config.forwarding.exit_gateway);
+        assert!(config.forwarding.exit_gateway_controller_sources);
+        assert_eq!(
+            config.forwarding.exit_output_interface.as_deref(),
+            Some("eth0")
+        );
+        assert_eq!(fs::read_to_string(&path)?, deployed);
+        assert_eq!(fs::read(fixture.path().join("node.key"))?, key);
+        for wrong_role in [
+            deployed.replace("serve = true", "serve = false"),
+            deployed.replace("nat = true", "nat = false"),
+            deployed.replace("serve = true", "serve = true\nlease_generation = 1"),
+            format!("{deployed}\n[wireguard]\nenabled = true\n"),
+        ] {
+            fs::write(&path, wrong_role)?;
+            assert!(Config::load_exit_config(&path).is_err());
+        }
         Ok(())
     }
 }

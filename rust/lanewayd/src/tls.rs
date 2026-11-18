@@ -46,20 +46,20 @@ pub(crate) fn validate_local(config: &TlsConfig, network: Id, node: Id) -> Resul
     Ok(())
 }
 
-pub(crate) fn verify_installed_connector(config: &TlsConfig) -> Result<AuthenticatedIdentity> {
+pub(crate) fn verify_installed_node(config: &TlsConfig) -> Result<AuthenticatedIdentity> {
     let certificates = load_certificates(&config.certificate)?;
     let key = load_private_key(&config.private_key)?;
     let provider = rustls::crypto::ring::default_provider();
     let credential = rustls::sign::CertifiedKey::from_der(certificates, key, &provider)?;
     credential
         .keys_match()
-        .context("Connector certificate and key do not match")?;
+        .context("node certificate and key do not match")?;
     let (leaf, intermediates) = credential
         .cert
         .split_first()
-        .context("Connector certificate is empty")?;
+        .context("node certificate is empty")?;
     let parsed = webpki::EndEntityCert::try_from(leaf)
-        .map_err(|_| anyhow::anyhow!("invalid Connector leaf certificate"))?;
+        .map_err(|_| anyhow::anyhow!("invalid node leaf certificate"))?;
     let roots = root_store(&config.ca)?;
     for usage in [
         webpki::KeyUsage::client_auth(),
@@ -75,11 +75,9 @@ pub(crate) fn verify_installed_connector(config: &TlsConfig) -> Result<Authentic
                 None,
                 None,
             )
-            .map_err(|error| {
-                anyhow::anyhow!("Connector certificate is not trusted for node TLS: {error}")
-            })?;
+            .map_err(|error| anyhow::anyhow!("certificate is not trusted for node TLS: {error}"))?;
     }
-    identity_from_certificate_der(leaf.as_ref()).context("invalid Connector certificate identity")
+    identity_from_certificate_der(leaf.as_ref()).context("invalid node certificate identity")
 }
 
 #[derive(Clone, Debug)]

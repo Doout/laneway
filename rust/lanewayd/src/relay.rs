@@ -39,6 +39,7 @@ use crate::{
 };
 
 const CONTROL_PREFACE: &[u8] = b"LWC1";
+const RAW_IP_CARRIER_LIMIT: u32 = 1280;
 const REQUIRED_CAPABILITIES: u64 =
     Capability::LanewayRelayV1 as u64 | Capability::LanewayQuicDatagramV1 as u64;
 const REQUIRED_TCP_CAPABILITIES: u64 =
@@ -644,6 +645,10 @@ impl RelayClient {
             Metrics::increment(&self.metrics.malformed_drops);
             return;
         };
+        if packet.len() > usize::from(self.config.tun.mtu) {
+            Metrics::increment(&self.metrics.invalid_drops);
+            return;
+        }
         let handles = self.state.handles.load();
         let Some(peer) = handles.inbound.get(&header.route_handle).copied() else {
             Metrics::increment(&self.metrics.invalid_drops);
@@ -702,11 +707,8 @@ impl RelayClient {
                 ensure!(binding.route_handle != 0, "relay bound zero handle");
                 let peer = Id::from_slice(&binding.peer_node_id).context("binding peer ID")?;
                 ensure!(peer != self.node, "relay bound local node as peer");
-                ensure!(
-                    binding.max_packet_payload >= 576
-                        && binding.max_packet_payload <= u32::from(self.config.tun.mtu),
-                    "invalid binding packet limit"
-                );
+                let max_payload =
+                    local_packet_limit(binding.max_packet_payload, self.config.tun.mtu)?;
                 ensure!(
                     self.state
                         .routes
@@ -720,7 +722,7 @@ impl RelayClient {
                     peer,
                     Handle {
                         value: binding.route_handle,
-                        max_payload: binding.max_packet_payload as usize,
+                        max_payload,
                     },
                 );
             }
@@ -841,6 +843,16 @@ fn packet_capabilities_allow(
         return false;
     }
     !forwards_exit || capabilities & Capability::LanewayExitNodeV1 as u64 != 0
+}
+
+fn local_packet_limit(carrier_limit: u32, local_mtu: u16) -> Result<usize> {
+    // The relay advertises its path limit independently of the local TUN.
+    // Keep the smaller bound without rejecting a compatible path.
+    ensure!(
+        (576..=RAW_IP_CARRIER_LIMIT).contains(&carrier_limit),
+        "invalid binding packet limit"
+    );
+    Ok((carrier_limit as usize).min(usize::from(local_mtu)))
 }
 
 fn validate_welcome(
@@ -980,6 +992,14 @@ mod tests {
             ..unexpected
         };
         assert!(validate_welcome(&unknown, u64::MAX, REQUIRED_CAPABILITIES).is_err());
+    }
+
+    #[test]
+    fn relay_binding_obeys_both_the_wire_limit_and_local_mtu() {
+        assert_eq!(local_packet_limit(1280, 1200).unwrap(), 1200);
+        assert_eq!(local_packet_limit(1000, 1200).unwrap(), 1000);
+        assert!(local_packet_limit(575, 1200).is_err());
+        assert!(local_packet_limit(1281, 1200).is_err());
     }
 
     #[test]
@@ -1692,15 +1712,25 @@ via_node = "{first_node}"
             let client = "100.96.0.1:45080".parse().unwrap();
             let target = app.local_addr().unwrap();
             let request = crate::connector::udp_packet(client, target, b"relay to host");
-            first_outbound_tx
-                .send(OutboundPacket::new(second_id, request.to_vec()))
-                .await
-                .unwrap();
             let mut payload = [0; 32];
-            let (size, host) = timeout(Duration::from_secs(3), app.recv_from(&mut payload))
-                .await
-                .expect("connector did not reach host socket")
-                .unwrap();
+            // Session replacement and remote handle publication are asynchronous.
+            // Prove delivery on the promoted path without assuming its first
+            // datagram survives that transition.
+            let (size, host) = timeout(Duration::from_secs(3), async {
+                let mut retry = tokio::time::interval(Duration::from_millis(50));
+                loop {
+                    tokio::select! {
+                        _ = retry.tick() => first_outbound_tx
+                            .send(OutboundPacket::new(second_id, request.to_vec()))
+                            .await
+                            .unwrap(),
+                        result = app.recv_from(&mut payload) => break result,
+                    }
+                }
+            })
+            .await
+            .expect("connector did not reach host socket")
+            .unwrap();
             assert_eq!(&payload[..size], b"relay to host");
             app.send_to(b"host to relay", host).await.unwrap();
             assert_eq!(

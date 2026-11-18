@@ -12,10 +12,10 @@ async fn main() -> Result<()> {
         )
         .init();
     let arguments = arguments()?;
-    let config = if arguments.connector_state {
-        Config::load_connector_state(&arguments.config)?
-    } else {
-        Config::load(&arguments.config)?
+    let config = match arguments.profile {
+        Profile::Connector => Config::load_connector_state(&arguments.config)?,
+        Profile::ExitGateway => Config::load_exit_config(&arguments.config)?,
+        Profile::Native => Config::load(&arguments.config)?,
     };
     let agent = Agent::new(config)?;
     if arguments.check {
@@ -46,8 +46,15 @@ async fn shutdown_signal() {
 
 struct Arguments {
     config: PathBuf,
-    connector_state: bool,
+    profile: Profile,
     check: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Profile {
+    Native,
+    Connector,
+    ExitGateway,
 }
 
 fn arguments() -> Result<Arguments> {
@@ -59,14 +66,16 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
     let binary = arguments.next().unwrap_or_default();
     let Some(argument) = arguments.next() else {
         bail!(
-            "usage: {} (--config PATH | --connector-state DIR) [--check-config]",
+            "usage: {} (--config PATH | --connector-state DIR | --exit-config PATH) [--check-config]",
             PathBuf::from(binary).display()
         );
     };
-    let connector_state = argument == "--connector-state";
-    if !connector_state && argument != "--config" {
-        bail!("first argument must be --config or --connector-state");
-    }
+    let profile = match argument.to_str() {
+        Some("--config") => Profile::Native,
+        Some("--connector-state") => Profile::Connector,
+        Some("--exit-config") => Profile::ExitGateway,
+        _ => bail!("first argument must be --config, --connector-state, or --exit-config"),
+    };
     let path = arguments
         .next()
         .context("configuration path or state directory is required")?;
@@ -80,7 +89,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
     }
     Ok(Arguments {
         config: path.into(),
-        connector_state,
+        profile,
         check,
     })
 }
@@ -99,7 +108,16 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.config, PathBuf::from("/tmp/node.toml"));
+        assert_eq!(parsed.profile, Profile::Native);
         assert!(parsed.check);
+        let exit = parse_arguments([
+            "lanewayd-rs".into(),
+            "--exit-config".into(),
+            "/etc/laneway/exit-node.toml".into(),
+            "--check-config".into(),
+        ])
+        .unwrap();
+        assert_eq!(exit.profile, Profile::ExitGateway);
         assert!(parse_arguments(["lanewayd-rs".into(), "--check-config".into()]).is_err());
     }
 }

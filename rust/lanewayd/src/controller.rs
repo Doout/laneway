@@ -68,7 +68,7 @@ pub(crate) enum PollResult {
 /// Strict HTTPS/protobuf controller snapshot client.
 pub(crate) struct Client {
     options: ClientOptions,
-    endpoint: String,
+    http_origin: reqwest::Url,
     http: reqwest::Client,
     expected_controller: AuthenticatedIdentity,
     resolved: Vec<SocketAddr>,
@@ -91,26 +91,8 @@ impl Client {
             !options.timeout.is_zero() && options.timeout <= Duration::from_secs(300),
             "controller timeout must be in (0,5m]"
         );
-        let url = reqwest::Url::parse(&options.endpoint).context("parse controller endpoint")?;
-        ensure!(
-            url.scheme() == "https"
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-                && matches!(url.path(), "" | "/"),
-            "controller endpoint must be an HTTPS origin"
-        );
-        if !options.server_name.is_empty() {
-            ensure!(
-                url.host_str() == Some(options.server_name.as_str()),
-                "controller server_name must match endpoint host"
-            );
-        }
-        let host = url
-            .host_str()
-            .context("controller endpoint host is missing")?;
+        let (url, http_origin) = controller_origins(&options.endpoint, &options.server_name)?;
+        let host = origin_host(&url);
         let port = url
             .port_or_known_default()
             .context("controller endpoint port is unknown")?;
@@ -140,8 +122,9 @@ impl Client {
             .use_preconfigured_tls(https)
             .timeout(options.timeout)
             .tls_info(true);
-        if host.parse::<IpAddr>().is_err() {
-            builder = builder.resolve_to_addrs(host, &resolved);
+        let tls_host = origin_host(&http_origin);
+        if tls_host.parse::<IpAddr>().is_err() {
+            builder = builder.resolve_to_addrs(tls_host, &resolved);
         }
         let http = builder
             .build()
@@ -158,10 +141,7 @@ impl Client {
         }
         Ok(Self {
             options: options.clone(),
-            endpoint: format!(
-                "{}/v1/configuration",
-                options.endpoint.trim_end_matches('/')
-            ),
+            http_origin,
             http,
             expected_controller: expected,
             resolved,
@@ -180,10 +160,7 @@ impl Client {
         report.validate().map_err(anyhow::Error::msg)?;
         let response = self
             .http
-            .put(format!(
-                "{}/v1/status",
-                self.options.endpoint.trim_end_matches('/')
-            ))
+            .put(self.http_origin.join("/v1/status")?)
             .header("content-type", "application/json")
             .body(serde_json::to_vec(report)?)
             .send()
@@ -240,7 +217,7 @@ impl Client {
         .encode_to_vec();
         let mut response = self
             .http
-            .post(&self.endpoint)
+            .post(self.http_origin.join("/v1/configuration")?)
             .header("content-type", "application/x-protobuf")
             .body(request)
             .send()
@@ -304,6 +281,47 @@ impl Client {
             NodeConfiguration::decode(body.as_slice()).context("decode node configuration")?,
         )))
     }
+}
+
+pub(crate) fn controller_origins(
+    endpoint: &str,
+    tls_name: &str,
+) -> Result<(reqwest::Url, reqwest::Url)> {
+    let dial = reqwest::Url::parse(endpoint).context("parse controller endpoint")?;
+    ensure!(
+        dial.scheme() == "https"
+            && dial.host_str().is_some()
+            && dial.username().is_empty()
+            && dial.password().is_none()
+            && dial.query().is_none()
+            && dial.fragment().is_none()
+            && matches!(dial.path(), "" | "/"),
+        "controller endpoint must be an HTTPS origin"
+    );
+    let mut https = dial.clone();
+    if !tls_name.is_empty() && origin_host(&dial) != tls_name {
+        // Resolve only the configured dial endpoint; present the certificate's
+        // DNS name as SNI. This permits the Docker service alias without DNS
+        // queries to the public certificate name or relaxing its verification.
+        ensure!(
+            matches!(ServerName::try_from(tls_name), Ok(ServerName::DnsName(_))),
+            "a distinct controller TLS name must be a DNS name"
+        );
+        https
+            .set_host(Some(tls_name))
+            .context("set controller TLS host")?;
+        ensure!(
+            origin_host(&https) == tls_name && tls_name.parse::<IpAddr>().is_err(),
+            "controller TLS name must be a canonical DNS name"
+        );
+    }
+    Ok((dial, https))
+}
+
+fn origin_host(url: &reqwest::Url) -> &str {
+    url.host_str()
+        .expect("validated controller origin")
+        .trim_matches(['[', ']'])
 }
 
 fn expected_controller(network: Id, service: Id) -> AuthenticatedIdentity {
@@ -1218,6 +1236,26 @@ mod tests {
 
     fn id(value: u8) -> Id {
         Id::new([value; 16]).unwrap()
+    }
+
+    #[test]
+    fn controller_dial_origin_can_differ_from_the_authenticated_dns_name() {
+        let (dial, https) =
+            controller_origins("https://controller:8443", "internal.example.test").unwrap();
+        assert_eq!(dial.as_str(), "https://controller:8443/");
+        assert_eq!(https.as_str(), "https://internal.example.test:8443/");
+        assert!(controller_origins("https://controller:8443", "10.0.0.3").is_err());
+        assert!(
+            controller_origins("https://controller:8443", "internal.example.test/api").is_err()
+        );
+        assert!(
+            controller_origins("https://user@controller:8443", "internal.example.test").is_err()
+        );
+        assert!(
+            controller_origins("https://controller:8443/api", "internal.example.test").is_err()
+        );
+        let (_, ipv6) = controller_origins("https://[::1]:8443", "::1").unwrap();
+        assert_eq!(ipv6.as_str(), "https://[::1]:8443/");
     }
 
     #[test]

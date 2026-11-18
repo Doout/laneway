@@ -270,9 +270,33 @@ sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_DURABLE_EXIT=1 \
   ./integration/rust-controller-node-netns.sh
 ```
 
-This is a pre-enrolled durable native gateway. The packaged Go exit image,
-routed exit mode, and the shared-host ephemeral WireGuard exit are not part
-of this gate.
+For an existing durable Docker Exit Node, the opt-in `rust-exit` target
+accepts the same read-only Go TOML, certificates, state volume, health socket,
+and `-config` command. It keeps the fixed direct port and the controller TLS
+name even when the private Docker hostname differs. The process uses the same
+non-root user and `NET_ADMIN`-only container contract. The Go CLI remains
+available for one-shot administration; the daemon and readiness probe are Rust.
+
+```sh
+docker build -f deploy/containers/Dockerfile.exit-node --build-arg VERSION=go-exit-lab \
+  -t laneway-go-exit:migration-lab .
+docker build -f deploy/containers/Dockerfile.exit-node --target rust-exit \
+  --build-arg VERSION=rust-exit-lab -t laneway-rust-exit:migration-lab .
+bash integration/rust-lab/exit-cutover.sh
+```
+
+The gate keeps the controller approval and client selection in place during the
+Go → Rust → Go image swaps. It checks the IPv4 MTU, real NAT with and without
+UDP on the gateway's relay link, a controller health report, graceful cleanup,
+and that the config, identity and state files remain unchanged.
+For an operator-managed cutover, retain the previous image digest and stop the
+old container before starting the replacement against the same mounts. Run
+`lanewayd-rs --exit-config /etc/laneway/exit-node.toml --check-config` in the new
+image with the original mounts to validate the configuration without networking.
+
+The release default remains Go until promotion. The supported legacy profile
+uses NAT and enables direct paths. WireGuard-enabled, routed-only and shared-host
+ephemeral exits are separate migration work.
 
 ### Verified on the local ARM64 Linux VM
 
