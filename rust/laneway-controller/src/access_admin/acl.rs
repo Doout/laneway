@@ -1,7 +1,6 @@
 use super::{AccessError, AclSelector, epoch_reply, next_id, row_id, subjects::Editor};
 use anyhow::{Result, ensure};
 use laneway_protocol::Id;
-use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 
 const MAX_SELECTOR_BYTES: usize = 16 << 10;
@@ -19,7 +18,7 @@ impl Editor<'_, '_> {
             (1..=1000).contains(&limit),
             AccessError::Invalid("invalid limit")
         );
-        let epoch = self.acl_epoch()?;
+        let epoch = self.current_epoch()?;
         let mut stmt = self.tx.prepare(
             "SELECT id,priority,action,selector_json,description,enabled FROM acl_rules
             WHERE network_id=? ORDER BY priority,id LIMIT ?",
@@ -39,18 +38,6 @@ impl Editor<'_, '_> {
                 "description":description,"enabled":row.get::<_,bool>(5)?,"configuration_epoch":epoch}));
         }
         Ok(json!({"acl_rules":result}))
-    }
-
-    fn acl_epoch(&self) -> Result<i64> {
-        Ok(self
-            .tx
-            .query_row(
-                "SELECT configuration_epoch FROM networks WHERE id=?",
-                [self.net.as_bytes()],
-                |r| r.get(0),
-            )
-            .optional()?
-            .ok_or(AccessError::Missing)?)
     }
 
     pub(super) fn write_acl_rule(&self, id: Option<Id>, rule: AclRule) -> Result<Value> {
@@ -85,7 +72,7 @@ impl Editor<'_, '_> {
                 )?,
             )
         } else {
-            self.acl_epoch()?;
+            self.current_epoch()?;
             let id = next_id()?;
             self.tx.execute("INSERT INTO acl_rules(id,network_id,priority,action,selector_json,description,enabled,created_at,updated_at)
                 VALUES(?1,?2,?3,?4,?5,?6,1,?7,?7)",(id.as_bytes(),self.net.as_bytes(),rule.priority,&rule.action,&stored,&rule.description,self.now))?;

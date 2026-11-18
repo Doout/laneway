@@ -146,7 +146,7 @@ fn required_capability(kind: &str) -> i64 {
 
 impl Editor<'_, '_> {
     pub(super) fn list_routes(&self, limit: usize) -> Result<Value> {
-        self.route_epoch()?; // distinguish an empty inventory from a missing network
+        self.current_epoch()?; // distinguish an empty inventory from a missing network
         let mut stmt = self.tx.prepare(&format!(
             "SELECT {COLUMNS} FROM routes WHERE network_id=? ORDER BY created_at DESC,id DESC LIMIT ?"
         ))?;
@@ -156,18 +156,6 @@ impl Editor<'_, '_> {
             routes.push(route(row)?);
         }
         Ok(json!({"routes":routes}))
-    }
-
-    fn route_epoch(&self) -> Result<i64> {
-        Ok(self
-            .tx
-            .query_row(
-                "SELECT configuration_epoch FROM networks WHERE id=?",
-                [self.net.as_bytes()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or(AccessError::Missing)?)
     }
 
     fn one_route(&self, id: Id) -> Result<RouteRecord> {
@@ -273,7 +261,7 @@ impl Editor<'_, '_> {
                 ("route", id),
                 json!({}),
             )?;
-            self.route_epoch()
+            self.current_epoch()
         }
     }
 

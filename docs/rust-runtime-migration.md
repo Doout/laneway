@@ -135,8 +135,8 @@ the serve command. Use a private file (e.g. mode 0600); never pass its
 contents on the command line. Restart after replacing the token file. To
 verify the root credential, `GET /v1/admin/auth/root` returns 204; it does
 not accept a session or automation token. Bearers are rejected in browser
-contexts or when combined with a session cookie. Bootstrap, recovery, OAuth,
-and the remaining node and certificate administration still require Go.
+contexts or when combined with a session cookie. Bootstrap, recovery, and
+OAuth still require Go.
 Do not route production traffic here.
 
 The console can check `GET /v1/admin/auth/state` for `bootstrap_required`
@@ -191,6 +191,19 @@ routes, and assignment rollback. With `LANEWAY_NODE_TEST_CONTROLLER=rust`,
 the namespace gate uses the existing Go CLI against the Rust route API and
 verifies that approval carries packets, withdrawal stops them, and
 reassignment restores the path.
+
+Certificate inventory uses `certificate.read`; a certificate can be revoked
+by network and serial with `certificate.revoke`. Node revocation and changes
+to router or exit capabilities use `node.manage`. Revoking a node also
+revokes its certificates, releases its overlay addresses and withdraws its
+routes in the same transaction as the epoch and audit event. Removing a
+capability withdraws only its route kind. A live node can query revocation
+records within its own network over mutual TLS.
+
+The device HTTPS gate verifies Go/Rust inventory and revocation record parity,
+network isolation, rollback on audit failure, and denial for revoked leaves.
+The namespace test uses the Rust API to remove a router capability and revoke
+a gateway certificate, and checks that packets stop in both cases.
 
 `POST /v1/admin/enrollment-tokens` issues durable, remembered, and ephemeral
 invitations. It accepts owner or operator sessions with network access, the

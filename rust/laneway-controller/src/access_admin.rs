@@ -1,5 +1,6 @@
-//! Managed-access administration against the existing controller database.
+//! Network-scoped administration against the existing controller database.
 mod acl;
+mod devices;
 mod inventory;
 mod named;
 mod routes;
@@ -34,6 +35,10 @@ pub enum Request {
     AssignRoute(Id, Id, RouteSpec),
     ApproveRoute(Id),
     WithdrawRoute(Id),
+    ListCertificates(Id, usize),
+    RevokeCertificate(Id, Vec<u8>, String),
+    RevokeNode(Id, String),
+    SetNodeCapabilities(Id, u64),
     ListAclRules(Id, usize),
     CreateAclRule(Id, AclRule),
     UpdateAclRule(Id, AclRule),
@@ -95,12 +100,18 @@ impl Request {
     pub fn is_read(&self) -> bool {
         matches!(
             self,
-            Self::Inventory(_) | Self::ListAclRules(..) | Self::ListRoutes(..)
+            Self::Inventory(_)
+                | Self::ListAclRules(..)
+                | Self::ListRoutes(..)
+                | Self::ListCertificates(..)
         )
     }
     fn permission(&self) -> &'static str {
         match self {
             Self::ListRoutes(..) => "route.read",
+            Self::ListCertificates(..) => "certificate.read",
+            Self::RevokeCertificate(..) => "certificate.revoke",
+            Self::RevokeNode(..) | Self::SetNodeCapabilities(..) => "node.manage",
             Self::AssignRoute(..) | Self::ApproveRoute(_) | Self::WithdrawRoute(_) => {
                 "route.manage"
             }
@@ -113,6 +124,8 @@ impl Request {
             Self::Inventory(net)
             | Self::ListRoutes(net, _)
             | Self::AssignRoute(net, ..)
+            | Self::ListCertificates(net, _)
+            | Self::RevokeCertificate(net, ..)
             | Self::ListAclRules(net, _)
             | Self::CreateAclRule(net, _)
             | Self::CreateUser(net, _)
@@ -129,6 +142,9 @@ impl Request {
             Self::SetUserEnabled(id, _) => ("SELECT network_id FROM access_users WHERE id=?", id),
             Self::SetMember(id, _, _) => ("SELECT network_id FROM access_teams WHERE id=?", id),
             Self::DeleteGrant(id) => ("SELECT network_id FROM access_grants WHERE id=?", id),
+            Self::RevokeNode(id, _) | Self::SetNodeCapabilities(id, _) => {
+                ("SELECT network_id FROM nodes WHERE id=?", id)
+            }
             Self::ApproveRoute(id) | Self::WithdrawRoute(id) => {
                 ("SELECT network_id FROM routes WHERE id=?", id)
             }
@@ -174,6 +190,14 @@ impl Request {
             }
             Self::ApproveRoute(id) => editor.approve_route(id).map(epoch_reply),
             Self::WithdrawRoute(id) => editor.withdraw_route(id, None).map(epoch_reply),
+            Self::ListCertificates(_, limit) => editor.certificates(limit),
+            Self::RevokeCertificate(_, serial, reason) => {
+                editor.revoke_certificate(&serial, &reason).map(epoch_reply)
+            }
+            Self::RevokeNode(id, reason) => editor.revoke_node(id, &reason).map(epoch_reply),
+            Self::SetNodeCapabilities(id, capabilities) => editor
+                .set_node_capabilities(id, capabilities)
+                .map(epoch_reply),
             Self::ListAclRules(_, limit) => editor.list_acl_rules(limit),
             Self::CreateAclRule(_, rule) => editor.write_acl_rule(None, rule),
             Self::UpdateAclRule(id, rule) => editor.write_acl_rule(Some(id), rule),

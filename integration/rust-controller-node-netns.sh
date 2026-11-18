@@ -314,8 +314,6 @@ if [[ ! "${rust_id}" =~ ^[0-9a-f]{32}$ || ! "${gateway_id}" =~ ^[0-9a-f]{32}$ ||
   printf '%s\n%s\n' "${rust_join}" "${gateway_join}" >&2
   exit 1
 fi
-ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
-  --node-id "${gateway_id}" --subnet-router "${admin_connection[@]}" >"${work_dir}/capabilities.json"
 node_endpoint="${controller_endpoint}"
 node_quic_endpoint="${controller_quic_endpoint}"
 node_server_name="10.254.0.1"
@@ -346,6 +344,9 @@ if [[ "${node_controller}" == "rust" ]]; then
     --admin-token-file "${work_dir}/admin.token"
   )
 fi
+
+ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
+  --node-id "${gateway_id}" --subnet-router "${management_connection[@]}" >"${work_dir}/capabilities.json"
 
 acl_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl add \
   --network-id "${network_id}" --priority 100 --action accept \
@@ -478,7 +479,7 @@ new_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/rust.
 echo "==> revoking the superseded Rust certificate before testing routed traffic"
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller certificate revoke \
   --network-id "${network_id}" --serial "${old_serial}" --reason rust-renewal-test \
-  "${admin_connection[@]}" >"${work_dir}/old-certificate-revocation.json"
+  "${management_connection[@]}" >"${work_dir}/old-certificate-revocation.json"
 for _ in $(seq 1 120); do
   if ip -n "${rust_ns}" -4 address show dev lane0 2>/dev/null | grep -q "${rust_address}/32"; then
     break
@@ -600,6 +601,17 @@ if [[ "${node_controller}" == "rust" ]]; then
     "${management_connection[@]}" >"${work_dir}/route-assignment.json"
   wait_route "${rust_ns}" 192.168.77.0/24 1
   udp_success 9706 rust-route-reassigned
+
+  echo "==> removing the router capability withdraws its route and stops traffic"
+  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
+    --node-id "${gateway_id}" "${management_connection[@]}" >"${work_dir}/capability-removal.json"
+  wait_route "${rust_ns}" 192.168.77.0/24 0
+  udp_denied 9707 rust-capability-removed
+  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route assign \
+    --network-id "${network_id}" --connector "${gateway_id}" --to 192.168.77.0/24 \
+    "${management_connection[@]}" >"${work_dir}/route-restoration.json"
+  wait_route "${rust_ns}" 192.168.77.0/24 1
+  udp_success 9708 rust-capability-restored
 fi
 
 echo "==> certificate revocation closes the established gateway path"
@@ -611,7 +623,7 @@ if [[ ! "${gateway_serial}" =~ ^[0-9a-f]{2,64}$ ]]; then
 fi
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller certificate revoke \
   --network-id "${network_id}" --serial "${gateway_serial}" --reason rust-live-revoke \
-  "${admin_connection[@]}" >"${work_dir}/certificate-revocation.json"
+  "${management_connection[@]}" >"${work_dir}/certificate-revocation.json"
 wait_relay_sessions 1
 ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q 'dev lane0'
 udp_denied 9704 rust-revoked-path

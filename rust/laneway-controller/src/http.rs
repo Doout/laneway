@@ -23,6 +23,7 @@ mod node_proto;
 mod node_routes;
 mod relay_configuration;
 mod renew;
+mod revocation;
 
 const COOKIE: &str = "__Host-laneway_admin_session";
 const CSRF: &str = "__Host-laneway_admin_csrf";
@@ -253,6 +254,9 @@ async fn dispatch(
             ["", "v1", "routes"] => return node_routes::handle(req, state, id, None).await,
             ["", "v1", "routes", route] => {
                 return node_routes::handle(req, state, id, Some(route)).await;
+            }
+            ["", "v1", "revocations", serial] => {
+                return Ok(revocation::handle(req, state, id, serial).await);
             }
             _ => {}
         }

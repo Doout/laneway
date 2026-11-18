@@ -22,6 +22,10 @@ pub(super) enum Route<'a> {
     AssignSubnet,
     ApproveAdvertisement(&'a str),
     WithdrawAdvertisement(&'a str),
+    Certificates(&'a str),
+    RevokeCertificate(&'a str, &'a str),
+    RevokeNode(&'a str),
+    NodeCapabilities(&'a str),
     AclRules(&'a str),
     AclRule(&'a str),
     UserCreate(&'a str),
@@ -46,6 +50,19 @@ impl<'a> Route<'a> {
             ["", "v1", "admin", "routes", "assign"] => AssignSubnet,
             ["", "v1", "admin", "routes", id, "approve"] => ApproveAdvertisement(id),
             ["", "v1", "admin", "routes", id, "withdraw"] => WithdrawAdvertisement(id),
+            ["", "v1", "admin", "networks", id, "certificates"] => Certificates(id),
+            [
+                "",
+                "v1",
+                "admin",
+                "networks",
+                id,
+                "certificates",
+                serial,
+                "revoke",
+            ] => RevokeCertificate(id, serial),
+            ["", "v1", "admin", "nodes", id, "revoke"] => RevokeNode(id),
+            ["", "v1", "admin", "nodes", id, "capabilities"] => NodeCapabilities(id),
             ["", "v1", "admin", "networks", id, "acl-rules"] => AclRules(id),
             ["", "v1", "admin", "acl-rules", id] => AclRule(id),
             ["", "v1", "admin", "networks", id, "users"] => UserCreate(id),
@@ -67,13 +84,16 @@ impl<'a> Route<'a> {
     }
     fn allow(&self) -> &'static str {
         match self {
-            Self::Inventory(_) | Self::ListRoutes(_) => "GET, HEAD",
+            Self::Inventory(_) | Self::ListRoutes(_) | Self::Certificates(_) => "GET, HEAD",
+            Self::NodeCapabilities(_) => "PUT",
             Self::AclRules(_) => "GET, HEAD, POST",
             Self::AclRule(_) => "DELETE, PUT",
             Self::UserCreate(_)
             | Self::AssignSubnet
             | Self::ApproveAdvertisement(_)
             | Self::WithdrawAdvertisement(_)
+            | Self::RevokeCertificate(..)
+            | Self::RevokeNode(_)
             | Self::TeamCreate(_)
             | Self::GrantCreate(_)
             | Self::ResourceCreate(_)
@@ -100,6 +120,16 @@ struct AssignForm {
     mode: RouteMode,
     #[serde(default)]
     metric: u32,
+}
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CapabilitiesForm {
+    enabled_capabilities: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevocationForm {
+    reason: String,
 }
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -192,9 +222,15 @@ pub(super) async fn handle(
     let auth = credential(req.headers())?;
     let read = matches!(req.method().clone(), Method::GET | Method::HEAD);
     let creates = req.method() == Method::POST
-        && !matches!(
+        && matches!(
             route,
-            Route::ApproveAdvertisement(_) | Route::WithdrawAdvertisement(_)
+            Route::AclRules(_)
+                | Route::UserCreate(_)
+                | Route::TeamCreate(_)
+                | Route::GrantCreate(_)
+                | Route::ResourceCreate(_)
+                | Route::ServiceCreate(_)
+                | Route::ResourceGrantCreate(_)
         );
     let put = req.method() == Method::PUT;
     let proof = (!read)
@@ -256,6 +292,27 @@ async fn decode(route: Route<'_>, req: Request<Incoming>, put: bool) -> Result<A
         }
         Route::ApproveAdvertisement(id) => Action::ApproveRoute(parse(id)?),
         Route::WithdrawAdvertisement(id) => Action::WithdrawRoute(parse(id)?),
+        Route::Certificates(net) => Action::ListCertificates(
+            parse(net)?,
+            super::query_limit(req.uri().query()).map_err(|_| malformed("invalid limit"))?,
+        ),
+        Route::RevokeCertificate(net, serial) => Action::RevokeCertificate(
+            parse(net)?,
+            super::revocation::parse_serial(serial)
+                .filter(|raw| raw[0] != 0)
+                .ok_or(malformed("invalid certificate serial"))?,
+            required_json_form::<RevocationForm>(req).await?.reason,
+        ),
+        Route::RevokeNode(id) => Action::RevokeNode(
+            parse(id)?,
+            required_json_form::<RevocationForm>(req).await?.reason,
+        ),
+        Route::NodeCapabilities(id) => Action::SetNodeCapabilities(
+            parse(id)?,
+            json_form::<CapabilitiesForm>(req)
+                .await?
+                .enabled_capabilities,
+        ),
         Route::AclRules(net) if req.method() == Method::POST => {
             let id = parse(net)?;
             let f = json_form::<AclCreateForm>(req).await?;

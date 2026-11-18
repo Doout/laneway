@@ -205,6 +205,17 @@ impl Editor<'_, '_> {
             .ok_or(AccessError::Missing)?;
         Ok(())
     }
+    pub(super) fn current_epoch(&self) -> Result<i64> {
+        Ok(self
+            .tx
+            .query_row(
+                "SELECT configuration_epoch FROM networks WHERE id=?",
+                [self.net.as_bytes()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(AccessError::Missing)?)
+    }
     pub(super) fn record(&self, action: &str, kind: &str, id: Id, details: Value) -> Result<i64> {
         change(
             self.tx,
