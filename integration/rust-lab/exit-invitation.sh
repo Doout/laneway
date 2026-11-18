@@ -46,6 +46,7 @@ check_invited_systemd_exit() {
   fi
   rm -- "${systemd_sources}/invitation"
   rust_key="$(base64 -w0 <"${systemd_sources}/wireguard.key" | wg pubkey)"
+  prepare_lab_carrier
   start_staged_systemd_exit quic
   wait_relay_sessions 2
   verify_systemd_transport quic
@@ -79,5 +80,6 @@ check_invited_systemd_exit() {
   fi
   stop_process "${nat_pid}"
   stop_systemd_exit
-  echo 'PASS: real invitation, replay rejection, protected Rust service, NAT and revocation'
+  verify_lab_carrier_cleanup
+  echo 'PASS: real invitation, installer carrier, protected Rust service, NAT and revocation'
 }

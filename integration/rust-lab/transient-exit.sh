@@ -19,6 +19,11 @@ cleanup_systemd_exit() {
     systemctl stop "${systemd_unit}" >/dev/null 2>&1 || true
   fi
   remove_systemd_sources
+  if [[ -n "${lab_carrier_cleanup_unit:-}" ]]; then
+    finish_lab_carrier || return 1
+    systemd_mounted=0
+    systemd_runtime=""
+  fi
   if [[ -n "${systemd_runtime}" ]]; then
     if [[ "${systemd_mounted}" == 1 ]]; then
       umount -- "${systemd_runtime}" || return 1
@@ -74,21 +79,24 @@ start_staged_systemd_exit() {
   [[ "${private_network}" != "$(readlink /proc/1/ns/net)" ]] ||
     { systemd_failure 'Exit shares the VM network namespace'; return 1; }
 
-  # Move only the fixture's veths so this service gets no path into the VM's
-  # default network. Keep a handle to the unit's netns after it exits to check
-  # WireGuard and nftables teardown, and move the veths to the next unit.
-  ip -n "${rust_ns}" link set eth0 netns "${pid}"
-  ip -n "${rust_ns}" link set uplink0 netns "${pid}"
-  ip netns delete "${rust_ns}"
-  ip netns attach "${rust_ns}" "${pid}"
-  ip -n "${rust_ns}" link set lo up
-  ip -n "${rust_ns}" address add 10.254.0.3/24 dev eth0
-  if [[ "${node_controller}" == rust ]]; then
-    ip -n "${rust_ns}" address add "${location_node_ip}/28" dev eth0
+  if [[ -n "${lab_carrier_cleanup_unit:-}" ]]; then
+    connect_lab_carrier "${pid}"
+  else
+    # Keep a handle to the unit's private netns after shutdown to check
+    # teardown and move the fixture veths to the next unit.
+    ip -n "${rust_ns}" link set eth0 netns "${pid}"
+    ip -n "${rust_ns}" link set uplink0 netns "${pid}"
+    ip netns delete "${rust_ns}"
+    ip netns attach "${rust_ns}" "${pid}"
+    ip -n "${rust_ns}" link set lo up
+    ip -n "${rust_ns}" address add 10.254.0.3/24 dev eth0
+    if [[ "${node_controller}" == rust ]]; then
+      ip -n "${rust_ns}" address add "${location_node_ip}/28" dev eth0
+    fi
+    ip -n "${rust_ns}" address add 203.0.113.1/24 dev uplink0
+    ip -n "${rust_ns}" link set eth0 up
+    ip -n "${rust_ns}" link set uplink0 up
   fi
-  ip -n "${rust_ns}" address add 203.0.113.1/24 dev uplink0
-  ip -n "${rust_ns}" link set eth0 up
-  ip -n "${rust_ns}" link set uplink0 up
   ip netns exec "${rust_ns}" sysctl -qw net.ipv4.ip_forward=0
   if [[ "${transport}" == tcp ]]; then
     block_udp_relay
@@ -112,6 +120,9 @@ start_staged_systemd_exit() {
   local loaded="/proc/${pid}/root/run/credentials/${systemd_unit}"
   [[ -f "${loaded}/wireguard.key" && -f "${loaded}/config" ]]
   [[ "$(findmnt -n -N "${pid}" -o OPTIONS --mountpoint "/run/credentials/${systemd_unit}")" == ro,* ]]
+  if [[ -n "${lab_carrier_cleanup_unit:-}" ]]; then
+    install -m 0600 /dev/null "${lab_carrier_ready_path}"
+  fi
   remove_systemd_sources
   rm -f -- "${systemd_runtime}/"{resolv.conf,entrypoint,lanewayd-rs,network.ready}
   echo "verified private systemd namespace, dynamic UID, locked memory and protected credentials"

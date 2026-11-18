@@ -50,7 +50,8 @@ and ARM64 runners. It extracts the actual archive binaries and runs the
 isolated systemd packet gate against both the Go and Rust controller/relay.
 It also redeems a real one-use invitation through Rust HTTPS discovery and
 enrollment, rejects a replay, and forwards traffic using the configuration
-and protected credentials produced by the packaged Go enrollment CLI.
+and protected credentials produced by the packaged Go enrollment CLI. It
+checks that the archived bootstrap matches the one exercised by the test.
 The unsigned AMD64 CI preview uses the same gate. After signing a tagged
 release, the publish job checks the manifest using the bootstrap's exact
 workflow, tag, and OIDC issuer policy and checks the hashes of the release
@@ -411,15 +412,18 @@ directory must contain `laneway` and `lanewayd` from `./cmd/laneway`,
 The systemd gate uses the installer unit definition with lab-only networking and
 credentials. It checks the private namespace, dynamic UID, memory lock,
 read-only credential mount and removal of source copies, then runs the same
-packet, policy and teardown checks. It does not run the signed download path
-or the installer's host carrier, and it does not cover routed-only egress or
-IPv6 NAT on the encrypted profile.
+packet, policy and teardown checks. It does not run the signed download path or
+cover routed-only egress or IPv6 NAT on the encrypted profile.
 
 To use a real invitation rather than pre-staged credentials, add
 `LANEWAY_NODE_WIREGUARD_INVITATION=1` to the Rust-backed systemd command.
 The discovery name and lab CA apply only within the enrollment process.
 The generated config is passed to Rust unchanged; its time fields may be
 integer nanoseconds from Go or strings from older hand-written configs.
+This variant puts the actual installer veth, NAT and Docker forwarding rules
+inside a dedicated host namespace and proves that the installed cleanup unit
+removes them after revocation without changing unrelated rules or the VM's
+global forwarding setting. It requires the iptables nftables backend.
 
 ### Verified on the local ARM64 Linux VM
 

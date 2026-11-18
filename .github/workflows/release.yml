@@ -89,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends binutils iproute2 nftables wireguard-tools jq iputils-ping procps
+          sudo apt-get install -y --no-install-recommends binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps
           sudo modprobe tun
           sudo modprobe wireguard
           sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab

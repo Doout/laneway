@@ -59,6 +59,100 @@ start_transient_exit() {
 		--property=TimeoutStopSec=15s --property=KillMode=mixed "$runtime_dir/entrypoint"
 }
 
+# The daemon, carrier and cleanup can be exercised with only a lab underlay.
+die() { printf 'laneway ephemeral Exit: %s\n' "$*" >&2; exit 1; }
+
+describe_exit_carrier() {
+	local runtime_name=$1 random=${1#laneway-ephemeral-exit-} carrier_index carrier_third carrier_base
+	[[ $runtime_name == laneway-ephemeral-exit-* && $random =~ ^[0-9a-f]{16}$ ]] || die 'invalid carrier identity'
+	host_if=lxe${random:0:12}
+	peer_if=lxp${random:0:12}
+	nft_table=lxe_${random:0:12}
+	marker=laneway:$runtime_name
+	carrier_index=$((16#${random:0:4} & 0x3fff))
+	carrier_third=$((carrier_index / 64))
+	carrier_base=$(((carrier_index % 64) * 4))
+	carrier_prefix=169.254.$carrier_third.$carrier_base/30
+	carrier_host=169.254.$carrier_third.$((carrier_base + 1))
+	carrier_peer=169.254.$carrier_third.$((carrier_base + 2))
+}
+
+attach_exit_carrier() {
+	local pid=$1
+	[[ $pid =~ ^[1-9][0-9]*$ ]] || die 'invalid carrier namespace process'
+	ip link show dev "$host_if" >/dev/null 2>&1 && die 'random carrier interface already exists'
+	nft list table inet "$nft_table" >/dev/null 2>&1 && die 'random carrier firewall state already exists'
+	ip link add "$host_if" type veth peer name "$peer_if"
+	carrier_created=true
+	ip link set dev "$host_if" alias "$marker"
+	ip address add "$carrier_host/30" dev "$host_if"
+	ip link set "$host_if" up
+	ip link set "$peer_if" netns "$pid"
+	nsenter -t "$pid" -n ip link set lo up
+	nsenter -t "$pid" -n ip link set "$peer_if" name uplink0
+	nsenter -t "$pid" -n ip address add "$carrier_peer/30" dev uplink0
+	nsenter -t "$pid" -n ip link set uplink0 up
+	nsenter -t "$pid" -n ip route add default via "$carrier_host" dev uplink0
+	nft add table inet "$nft_table"
+	nft add chain inet "$nft_table" owner || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not claim carrier firewall state'; }
+	nft "add rule inet $nft_table owner counter comment \"$marker\"" || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not mark carrier firewall ownership'; }
+	nft "add chain inet $nft_table forward { type filter hook forward priority 100; policy accept; }"
+	nft add rule inet "$nft_table" forward iifname "$host_if" accept
+	nft add rule inet "$nft_table" forward oifname "$host_if" ct state established,related accept
+	nft "add chain inet $nft_table postrouting { type nat hook postrouting priority srcnat; policy accept; }"
+	nft add rule inet "$nft_table" postrouting ip saddr "$carrier_prefix" masquerade
+	if nft list chain ip filter DOCKER-USER >/dev/null 2>&1; then
+		command -v iptables >/dev/null || die 'Docker forwarding requires iptables'
+		iptables -I DOCKER-USER 1 -o "$host_if" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$marker" -j ACCEPT
+		docker_user_rules=true
+		iptables -I DOCKER-USER 1 -i "$host_if" -m comment --comment "$marker" -j ACCEPT
+	fi
+}
+
+stage_exit_cleanup() {
+	local work=$1 runtime_dir=$2 unit=$3 cleanup_path=$4 cleanup_ready_path=$5
+	if [[ -e $cleanup_path || -L $cleanup_path || -e $cleanup_ready_path || -L $cleanup_ready_path ]]; then
+		die 'random cleanup path already exists'
+	fi
+	cat > "$work/cleanup" <<EOF
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+while kill -0 $$ >/dev/null 2>&1 && [ ! -e $cleanup_ready_path ]; do
+  sleep 0.1
+done
+if [ -e $cleanup_ready_path ]; then
+  while :; do
+    state=\$(systemctl is-active $unit 2>/dev/null || true)
+    case "\$state" in active|activating) sleep 1 ;; *) break ;; esac
+  done
+fi
+if ip -j -d link show dev $host_if 2>/dev/null | grep -F -- '"ifalias":"$marker"' >/dev/null; then
+  ip link delete $host_if || true
+fi
+if nft list chain inet $nft_table owner 2>/dev/null | grep -F -- 'comment "$marker"' >/dev/null; then
+  nft delete table inet $nft_table || true
+fi
+if command -v iptables >/dev/null 2>&1; then
+  iptables -D DOCKER-USER -i $host_if -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
+  iptables -D DOCKER-USER -o $host_if -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
+fi
+find $runtime_dir -mindepth 1 -depth -delete 2>/dev/null || true
+umount $runtime_dir 2>/dev/null || true
+rmdir $runtime_dir 2>/dev/null || true
+find $work -depth -delete 2>/dev/null || true
+rm -f $cleanup_path $cleanup_ready_path
+EOF
+	install -m 0500 "$work/cleanup" "$cleanup_path"
+}
+
+start_exit_cleanup() {
+	local cleanup_unit=$1 cleanup_path=$2
+	shift 2
+	systemd-run --unit="$cleanup_unit" --collect --quiet --property=Type=exec --property=StandardOutput=null \
+		--property=StandardError=null --property=NoNewPrivileges=yes "$@" /bin/sh "$cleanup_path"
+}
+
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
 	return 0
 fi
@@ -69,8 +163,6 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 IFS=$' \t\n'
 umask 077
-
-die() { printf 'laneway ephemeral Exit: %s\n' "$*" >&2; exit 1; }
 
 version=
 authority=
@@ -126,16 +218,7 @@ unit=$runtime_name.service
 cleanup_unit=$runtime_name-cleanup.service
 cleanup_path=/run/.$runtime_name.cleanup
 cleanup_ready_path=/run/.$runtime_name.cleanup.ready
-host_if=lxe${random:0:12}
-peer_if=lxp${random:0:12}
-nft_table=lxe_${random:0:12}
-marker=laneway:$runtime_name
-carrier_index=$((16#${random:0:4} & 0x3fff))
-carrier_third=$((carrier_index / 64))
-carrier_base=$(((carrier_index % 64) * 4))
-carrier_prefix=169.254.$carrier_third.$carrier_base/30
-carrier_host=169.254.$carrier_third.$((carrier_base + 1))
-carrier_peer=169.254.$carrier_third.$((carrier_base + 2))
+describe_exit_carrier "$runtime_name"
 work=$(mktemp -d /run/.laneway-ephemeral-exit.XXXXXXXX)
 mkdir "$work/home"
 HOME=$work/home
@@ -172,41 +255,8 @@ cleanup_failed_bootstrap() {
 	exit "$status"
 }
 trap cleanup_failed_bootstrap EXIT HUP INT TERM
-if [[ -e $cleanup_path || -L $cleanup_path || -e $cleanup_ready_path || -L $cleanup_ready_path ]]; then
-	die 'random cleanup path already exists'
-fi
-cat > "$work/cleanup" <<EOF
-#!/bin/sh
-set -eu
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-while kill -0 $$ >/dev/null 2>&1 && [ ! -e $cleanup_ready_path ]; do
-  sleep 0.1
-done
-if [ -e $cleanup_ready_path ]; then
-  while :; do
-    state=\$(systemctl is-active $unit 2>/dev/null || true)
-    case "\$state" in active|activating) sleep 1 ;; *) break ;; esac
-  done
-fi
-if [ -e /sys/class/net/$host_if/ifalias ] && [ "\$(cat /sys/class/net/$host_if/ifalias)" = '$marker' ]; then
-  ip link delete $host_if || true
-fi
-if nft list chain inet $nft_table owner 2>/dev/null | grep -F -- 'comment "$marker"' >/dev/null; then
-  nft delete table inet $nft_table || true
-fi
-if command -v iptables >/dev/null 2>&1; then
-  iptables -D DOCKER-USER -i $host_if -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
-  iptables -D DOCKER-USER -o $host_if -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment '$marker' -j ACCEPT 2>/dev/null || true
-fi
-find $runtime_dir -mindepth 1 -depth -delete 2>/dev/null || true
-umount $runtime_dir 2>/dev/null || true
-rmdir $runtime_dir 2>/dev/null || true
-find $work -depth -delete 2>/dev/null || true
-rm -f $cleanup_path $cleanup_ready_path
-EOF
-install -m 0500 "$work/cleanup" "$cleanup_path"
-systemd-run --unit="$cleanup_unit" --collect --quiet --property=Type=exec --property=StandardOutput=null \
-	--property=StandardError=null --property=NoNewPrivileges=yes /bin/sh "$cleanup_path"
+stage_exit_cleanup "$work" "$runtime_dir" "$unit" "$cleanup_path" "$cleanup_ready_path"
+start_exit_cleanup "$cleanup_unit" "$cleanup_path"
 mkdir "$runtime_dir"
 claimed_runtime=true
 mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"
@@ -288,33 +338,7 @@ for _ in $(seq 1 100); do
 	sleep 0.05
 done
 [[ $pid =~ ^[1-9][0-9]*$ ]] || die 'transient unit did not enter its private network namespace'
-[[ ! -e /sys/class/net/$host_if ]] || die 'random carrier interface already exists'
-nft list table inet "$nft_table" >/dev/null 2>&1 && die 'random carrier firewall state already exists'
-ip link add "$host_if" type veth peer name "$peer_if"
-carrier_created=true
-ip link set dev "$host_if" alias "$marker"
-ip address add "$carrier_host/30" dev "$host_if"
-ip link set "$host_if" up
-ip link set "$peer_if" netns "$pid"
-nsenter -t "$pid" -n ip link set lo up
-nsenter -t "$pid" -n ip link set "$peer_if" name uplink0
-nsenter -t "$pid" -n ip address add "$carrier_peer/30" dev uplink0
-nsenter -t "$pid" -n ip link set uplink0 up
-nsenter -t "$pid" -n ip route add default via "$carrier_host" dev uplink0
-nft add table inet "$nft_table"
-nft add chain inet "$nft_table" owner || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not claim carrier firewall state'; }
-nft "add rule inet $nft_table owner counter comment \"$marker\"" || { nft delete table inet "$nft_table" >/dev/null 2>&1 || true; die 'could not mark carrier firewall ownership'; }
-nft "add chain inet $nft_table forward { type filter hook forward priority 100; policy accept; }"
-nft add rule inet "$nft_table" forward iifname "$host_if" accept
-nft add rule inet "$nft_table" forward oifname "$host_if" ct state established,related accept
-nft "add chain inet $nft_table postrouting { type nat hook postrouting priority srcnat; policy accept; }"
-nft add rule inet "$nft_table" postrouting ip saddr "$carrier_prefix" masquerade
-if nft list chain ip filter DOCKER-USER >/dev/null 2>&1; then
-	command -v iptables >/dev/null || die 'Docker forwarding requires iptables'
-	iptables -I DOCKER-USER 1 -o "$host_if" -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment "$marker" -j ACCEPT
-	docker_user_rules=true
-	iptables -I DOCKER-USER 1 -i "$host_if" -m comment --comment "$marker" -j ACCEPT
-fi
+attach_exit_carrier "$pid"
 touch "$runtime_dir/network.ready"
 
 executed=false

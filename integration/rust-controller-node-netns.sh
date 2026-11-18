@@ -73,6 +73,8 @@ if [[ "${test_invitation}" == "1" ]]; then
   snapshot_seconds=30
   # shellcheck source=integration/rust-lab/exit-invitation.sh
   source "${repo_root}/integration/rust-lab/exit-invitation.sh"
+  # shellcheck source=integration/rust-lab/exit-carrier.sh
+  source "${repo_root}/integration/rust-lab/exit-carrier.sh"
 fi
 case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 work_dir="$(mktemp -d -t laneway-rust-controller.XXXXXX)"
@@ -215,17 +217,17 @@ block_udp_relay() {
 }
 
 attach_wireguard_uplink() {
+  local namespace="${1:-${rust_ns}}" iface="${2:-uplink0}"
   # Exercise NAT without connecting the lab network to the host.
   ip link add "wr$$" type veth peer name "wl$$"
-  ip link set "wr$$" netns "${rust_ns}"
+  ip link set "wr$$" netns "${namespace}"
   ip link set "wl$$" netns "${lan_ns}"
-  ip -n "${rust_ns}" link set "wr$$" name uplink0
+  ip -n "${namespace}" link set "wr$$" name "${iface}"
   ip -n "${lan_ns}" link set "wl$$" name wgout
-  ip -n "${rust_ns}" address add 203.0.113.1/24 dev uplink0
+  ip -n "${namespace}" address add 203.0.113.1/24 dev "${iface}"
   ip -n "${lan_ns}" address add 203.0.113.2/24 dev wgout
-  ip -n "${rust_ns}" link set uplink0 up
+  ip -n "${namespace}" link set "${iface}" up
   ip -n "${lan_ns}" link set wgout up
-  ip netns exec "${rust_ns}" sysctl -qw net.ipv4.ip_forward=0
 }
 
 udp_success() {
@@ -635,7 +637,6 @@ EOF
   wait_log "${last_pid}" "${work_dir}/gateway.log" "interface=lane0"
 
   if [[ "${test_invitation}" == "1" ]]; then
-    attach_wireguard_uplink
     check_invited_systemd_exit
     exit 0
   fi
@@ -650,6 +651,7 @@ EOF
   if [[ "${wireguard_native}" == "1" ]]; then
     sed '/^auto_renew_certificate = /d' "${work_dir}/rust.toml" >"${work_dir}/wireguard-native.toml"
     attach_wireguard_uplink
+    ip netns exec "${rust_ns}" sysctl -qw net.ipv4.ip_forward=0
     cat >>"${work_dir}/wireguard-native.toml" <<'EOF'
 [forwarding]
 exit_gateway = true

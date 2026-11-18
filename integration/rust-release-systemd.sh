@@ -26,6 +26,12 @@ mkdir "$probe_dir/go" "$probe_dir/rust"
 # Take both peers and both release servers from the archive. Extract to plain
 # files rather than installing over any of the host's binaries.
 listing=$(tar -tzf "$archive")
+bootstrap=laneway/deploy/ephemeral-exit/bootstrap.sh
+if [[ $(grep -Fxc "$bootstrap" <<<"$listing") != 1 ]] ||
+  ! tar -xzOf "$archive" "$bootstrap" | cmp - "$root/deploy/ephemeral-exit/bootstrap.sh"; then
+  echo 'The archived bootstrap must match the installer exercised by the packet gate.' >&2
+  exit 1
+fi
 for member in laneway/bin/laneway laneway/sbin/laneway-relay; do
   if [[ $(grep -Fxc "$member" <<<"$listing") != 1 ]]; then
     printf 'Expected one %s in the Linux archive.\n' "$member" >&2
