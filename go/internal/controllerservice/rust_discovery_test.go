@@ -75,6 +75,7 @@ func TestRustControllerDiscovery(t *testing.T) {
 	issuerKey := keyFile("ca.key", f.service.caKey)
 	artifact := bootstrap.Artifact{OS: "linux", Arch: "arm64", URL: "https://release.bootstrap.test/laneway",
 		SHA256: strings.Repeat("12", 32), SizeBytes: 512}
+	console := rustConsoleDir(t)
 	profile := func(name, filename string) string {
 		t.Helper()
 		data, err := json.Marshal(map[string]any{
@@ -87,7 +88,8 @@ func TestRustControllerDiscovery(t *testing.T) {
 	}
 	command := func(ctx context.Context, profile string) *exec.Cmd {
 		return exec.CommandContext(ctx, os.Getenv("LANEWAY_RUST_CONTROLLER"), "serve", f.dbPath, "127.0.0.1:0",
-			cert, key, "--node-issuer", ca, issuerKey, "86400", "--node-client-ca", ca, "--bootstrap-profile", profile)
+			cert, key, "--node-issuer", ca, issuerKey, "86400", "--node-client-ca", ca, "--bootstrap-profile", profile,
+			"--console-dir", console)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -123,6 +125,7 @@ func TestRustControllerDiscovery(t *testing.T) {
 		TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: serverName, MinVersion: tls.VersionTLS13},
 	}}
 	defer client.CloseIdleConnections()
+	testRustConsole(t, client, base, serverName)
 	call := func(method, path string, want int) *http.Response {
 		t.Helper()
 		req, err := http.NewRequestWithContext(t.Context(), method, base+path, nil)
@@ -258,6 +261,7 @@ private_key = %q
 			TLSClientConfig: &tls.Config{RootCAs: publicRoots, ServerName: publicName, MinVersion: tls.VersionTLS13},
 		}}
 		defer https.CloseIdleConnections()
+		testRustConsole(t, https, "https://"+tcp, publicName)
 		request := func(method, path string, body io.Reader, headers http.Header, want int) *http.Response {
 			t.Helper()
 			req, err := http.NewRequestWithContext(t.Context(), method, "https://"+tcp+path, body)

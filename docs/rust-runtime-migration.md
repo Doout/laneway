@@ -72,8 +72,22 @@ Run `make rust-controller-interop` for shared-port discovery, browser sessions,
 one-use downloads, OAuth Basic forwarding, and the separate mTLS handshake.
 This configuration requires a provisioned certificate and a relay restart to
 pick up replacements. The Go ACME cache format, in-process TLS-ALPN renewal,
-serving the console's built assets from the Rust controller, and a complete
-Dispatch exchange through the shared port are not covered by this gate.
+and a complete Dispatch exchange through the shared port are not covered by
+this gate.
+
+The Rust controller image includes the same `pnpm build:live` console as the
+Go image and enables it from `/usr/share/laneway-console`. For a standalone
+controller, supply an absolute build output directory with `--console-dir` or
+`LANEWAY_CONSOLE_DIR`. The controller takes a bounded read-only snapshot at
+startup; install a complete build and restart together. Browser deep links
+get the non-cacheable HTML shell, hashed assets are immutable, and API routes
+never fall back to HTML. Broken asset links return 404.
+
+To exercise a real web build through the Rust controller and relay instead
+of the small HTTP fixture, build the console with `pnpm build:live` in `web`,
+then run `LANEWAY_RUST_CONSOLE_ASSETS="$PWD/web/dist" make rust-controller-interop`
+from the repository root. The controller image lab also tests the packaged
+assets while running with its non-root UID and no network.
 
 ## Linux node image
 

@@ -15,7 +15,7 @@ use std::{
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
 use tokio_rustls::TlsAcceptor;
 
-const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON]";
+const USAGE: &str = "usage: laneway-controller serve DATABASE LOOPBACK_IP:PORT CERT_PEM KEY_PEM [--root-token-file PATH] [--node-issuer CHAIN_PEM KEY_PEM LIFETIME_SECONDS] [--node-client-ca ROOTS_PEM] [--node-quic [--quic-listen IP:PORT]] [--snapshot-validity SECONDS] [--location-database CITY_MMDB] [--allow-insecure-application-callbacks] [--bootstrap-profile PROFILE_JSON] [--console-dir ABSOLUTE_DIST_DIR]";
 
 struct QuicListener {
     config: quinn::ServerConfig,
@@ -46,6 +46,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let mut location_database = None;
     let mut allow_loopback_callbacks = false;
     let mut bootstrap_profile = None;
+    let mut console_dir = None;
     while let Some(flag) = args.next() {
         if flag == "--root-token-file" && root.is_none() {
             root = Some(laneway_controller::RootCredential::load(
@@ -80,6 +81,8 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             allow_loopback_callbacks = true;
         } else if flag == "--bootstrap-profile" && bootstrap_profile.is_none() {
             bootstrap_profile = Some(PathBuf::from(args.next().context(USAGE)?));
+        } else if flag == "--console-dir" && console_dir.is_none() {
+            console_dir = Some(PathBuf::from(args.next().context(USAGE)?));
         } else if flag == "--quic-listen" && quic_listen.is_none() {
             quic_listen = Some(
                 args.next()
@@ -165,6 +168,14 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         allow_loopback_callbacks,
     )?;
     state.bootstrap_discovery = discovery;
+    let console_dir =
+        console_dir.or_else(|| std::env::var_os("LANEWAY_CONSOLE_DIR").map(PathBuf::from));
+    state.console = console_dir
+        .as_deref()
+        .map(super::http::console::Console::load)
+        .transpose()
+        .context("load live console build")?
+        .map(Arc::new);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

@@ -20,6 +20,7 @@ mod audit;
 mod automation;
 mod bootstrap_bundles;
 mod bootstrap_discovery;
+pub(crate) mod console;
 mod endpoint_status;
 mod enroll;
 mod form;
@@ -59,6 +60,7 @@ pub struct State {
     allow_loopback_callbacks: bool,
     bootstrap_bundles: Arc<bootstrap_bundles::Bundles>,
     pub(crate) bootstrap_discovery: Option<Arc<laneway_controller::bootstrap_discovery::Discovery>>,
+    pub(crate) console: Option<Arc<console::Console>>,
 }
 impl State {
     pub fn new(
@@ -81,6 +83,7 @@ impl State {
             allow_loopback_callbacks,
             bootstrap_bundles: Default::default(),
             bootstrap_discovery: None,
+            console: None,
             queries: Arc::new(Semaphore::new(8)),
             root: root.map(Arc::new),
             discovery: Default::default(),
@@ -287,6 +290,11 @@ async fn dispatch(
 ) -> Result<Reply, Failure> {
     let uri = req.uri().clone();
     let path = uri.path();
+    if let Some(console) = state.console.as_ref()
+        && !console::api_path(path)
+    {
+        return Ok(console.handle(&req, id));
+    }
     if path == "/v1/health" {
         if head || req.method() == Method::GET {
             return Ok(response(

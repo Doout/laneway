@@ -1,4 +1,11 @@
 # syntax=docker/dockerfile:1.9
+FROM --platform=$BUILDPLATFORM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43 AS console-build
+WORKDIR /src/web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN corepack enable && corepack prepare pnpm@10.14.0 --activate && pnpm install --frozen-lockfile
+COPY web/ ./
+RUN pnpm build:live
+
 FROM rust:1.88-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
@@ -31,6 +38,8 @@ RUN cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-co
 FROM scratch AS controller
 COPY --from=controller-build /src/rust/target/release/laneway-controller /usr/local/bin/laneway-controller
 COPY --from=build /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+COPY --from=console-build /src/web/dist /usr/share/laneway-console
+ENV LANEWAY_CONSOLE_DIR=/usr/share/laneway-console
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway-controller"]
 
