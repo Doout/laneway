@@ -238,11 +238,6 @@ async fn request(
                                 "known epoch is ahead of controller",
                                 false,
                             ),
-                            ConfigurationError::ManagedAccess => (
-                                ErrorCode::PermissionDenied,
-                                "managed access requires the Go controller",
-                                false,
-                            ),
                         }
                     }
                     _ => (ErrorCode::Internal, "internal controller error", true),

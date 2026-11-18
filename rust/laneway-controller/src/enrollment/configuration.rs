@@ -1,5 +1,7 @@
 //! Stable-v1 snapshots are built from one database view for one live TLS peer.
-use super::{EnrollError, audit, maintenance, renewal::NodeCredential, snapshot_policy};
+use super::{
+    EnrollError, audit, maintenance, managed_policy, renewal::NodeCredential, snapshot_policy,
+};
 use crate::{SessionStore, check_snapshot, enrollment_tokens::EXIT};
 use anyhow::{Context, Result, ensure};
 use laneway_protocol::{DEFAULT_MAX_CONTROL_PAYLOAD, Id, policy::prefix_from_wire, v1::*};
@@ -11,9 +13,6 @@ use x509_parser::parse_x509_certificate;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigurationError {
-    // Deliberate fail-closed feature gate until managed grants are compiled.
-    #[error("managed access is not yet supported")]
-    ManagedAccess,
     #[error("known epoch is ahead of controller")]
     StaleEpoch,
 }
@@ -50,7 +49,7 @@ impl SessionStore {
             (peer.net.as_bytes(), peer.node.as_bytes()),
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        ensure!(user.is_none(), ConfigurationError::ManagedAccess);
+        let user = user.as_deref().map(Id::from_slice).transpose()?;
         let class = match class.as_str() {
             "durable" => EnrollmentClass::DurableNode,
             "remembered" => EnrollmentClass::RememberedUser,
@@ -95,14 +94,18 @@ impl SessionStore {
                 .find(|p| p.node_id == peer.node.as_bytes())
                 .context("node has no active peer record")?;
             let routes = routes(&tx, peer.net, epoch, now)?;
-            let mut seen = HashSet::new();
-            let exits = routes
-                .routes
-                .iter()
-                .filter(|r| r.kind == RouteKind::Exit as i32 && seen.insert(&r.via_node_id))
-                .map(|r| r.via_node_id.clone())
-                .collect();
-            let policy = snapshot_policy::compile(&tx, peer.net, epoch)?;
+            let mut policy = snapshot_policy::compile(&tx, peer.net, epoch)?;
+            let exits = if let Some(user) = user {
+                managed_policy::apply(&tx, peer, user, now, &peers, &routes, &mut policy)?
+            } else {
+                let mut seen = HashSet::new();
+                routes
+                    .routes
+                    .iter()
+                    .filter(|r| r.kind == RouteKind::Exit as i32 && seen.insert(&r.via_node_id))
+                    .map(|r| r.via_node_id.clone())
+                    .collect()
+            };
             let response = NodeConfiguration {
                 configuration_epoch: epoch,
                 overlay_addresses: subject.overlay_addresses.clone(),

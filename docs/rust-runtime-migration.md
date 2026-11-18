@@ -253,8 +253,12 @@ the relay certificate and enabled registration before every snapshot or lease,
 including on existing connections. The relay keeps its last issued lease
 until it expires; the controller does not renew it after disablement.
 
-Managed user/team and named-resource grants are not yet compiled by Rust;
-user-bound nodes fail closed. Other Go control operations are still required.
+The Rust controller compiles existing user and team grants into node snapshots.
+Named resources remain pinned to their approved route and service port ranges.
+A deny rule for the user's devices precedes ordinary ACLs, so a global allow
+cannot widen managed access. Disabling the user removes their grants and
+retains that deny rule. Use the Go controller to manage the grants themselves;
+the Rust administration endpoints for managed access are still pending.
 Keep Go serving production.
 
 ### Renew a Rust node at a Go or Rust controller (lab only)

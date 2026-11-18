@@ -338,21 +338,18 @@ func TestRustControllerQUIC(t *testing.T) {
 		if err != nil || !unchanged || fresh.GetConfigurationEpoch() != after.ConfigurationEpoch || fresh.GetValidUntilUnixSeconds() <= after.GetValidUntilUnixSeconds() {
 			t.Fatalf("lease did not advance without an epoch change: %v %t %v", fresh, unchanged, err)
 		}
-		// Bind the connector to a managed user and prove the ordinary ACL
-		// snapshot path cannot bypass unported managed grants.
-		user, err := identity.NewID()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err = raw.Exec("INSERT INTO access_users(id,network_id,name,enabled,created_at,updated_at) VALUES(?,?,?,1,unixepoch(),unixepoch())", user[:], net1.ID[:], "managed"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err = raw.Exec("UPDATE nodes SET user_id=? WHERE id=?", user[:], cid.NodeID[:]); err != nil {
-			t.Fatal(err)
-		}
-		if _, _, err = newClient("managed", connector).Configuration(ctx, after.ConfigurationEpoch); err == nil || !strings.Contains(err.Error(), "ERROR_CODE_PERMISSION_DENIED") {
-			t.Fatalf("managed node was not denied: %v", err)
-		}
+		t.Run("managed access", func(t *testing.T) {
+			provision := func(name string) (identity.NodeID, pki.Material) {
+				material, cert := enroll(net1.ID, name, false)
+				id, err := identity.IdentityFromCertificate(cert)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return id.NodeID, material
+			}
+			checkRustManagedPolicy(t, store, raw, net1.ID, cid.NodeID, newClient("managed", connector),
+				clientFor("managed-go", connector, goServer.Addr().String(), 0), provision)
+		})
 	})
 	outsider, _ := enroll(net2.ID, "foreign", false)
 	if _, err := newClient("foreign", outsider).Renew(ctx, csr, nil); err == nil {
