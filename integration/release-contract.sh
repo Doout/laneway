@@ -82,7 +82,7 @@ require_compose_target() {
 # Release credentials can publish packages and attestations, so every external
 # action is fixed to an immutable commit instead of a mutable tag or branch.
 if sed -n 's/^[[:space:]]*\(- \)\{0,1\}uses: \([^ #]*\).*/\2/p' "$workflow" |
-  grep -Ev '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$' >/dev/null; then
+  grep -Ev '^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+){1,}@[0-9a-f]{40}$' >/dev/null; then
   echo "release workflow contains an action that is not pinned to a full commit" >&2
   exit 1
 fi
@@ -195,7 +195,7 @@ for value in \
   'os: linux, arch: arm64, runner: ubuntu-24.04-arm' \
   'os: darwin, arch: amd64, runner: macos-15-intel' \
   'os: darwin, arch: arm64, runner: macos-15' \
-  'PACKAGE_RUST_RUNTIME_DIR=' \
+  'PACKAGE_RUST_RUNTIME_DIR: ${{ runner.temp }}/runtime' \
   'PACKAGE_RUST_MACOS=' \
   'integration/rust-release-macos.sh' \
   'integration/rust-release-systemd.sh' \
@@ -235,7 +235,10 @@ for value in \
 do
   require "$value" "$workflow"
 done
-require 'cache-to: type=gha,scope=rust-release-deps-${{ matrix.arch }},mode=max' "$ci_workflow"
+require "format('type=gha,scope=rust-release-deps-{0},mode=max" "$ci_workflow"
+require 'check: [systemd, fleet-update]' "$workflow"
+require 'needs: [check-linux, package-macos, image-index]' "$workflow"
+require 'name: laneway-linux-${{ matrix.arch }}' "$workflow"
 if ! awk '
   /Reject vulnerable image before registry publication/ { scan=1 }
   /Push the native candidate by digest only/ { push=scan }

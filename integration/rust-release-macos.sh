@@ -76,11 +76,25 @@ sh "$root/scripts/verify-rust-macos-runtime.sh" "$package/bin/lanewayd-rs" "$arc
 LANEWAY_MACOS_TEST_ARCHIVE="$archive" LANEWAY_MACOS_TEST_VERSION="$version" \
   go -C "$root/go" test ./cmd/laneway -run '^TestMacRustRuntimeArchiveMatchesUpdater$' -count=1
 
+run_probe() {
+  probe_executable=$1
+  probe_case=$2
+  shift 2
+  if [ -n "${LANEWAY_MACOS_PROBES_DIR:-}" ]; then
+    executable="$LANEWAY_MACOS_PROBES_DIR/$probe_executable"
+    [ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] ||
+      { echo "invalid cached probe: $executable" >&2; return 1; }
+    "$executable" --ignored --exact "$probe_case"
+  else
+    cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs "$@" \
+      -- --ignored --exact "$probe_case"
+  fi
+}
+
 if [ "$desktop_probe" = 1 ]; then
   desktop_case=packaged_daemon_serves_the_desktop_socket
   if ! LANEWAY_MACOS_PACKAGE_DAEMON="$package/bin/lanewayd-rs" LANEWAY_MACOS_PACKAGE_VERSION="$version" \
-    cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs --test desktop_local_api_lab \
-      -- --ignored --exact "$desktop_case" >"$probe_dir/desktop.log" 2>&1; then
+    run_probe desktop_local_api_lab "$desktop_case" --test desktop_local_api_lab >"$probe_dir/desktop.log" 2>&1; then
     cat "$probe_dir/desktop.log" >&2
     exit 1
   fi
@@ -102,8 +116,7 @@ if [ "$install_probe" = 1 ]; then
   cmp -s "$package/bin/lanewayd-rs" "$runtime_dir/lanewayd-rs"
   if [ "$utun_probe" = 1 ]; then
     utun_case=tun::darwin::tests::darwin_installed_helper_routes_and_restores_real_utun
-    if ! cargo test --locked --manifest-path "$root/rust/Cargo.toml" -p lanewayd-rs --lib \
-      -- --ignored --exact "$utun_case" >"$probe_dir/utun.log" 2>&1; then
+    if ! run_probe lanewayd_rs "$utun_case" --lib >"$probe_dir/utun.log" 2>&1; then
       cat "$probe_dir/utun.log" >&2
       exit 1
     fi

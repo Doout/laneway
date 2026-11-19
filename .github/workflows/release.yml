@@ -31,7 +31,7 @@ jobs:
       - name: Check scripts
         run: |
           python3 -m unittest discover -s deploy/compose -p 'test_*.py'
-          shellcheck integration/rust-release-macos.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh
+          shellcheck integration/rust-release-macos*.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
           sh integration/rust-compose-release.sh
           sh integration/rust-go-runtime-guard.sh
@@ -51,20 +51,24 @@ jobs:
           sudo ./integration/lane-prepare.sh
           sudo env PATH="$PATH" ./integration/lane-recovery.sh
 
-  linux-runtime:
-    name: Build shared Linux ${{ matrix.arch }} runtime
+  package-linux:
+    name: Build Linux ${{ matrix.arch }} runtime and archive
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - {arch: amd64, runner: ubuntu-24.04}
-          - {arch: arm64, runner: ubuntu-24.04-arm}
+          - {os: linux, arch: amd64, runner: ubuntu-24.04}
+          - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.11"
+          cache-dependency-path: go/go.sum
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.36.1
@@ -82,6 +86,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.value }}
             FLEET_ACTIVATION_FIXTURE=1
+            FLEET_PRIOR_VERSION=${{ github.ref_name == 'v0.0.0' && '0.0.1' || '0.0.0' }}
           outputs: type=local,dest=${{ runner.temp }}/runtime
           cache-from: type=gha,scope=rust-release-deps-${{ matrix.arch }},timeout=1m
       - name: Archive binaries with executable permissions
@@ -101,86 +106,15 @@ jobs:
           path: ${{ runner.temp }}/activation-fixture.tar.gz
           compression-level: 0
           if-no-files-found: error
-
-  package-linux:
-    name: ${{ matrix.os }} ${{ matrix.arch }} package
-    needs: linux-runtime
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 14
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {os: linux, arch: amd64, runner: ubuntu-24.04}
-          - {os: linux, arch: arm64, runner: ubuntu-24.04-arm}
-    steps: &package-steps
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.26.11"
-          cache-dependency-path: go/go.sum
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: matrix.os == 'linux'
-        with:
-          pattern: release-*-${{ matrix.arch }}
-          path: ${{ runner.temp }}
-          merge-multiple: true
-      - name: Unpack the shared Linux build
-        if: matrix.os == 'linux'
-        run: |
-          output="$RUNNER_TEMP/laneway-rust"
-          mkdir -p "$output"
-          tar -xzf "$RUNNER_TEMP/runtime.tar.gz" -C "$output"
-          tar -xzf "$RUNNER_TEMP/activation-fixture.tar.gz" -C "$output"
-          printf 'PACKAGE_RUST_RUNTIME_DIR=%s\n' "$output" >> "$GITHUB_ENV"
-      - name: Install the pinned macOS Rust compiler
-        if: matrix.os == 'darwin'
-        run: rustup toolchain install 1.91.1 --profile minimal && rustup default 1.91.1
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        if: matrix.os == 'darwin'
-        with:
-          workspaces: rust
-          shared-key: macos-release
-          save-if: 'false'
-      - name: Build the native macOS Rust runtime candidate
-        if: matrix.os == 'darwin'
-        run: |
-          LANEWAY_PRODUCT_VERSION="${GITHUB_REF_NAME#v}" cargo +1.91.1 build --locked --release \
-            --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
-          printf 'PACKAGE_RUST_MACOS=%s\n' "$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" >> "$GITHUB_ENV"
       - name: Build reproducible package
         env:
           PACKAGE_GOOS: ${{ matrix.os }}
           PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_RUST_RUNTIME_DIR: ${{ runner.temp }}/runtime
         run: make package VERSION="${GITHUB_REF_NAME#v}"
-      - name: Test the macOS release archive on its native architecture
-        if: matrix.os == 'darwin'
-        env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
-        run: |
-          RUSTUP_TOOLCHAIN=1.91.1 LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
-            sh integration/rust-release-macos.sh \
-            "dist/laneway_darwin_$PACKAGE_GOARCH.tar.gz" "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
-      - name: Test the Linux release archive under systemd
-        if: matrix.os == 'linux'
-        env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps
-          sudo modprobe tun
-          sudo modprobe wireguard
-          sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
-          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
-            "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
-          sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz" \
-            "$PACKAGE_RUST_RUNTIME_DIR/activation-fixture"
       - name: Generate package SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
-        with:
+        with: &package-sbom
           file: dist/laneway_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
           format: spdx-json
           output-file: dist/laneway_${{ matrix.os }}_${{ matrix.arch }}.spdx.json
@@ -189,13 +123,67 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
+        with: &upload-package
           name: laneway-${{ matrix.os }}-${{ matrix.arch }}
           path: |
             dist/laneway_${{ matrix.os }}_${{ matrix.arch }}.tar.gz
             dist/laneway_${{ matrix.os }}_${{ matrix.arch }}
             dist/laneway_${{ matrix.os }}_${{ matrix.arch }}.spdx.json
           if-no-files-found: error
+
+  check-linux:
+    name: Linux ${{ matrix.arch }} archive / ${{ matrix.check }}
+    needs: package-linux
+    runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 14
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        check: [systemd, fleet-update]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.11"
+          cache-dependency-path: go/go.sum
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: laneway-linux-${{ matrix.arch }}
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: matrix.check == 'fleet-update'
+        with:
+          name: release-fixture-${{ matrix.arch }}
+          path: ${{ runner.temp }}
+      - name: Prepare the isolated systemd runner
+        run: |
+          packages=(binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps)
+          sudo apt-get install -y --no-install-recommends "${packages[@]}" || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${packages[@]}"
+          }
+          sudo modprobe tun
+          sudo modprobe wireguard
+          sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
+      - name: Test the exact release archive under systemd
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+          CHECK: ${{ matrix.check }}
+        run: |
+          archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
+          case "$CHECK" in
+            systemd)
+              sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "$archive" \
+                "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}" ;;
+            fleet-update)
+              tar -xzf "$RUNNER_TEMP/activation-fixture.tar.gz" -C "$RUNNER_TEMP"
+              sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "$archive" \
+                "$RUNNER_TEMP/activation-fixture" ;;
+            *) exit 1 ;;
+          esac
 
   package-macos:
     name: ${{ matrix.os }} ${{ matrix.arch }} package
@@ -207,11 +195,57 @@ jobs:
         include:
           - {os: darwin, arch: amd64, runner: macos-15-intel}
           - {os: darwin, arch: arm64, runner: macos-15}
-    steps: *package-steps
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.11"
+          cache-dependency-path: go/go.sum
+      - name: Restore native release probes from main
+        id: macos-probes
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/laneway-macos-probes
+          key: >-
+            laneway-macos-probes-v1-1.91.1-${{ runner.arch }}-${{ hashFiles('rust/**', 'api/proto/**',
+            'deploy/examples/*rust*.toml', 'deploy/compose/generated/config/exit-node.toml.example',
+            'testvectors/local-api/**', 'integration/rust-release-macos-probes.sh') }}
+      - name: Install the pinned macOS Rust compiler
+        run: rustup toolchain install 1.91.1 --profile minimal && rustup default 1.91.1
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: rust
+          shared-key: macos-release
+          save-if: 'false'
+      - name: Build the native macOS Rust runtime candidate
+        run: |
+          LANEWAY_PRODUCT_VERSION="${GITHUB_REF_NAME#v}" cargo +1.91.1 build --locked --release \
+            --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
+          printf 'PACKAGE_RUST_MACOS=%s\n' "$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" >> "$GITHUB_ENV"
+      - name: Build reproducible package
+        env:
+          PACKAGE_GOOS: ${{ matrix.os }}
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: make package VERSION="${GITHUB_REF_NAME#v}"
+      - name: Test the macOS release archive on its native architecture
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+          LANEWAY_MACOS_PROBES_DIR: ${{ steps.macos-probes.outputs.cache-hit == 'true' && format('{0}/laneway-macos-probes', runner.temp) || '' }}
+        run: |
+          RUSTUP_TOOLCHAIN=1.91.1 LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
+            sh integration/rust-release-macos.sh \
+            "dist/laneway_darwin_$PACKAGE_GOARCH.tar.gz" "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
+      - name: Generate package SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with: *package-sbom
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: *upload-package
 
   image:
     name: ${{ matrix.role.name }} linux/${{ matrix.arch }} image
-    needs: [verify, linux-runtime]
+    needs: [verify, package-linux]
     runs-on: ${{ matrix.arch == 'amd64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 10
     permissions:
@@ -435,7 +469,7 @@ jobs:
 
   release:
     name: Publish signed GitHub release
-    needs: [package-linux, package-macos, image-index]
+    needs: [check-linux, package-macos, image-index]
     runs-on: ubuntu-latest
     timeout-minutes: 18
     permissions:

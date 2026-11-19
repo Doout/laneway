@@ -145,18 +145,19 @@ workflow, tag, and OIDC issuer policy and checks the hashes of the release
 assets. Those are separate gates; neither claims the published bootstrap has
 been installed with a real invitation on the dedicated host.
 
-The release builds Linux Rust executables once on each native CPU and reuses
-them in the matching archive and container images. Main-branch CI primes the
-compiled Linux dependency layers and native macOS Cargo caches. A cache miss
-still builds from the locked sources. Each native image must pass Trivy before
-its candidate digest is pushed; the release signs the combined two-platform
-index and exercises the signed install and recovery before publishing.
+The release builds each native Linux runtime once and reuses it in the archive
+and container images. Packet/systemd and fleet-update tests use the same archive
+on separate runners, so they can run in parallel without sharing installed
+services. Main-branch CI warms Linux dependency and fleet-fixture layers, native
+macOS Cargo caches, and the macOS test harnesses. The test harnesses don't embed
+the release version; they run against the actual tagged binaries. Cache misses
+rebuild from locked sources. Trivy, digest comparisons, signatures, provenance,
+and the signed install and recovery rehearsal still gate publication.
 
-Aim for ten minutes with warm caches. Use the wall time of a successful run
-(including waits between jobs), and compare the Linux runtime, Intel macOS
-archive, and signed install jobs when a run exceeds the target. The release
-job timeouts bound execution separately from hosted-runner queue time. To see
-which job took longest after a run:
+Aim for ten minutes with warm caches. Let CI finish on the `main` commit you plan
+to tag. Measure wall time from tag push to publication,
+including runner queues. If the run exceeds the target, compare the Linux build
+and systemd checks, Intel macOS archive, and signed install jobs:
 
 ```sh
 gh run view RUN_ID --repo Doout/laneway --json jobs \
