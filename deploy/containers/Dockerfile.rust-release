@@ -1,5 +1,6 @@
 # Build on the target architecture. Static binaries work with the existing
 # package/bootstrap contract and do not depend on the build host's libc.
+ARG FLEET_ACTIVATION_FIXTURE=0
 FROM docker.io/library/rust:1.91.1-alpine3.22@sha256:8efbfb788786eeb127adc581394349c5fb567712156e0f8c2e499acadbc23756 AS chef
 WORKDIR /src
 RUN cargo install --locked --version 0.1.73 cargo-chef
@@ -23,15 +24,16 @@ RUN target="$(rustc -vV | sed -n 's/^host: //p')" && \
       -p lanewayd-rs -p laneway-controller -p laneway-relay -p laneway-healthcheck && \
     cargo fetch --locked
 
-FROM dependencies AS build
+FROM dependencies AS sources
 WORKDIR /src
 COPY api/proto /src/api/proto
 COPY rust /src/rust
 COPY deploy/examples/node-rust.toml deploy/examples/node-rust-controller.toml deploy/examples/connector-rust.toml /src/deploy/examples/
 COPY deploy/compose/generated/config/exit-node.toml.example /src/deploy/compose/generated/config/
 COPY testvectors/local-api /src/testvectors/local-api
+
+FROM sources AS build
 ARG VERSION=dev
-ARG FLEET_ACTIVATION_FIXTURE=0
 RUN --network=none set -eu; \
     case "$VERSION" in ""|*[!0-9A-Za-z._+-]*) exit 1;; esac; \
     test "${#VERSION}" -le 64; \
@@ -48,25 +50,37 @@ RUN --network=none set -eu; \
     for name in laneway-controller laneway-relay laneway-healthcheck; do \
       install -m 0755 "$out/$name" "/artifacts/$name-rs"; \
     done; \
-    case "$FLEET_ACTIVATION_FIXTURE" in \
-      0) ;; \
-      1) \
-        prior=0.0.0; \
-        if [ "$VERSION" = "$prior" ]; then prior=0.0.1; fi; \
-        mkdir /artifacts/activation-fixture; \
-        LANEWAY_PRODUCT_VERSION="$prior" cargo build --offline --locked --release \
-          --manifest-path rust/Cargo.toml --target "$target" -p lanewayd-rs --bin lanewayd-rs; \
-        install -m 0755 "$out/lanewayd-rs" /artifacts/activation-fixture/prior-node; \
-        LANEWAY_PRODUCT_VERSION="$VERSION" cargo test --offline --locked --release --no-run \
-          --manifest-path rust/Cargo.toml --target "$target" -p lanewayd-rs --lib \
-          --message-format=json-render-diagnostics > /tmp/fleet-activation-build.json; \
-        test_bin="$(sed -n '/"reason":"compiler-artifact"/{ /"kind":\["lib"\]/{ /"name":"lanewayd_rs"/{ /"test":true/s/.*"executable":"\([^"]*\)".*/\1/p; }; }; }' /tmp/fleet-activation-build.json)"; \
-        test -x "$test_bin"; \
-        install -m 0755 "$test_bin" /artifacts/activation-fixture/activation-test; \
-        rm /tmp/fleet-activation-build.json ;; \
-      *) exit 1 ;; \
-    esac; \
     cargo clean --offline --manifest-path rust/Cargo.toml
 
-FROM scratch AS artifacts
+# The harness reads the candidate's version at runtime. Keep this stage
+# independent of VERSION so main can precompile both test-only executables.
+FROM sources AS build-fleet-fixture
+ARG FLEET_PRIOR_VERSION=0.0.0
+RUN --network=none set -eu; \
+    case "$FLEET_PRIOR_VERSION" in 0.0.0|0.0.1) ;; *) exit 1;; esac; \
+    target="$(rustc -vV | sed -n 's/^host: //p')"; \
+    case "$target" in x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) ;; *) exit 1;; esac; \
+    export LANEWAY_PRODUCT_VERSION="$FLEET_PRIOR_VERSION"; \
+    cargo build --offline --locked --release --manifest-path rust/Cargo.toml \
+      --target "$target" -p lanewayd-rs --bin lanewayd-rs; \
+    mkdir -p /fixture/activation-fixture; \
+    install -m 0755 "rust/target/$target/release/lanewayd-rs" /fixture/activation-fixture/prior-node; \
+    cargo test --offline --locked --release --no-run --manifest-path rust/Cargo.toml \
+      --target "$target" -p lanewayd-rs --lib \
+      --message-format=json-render-diagnostics > /tmp/fleet-activation-build.json; \
+    test_bin="$(sed -n '/"reason":"compiler-artifact"/{ /"kind":\["lib"\]/{ /"name":"lanewayd_rs"/{ /"test":true/s/.*"executable":"\([^"]*\)".*/\1/p; }; }; }' /tmp/fleet-activation-build.json)"; \
+    test -x "$test_bin"; \
+    install -m 0755 "$test_bin" /fixture/activation-fixture/activation-test; \
+    rm /tmp/fleet-activation-build.json; \
+    cargo clean --offline --manifest-path rust/Cargo.toml
+
+FROM scratch AS fleet-fixture
+COPY --from=build-fleet-fixture /fixture/ /
+
+FROM scratch AS artifacts-0
 COPY --from=build /artifacts/ /
+
+FROM artifacts-0 AS artifacts-1
+COPY --from=fleet-fixture / /
+
+FROM artifacts-${FLEET_ACTIVATION_FIXTURE} AS artifacts
