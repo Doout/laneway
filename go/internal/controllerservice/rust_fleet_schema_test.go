@@ -55,7 +55,8 @@ func testRustFleetPolicyHistory(t *testing.T, client *http.Client, cert, key, ro
 	}
 	endpoint, stop := startRustAdministratorLab(t, f.dbPath, cert, key, rootFile)
 	defer stop()
-	db, err := sql.Open("sqlite", f.dbPath)
+	// The fixture writes test triggers while the Rust controller is running.
+	db, err := sql.Open("sqlite", f.dbPath+"?_pragma=busy_timeout(3000)")
 	if err != nil {
 		t.Fatal(err)
 	}
