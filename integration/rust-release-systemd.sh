@@ -19,7 +19,14 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 sh "$root/integration/rust-release-package.sh" "$archive" "$architecture" "$version"
 
 probe_dir=$(mktemp -d -t laneway-release-systemd.XXXXXX)
-trap 'find "$probe_dir" -depth -delete' EXIT
+packet_jobs=()
+cleanup() {
+  local pid
+  for pid in "${packet_jobs[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+  for pid in "${packet_jobs[@]}"; do wait "$pid" 2>/dev/null || true; done
+  find "$probe_dir" -depth -delete
+}
+trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir "$probe_dir/go" "$probe_dir/rust"
@@ -54,7 +61,7 @@ chmod 0755 "$probe_dir/go/"* "$probe_dir/rust/"*
 
 run_packet_gate() {
   local controller="$1" drain="$2" invitation="$3"
-  env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_CONTROLLER="$controller" \
+  exec env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_NODE_TEST_CONTROLLER="$controller" \
     LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_WIREGUARD_NATIVE=1 \
     LANEWAY_NODE_WIREGUARD_CREDENTIALS=0 LANEWAY_NODE_WIREGUARD_DRAIN="$drain" \
     LANEWAY_NODE_WIREGUARD_SYSTEMD=1 LANEWAY_NODE_WIREGUARD_INVITATION="$invitation" \
@@ -62,9 +69,23 @@ run_packet_gate() {
     bash "$root/integration/rust-controller-node-netns.sh"
 }
 
-run_packet_gate go 1 0
-run_packet_gate rust 1 0
-run_packet_gate rust 0 1
+# Each drain test owns its own network namespaces and transient service. Keep
+# the installer and packaged services sequential because they check host state.
+for controller in go rust; do
+  run_packet_gate "$controller" 1 0 >"$probe_dir/drain-$controller.log" 2>&1 &
+  packet_jobs+=("$!")
+done
+result=0
+for index in "${!packet_jobs[@]}"; do
+  wait "${packet_jobs[$index]}" || result=$?
+  unset 'packet_jobs[index]'
+done
+for controller in go rust; do
+  printf '==> %s controller drain gate\n' "$controller"
+  cat "$probe_dir/drain-$controller.log"
+done
+((result == 0)) || exit "$result"
+(run_packet_gate rust 0 1)
 
 # Run the packaged ordinary-node and relay units, not the transient WireGuard
 # exit unit. Only the lab network and log location will be overridden.

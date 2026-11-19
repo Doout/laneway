@@ -151,8 +151,13 @@ on separate runners, so they can run in parallel without sharing installed
 services. Main-branch CI warms Linux dependency and fleet-fixture layers, native
 macOS Cargo caches, and the macOS test harnesses. The test harnesses don't embed
 the release version; they run against the actual tagged binaries. Cache misses
-rebuild from locked sources. Trivy, digest comparisons, signatures, provenance,
-and the signed install and recovery rehearsal still gate publication.
+rebuild from locked sources. The systemd gate runs the Go and Rust relay drain
+checks in separate network namespaces in parallel, then tests the installer and
+packaged units sequentially. Publication verifies all six image signatures in
+parallel. The signed install still runs with production defaults; only the
+installed test relay polls faster during the follow-up Connector probe.
+Trivy, digest comparisons, signatures, provenance, and signed recovery still
+gate publication.
 
 Aim for ten minutes with warm caches. Let CI finish on the `main` commit you plan
 to tag. Measure wall time from tag push to publication,

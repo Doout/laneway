@@ -87,12 +87,15 @@ verify_published() (
 write_published_images > published/image-digests.txt
 verify_published > settings
 grep -Fx "LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=sha256:$two" settings >/dev/null
-if (export REJECT_IMAGE=ghcr.io/doout/laneway-node-rust; verify_published) > settings 2> diagnostic; then
-  echo "publication accepted a node without a valid image signature" >&2
-  exit 1
-fi
-test ! -s settings
-grep -F 'image signature did not match' diagnostic >/dev/null || { cat diagnostic >&2; exit 1; }
+for image in laneway-controller-rust laneway-relay-rust laneway-exit-node-rust laneway-admin lane-edge-rust laneway-node-rust; do
+  if REJECT_IMAGE="ghcr.io/doout/$image" verify_published > settings 2> diagnostic; then
+    echo "publication accepted an invalid image signature: $image" >&2
+    exit 1
+  fi
+  test ! -s settings
+  grep -F "image signature did not match v0.0.9103: ghcr.io/doout/$image" diagnostic >/dev/null ||
+    { cat diagnostic >&2; exit 1; }
+done
 printf 'ghcr.io/doout/laneway-relay@sha256:%s\n' "$one" >> published/image-digests.txt
 if verify_published > settings 2> diagnostic; then
   echo "publication accepted an extra legacy runtime" >&2
