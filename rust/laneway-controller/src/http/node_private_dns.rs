@@ -24,14 +24,10 @@ pub(super) async fn handle(
         .extensions_mut()
         .remove::<CertificateDer<'static>>()
         .ok_or(AUTH)?;
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            S::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
         let peer = NodeCredential::from_verified_peer(cert.as_ref())?;

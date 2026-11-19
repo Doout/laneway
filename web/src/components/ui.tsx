@@ -1,6 +1,6 @@
 import { cloneElement, isValidElement, useId, type ButtonHTMLAttributes, type FormEvent, type ReactElement, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ChevronRight, Ellipsis, Search } from 'lucide-react'
+import { ChevronRight, Search } from 'lucide-react'
 import clsx from 'clsx'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'quiet' | 'danger'
@@ -69,10 +69,6 @@ export interface DataColumn<T> {
 export function DataTable<T>({ columns, rows, rowKey, rowClassName, empty }: { columns: DataColumn<T>[]; rows: T[]; rowKey: (row: T) => string; rowClassName?: (row: T) => string | undefined; empty?: ReactNode }) {
   if (!rows.length && empty) return <div className="data-empty">{empty}</div>
   return <div className="table-wrap"><table className="data-table"><thead><tr>{columns.map(column => <th key={column.key} className={column.align === 'end' ? 'align-end' : undefined}>{column.label}</th>)}</tr></thead><tbody>{rows.map(row => <tr key={rowKey(row)} className={rowClassName?.(row)}>{columns.map(column => <td key={column.key} data-label={column.label} className={column.align === 'end' ? 'align-end' : undefined}>{column.render(row)}</td>)}</tr>)}</tbody></table></div>
-}
-
-export function KebabButton({ label = 'Open row actions', onClick }: { label?: string; onClick?: () => void }) {
-  return <button className="icon-button" type="button" aria-label={label} onClick={onClick}><Ellipsis aria-hidden="true" size={18} /></button>
 }
 
 export function Section({ title, meta, action, children }: { title: string; meta?: ReactNode; action?: ReactNode; children: ReactNode }) {

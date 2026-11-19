@@ -121,14 +121,10 @@ pub(super) async fn handle(
         return Ok(reply);
     }
     let caller = credential(req.headers())?;
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            S::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     let query = req.uri().query();
     let read = match route {
         Route::List => list(query),

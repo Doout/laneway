@@ -34,18 +34,6 @@ type Config struct {
 	IdleTimeout       time.Duration
 }
 
-// Serve runs metrics and Go pprof handlers until ctx is cancelled.
-func Serve(ctx context.Context, config Config) error {
-	done, err := Start(ctx, config)
-	if err != nil {
-		return err
-	}
-	if done == nil {
-		return nil
-	}
-	return <-done
-}
-
 // Start binds the diagnostics listener synchronously and returns its completion
 // channel. A nil channel means diagnostics are disabled.
 func Start(ctx context.Context, config Config) (<-chan error, error) {

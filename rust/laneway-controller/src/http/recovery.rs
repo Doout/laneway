@@ -98,12 +98,7 @@ fn store_error(err: anyhow::Error) -> Failure {
     }
 }
 
-const CONTROLLER_BUSY: Failure = Failure(
-    S::SERVICE_UNAVAILABLE,
-    "ERROR_CODE_RESOURCE_EXHAUSTED",
-    "controller busy",
-    true,
-);
+const CONTROLLER_BUSY: Failure = crate::http::QUERY_BUSY;
 
 pub(super) async fn handle(
     req: Request<Incoming>,

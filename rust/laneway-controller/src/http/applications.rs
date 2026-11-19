@@ -68,12 +68,7 @@ impl<'a> Route<'a> {
     }
 }
 
-const BUSY: Failure = Failure(
-    S::SERVICE_UNAVAILABLE,
-    "ERROR_CODE_RESOURCE_EXHAUSTED",
-    "controller busy",
-    true,
-);
+const BUSY: Failure = crate::http::QUERY_BUSY;
 
 pub(super) async fn handle(
     req: Request<Incoming>,

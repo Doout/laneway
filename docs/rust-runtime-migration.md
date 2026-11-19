@@ -1,85 +1,30 @@
-# Rust runtime migration
+# Rust runtime guide
 
-Public source baseline: `acac2047329dd4331e60d7f1f21de6fa67247df3`.
-Target a fresh installation that runs Rust services from the start. Upgrading
-or rolling back to the old Go runtime is not a release requirement. The Go
-operator CLI and lab tools can still be used without running a Go server.
-Direct Docker builds of the Connector and Exit Node select Rust by default.
-The shared Go Dockerfile defaults to the one-shot operator CLI, with its Go
-controller and relay available only as explicit targets.
+Laneway runs its controller, relay, and node services in Rust. The one-shot
+operator CLI and some integration test peers still use Go.
 
-## Release handoff
+For deployment and day-to-day work, see [the Compose guide](../deploy/compose/README.md)
+and [Operations](operations.md). To run several tenants on one controller and
+relay, see [Shared Rust control plane](shared-tenant-control-plane.md).
 
-Fresh control planes, managed Linux nodes, and foreground Linux/macOS sessions
-select Rust. Before promoting to production, verify the following on the
-signed candidate:
+## Release checks
 
-1. Run the native release matrix on the release commit, including the Linux
-   systemd packet tests and the installed macOS helper on Intel and Apple
-   Silicon. Verify the published archive checksums and image signatures, then
-   install the signed candidate from empty state on the lab host.
-2. On the fresh deployment, verify HTTPS, Dispatch authorization, client
-   enrollment and connectivity, routes, certificate renewal and fleet
-   operations. Back up the Rust deployment and restore it to a separate empty
-   lab volume. Verify a Rust-to-Rust update from a previous signed release
-   when one is available. Keep one controller writing to each database.
-3. Test one isolated workload before promoting. Verify the recovery procedure
-   with the same Rust images that will serve the deployment.
+The release workflow builds native AMD64 and ARM64 archives and images. It
+scans and signs the images by digest and tests the signed Linux installer in
+a disposable environment. The install test checks HTTPS discovery, encrypted
+backup and restore, Connector enrollment and restart, and approved exit NAT.
 
-The tagged publish job now runs `integration/rust-release-install.sh` before
-creating the GitHub release. It installs the exact signed AMD64 archive using
-the release installer, verifies the running digest-pinned services and HTTPS
-discovery, and restores its encrypted backup into a separate, empty controller
-volume. It also redeems a one-time HTTPS invitation with the pinned Connector
-image, checks for a live controller lease and QUIC relay path, and restarts the
-Rust process with the same identity and no enrollment token. The gate also
-enrolls a fresh Docker Exit Node and verifies its forwarding and IPv4 NAT
-readiness after route approval. Download transport
-and the relay's public certificate are local to the disposable runner; release
-signature verification and image pulls are real.
-The same gate passed an ARM64 rehearsal using fixture signatures and local
-images; the actual tagged workflow is still required.
+Before promoting a release, test it on a separate deployment with the same
+OS and service manager as production. Check HTTPS, enrollment, routing,
+certificate renewal, and restore to an empty volume. Keep only one controller
+writing to each database.
 
-For a pinned test deployment, annotate the numeric release tag with the
-subject `Laneway pinned prerelease`. The workflow runs the same signing and
-fresh-install checks, then publishes it as a prerelease without setting it
-as Latest. Install by specifying that exact tag, not the latest release.
+Run `bash integration/rust-lab/installer-fresh.sh` on the marked lab to
+rehearse installation, update rollback, and root-token rotation with local
+images. That rehearsal does not verify release signatures.
 
-The isolated ARM64 installer rehearsal used fixture signatures and local
-images. The packaged host-tools install left no daemon or systemd units; the
-installer created an empty Rust deployment, verified authenticated inventory,
-generated a Rust shared-host exit invitation, and wrote an encrypted backup.
-Run `bash integration/rust-lab/installer-fresh.sh` on the marked lab to repeat.
-The same test updates the real lab services to a fixture release, checks
-that existing invitations survive, then starts a deliberately incompatible
-candidate and verifies that the previous controller state is available again.
-It also rotates the administrator root token on Rust, verifies rollback of a
-failed credential check, and resumes after an interrupted completion. The
-relay keeps serving discovery over lab HTTPS without being replaced.
-It exercises real Compose and encrypted recovery, but does not exercise live
-release signing and registry infrastructure.
-
-| Component | Starting point | Acceptance before switching the default |
-| --- | --- | --- |
-| Relay | Rust QUIC and TLS/TCP data relay, controller snapshots, TCP readiness probe | Mixed Go/Rust peers exchange packets, enforce revocation, and reconnect after restart. Exercise public HTTPS, ACME renewal, bootstrap discovery, console, and Dispatch OAuth on the shared port. |
-| Node, connector, exit | Rust Linux TUN daemon, routing, DNS configuration, local socket and relay fallback | Enroll and renew each role. Test allowed and denied traffic, health and topology reports, loss of route authority, exit NAT and DNS recovery after restart and uninstall. |
-| Controller | Go owns SQLite, PKI and management APIs | Verify the web console and Rust nodes on fresh deployments, including auth, grants, policy snapshots, enrollment, OAuth and backups. Go peers and fixture databases remain test references. |
-| Fleet features | Private DNS, updates, recovery, policy history, diagnostics, alerts and topology | Exercise each feature on a fresh Rust deployment through its UI/API and node consumer. |
-| Packaging and platforms | Go also provides the Docker plugin, platform-specific CLI/daemon entry points and readiness helpers | Verify signed install, Rust recovery, desktop local API and active service processes per platform. The one-shot operator CLI and test harnesses can stay in Go. |
-
-The tagged release workflow builds only the Rust runtime images:
-`ghcr.io/doout/laneway-controller-rust`, `ghcr.io/doout/laneway-relay-rust`,
-`ghcr.io/doout/laneway-node-rust`, `ghcr.io/doout/laneway-exit-node-rust`,
-and `ghcr.io/doout/lane-edge-rust`. Each release job targets AMD64 and ARM64,
-scans its build, signs its immutable digest, and adds it to the signed image
-manifest. The Go administrator image remains a one-shot operator tool. New
-releases do not publish the old Go images or archive their daemons and systemd
-units. Mixed-language packet tests build Go peers from source. Existing
-installations are not changed by this workflow. A local build is not a signed
-release.
-The local ARM64 lab built all four new image targets and verified that
-their non-root Rust binaries reported the pinned build version. The tagged
-AMD64 build, signing, and publication were not exercised locally.
+For a pinned test deployment, check that GitHub marks the release as a
+prerelease and not Latest. Install the exact signed tag.
 
 ## Linux managed nodes
 
@@ -218,27 +163,6 @@ gh run view RUN_ID --repo Doout/laneway --json jobs \
   --jq '.jobs[] | [.name, .startedAt, .completedAt, .conclusion] | @tsv'
 ```
 
-The isolated ARM64 systemd VM passed the archive gate for
-`0.0.0-fleet-rust-lab`. The packaged Rust node exchanged encrypted traffic
-with a Go peer over QUIC and TCP using both controller/relay pairs. The tests
-also covered policy withdrawal, partition recovery, and NAT and revocation
-after an invitation through Rust HTTPS. This archive was unsigned; it did not
-exercise the fleet updater or a signed release.
-
-The disposable native AMD64 systemd VM passed the same three phases using
-the exact unsigned `0.0.9102` archive above. The packaged peers exercised
-QUIC and full-MTU TCP, policy changes, partition drain and recovery, and
-exit NAT through both controller/relay pairs. The Rust HTTPS invitation
-phase verified one-use enrollment, NAT, revocation, and carrier cleanup.
-The isolated QUIC listener explicitly opts into non-loopback binding;
-the controller still refuses it without the opt-in and node trust inputs.
-
-For the compatibility baseline, Cosign 3.1.3 verified the published
-`v0.2.72` manifest under the pinned release workflow identity. The ARM64
-archive matched its signed checksum, and asking for the `v0.2.71` identity
-rejected that signature. The published archive contains Go runtimes only;
-it is not a Rust updater test.
-
 ### Fresh Rust Compose bootstrap
 
 The prepared Compose files can initialize an empty controller volume without
@@ -261,110 +185,8 @@ through HTTPS, rejected a second bootstrap, and restored the encrypted backup
 into a separate volume. This used local unsigned images and a lab certificate,
 not a signed install or public ACME validation.
 
-### Historical Compose cutover rehearsal
-
-The packaged `deploy/compose/compose.rust.yaml` is an opt-in overlay for an
-**existing** standard Compose stack. It preserves the service names, ports,
-existing controller database and ACME volume. The Go operator CLI remains
-available. The Rust controller requires `--listen-on-network` for non-loopback
-TCP or UDP and requires the node issuer and client CA there. It cannot start
-in that mode with insecure application callbacks enabled.
-
-Rehearse on an isolated, restored copy first. Place `checksums.txt`,
-`checksums.sigstore.json`, `image-digests.txt`, and `bootstrap-artifacts.toml`
-from the same tagged release in a staging directory. From the trusted
-package or checkout, run
-`sh deploy/compose/verify-rust-release.sh vVERSION METADATA_DIRECTORY`.
-The verifier checks the release identity and each immutable image signature
-before printing all four `LANEWAY_RUST_*` settings. It does not read or change
-the deployment. Copy those settings into the lab's `.env`; keep the Go
-`LANEWAY_VERSION` and digests unchanged. Stage `compose.rust.yaml`,
-`prepare-rust.py`, and `verify-rust-release.sh` as protected, root-owned
-files from the same verified package in the lab's Compose directory. Then
-run `sudo python3 prepare-rust.py --release-metadata /absolute/path/to/METADATA_DIRECTORY`
-(Python 3.11+). It rechecks the signature, confirms the Rust image pins in
-`.env` match, and stages only the four client archives for that Rust release in
-discovery. It does not replace the Go configuration or its advertised
-downloads. The separate `--lab` mode reuses the Go downloads for an unsigned,
-isolated rehearsal only.
-The relay uses a Compose alias matching the existing controller certificate
-name. Custom controller settings are rejected rather than silently dropped.
-
-Check the assembled services with `docker compose -f compose.yaml -f compose.rust.yaml config`.
-Take a database backup while Go is still serving and verify a restore.
-Disable the Go service-certificate renewal timer for the rehearsal; the
-overlay uses native renewal and leaves the seed files available for rollback.
-Stop the relay and controller with the base Compose file before starting
-them with the overlay. Keep only one controller writer. To roll back,
-stop the Rust services, then start with the base file. Do not remove volumes.
-If a schema upgrade was applied, restore the prior backup before restarting
-a Go controller that cannot read that schema. Confirm the Go seeds are
-still valid and restore its renewal timer.
-If the optional `exit-node` is running, stop it first with its profile
-enabled. Start it after the replacement controller and relay are healthy,
-using the same configuration and state volume. Use the same order on
-rollback, and check a client packet round trip before reopening traffic.
-
-The existing Go installer does not select this overlay. For an active Rust
-stack, use the `laneway-control` and `recovery.sh` scripts from the same
-verified package. Run `sudo laneway-control --rust readiness METADATA_DIRECTORY`
-to check the signed digests against the rendered Compose config, the image
-IDs actually running, health, authenticated inventory and public HTTPS
-discovery. This check is read-only and creates no production approval marker.
-It does not verify external firewall reachability, an off-host backup, or
-rollback.
-
-Use `laneway-control --rust status` for routine inventory and
-`sudo laneway-control --rust backup NAME.age` for a backup. It takes an
-online copy using the running controller, includes the Rust Compose inputs, and puts validated current
-controller and relay certificates into the encrypted bundle as restore seeds
-without changing the originals. The public ACME cache is not archived.
-The updated wrapper refuses Go lifecycle commands while any Rust controller,
-relay, or exit service is running in the project, even if the operator omits
-`--rust`. The packaged Go upgrader checks before changing deployment files.
-This guard does not block maintenance just because the overlay is staged; it
-allows the Go commands again after a deliberate rollback.
-
-On an empty, stopped deployment with the verified Rust images already
-installed, use `sudo laneway-control --rust restore BUNDLE.age --identity
-AGE_IDENTITY_FILE`. The restore requires a new database target and checks
-that every archived file has a checksum. Version 2 is Rust-only; legacy
-version 1 bundles still use the Go restore command. Reissue service
-credentials before startup if the restored seeds have expired.
-
-The isolated gate is `integration/rust-lab/compose-cutover.sh`; set
-`LANEWAY_TEST_RUST_RECOVERY=1` with `age` and `age-keygen` available to include
-authenticated status, online backup and fresh-volume restore. It uses local
-lab images, not a published signed release.
-The ARM64 run used the actual Compose files and the same SQLite volume. It
-replaced Go with Rust, used the Go admin CLI to write another network,
-checked the console and bootstrap discovery over HTTPS, and then confirmed
-that Go could read both networks after rollback. The run did not change the
-database schema.
-The fixture uses an offline signature stub and checks that Rust advertises
-all four candidate downloads over HTTPS, rejects mismatched image pins, and
-leaves Go's bootstrap files unchanged. A real signed Go-only release is not
-a Rust cutover candidate.
-With recovery enabled on ARM64, the gate verified authenticated status,
-rejected an image mismatch, and restored both networks and the refreshed TLS
-seeds into a new project. The original volume was still usable for Go rollback.
-
-For the optional exit packet gate, add `LANEWAY_TEST_COMPOSE_EXIT=1` and set
-`LANEWAY_TEST_COMPOSE_NETPROBE` to an absolute path to a native static
-`netprobe` binary (`CGO_ENABLED=0 go -C go build -o /tmp/netprobe ./integration/netprobe`).
-Load `alpine:3.22` and build the `go-exit` target from
-`deploy/containers/Dockerfile.exit-node` as
-`laneway-go-exit:compose-cutover-lab` with version `0.0.9100`. The fixture
-places the UDP target on a separate internal bridge so a Go client can reach
-it only through the approved exit. It checks the NAT source address and
-keeps the exit's identity, credentials, configuration, and volume constant
-across Go, Rust, and rollback. It does not route to the Internet or test DNS.
-On ARM64 the client received a UDP reply with the expected NAT source in all
-three stages, without re-enrolling or changing its selected exit.
-With both optional gates enabled, the Rust exit remained healthy during the
-encrypted backup. A fresh Rust controller restored the exit registration,
-certificate, key, and configuration before the original stack rolled back to
-Go and forwarded traffic again.
+Use [the Compose guide](../deploy/compose/README.md) for readiness checks,
+online backup, and restore to a new volume.
 
 ## First Linux lab run
 
@@ -791,24 +613,6 @@ bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:rust-migration-
 bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:rust-migration-lab tcp-fallback
 ```
 
-Historical Go-to-Rust cutover tests are available for reference only; they are
-not release requirements.
-
-```sh
-docker build -f deploy/containers/Dockerfile.connector -t lane-edge:go-migration-lab .
-docker build --target rust-connector -f deploy/containers/Dockerfile.connector \
-  -t lane-edge:rust-migration-lab .
-bash integration/rust-lab/connector-cutover.sh
-bash integration/rust-lab/connector-cutover.sh lane-edge:go-migration-lab lane-edge:rust-migration-lab tcp-fallback
-```
-
-The cutover gate uses an isolated controller and disposable enrollment tokens
-to verify a Go-to-Rust swap, offline validation, rollback, and first start with
-the Rust-backed image. For existing identity it compares the original node ID
-and the bytes of every rollback file across both image swaps. It checks
-QUIC and forced TCP fallback separately and verifies that local status
-reports the running image's build version.
-
 ### Durable Linux exit gateway
 
 On an already enrolled Rust Linux node with a dedicated TUN and a known
@@ -845,28 +649,6 @@ runs as a non-root user with only `NET_ADMIN`; Compose invokes the Rust daemon's
 `healthcheck` subcommand for readiness. The Go CLI is used only for one-shot
 administration.
 
-Historical Go-to-Rust cutover experiments are not release requirements. The
-following gate checks the legacy NAT profile and its existing state layout:
-
-```sh
-docker build -f deploy/containers/Dockerfile.exit-node --target go-exit --build-arg VERSION=go-exit-lab \
-  -t laneway-go-exit:migration-lab .
-docker build -f deploy/containers/Dockerfile.exit-node --target rust-exit \
-  --build-arg VERSION=rust-exit-lab -t laneway-rust-exit:migration-lab .
-bash integration/rust-lab/exit-cutover.sh
-```
-
-The gate keeps the controller approval and client selection in place during the
-Go → Rust → Go image swaps. It checks the IPv4 MTU, real NAT with and without
-UDP on the gateway's relay link, a controller health report, graceful cleanup,
-and that the config, identity and state files remain unchanged.
-For an operator-managed cutover, retain the previous image digest and stop the
-old container before starting the replacement against the same mounts. Run
-`lanewayd-rs --exit-config /etc/laneway/exit-node.toml --check-config` in the new
-image with the original mounts to validate the configuration without networking.
-
-This Docker profile uses NAT and enables direct paths. The shared-host
-ephemeral Exit uses the separate native WireGuard process described below.
 
 ### Ephemeral exit control
 
@@ -950,23 +732,6 @@ This variant puts the actual installer veth, NAT and Docker forwarding rules
 inside a dedicated host namespace and proves that the installed cleanup unit
 removes them after revocation without changing unrelated rules or the VM's
 global forwarding setting. It requires the iptables nftables backend.
-
-### Verified on the local ARM64 Linux VM
-
-- Direct and relayed IPv4/IPv6 packets between the Go and Rust node binaries,
-  including exit forwarding and blocked traffic.
-- Kernel route, firewall and DNS ownership recovery, including SIGTERM cleanup.
-- Go controller bootstrap of the Rust node, an approved route, traffic denial
-  after ACL removal and certificate revocation, and authority expiry on outage.
-- Packaged Rust node running non-root with TUN and a healthy status socket;
-  Docker stop returned exit code zero.
-- Packaged Rust shared-host Exit under Ubuntu 24.04/systemd 255: QUIC and
-  TLS/TCP fallback with both Go and Rust controllers/relays, live ACLs, scoped
-  NAT and established-flow drain, route withdrawal, identity revocation, and
-  kernel state cleanup.
-
-Repeat on the dedicated host using its architecture and service manager before
-any production canary. These results do not establish private fleet parity.
 
 ## Controller inventory
 

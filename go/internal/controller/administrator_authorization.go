@@ -208,7 +208,3 @@ func decisionObjectMatches(decision adminauth.Decision, objectID identity.ID, op
 	}
 	return nil
 }
-
-func isAdministratorAuthorizationFailure(err error) bool {
-	return errors.Is(err, ErrCredentialInvalid) || errors.Is(err, ErrSessionInvalid) || errors.Is(err, ErrPermissionDenied)
-}

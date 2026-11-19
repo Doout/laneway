@@ -10,7 +10,6 @@ import (
 	"github.com/Doout/laneway/go/internal/packetbuffer"
 	"github.com/Doout/laneway/go/internal/pathmanager"
 	"github.com/Doout/laneway/go/internal/protocol"
-	"github.com/Doout/laneway/go/internal/transport"
 )
 
 var (
@@ -193,17 +192,4 @@ func (p *RelayPath) Health(peer pathmanager.PeerID) pathmanager.PathHealth {
 
 func (p *RelayPath) Close() error { return p.carrier.Close() }
 
-type QUICCarrier struct{ Conn *transport.Conn }
-
-func (c QUICCarrier) SendPacket(_ context.Context, packet []byte) error {
-	return c.Conn.SendDatagram(packet)
-}
-func (c QUICCarrier) ReceivePacket(ctx context.Context) ([]byte, *packetbuffer.Buffer, error) {
-	packet, err := c.Conn.ReceiveDatagram(ctx)
-	return packet, nil, err
-}
-func (c QUICCarrier) Done() <-chan struct{} { return c.Conn.Context().Done() }
-func (c QUICCarrier) Close() error          { return c.Conn.Close() }
-
 var _ pathmanager.PacketPath = (*RelayPath)(nil)
-var _ RelayCarrier = QUICCarrier{}

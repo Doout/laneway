@@ -75,13 +75,6 @@ type Authorizer interface {
 	Authorize(context.Context, identity.NodeIdentity) (Authorization, error)
 }
 
-// AuthorizerFunc adapts a function to Authorizer.
-type AuthorizerFunc func(context.Context, identity.NodeIdentity) (Authorization, error)
-
-func (f AuthorizerFunc) Authorize(ctx context.Context, id identity.NodeIdentity) (Authorization, error) {
-	return f(ctx, id)
-}
-
 // StaticAuthorizer is an immutable-by-convention assignment table suitable
 // for static deployments and tests. Do not mutate it while a server is using
 // it. Returned assignments are defensive copies.

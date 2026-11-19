@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { Globe, Link2, MonitorDot, Network, TriangleAlert } from 'lucide-react'
+import { Globe, MonitorDot, Network, TriangleAlert } from 'lucide-react'
 import { Button, Callout, EmptyState, FilterSelect, Toolbar } from '../../components/ui'
 import type { ControllerACLRule, ControllerAuditEvent, ControllerCertificate, ControllerNode, ControllerRoute } from '../../lib/control-plane'
 
@@ -171,7 +171,7 @@ export function Missing({ title, back }: { title: string; back: string }) {
 }
 
 export type RecordVisibility = 'current' | 'all'
-export type NetworkWorkspaceView = 'networks' | 'nodes' | 'connectivity' | 'map'
+export type NetworkWorkspaceView = 'networks' | 'nodes' | 'map'
 export const subnetRouterCapability = 1 << 3
 export const exitNodeCapability = 1 << 4
 export const emptyNodes: ControllerNode[] = []
@@ -201,12 +201,11 @@ export function DashboardEmpty({ icon, title, description }: { icon: ReactNode; 
   return <div className="dashboard-empty"><span aria-hidden="true">{icon}</span><div><strong>{title}</strong>{description ? <p>{description}</p> : null}</div></div>
 }
 
-export function NetworkWorkspaceTabs({ view, networks, nodes, connections }: { view: NetworkWorkspaceView; networks: number; nodes: number; connections?: number }) {
+export function NetworkWorkspaceTabs({ view, networks, nodes }: { view: NetworkWorkspaceView; networks: number; nodes: number }) {
   const items: Array<{ id: NetworkWorkspaceView; label: string; count: ReactNode; icon: ReactNode }> = [
     { id: 'networks', label: 'Networks', count: networks, icon: <Network size={15} /> },
     { id: 'nodes', label: 'Nodes', count: nodes, icon: <MonitorDot size={15} /> },
     { id: 'map', label: 'Map', count: null, icon: <Globe size={15} /> },
-    { id: 'connectivity', label: 'Connectivity', count: connections ?? '—', icon: <Link2 size={15} /> },
   ]
   return <nav className="network-workspace-tabs" aria-label="Network workspace views">{items.map((item) => <Link key={item.id} to={item.id === 'networks' ? '/networks' : `/networks?view=${item.id}`} aria-current={view === item.id ? 'page' : undefined}><span aria-hidden="true">{item.icon}</span><span>{item.label}</span>{item.count !== null && <em aria-hidden="true">{item.count}</em>}</Link>)}</nav>
 }

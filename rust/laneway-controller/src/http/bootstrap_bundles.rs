@@ -31,12 +31,7 @@ const UNAVAILABLE: Failure = Failure(
     "bootstrap service temporarily unavailable",
     true,
 );
-const BUSY: Failure = Failure(
-    S::SERVICE_UNAVAILABLE,
-    "ERROR_CODE_RESOURCE_EXHAUSTED",
-    "controller busy",
-    true,
-);
+const BUSY: Failure = crate::http::QUERY_BUSY;
 
 #[derive(Default)]
 pub(super) struct Bundles(Mutex<HashMap<String, Entry>>);

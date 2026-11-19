@@ -104,14 +104,3 @@ func (r *Rendezvous) Lookup(requester identity.AuthenticatedIdentity, peer ident
 	}
 	return append([]Candidate(nil), record.candidates...), nil
 }
-
-func (r *Rendezvous) Remove(auth identity.AuthenticatedIdentity) error {
-	node, err := authenticatedNode(auth)
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	delete(r.records, rendezvousKey{network: node.NetworkID, node: node.NodeID})
-	r.mu.Unlock()
-	return nil
-}

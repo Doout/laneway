@@ -49,7 +49,7 @@ The carrier preserves order and has head-of-line blocking. Implementations MUST
 prefer a healthy direct or QUIC relay path and fully stop the previous packet
 pump before switching carriers.
 
-TLS authenticates each endpoint, but forwarding authority comes only from the
-certificate identity, authorization snapshot, negotiated handles, and packet
-policy—not the socket address. Payloads remain visible to the relay unless the
-separate end-to-end packet capability is negotiated.
+TLS authenticates each endpoint. Forwarding depends on the certificate
+identity, authorization snapshot, negotiated handles, and packet policy.
+The socket address does not grant access. The relay can read payloads unless
+the peers negotiate the end-to-end packet capability.

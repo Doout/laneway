@@ -1,5 +1,4 @@
-//! The lab listener exposes authenticated management operations. Never dispatch to
-//! the unrestricted operator commands, including when a credential is absent.
+//! The HTTP listener requires credentials for management. It never runs local operator commands.
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{HeaderMap, Method, Request, Response, StatusCode, header};
@@ -116,6 +115,12 @@ const INTERNAL: Failure = Failure(
     StatusCode::INTERNAL_SERVER_ERROR,
     "ERROR_CODE_INTERNAL",
     "internal controller error",
+    true,
+);
+const QUERY_BUSY: Failure = Failure(
+    StatusCode::SERVICE_UNAVAILABLE,
+    "ERROR_CODE_RESOURCE_EXHAUSTED",
+    "controller busy",
     true,
 );
 fn malformed(detail: &'static str) -> Failure {
@@ -525,14 +530,7 @@ async fn dispatch(
     // Keep this permit in the blocking closure even if the socket disappears.
     let permit = Arc::clone(&state.queries)
         .try_acquire_owned()
-        .map_err(|_| {
-            Failure(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "ERROR_CODE_RESOURCE_EXHAUSTED",
-                "controller busy",
-                true,
-            )
-        })?;
+        .map_err(|_| QUERY_BUSY)?;
     if discovery {
         let v = tokio::task::spawn_blocking(move || {
             let _permit = permit;

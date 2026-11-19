@@ -168,12 +168,7 @@ struct Auth {
     root: Option<Arc<RootCredential>>,
 }
 
-const CONTROLLER_BUSY: Failure = Failure(
-    S::SERVICE_UNAVAILABLE,
-    "ERROR_CODE_RESOURCE_EXHAUSTED",
-    "controller busy",
-    true,
-);
+const CONTROLLER_BUSY: Failure = crate::http::QUERY_BUSY;
 
 impl Auth {
     fn caller(&self) -> Caller<'_> {

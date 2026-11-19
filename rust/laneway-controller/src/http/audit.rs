@@ -96,14 +96,10 @@ pub(super) async fn handle(
     }
     let auth = credential(req.headers())?;
     let query = route.query(req.uri().query());
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            S::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     let (data, meta) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
         let (page, meta) = match auth {

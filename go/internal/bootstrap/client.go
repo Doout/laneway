@@ -84,18 +84,6 @@ func fetch(ctx context.Context, client *http.Client, discoveryURL string, now ti
 	return Decode(response.Body, now)
 }
 
-func OriginHost(authority string) (string, error) {
-	discoveryURL, err := DiscoveryURL(authority)
-	if err != nil {
-		return "", err
-	}
-	parsed, err := url.Parse(discoveryURL)
-	if err != nil {
-		return "", err
-	}
-	return parsed.Hostname(), nil
-}
-
 // DownloadArtifact writes an authenticated release artifact without
 // overwriting any existing path. It never extracts or executes the bytes.
 func DownloadArtifact(ctx context.Context, artifact Artifact, destination string) error {

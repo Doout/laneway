@@ -233,10 +233,10 @@ Traffic-selector requests use a canonical safe subset of protobuf JSON:
 snake_case field names, named protocol enums, padded standard base64, and
 uint32 JSON integers or quoted ASCII decimal digits. Quoted integers are
 normalized before transmission, and every canonical selector returned by the
-controller round-trips losslessly. The controller's raw HTTP parser is more
-permissive—for example, it can accept lowerCamel aliases and other protobuf
-JSON spellings—but those forms deliberately have no browser SDK path. Relay
-input similarly uses the canonical ASCII-DNS/numeric-IP browser subset. It
+controller round-trips losslessly. The controller's raw HTTP parser accepts
+lowerCamel aliases and other protobuf JSON spellings. The browser SDK does
+not accept those forms. Relay input uses the canonical ASCII DNS and numeric
+IP subset in the browser. It
 accepts non-mapped IPv6 with an embedded dotted IPv4 tail, rejects IPv4-mapped
 IPv6 and zones, and lets the controller normalize additional non-ASCII DNS
 spellings outside that subset. Canonical responses still round-trip.

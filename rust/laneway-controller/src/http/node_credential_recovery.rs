@@ -61,14 +61,10 @@ pub(super) async fn handle(
     let der = STANDARD
         .decode(form.pkcs10_csr_der)
         .map_err(|_| malformed("invalid PKCS#10 encoding"))?;
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            S::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     let issuer = state.issuer.ok_or(INTERNAL)?;
     let (cancel, _request_alive) = tokio::sync::oneshot::channel::<()>();
     let chain = tokio::task::spawn_blocking(move || {

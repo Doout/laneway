@@ -528,11 +528,23 @@ jobs:
           tag_commit=$(git rev-parse --verify "$tag_ref^{commit}")
           test "$tag_commit" = "$GITHUB_SHA"
           test "$tag_commit" = "$(git rev-parse HEAD)"
-          tag_type=$(git cat-file -t "$tag_ref")
-          tag_subject=$(git for-each-ref --format='%(contents:subject)' "$tag_ref")
+          # Checkout can point the local tag ref at the peeled commit. Read the
+          # authoritative tag object so pinned releases never publish as Latest.
+          tag_object=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object | [.type, .sha] | @tsv')
+          IFS=$'\t' read -r tag_type tag_sha <<< "$tag_object"
           flags=()
-          if [[ $tag_type == tag && $tag_subject == 'Laneway pinned prerelease' ]]; then
-            flags+=(--prerelease --latest=false)
-          fi
+          case "$tag_type" in
+            tag)
+              annotation=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_sha")
+              jq -e --arg tag "$GITHUB_REF_NAME" --arg commit "$tag_commit" \
+                '.tag == $tag and .object.type == "commit" and .object.sha == $commit' <<< "$annotation" >/dev/null
+              tag_subject=$(jq -r '.message | split("\n")[0]' <<< "$annotation")
+              if [[ $tag_subject == 'Laneway pinned prerelease' ]]; then
+                flags+=(--prerelease --latest=false)
+              fi
+              ;;
+            commit) test "$tag_sha" = "$tag_commit" ;;
+            *) exit 1 ;;
+          esac
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${flags[@]}"
