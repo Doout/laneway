@@ -100,7 +100,7 @@ impl PublicHttps {
         Ok(())
     }
 
-    async fn handle(&self, request: Request<Incoming>, peer: IpAddr) -> Reply {
+    async fn handle(&self, mut request: Request<Incoming>, peer: IpAddr) -> Reply {
         let head = request.method() == Method::HEAD;
         let uri = request.uri();
         if uri.scheme().is_some()
@@ -114,7 +114,10 @@ impl PublicHttps {
         };
         let peer = peer.to_canonical();
         if let Some(platform) = &self.platform
-            && matches!(uri.path(), "/" | "/tenants")
+            && matches!(
+                uri.path(),
+                "/" | "/tenants" | "/platform/sign-in" | "/platform/sign-out"
+            )
         {
             if !self
                 .platform_limit
@@ -179,6 +182,13 @@ impl PublicHttps {
                 head,
             );
         }
+        if self.platform.is_some() {
+            let cookies = platform_cookies(request.headers(), false);
+            request.headers_mut().remove(header::COOKIE);
+            for value in cookies {
+                request.headers_mut().append(header::COOKIE, value);
+            }
+        }
         if !matches!(
             *request.method(),
             Method::GET
@@ -206,8 +216,8 @@ impl PublicHttps {
         let (parts, body) = request.into_parts();
         let path = parts.uri.path();
         match (&parts.method, path) {
-            (&Method::GET, "/") => {}
-            (&Method::POST, "/tenants") => {
+            (&Method::GET, "/" | "/platform/sign-in") => {}
+            (&Method::POST, "/tenants" | "/platform/sign-in" | "/platform/sign-out") => {
                 let mut origins = parts.headers.get_all(header::ORIGIN).iter();
                 let expected = format!("https://{}", self.server_name);
                 if origins.next().and_then(|origin| origin.to_str().ok()) != Some(expected.as_str())
@@ -227,18 +237,15 @@ impl PublicHttps {
         let mut outgoing = client
             .request(parts.method, format!("{LOCAL}{path}"))
             .body(body);
-        for key in [header::AUTHORIZATION, header::CONTENT_TYPE] {
-            let mut values = parts.headers.get_all(&key).iter();
-            if let Some(value) = values.next() {
-                if values.next().is_some() {
-                    return Err(S::BAD_REQUEST);
-                }
-                let mut value = value.clone();
-                if key == header::AUTHORIZATION {
-                    value.set_sensitive(true);
-                }
-                outgoing = outgoing.header(key, value);
+        for value in platform_cookies(&parts.headers, true) {
+            outgoing = outgoing.header(header::COOKIE, value);
+        }
+        let mut types = parts.headers.get_all(header::CONTENT_TYPE).iter();
+        if let Some(value) = types.next() {
+            if types.next().is_some() {
+                return Err(S::BAD_REQUEST);
             }
+            outgoing = outgoing.header(header::CONTENT_TYPE, value.clone());
         }
         if post {
             outgoing = outgoing.header(header::ORIGIN, LOCAL);
@@ -354,6 +361,32 @@ impl PublicHttps {
         *reply.headers_mut() = headers;
         Ok(reply)
     }
+}
+
+fn platform_cookies(headers: &HeaderMap, only_platform: bool) -> Vec<header::HeaderValue> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|raw| {
+            let pairs = raw
+                .to_str()
+                .ok()?
+                .split(';')
+                .map(str::trim)
+                .filter(|pair| {
+                    pair.split_once('=')
+                        .is_some_and(|(name, _)| name == "__Host-laneway-platform")
+                        == only_platform
+                })
+                .collect::<Vec<_>>();
+            if pairs.is_empty() {
+                return None;
+            }
+            let mut value: header::HeaderValue = pairs.join("; ").parse().ok()?;
+            value.set_sensitive(true);
+            Some(value)
+        })
+        .collect()
 }
 
 async fn bounded_response(mut upstream: reqwest::Response, limit: usize) -> Result<Bytes> {

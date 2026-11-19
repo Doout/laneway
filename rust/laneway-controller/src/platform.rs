@@ -1,6 +1,5 @@
 //! Opt-in operator plane. No instance HTTP API is mounted on this listener.
 use anyhow::{Context, Result, ensure};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
     Method, Request, Response, StatusCode,
@@ -22,14 +21,17 @@ use std::{
     net::SocketAddr,
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use subtle::ConstantTimeEq;
 use tokio::{net::TcpListener, sync::Semaphore, time::timeout};
 
 const USAGE: &str = "usage: laneway-controller platform init STATE_DIR | serve STATE_DIR ACTIVE_MANIFEST 127.0.0.1:PORT | stage STATE_DIR ACTIVE_MANIFEST SLUG PROVISION_JSON";
 const LIMIT: u64 = 262_144;
+const SESSION_AGE: Duration = Duration::from_secs(8 * 60 * 60);
+const COOKIE: &str = "__Host-laneway-platform";
+const SIGN_IN: &str = "/platform/sign-in";
 
 pub fn command(args: impl Iterator<Item = OsString>) -> Result<()> {
     let args: Vec<_> = args.collect();
@@ -76,6 +78,7 @@ struct State {
     directory: PathBuf,
     manifest: PathBuf,
     auth_digest: [u8; 32],
+    sessions: Mutex<BTreeMap<[u8; 32], Instant>>,
 }
 
 impl State {
@@ -103,6 +106,7 @@ impl State {
             directory,
             manifest: manifest.canonicalize()?,
             auth_digest: Sha256::digest(credential.as_bytes()).into(),
+            sessions: Mutex::default(),
         };
         load_manifest(&state.manifest)?;
         state.db()?;
@@ -118,20 +122,59 @@ impl State {
         Ok(db)
     }
 
-    fn authorized(&self, header: Option<&str>) -> bool {
-        let Some(encoded) = header.and_then(|value| value.strip_prefix("Basic ")) else {
-            return false;
-        };
-        if encoded.len() > 128 {
-            return false;
-        }
-        let Ok(decoded) = STANDARD.decode(encoded) else {
-            return false;
-        };
-        let decoded = zeroize::Zeroizing::new(decoded);
-        let actual: [u8; 32] = Sha256::digest(decoded.as_slice()).into();
+    fn valid_password(&self, password: &str) -> bool {
+        let candidate = zeroize::Zeroizing::new(format!("operator:{password}"));
+        let actual: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
         bool::from(self.auth_digest.ct_eq(&actual))
     }
+
+    fn session(&self, token: Option<[u8; 32]>, revoke: bool, now: Instant) -> bool {
+        let (Some(token), Ok(mut sessions)) = (token, self.sessions.lock()) else {
+            return false;
+        };
+        sessions.retain(|_, expires| *expires > now);
+        if revoke {
+            sessions.remove(&token).is_some()
+        } else {
+            sessions.contains_key(&token)
+        }
+    }
+
+    fn start_session(&self, previous: Option<[u8; 32]>, now: Instant) -> Result<String> {
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).map_err(|error| anyhow::anyhow!("{error}"))?;
+        let token = hex::encode(random);
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session lock"))?;
+        sessions.retain(|key, expires| Some(*key) != previous && *expires > now);
+        if sessions.len() >= 64
+            && let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, expires)| *expires)
+                .map(|(key, _)| *key)
+        {
+            sessions.remove(&oldest);
+        }
+        sessions.insert(Sha256::digest(token.as_bytes()).into(), now + SESSION_AGE);
+        Ok(token)
+    }
+}
+
+fn session_key(headers: &hyper::HeaderMap) -> Option<[u8; 32]> {
+    let mut values = headers
+        .get_all("cookie")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            (name == COOKIE).then_some(value)
+        });
+    let token = values.next()?;
+    (values.next().is_none() && token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| Sha256::digest(token.as_bytes()).into())
 }
 
 fn read_limited(path: &Path, limit: u64) -> Result<Vec<u8>> {
@@ -368,23 +411,62 @@ async fn response(
     host: Arc<str>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let header = |key| req.headers().get(key).and_then(|v| v.to_str().ok());
+    let key = session_key(req.headers());
+    let now = Instant::now();
+    let signed_in = state.session(key, false, now);
     let mut res = if header("host") != Some(host.as_ref()) {
         reply(
             StatusCode::BAD_REQUEST,
             "Use the configured loopback address.",
         )
-    } else if !state.authorized(header("authorization")) {
-        let mut value = reply(
-            StatusCode::UNAUTHORIZED,
-            "Platform operator authentication required.",
-        );
-        value.headers_mut().insert(
-            "www-authenticate",
-            hyper::header::HeaderValue::from_static("Basic realm=\"Laneway Platform\""),
-        );
-        value
+    } else if req.method() == Method::POST
+        && (req.headers().get_all("origin").iter().count() != 1
+            || header("origin") != Some(format!("http://{host}").as_str()))
+    {
+        reply(StatusCode::FORBIDDEN, "Submit from the Platform console.")
     } else {
         match (req.method(), req.uri().path()) {
+            (&Method::GET, SIGN_IN) => {
+                if signed_in {
+                    redirect("/")
+                } else {
+                    sign_in(false)
+                }
+            }
+            (&Method::POST, SIGN_IN)
+                if header("content-type") == Some("application/x-www-form-urlencoded") =>
+            {
+                let body = timeout(
+                    Duration::from_secs(3),
+                    Limited::new(req.into_body(), 512).collect(),
+                )
+                .await;
+                let Ok(Ok(body)) = body else {
+                    return Ok(reply(StatusCode::BAD_REQUEST, "Invalid request body."));
+                };
+                let body = body.to_bytes();
+                let mut fields = form_urlencoded::parse(&body);
+                let valid = matches!((fields.next(), fields.next(), fields.next()),
+                    (Some((user, name)), Some((pass, password)), None)
+                        if user == "username" && name == "operator" && pass == "password"
+                            && state.valid_password(&password));
+                if !valid {
+                    sign_in(true)
+                } else {
+                    match state.start_session(key, now) {
+                        Ok(token) => with_session_cookie(redirect("/"), &token, SESSION_AGE),
+                        Err(_) => reply(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Could not start a session.",
+                        ),
+                    }
+                }
+            }
+            (&Method::POST, "/platform/sign-out") => {
+                state.session(key, true, now);
+                with_session_cookie(redirect(SIGN_IN), "", Duration::ZERO)
+            }
+            (&Method::GET, "/") | (&Method::POST, "/tenants") if !signed_in => redirect(SIGN_IN),
             (&Method::GET, "/") => {
                 match tokio::task::spawn_blocking(move || directory(&state)).await {
                     Ok(Ok(html)) => reply(StatusCode::OK, html),
@@ -395,8 +477,7 @@ async fn response(
                 }
             }
             (&Method::POST, "/tenants")
-                if header("origin") == Some(format!("http://{host}").as_str())
-                    && header("content-type") == Some("application/x-www-form-urlencoded") =>
+                if header("content-type") == Some("application/x-www-form-urlencoded") =>
             {
                 let Ok(Ok(body)) = timeout(
                     Duration::from_secs(3),
@@ -444,10 +525,75 @@ async fn response(
     Ok(res)
 }
 
+fn redirect(path: &'static str) -> Response<Full<Bytes>> {
+    let mut result = reply(StatusCode::SEE_OTHER, "");
+    result
+        .headers_mut()
+        .insert("location", hyper::header::HeaderValue::from_static(path));
+    result
+}
+
+fn with_session_cookie(
+    mut response: Response<Full<Bytes>>,
+    token: &str,
+    age: Duration,
+) -> Response<Full<Bytes>> {
+    let mut value: hyper::header::HeaderValue = format!(
+        "{COOKIE}={token}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Strict",
+        age.as_secs()
+    )
+    .parse()
+    .expect("generated cookie header");
+    value.set_sensitive(true);
+    response.headers_mut().insert("set-cookie", value);
+    response
+}
+
+fn sign_in(failed: bool) -> Response<Full<Bytes>> {
+    let message = if failed {
+        "<p role=\"alert\">Incorrect username or password.</p>"
+    } else {
+        ""
+    };
+    reply(
+        if failed {
+            StatusCode::UNAUTHORIZED
+        } else {
+            StatusCode::OK
+        },
+        include_str!("platform_sign_in.html").replace("<!-- error -->", message),
+    )
+}
+
 fn reply(status: StatusCode, body: impl Into<Bytes>) -> Response<Full<Bytes>> {
     Response::builder().status(status)
         .header("cache-control", "no-store")
         .header("x-content-type-options", "nosniff")
         .header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
         .body(Full::new(body.into())).expect("static response headers")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sessions_expire_and_cannot_be_reused_after_revocation() {
+        let state = State {
+            directory: PathBuf::new(),
+            manifest: PathBuf::new(),
+            auth_digest: [0; 32],
+            sessions: Mutex::default(),
+        };
+        let now = Instant::now();
+        let token = state.start_session(None, now).unwrap();
+        let key = Some(Sha256::digest(token.as_bytes()).into());
+        assert!(state.session(key, false, now + SESSION_AGE - Duration::from_secs(1)));
+        assert!(!state.session(key, false, now + SESSION_AGE));
+
+        let other = state.start_session(None, now).unwrap();
+        let key = Some(Sha256::digest(other.as_bytes()).into());
+        assert!(state.session(key, true, now));
+        assert!(!state.session(key, false, now));
+    }
 }

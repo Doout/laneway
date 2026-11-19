@@ -63,10 +63,13 @@ the relay. Do not set it in a tenant relay config. Connect the socket to the
 Platform backend on `127.0.0.1:4177` with a local socket proxy, and keep that
 backend off public interfaces.
 
-Open the root HTTPS URL and use the browser's sign-in prompt with the
-Platform's `operator` credential, not a tenant administrator account. The
+Open the root HTTPS URL and sign in with the Platform's `operator`
+credential, not a tenant administrator account. Sessions expire after eight
+hours or when the Platform backend restarts. **Sign out** revokes the
+current session immediately. The
 relay preserves existing discovery and workload paths; only the directory at
-`/` and the reservation form at `/tenants` go to the Platform. Restart the
+`/`, the reservation form at `/tenants`, and the sign-in and sign-out paths
+under `/platform/` go to the Platform. Restart the
 shared relay to apply or remove the setting. No change is required for
 self-hosted installations.
 
