@@ -36,6 +36,8 @@ pub(crate) struct PublicHttps {
     slots: Semaphore,
     controller: Arc<Client>,
     bootstrap: Mutex<BootstrapLimit>,
+    platform: Option<reqwest::Client>,
+    platform_limit: Mutex<BootstrapLimit>,
 }
 
 impl PublicHttps {
@@ -44,6 +46,18 @@ impl PublicHttps {
         controller: Arc<Client>,
     ) -> Result<(Self, Option<Renewal>)> {
         let (tls, renewal) = PublicTls::new(config)?;
+        let platform = config
+            .platform_socket
+            .as_ref()
+            .map(|socket| {
+                reqwest::Client::builder()
+                    .unix_socket(socket.clone())
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(8))
+                    .build()
+            })
+            .transpose()?;
         Ok((
             Self {
                 tls,
@@ -51,6 +65,8 @@ impl PublicHttps {
                 slots: Semaphore::new(32),
                 controller,
                 bootstrap: Mutex::new(BootstrapLimit::default()),
+                platform,
+                platform_limit: Mutex::new(BootstrapLimit::default()),
             },
             renewal,
         ))
@@ -97,6 +113,21 @@ impl PublicHttps {
             return plain(S::NOT_FOUND, "404 page not found\n", head);
         };
         let peer = peer.to_canonical();
+        if let Some(platform) = &self.platform
+            && matches!(uri.path(), "/" | "/tenants")
+        {
+            if !self
+                .platform_limit
+                .lock()
+                .is_ok_and(|mut limit| limit.allow(peer, Instant::now()))
+            {
+                return plain(S::TOO_MANY_REQUESTS, "rate limit exceeded\n", head);
+            }
+            return match self.forward_platform(platform, request).await {
+                Ok(reply) => reply,
+                Err(status) => plain(status, "Platform request could not be completed\n", head),
+            };
+        }
         if !matches!(route, Route::Console) {
             let mut response = if request.method() != Method::GET
                 || uri.query().is_some_and(|q| !q.is_empty())
@@ -126,7 +157,20 @@ impl PublicHttps {
         let oauth_token = matches!(uri.path(), "/oauth/token" | "/oauth/revoke")
             && request.method() == Method::POST;
         let app = public_application::route_allowed(request.method().as_str(), uri.path());
-        if forbidden_credential(request.headers(), oauth_token, app)
+        if (self.platform.is_some()
+            && request
+                .headers()
+                .get_all(header::AUTHORIZATION)
+                .iter()
+                .any(|value| {
+                    value.to_str().ok().is_some_and(|value| {
+                        value.split_once(' ').is_some_and(|(scheme, credential)| {
+                            scheme.eq_ignore_ascii_case("basic")
+                                && credential.trim_start().starts_with("b3BlcmF0b3I6")
+                        })
+                    })
+                }))
+            || forbidden_credential(request.headers(), oauth_token, app)
             || !connection_headers_are_safe(request.headers())
         {
             return plain(
@@ -151,6 +195,66 @@ impl PublicHttps {
             Ok(reply) => reply,
             Err(error) => plain(error, "console request could not be completed\n", head),
         }
+    }
+
+    async fn forward_platform(
+        &self,
+        client: &reqwest::Client,
+        request: Request<Incoming>,
+    ) -> Result<Reply, S> {
+        const LOCAL: &str = "http://127.0.0.1:4177";
+        let (parts, body) = request.into_parts();
+        let path = parts.uri.path();
+        match (&parts.method, path) {
+            (&Method::GET, "/") => {}
+            (&Method::POST, "/tenants") => {
+                let mut origins = parts.headers.get_all(header::ORIGIN).iter();
+                let expected = format!("https://{}", self.server_name);
+                if origins.next().and_then(|origin| origin.to_str().ok()) != Some(expected.as_str())
+                    || origins.next().is_some()
+                {
+                    return Err(S::FORBIDDEN);
+                }
+            }
+            _ => return Err(S::METHOD_NOT_ALLOWED),
+        }
+        let post = parts.method == Method::POST;
+        let body = Limited::new(body, 512)
+            .collect()
+            .await
+            .map_err(|_| S::PAYLOAD_TOO_LARGE)?
+            .to_bytes();
+        let mut outgoing = client
+            .request(parts.method, format!("{LOCAL}{path}"))
+            .body(body);
+        for key in [header::AUTHORIZATION, header::CONTENT_TYPE] {
+            let mut values = parts.headers.get_all(&key).iter();
+            if let Some(value) = values.next() {
+                if values.next().is_some() {
+                    return Err(S::BAD_REQUEST);
+                }
+                let mut value = value.clone();
+                if key == header::AUTHORIZATION {
+                    value.set_sensitive(true);
+                }
+                outgoing = outgoing.header(key, value);
+            }
+        }
+        if post {
+            outgoing = outgoing.header(header::ORIGIN, LOCAL);
+        }
+        let upstream = outgoing.send().await.map_err(|_| S::BAD_GATEWAY)?;
+        let status = upstream.status();
+        let mut headers = upstream.headers().clone();
+        remove_transport_headers(&mut headers);
+        headers.remove(header::CONTENT_LENGTH);
+        let body = bounded_response(upstream, MAX_CONSOLE_RESPONSE)
+            .await
+            .map_err(|_| S::BAD_GATEWAY)?;
+        let mut reply = Response::new(Full::new(body));
+        *reply.status_mut() = status;
+        *reply.headers_mut() = headers;
+        Ok(reply)
     }
 
     async fn fetch_bootstrap(&self, route: Route<'_>) -> Reply {

@@ -16,9 +16,9 @@ manifest, or a connection to the hosted control plane.
 
 The Platform is a separate, loopback-only console. It lists configured
 tenant hostnames and tracks new requests without exposing instance APIs or
-credentials. Do not proxy this preview publicly; use SSH forwarding for
-remote access. Starting the Platform does not change the root hostname or
-any existing tenant.
+credentials. Use SSH forwarding for remote access unless you explicitly set
+up the shared HTTPS relay integration below. Starting the backend alone does
+not change the root hostname or any existing tenant.
 
 ```sh
 laneway-controller platform init /path/to/private/platform
@@ -53,6 +53,22 @@ deployment process, then verify HTTPS and bootstrap the tenant owner with
 the existing CLI. If staging fails after writing a database, inspect that
 unpublished file before reusing its path. Public Platform auth, automatic
 activation, and owner invite links are not part of this preview.
+
+### Serve the Platform on the shared HTTPS root
+
+The shared relay can explicitly proxy the Platform's directory and reservation
+form on the base hostname. Set `platform_socket` in the root relay config's
+`[public_https]` section to an absolute Unix socket path accessible only to
+the relay. Do not set it in a tenant relay config. Connect the socket to the
+Platform backend on `127.0.0.1:4177` with a local socket proxy, and keep that
+backend off public interfaces.
+
+Open the root HTTPS URL and use the browser's sign-in prompt with the
+Platform's `operator` credential, not a tenant administrator account. The
+relay preserves existing discovery and workload paths; only the directory at
+`/` and the reservation form at `/tenants` go to the Platform. Restart the
+shared relay to apply or remove the setting. No change is required for
+self-hosted installations.
 
 ## Provision a tenant
 

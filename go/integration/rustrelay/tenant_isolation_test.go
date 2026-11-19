@@ -369,10 +369,50 @@ private_key = %q
 			t.Fatalf("authorize %s peers: %v", cell.slug, err)
 		}
 	}
+	socketDir, err := os.MkdirTemp("/tmp", "lnw-platform-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	socket := filepath.Join(socketDir, "p.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "127.0.0.1:4177" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		user, password, ok := r.BasicAuth()
+		if !ok || user != "operator" || password != "fixture-only-password" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Laneway Platform"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodPost {
+			if r.Header.Get("Origin") != "http://127.0.0.1:4177" || r.FormValue("slug") != "test" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		_, _ = io.WriteString(w, "Platform fixture")
+	})}
+	go func() { _ = operator.Serve(listener) }()
+	t.Cleanup(func() { _ = operator.Close() })
+	rootRelay := baseCell.config["relay_config"]
+	relayBytes, err := os.ReadFile(rootRelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, rootRelay, bytes.Replace(relayBytes, []byte("[public_https]\n"),
+		[]byte(fmt.Sprintf("[public_https]\nplatform_socket = %q\n", socket)), 1), 0600)
 	startTenantProcess(t, relayBinary, "--tenants", manifest)
 	for _, cell := range []tenantLab{a, b, baseCell} {
 		waitFor(t, ctx, "tenant HTTPS discovery "+cell.slug, func() bool { return discovered(cell) })
-		if os.Getenv("LANEWAY_CONSOLE_DIR") != "" {
+		if cell.slug != baseCell.slug && os.Getenv("LANEWAY_CONSOLE_DIR") != "" {
 			response, err := web.Get(base(cell) + "/")
 			if err != nil {
 				t.Fatal(err)
@@ -384,6 +424,44 @@ private_key = %q
 			}
 		}
 	}
+	t.Run("root HTTPS has separate Platform sign-in", func(t *testing.T) {
+		client := *web
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		for _, test := range []struct {
+			method, path, from string
+			auth               bool
+			status             int
+		}{
+			{"GET", "/", "", false, 401},
+			{"GET", "/", "", true, 200},
+			{"POST", "/tenants", "https://" + a.host, true, 403},
+			{"POST", "/tenants", "https://" + baseCell.host, true, 303},
+		} {
+			req, err := http.NewRequestWithContext(ctx, test.method, base(baseCell)+test.path, strings.NewReader("slug=test"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.auth {
+				req.SetBasicAuth("operator", "fixture-only-password")
+			}
+			if test.from != "" {
+				req.Header.Set("Origin", test.from)
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			res, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(io.LimitReader(res.Body, 4096))
+			res.Body.Close()
+			if err != nil || res.StatusCode != test.status {
+				t.Fatalf("%s %s: got %d, want %d (%v)", test.method, test.path, res.StatusCode, test.status, err)
+			}
+			if test.status == 200 && string(body) != "Platform fixture" {
+				t.Fatal("root response did not come from Platform")
+			}
+		}
+	})
 	badHost, _ := http.NewRequestWithContext(ctx, http.MethodGet, base(a)+"/v1/admin/auth/state", nil)
 	badHost.Host = b.host + ":" + publicPort
 	if response, err := web.Do(badHost); err != nil {
