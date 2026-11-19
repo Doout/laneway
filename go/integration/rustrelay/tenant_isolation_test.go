@@ -223,6 +223,7 @@ private_key = %q
 		client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}}
+		var session *http.Cookie
 		request := func(method, path, from, body string, authenticated bool) (int, string) {
 			t.Helper()
 			req, err := http.NewRequestWithContext(ctx, method, origin+path, strings.NewReader(body))
@@ -233,14 +234,23 @@ private_key = %q
 				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 				req.Header.Set("Origin", from)
 			}
-			if authenticated {
-				req.SetBasicAuth("operator", strings.TrimSpace(string(password)))
+			if authenticated && session != nil {
+				req.AddCookie(session)
 			}
 			resp, err := client.Do(req)
 			if err != nil {
 				return 0, ""
 			}
 			defer resp.Body.Close()
+			if path == "/platform/sign-in" && resp.StatusCode == http.StatusSeeOther && method == "POST" {
+				cookies := resp.Cookies()
+				if len(cookies) != 1 || cookies[0].Name != "__Host-laneway-platform" ||
+					!cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].Domain != "" ||
+					cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].MaxAge != 28800 {
+					t.Fatal("missing protected Platform session cookie")
+				}
+				session = cookies[0]
+			}
 			value, err := io.ReadAll(resp.Body)
 			if err != nil {
 				t.Fatal(err)
@@ -249,8 +259,17 @@ private_key = %q
 		}
 		waitFor(t, ctx, "platform listener", func() bool {
 			status, _ := request("GET", "/", "", "", false)
-			return status == http.StatusUnauthorized
+			return status == http.StatusSeeOther
 		})
+		if status, page := request("GET", "/platform/sign-in", "", "", false); status != 200 || !strings.Contains(page, "Sign in · Laneway Platform") {
+			t.Fatal("Platform sign-in page is missing")
+		}
+		if status, _ := request("POST", "/platform/sign-in", origin, "username=operator&password=wrong", false); status != 401 {
+			t.Fatalf("invalid Platform password: HTTP %d", status)
+		}
+		if status, _ := request("POST", "/platform/sign-in", origin, "username=operator&password="+strings.TrimSpace(string(password)), false); status != 303 {
+			t.Fatalf("Platform sign-in: HTTP %d", status)
+		}
 		for _, check := range []struct {
 			path, from, body string
 			want             int
@@ -328,6 +347,15 @@ private_key = %q
 		if status != http.StatusOK || !strings.Contains(page, "Staged · awaiting activation") {
 			t.Fatal("platform did not show the staged tenant")
 		}
+		if status, _ := request("POST", "/platform/sign-out", "http://other.test", "", true); status != 403 {
+			t.Fatalf("cross-origin sign-out: HTTP %d", status)
+		}
+		if status, _ := request("POST", "/platform/sign-out", origin, "", true); status != 303 {
+			t.Fatalf("Platform sign-out: HTTP %d", status)
+		}
+		if status, _ := request("GET", "/", "", "", true); status != 303 {
+			t.Fatalf("signed-out cookie was still accepted: HTTP %d", status)
+		}
 		// Only start gamma here; the other fixture tenants bootstrap below.
 		var config struct {
 			Domain       string            `json:"domain"`
@@ -384,10 +412,13 @@ private_key = %q
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		user, password, ok := r.BasicAuth()
-		if !ok || user != "operator" || password != "fixture-only-password" {
-			w.Header().Set("WWW-Authenticate", `Basic realm="Laneway Platform"`)
-			w.WriteHeader(http.StatusUnauthorized)
+		session, err := r.Cookie("__Host-laneway-platform")
+		if err != nil || session.Value != "fixture-session" {
+			http.Redirect(w, r, "/platform/sign-in", http.StatusSeeOther)
+			return
+		}
+		if r.Header.Get("Authorization") != "" || len(r.Cookies()) != 1 {
+			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		if r.Method == http.MethodPost {
@@ -432,7 +463,7 @@ private_key = %q
 			auth               bool
 			status             int
 		}{
-			{"GET", "/", "", false, 401},
+			{"GET", "/", "", false, 303},
 			{"GET", "/", "", true, 200},
 			{"POST", "/tenants", "https://" + a.host, true, 403},
 			{"POST", "/tenants", "https://" + baseCell.host, true, 303},
@@ -441,8 +472,9 @@ private_key = %q
 			if err != nil {
 				t.Fatal(err)
 			}
+			req.AddCookie(&http.Cookie{Name: "unrelated", Value: "ignored"})
 			if test.auth {
-				req.SetBasicAuth("operator", "fixture-only-password")
+				req.AddCookie(&http.Cookie{Name: "__Host-laneway-platform", Value: "fixture-session"})
 			}
 			if test.from != "" {
 				req.Header.Set("Origin", test.from)

@@ -7,7 +7,7 @@
   :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
   body { margin: 0; background: light-dark(#f5f6f8,#16181c); color: light-dark(#181b20,#edeef2); }
   main { max-width: 760px; margin: auto; padding: 48px 20px; }
-  header { color: light-dark(#464d59,#b6bcc7); }
+  header { display: flex; align-items: center; justify-content: space-between; color: light-dark(#464d59,#b6bcc7); }
   h1 { font-size: 2.25rem; margin: .5rem 0 1.5rem; }
   section { background: light-dark(white,#202329); border: 1px solid light-dark(#d9dde4,#424751); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
   h2 { font-size: 1rem; margin: 0 0 12px; }
@@ -21,7 +21,7 @@
   p { margin: 12px 0 0; font-size: .875rem; }
 </style>
 <main>
-  <header>Laneway Platform</header>
+  <header>Laneway Platform <form method="post" action="/platform/sign-out"><button type="submit">Sign out</button></form></header>
   <h1>Tenants</h1>
   <section>
     <h2>Tenant directory</h2>
