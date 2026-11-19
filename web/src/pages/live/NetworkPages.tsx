@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { ArrowRight, KeyRound, Link2, LockKeyhole, MonitorDot, Network, Plus, Route as RouteIcon } from 'lucide-react'
+import { KeyRound, MonitorDot, Network, Plus } from 'lucide-react'
 import { ActionPanel, Button, Callout, DetailLayout, EmptyState, EntityTitle, Field, FilterSelect, FormStack, IdentityBlock, PageHeader, RecordList, Section, Status, TokenBox, Toolbar, SearchField } from '../../components/ui'
 import { controllerOrigin, useControlPlane, type ControllerNetwork, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
 import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
@@ -14,7 +14,7 @@ export function NetworksPage() {
   const presence = useNodePresence((inventory?.networks ?? []).filter(network => hasPermission('node.read', network.network_id)).map(network => network.network_id))
   const [searchParams] = useSearchParams()
   const requestedView = searchParams.get('view')
-  const workspaceView: NetworkWorkspaceView = requestedView === 'nodes' || requestedView === 'connectivity' || requestedView === 'map' ? requestedView : 'networks'
+  const workspaceView: NetworkWorkspaceView = requestedView === 'nodes' || requestedView === 'map' ? requestedView : 'networks'
   const networkId = inventory?.network?.network_id
   const records = inventory?.nodes ?? emptyNodes
   const [visibility, setVisibility] = useState<RecordVisibility>('current')
@@ -22,21 +22,16 @@ export function NetworksPage() {
   const [query, setQuery] = useState('')
   const [otherNodes, setOtherNodes] = useState<ControllerNode[]>([])
   const [otherRoutes, setOtherRoutes] = useState<ControllerRoute[]>([])
-  const [movingNodeId, setMovingNodeId] = useState('')
-  const [moveDestinationId, setMoveDestinationId] = useState('')
   const [creatingNetwork, setCreatingNetwork] = useState(false)
   const [networkName, setNetworkName] = useState('')
   const [ipv4Pool, setIPv4Pool] = useState('')
   const [networkPending, setNetworkPending] = useState(false)
   const [networkError, setNetworkError] = useState('')
-  const [creatingConnection, setCreatingConnection] = useState(false)
-  const [destinationNetworkId, setDestinationNetworkId] = useState('')
-  const [connectionDirection, setConnectionDirection] = useState<'one_way' | 'two_way'>('one_way')
   const allNodes = useMemo(() => [...records, ...otherNodes].filter((node, index, nodes) => nodes.findIndex((candidate) => candidate.node_id === node.node_id) === index), [otherNodes, records])
   const currentNodes = useMemo(() => allNodes.filter((node) => !nodeState(node).inactive), [allNodes])
   const currentNodeIds = useMemo(() => new Set(currentNodes.map((node) => node.node_id)), [currentNodes])
   const allRoutes = useMemo(() => [...(inventory?.routes ?? []), ...otherRoutes].filter((route, index, routes) => routes.findIndex((candidate) => candidate.route_id === route.route_id) === index), [inventory?.routes, otherRoutes])
-  const assignedRecords = networkFilter === 'all' ? allNodes : networkFilter === 'unassigned' ? [] : allNodes.filter((node) => node.network_id === networkFilter)
+  const assignedRecords = networkFilter === 'all' ? allNodes : allNodes.filter((node) => node.network_id === networkFilter)
   const currentAssignedRecords = assignedRecords.filter((node) => !nodeState(node).inactive)
   const normalizedQuery = query.trim().toLowerCase()
   const visibleRecords = assignedRecords.filter((node) => (visibility === 'all' || !nodeState(node).inactive) && (!normalizedQuery || [node.name, node.node_id, node.ipv4_address, node.ipv6_address].some((value) => value?.toLowerCase().includes(normalizedQuery))))
@@ -44,9 +39,6 @@ export function NetworksPage() {
   const historicalVisibleRecords = visibleRecords.filter((node) => nodeState(node).inactive).sort((left, right) => right.created_at_unix_seconds - left.created_at_unix_seconds)
   const activeRoutes = allRoutes.filter((route) => routeState(route).actionable)
   const networkExits = activeRoutes.filter((route) => route.kind === 'exit' && route.state === 'approved' && currentNodeIds.has(route.node_id))
-  const otherNetworks = (inventory?.networks ?? []).filter((network) => network.network_id !== networkId)
-  const movingNode = allNodes.find((node) => node.node_id === movingNodeId)
-  const moveDestinations = (inventory?.networks ?? []).filter((network) => network.network_id !== movingNode?.network_id)
   useEffect(() => {
     let current = true
     const networks = inventory?.networks ?? []
@@ -63,12 +55,6 @@ export function NetworksPage() {
     }).catch(() => { if (current) { setOtherNodes([]); setOtherRoutes([]) } })
     return () => { current = false }
   }, [hasPermission, inventory?.networks, networkId, request])
-  useEffect(() => {
-    if (!otherNetworks.some((network) => network.network_id === destinationNetworkId)) setDestinationNetworkId(otherNetworks[0]?.network_id ?? '')
-  }, [destinationNetworkId, otherNetworks])
-  useEffect(() => {
-    if (!moveDestinations.some((network) => network.network_id === moveDestinationId)) setMoveDestinationId(moveDestinations[0]?.network_id ?? '')
-  }, [moveDestinationId, moveDestinations])
   async function createNetwork(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const name = networkName.trim()
@@ -95,7 +81,7 @@ export function NetworksPage() {
     ? hasPermission('network.create') ? <Button variant="primary" onClick={() => { setCreatingNetwork((value) => !value); setNetworkError('') }}><Plus size={16} />Add network</Button> : undefined
     : workspaceView === 'nodes'
       ? networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/nodes/new" variant="primary"><Plus size={16} />Add node</Button> : undefined
-    : workspaceView === 'connectivity' && otherNetworks.length ? <Button onClick={() => setCreatingConnection((value) => !value)}><Link2 size={16} />Connect network</Button> : undefined
+    : undefined
   return <div className="network-workspace-page">
     <PageHeader title="Networks" action={workspaceAction} />
     <NetworkWorkspaceTabs view={workspaceView} networks={inventory?.networks.length ?? 0} nodes={currentNodes.length} />
@@ -109,34 +95,20 @@ export function NetworksPage() {
       {workspaceView === 'networks' ? <section className="network-groups" aria-labelledby="network-groups-title"><header><h2 id="network-groups-title">{inventory.networks.length} {inventory.networks.length === 1 ? 'Network' : 'Networks'}</h2></header><div className="network-group-list">{inventory.networks.map((network) => { const nodes = currentNodes.filter((node) => node.network_id === network.network_id); const exits = networkExits.filter((route) => route.network_id === network.network_id); return <article key={network.network_id}><span className="network-group-list__icon"><Network aria-hidden="true" size={18} /></span><div><strong>{network.name}</strong><code>{network.ipv4_pool}</code></div><div className="network-group-list__stats"><span><strong>{nodes.length}</strong><small>Nodes</small></span><span><strong>{exits.length}</strong><small>{exits.length === 1 ? 'Exit' : 'Exits'}</small></span></div></article> })}</div></section> : null}
       {workspaceView === 'nodes' ? <section className="network-nodes" aria-labelledby="network-nodes-title">
         <header className="network-nodes__header"><div><h2 id="network-nodes-title">Nodes</h2></div></header>
-        <Toolbar filters={<><FilterSelect label="Network" value={networkFilter} onChange={setNetworkFilter}><option value="all">All networks</option>{inventory.networks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}<option value="unassigned">Unassigned</option></FilterSelect><FilterSelect label="Record visibility" value={visibility} onChange={(value) => setVisibility(value as RecordVisibility)}><option value="current">Current only</option><option value="all">All records</option></FilterSelect><span className="inventory-result-count" aria-live="polite">{visibleRecords.length} of {visibility === 'all' ? assignedRecords.length : currentAssignedRecords.length} shown</span></>}><SearchField label="Search nodes" placeholder="Search name, address, or node ID" value={query} onChange={setQuery} /></Toolbar>
-        {activeVisibleRecords.length ? <div className="node-list" role="list" aria-label="Current nodes">{activeVisibleRecords.map((node) => { const exitLocked = networkExits.some((route) => route.node_id === node.node_id); return <article className="node-list__row" role="listitem" key={node.node_id}>
+        <Toolbar filters={<><FilterSelect label="Network" value={networkFilter} onChange={setNetworkFilter}><option value="all">All networks</option>{inventory.networks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</FilterSelect><FilterSelect label="Record visibility" value={visibility} onChange={(value) => setVisibility(value as RecordVisibility)}><option value="current">Current only</option><option value="all">All records</option></FilterSelect><span className="inventory-result-count" aria-live="polite">{visibleRecords.length} of {visibility === 'all' ? assignedRecords.length : currentAssignedRecords.length} shown</span></>}><SearchField label="Search nodes" placeholder="Search name, address, or node ID" value={query} onChange={setQuery} /></Toolbar>
+        {activeVisibleRecords.length ? <div className="node-list" role="list" aria-label="Current nodes">{activeVisibleRecords.map((node) => <article className="node-list__row" role="listitem" key={node.node_id}>
           <EntityTitle icon={<MonitorDot size={16} />} subtitle={node.node_id}>{node.name || node.node_id}</EntityTitle>
           <div className="node-list__placement"><span>Placement</span><strong>{inventory.networks.find((network) => network.network_id === node.network_id)?.name ?? 'Unassigned'}</strong><code>{[node.ipv4_address, node.ipv6_address].filter(Boolean).join(' · ') || 'No address'}</code></div>
           <div className="node-list__posture"><span>Connection</span><div>{routingRole(node)}</div><NodePresence record={presence.records[node.node_id]} unavailable={presence.unavailable} /></div>
-          <div className="node-list__action">{exitLocked ? <span className="node-move-locked">Exit locked</span> : <Button variant="quiet" onClick={() => setMovingNodeId(node.node_id)}>Move</Button>}</div>
-        </article> })}</div> : null}
+          {node.network_id === networkId && <div className="node-list__action"><Button to={`/nodes/${node.node_id}`} variant="quiet">View</Button></div>}
+        </article>)}</div> : null}
         {visibility === 'all' && historicalVisibleRecords.length ? <section className="node-history" aria-labelledby="node-history-title"><header><h3 id="node-history-title">History</h3><span>{historicalVisibleRecords.length} inactive</span></header><div role="list">{historicalVisibleRecords.map((node) => { const state = nodeState(node); const network = inventory.networks.find((candidate) => candidate.network_id === node.network_id); return <article className="node-history__row" role="listitem" key={node.node_id}>
           <EntityTitle icon={<MonitorDot size={15} />} subtitle={node.node_id}>{node.name || node.node_id}</EntityTitle>
           <div className="node-history__context"><strong>{network?.name ?? 'Unassigned'}</strong><span>{time(node.created_at_unix_seconds)}</span></div>
           <Status tone={state.tone}>{state.label}</Status>
-          <Button to={`/nodes/${node.node_id}`} variant="quiet">View</Button>
+          {node.network_id === networkId && <Button to={`/nodes/${node.node_id}`} variant="quiet">View</Button>}
         </article> })}</div></section> : null}
-        {!visibleRecords.length ? <div className="data-empty">{networkFilter === 'unassigned' ? <><MonitorDot aria-hidden="true" /><h2>No unassigned nodes</h2></> : <p>No nodes match the current filters.</p>}</div> : null}
-        {movingNode ? <form className="node-move" onSubmit={(event) => event.preventDefault()}><header><div><span>Move node</span><h3>{movingNode.name || movingNode.node_id}</h3></div><Status tone="muted">Unavailable</Status></header><div className="node-move__path"><strong>{inventory.networks.find((network) => network.network_id === movingNode.network_id)?.name ?? 'Unassigned'}</strong><ArrowRight aria-hidden="true" size={18} /><Field label="Destination network"><select disabled value={moveDestinationId} onChange={(event) => setMoveDestinationId(event.target.value)}>{moveDestinations.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</select></Field></div><Callout tone="warning">Node reassignment is not available in this controller API.</Callout><div className="button-row"><Button type="submit" variant="primary" disabled>Unavailable</Button><Button type="button" variant="quiet" onClick={() => setMovingNodeId('')}>Cancel</Button></div></form> : null}
-      </section> : null}
-      {workspaceView === 'connectivity' ? <section className="network-connections" aria-labelledby="network-connections-title">
-        <header className="network-connections__header">
-          <div className="network-connections__title"><span className="network-connections__title-icon"><Link2 aria-hidden="true" size={17} /></span><div><h2 id="network-connections-title">Network connectivity</h2></div></div>
-          <div className="network-connections__guardrails" aria-label="Connection availability"><span><LockKeyhole aria-hidden="true" size={13} /> Controller API unavailable</span><span><RouteIcon aria-hidden="true" size={13} /> No connection state reported</span></div>
-        </header>
-        {creatingConnection ? <form className="network-connection-form" onSubmit={(event) => event.preventDefault()}>
-          <header><h3>Connect networks</h3><Status tone="muted">Unavailable</Status></header>
-          <div className="network-connection-form__path"><div className="network-endpoint"><small>From</small><strong>{inventory.network.name}</strong><code>{inventory.network.ipv4_pool}</code></div><span className="network-connection-form__arrow"><ArrowRight aria-hidden="true" size={17} /></span><Field label="Destination network"><select disabled value={destinationNetworkId} onChange={(event) => setDestinationNetworkId(event.target.value)}>{otherNetworks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</select></Field></div>
-          <div className="network-connection-form__controls"><Field label="Traffic direction"><select disabled value={connectionDirection} onChange={(event) => setConnectionDirection(event.target.value as typeof connectionDirection)}><option value="one_way">From {inventory.network.name} only</option><option value="two_way">Both networks</option></select></Field><Field label="Initial access"><input readOnly value="Not available" /></Field><Field label="Routes"><input readOnly value="Not available" /></Field></div>
-          <Callout tone="warning">Network connection management is not available in this controller API.</Callout><div className="button-row"><Button type="submit" variant="primary" disabled>Unavailable</Button><Button type="button" variant="quiet" onClick={() => setCreatingConnection(false)}>Cancel</Button></div>
-        </form> : null}
-        {!creatingConnection ? <div className="network-connections__empty"><span><Link2 aria-hidden="true" size={19} /></span><div><strong>Connection data unavailable</strong><p>The controller API does not expose network connections yet.</p></div></div> : null}
+        {!visibleRecords.length ? <div className="data-empty"><p>No nodes match these filters.</p></div> : null}
       </section> : null}
     </> : <EmptyState icon={<Network />} title="No networks" />}
   </div>

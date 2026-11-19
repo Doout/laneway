@@ -120,7 +120,7 @@ describe('shipped live application authorization', () => {
       expect(screen.getByText('Lease expired')).toBeVisible()
       expect(screen.getByRole('heading', { name: 'History' })).toBeVisible()
       expect(screen.getByText('1 inactive')).toBeVisible()
-      expect(screen.getByRole('link', { name: 'View' })).toHaveAttribute('href', `/nodes/${'5'.repeat(32)}`)
+      expect(within(screen.getByRole('region', { name: 'History' })).getByRole('link', { name: 'View' })).toHaveAttribute('href', `/nodes/${'5'.repeat(32)}`)
       expect(screen.queryByText('Ephemeral enrollment')).not.toBeInTheDocument()
       expect(screen.getByRole('link', { name: 'Nodes' })).toHaveTextContent('1')
     }
@@ -297,7 +297,7 @@ describe('shipped live application authorization', () => {
     expect(within(infrastructureSummary).getByText('Not authorized')).toBeVisible()
   })
 
-  it('keeps node moves and network connections visible but unavailable when the API has no contract', async () => {
+  it('shows node details without offering unsupported network actions', async () => {
     vi.stubEnv('MODE', 'live')
     const secondNetworkId = '5'.repeat(32)
     const nodeId = '4'.repeat(32)
@@ -308,7 +308,7 @@ describe('shipped live application authorization', () => {
         { network_id: networkId, name: 'First network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 },
         { network_id: secondNetworkId, name: 'Second network', ipv4_pool: '100.65.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 },
       ] }))
-      if (path.includes(`/networks/${networkId}/nodes?`)) return Promise.resolve(managementResponse({ nodes: [{ node_id: nodeId, network_id: networkId, name: 'movable-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' }] }))
+      if (path.includes(`/networks/${networkId}/nodes?`)) return Promise.resolve(managementResponse({ nodes: [{ node_id: nodeId, network_id: networkId, name: 'office-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' }] }))
       if (path.includes(`/networks/${secondNetworkId}/nodes?`)) return Promise.resolve(managementResponse({ nodes: [] }))
       if (path.includes('/routes?')) return Promise.resolve(managementResponse({ routes: [] }))
       throw new Error(`Unexpected request ${path}`)
@@ -316,20 +316,12 @@ describe('shipped live application authorization', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderPath('/networks?view=nodes')
-    expect(await screen.findByText('movable-node')).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: 'Move' }))
-    expect(screen.getByText('Node reassignment is not available in this controller API.')).toBeVisible()
-    expect(screen.getByLabelText('Destination network')).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Unavailable' })).toBeDisabled()
-
-    fireEvent.click(screen.getByRole('link', { name: 'Connectivity' }))
-    expect(await screen.findByText('Connection data unavailable')).toBeVisible()
-    expect(screen.getByText('No connection state reported')).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: 'Connect network' }))
-    expect(screen.getByText('Network connection management is not available in this controller API.')).toBeVisible()
-    expect(screen.getByLabelText('Destination network')).toBeDisabled()
-    expect(screen.getByLabelText('Traffic direction')).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Unavailable' })).toBeDisabled()
+    expect(await screen.findByText('office-node')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Move' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Connectivity' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Unassigned' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', { name: 'View' }))
+    expect(await screen.findByRole('heading', { name: 'Node detail' })).toBeVisible()
 
     const paths = fetchMock.mock.calls.map(([input]) => String(input))
     expect(paths.some((path) => path.includes('/network-connections'))).toBe(false)

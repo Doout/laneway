@@ -3,9 +3,7 @@ package directpath
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 	"sort"
@@ -31,17 +29,6 @@ var (
 )
 
 type ProbeToken [16]byte
-
-func NewProbeToken() (ProbeToken, error) {
-	var token ProbeToken
-	if _, err := rand.Read(token[:]); err != nil {
-		return ProbeToken{}, fmt.Errorf("directpath: generate probe token: %w", err)
-	}
-	if token == (ProbeToken{}) {
-		return NewProbeToken()
-	}
-	return token, nil
-}
 
 type ProbePacket struct {
 	Response  bool

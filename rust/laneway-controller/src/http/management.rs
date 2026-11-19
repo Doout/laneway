@@ -29,14 +29,10 @@ pub(super) async fn create<
     // Buffer a bounded body before obtaining a database worker. A slow
     // upload must not hold a SQLite write lock or exhaust the query pool.
     let form = super::form::json_form::<F>(req).await;
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     let (created, meta) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
         let mut store = SessionStore::open(&state.database)?;

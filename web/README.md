@@ -1,13 +1,7 @@
 # Laneway admin console
 
-This directory contains the administrator-facing web console. It is a React and TypeScript single-page application built with Vite and emitted as static assets.
-
-The console is intentionally separate from the future endpoint desktop client:
-
-- The web console administers controller-owned networks, enrollments, nodes, routes, ACL rules, relays, certificates, and audit events.
-- The future desktop client should be a Tauri 2 application for local profile, connection, exit-node, tray, update, and diagnostic workflows.
-- Both surfaces may share design tokens, primitives, schemas, and generated API clients, but they should not share navigation or page composition.
-- Neither surface moves packet forwarding into the controller or UI process.
+This React console manages the controller. The [desktop client](../docs/desktop-client.md)
+manages the local node. The node forwards packets; neither UI does.
 
 ## Development
 
@@ -16,16 +10,14 @@ corepack pnpm install
 corepack pnpm dev
 ```
 
-The development server always starts in the deliberate demo mode.
-
-Builds must select their data boundary explicitly:
+The development server uses demo data. Choose a build mode:
 
 ```sh
-# Controller-hosted production artifact. Never falls back to demo records.
+# For a controller. No demo data.
 corepack pnpm build:live
 
-# Deliberate review artifact with a visible demo-data notice.
+# For local review with sample data.
 corepack pnpm build:demo
 ```
 
-Both commands write to `dist/`. The unscoped `corepack pnpm build` command fails so a production artifact cannot silently inherit demo behavior.
+Both write to `dist/`. A build without a mode fails.

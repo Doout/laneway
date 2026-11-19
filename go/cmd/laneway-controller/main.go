@@ -639,10 +639,6 @@ func allowsServerAuthentication(usages []x509.ExtKeyUsage) bool {
 	return false
 }
 
-func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, identity.AuthenticatedIdentity, error) {
-	return controllerTLSConfigAt(cfg, caPEM, time.Now())
-}
-
 func controllerTLSConfigAt(cfg config.TLS, caPEM []byte, now time.Time) (*tls.Config, identity.AuthenticatedIdentity, error) {
 	certificate, err := tls.LoadX509KeyPair(cfg.CertificateFile, cfg.PrivateKeyFile)
 	if err != nil {

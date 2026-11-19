@@ -45,10 +45,6 @@ type DirectPathAttacher interface {
 	Detach(identity.NodeID, string) bool
 }
 
-type PeerAuthorizerFunc func(identity.NodeID) bool
-
-func (f PeerAuthorizerFunc) AuthorizeDirectPeer(peer identity.NodeID) bool { return f(peer) }
-
 type DirectConfig struct {
 	Local              identity.NodeIdentity
 	Endpoint           *directpath.Endpoint
@@ -385,18 +381,6 @@ func (c *DirectController) replaceDirect(peer identity.NodeID, path *directpath.
 	}
 	c.active[peer] = path
 	return nil
-}
-
-func (c *DirectController) detachDirect(peer identity.NodeID) {
-	c.pathMu.Lock()
-	defer c.pathMu.Unlock()
-	path := c.active[peer]
-	if path == nil {
-		return
-	}
-	delete(c.active, peer)
-	c.config.Paths.Detach(peer, path.Name())
-	_ = path.Close()
 }
 
 // RouteAuthorizer permits only peers currently named as a route next hop.

@@ -16,10 +16,6 @@ import (
 	"github.com/Doout/laneway/go/internal/netvalidate"
 )
 
-func CreateNetwork(ctx context.Context, s *Store, name string, pool netip.Prefix) (Network, error) {
-	return s.CreateNetwork(ctx, name, pool)
-}
-
 func (s *Store) CreateNetwork(ctx context.Context, name string, pool netip.Prefix) (Network, error) {
 	return s.CreateNetworkDualStack(ctx, name, pool, netip.Prefix{})
 }

@@ -18,32 +18,29 @@ fixture=""
 cleanup() {
   docker rm --force "$name" "$name-laneway-update-previous" >/dev/null 2>&1 || true
   if [[ -n "$fixture" ]]; then docker rm --force "$fixture" >/dev/null 2>&1 || true; fi
-  docker volume rm "$volume" "$name-unused" >/dev/null 2>&1 || true
+  docker volume rm "$volume" >/dev/null 2>&1 || true
   docker image rm "$image" >/dev/null 2>&1 || true
 }
 # Guard against cleaning up anything we didn't create.
 for existing in "$name" "$name-laneway-update-previous"; do
   if docker container inspect "$existing" >/dev/null 2>&1; then exit 2; fi
 done
-for existing in "$volume" "$name-unused"; do
-  if docker volume inspect "$existing" >/dev/null 2>&1; then exit 2; fi
-done
+if docker volume inspect "$volume" >/dev/null 2>&1; then exit 2; fi
 if docker image inspect "$image" >/dev/null 2>&1; then exit 2; fi
 trap cleanup EXIT
 docker tag "$1" "$image"
 docker volume create --label laneway.test=managed-connector "$volume" >/dev/null
-docker volume create --label laneway.test=managed-connector "$name-unused" >/dev/null
 fixture="$(docker run -d --network none --tmpfs /tmp:exec,size=1g \
-  -v "$root:/src:ro" -v "$volume:/original" -v "$name-unused:/fresh" \
+  -v "$root:/src:ro" -v "$volume:/state" \
   -v laneway-rust-lab-gomod:/go/pkg/mod -v laneway-rust-lab-gobuild:/gobuild \
   -e GOPROXY=off -e GOCACHE=/gobuild -e GOFLAGS=-buildvcs=false \
   "$lab_image" bash /src/integration/rust-lab/connector-cutover.sh --fixture relay-quic)"
 for _ in {1..90}; do
-  docker logs "$fixture" 2>&1 | grep -q 'connector cutover fixture ready' && break
+  docker logs "$fixture" 2>&1 | grep -q 'connector fixture ready' && break
   [[ "$(docker inspect -f '{{.State.Running}}' "$fixture")" = true ]] || { docker logs "$fixture" >&2; exit 1; }
   sleep 1
 done
-docker logs "$fixture" 2>&1 | grep -q 'connector cutover fixture ready'
+docker logs "$fixture" 2>&1 | grep -q 'connector fixture ready'
 docker run -d --name "$name" --pull never --network "container:$fixture" \
   --restart unless-stopped --user 65532:65532 --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true \
@@ -56,9 +53,9 @@ for _ in {1..30}; do
   sleep 1
 done
 [[ "$(docker inspect -f '{{.State.Health.Status}}' "$name")" = healthy ]] || { docker logs "$name" >&2; exit 1; }
-docker exec "$fixture" rm -- /original/setup.token
+docker exec "$fixture" rm -- /state/setup.token
 identity_bytes() {
-  docker exec "$fixture" sh -ec 'cd /original/connector; sha256sum ca.crt node.crt node.key wireguard.key connector.toml'
+  docker exec "$fixture" sh -ec 'cd /state/connector; sha256sum ca.crt node.crt node.key wireguard.key connector.toml'
 }
 before="$(identity_bytes)"
 docker run --rm --network none --cap-drop ALL --tmpfs /tmp:exec,size=1g \

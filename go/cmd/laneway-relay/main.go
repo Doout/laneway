@@ -138,10 +138,6 @@ func run(path, diagnostics string) error {
 			PacketRateBitsPerSecond: cfg.Relay.PacketRateBitsPerSecond,
 			PacketBurstBytes:        cfg.Relay.PacketBurstBytes,
 		},
-		Transport: &transport.Config{
-			HandshakeIdleTimeout: cfg.Relay.HandshakeTimeout.Duration(),
-			MaxIdleTimeout:       cfg.Relay.IdleTimeout.Duration(),
-		},
 		TCPFallback:        tcpConfig,
 		MaxPacketPayload:   relayMaxPacketPayload,
 		ConfigurationEpoch: 1,

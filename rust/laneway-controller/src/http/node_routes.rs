@@ -57,14 +57,10 @@ pub(super) async fn handle(
         .ok_or(AUTH)?;
     let peer = NodeCredential::from_verified_peer(leaf.as_ref()).map_err(|_| AUTH)?;
     let request = decode(req, route).await.map_err(anyhow::Error::from);
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            S::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     let data = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut store = SessionStore::open(&state.database)?;

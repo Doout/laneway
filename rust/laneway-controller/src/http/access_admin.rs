@@ -377,14 +377,10 @@ pub(super) async fn handle(
     let action = decode(route, req, put, provider)
         .await
         .map_err(anyhow::Error::from);
-    let permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            S::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     let (data, meta) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
         let _permit = permit;
         let mut store = SessionStore::open(&state.database)?;

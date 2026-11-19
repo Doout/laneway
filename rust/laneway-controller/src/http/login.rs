@@ -68,14 +68,10 @@ async fn authenticate(
     if let Err(wait) = attempt {
         return Ok(limited(id, wait));
     }
-    let _permit = state.queries.try_acquire_owned().map_err(|_| {
-        Failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "ERROR_CODE_RESOURCE_EXHAUSTED",
-            "controller busy",
-            true,
-        )
-    })?;
+    let _permit = state
+        .queries
+        .try_acquire_owned()
+        .map_err(|_| crate::http::QUERY_BUSY)?;
     if let Some(old) = previous {
         let db = state.database.clone();
         tokio::task::spawn_blocking(move || {

@@ -2,7 +2,6 @@ package relayservice
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -43,7 +42,6 @@ type Config struct {
 	Revocations  *revocation.Set
 
 	Registry    relay.Config
-	Transport   *transport.Config
 	TCPFallback *tcpfallback.Config
 
 	MaxConcurrentSessions int
@@ -224,17 +222,6 @@ func (s *Server) Metrics() Metrics {
 		DroppedPackets:        s.metrics.droppedPackets.Load(),
 		DroppedBytes:          s.metrics.droppedBytes.Load(),
 	}
-}
-
-// ListenAndServe creates an authenticated QUIC listener and serves it until
-// ctx is canceled or the listener fails.
-func (s *Server) ListenAndServe(ctx context.Context, address string, tlsConfig *tls.Config) error {
-	listener, err := transport.Listen(address, tlsConfig, s.config.Transport)
-	if err != nil {
-		return err
-	}
-	defer listener.Close()
-	return s.Serve(ctx, listener)
 }
 
 // Serve runs a bounded Accept loop. Cancellation closes all accepted
