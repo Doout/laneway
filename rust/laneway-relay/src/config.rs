@@ -173,6 +173,8 @@ pub struct PeerConfig {
 pub(crate) struct ControllerConfig {
     pub(crate) endpoint: String,
     #[serde(default)]
+    pub(crate) dial_address: Option<SocketAddr>,
+    #[serde(default)]
     pub(crate) quic_endpoint: Option<String>,
     #[serde(default)]
     pub(crate) allow_legacy_https: bool,

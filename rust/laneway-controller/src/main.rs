@@ -22,6 +22,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         Some("serve") => return server::start(args),
+        Some("serve-tenants") => return server::start_shared(args),
         #[cfg(unix)]
         Some("init") => return server::initialize(args),
         #[cfg(unix)]

@@ -107,6 +107,7 @@ async fn authenticate(
             return if busy { Ok(limited(id, 1)) } else { Err(AUTH) };
         }
     };
+    let tenant_mode = state.tenant_mode;
     let s = tokio::task::spawn_blocking(move || {
         let _permit = _permit;
         SessionStore::open(&state.database)?.issue_after_password(candidate)
@@ -114,5 +115,5 @@ async fn authenticate(
     .await
     .map_err(|_| INTERNAL)?
     .map_err(store_error)?;
-    mutations::issued(id, s)
+    mutations::issued(id, s, tenant_mode)
 }

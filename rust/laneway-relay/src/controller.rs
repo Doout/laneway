@@ -377,6 +377,16 @@ impl Client {
             .retry(reqwest::retry::never())
             .use_preconfigured_tls(client_tls.clone())
             .timeout(controller.timeout);
+        if let Some(dial) = controller.dial_address {
+            ensure!(
+                !dial.ip().is_unspecified()
+                    && !dial.ip().is_multicast()
+                    && url.port_or_known_default() == Some(dial.port())
+                    && host.parse::<std::net::IpAddr>().is_err(),
+                "controller.dial_address requires a numeric dial target with the HTTPS origin port and a DNS origin"
+            );
+            http = http.resolve(host, dial);
+        }
         if workload.managed() {
             // Managed identities must not reuse an authenticated idle socket
             // belonging to the previous generation.

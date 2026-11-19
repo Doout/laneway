@@ -28,7 +28,14 @@ pub(super) fn clear_cookies(reply: &mut Reply) {
     }
 }
 
-pub(super) fn issued(id: &str, s: IssuedSession) -> Result<Reply, Failure> {
+pub(super) fn restrict_tenant_permissions(view: &mut serde_json::Value, tenant_mode: bool) {
+    if tenant_mode && let Some(permissions) = view["permissions"].as_array_mut() {
+        permissions.retain(|permission| permission != "network.create");
+    }
+}
+
+pub(super) fn issued(id: &str, mut s: IssuedSession, tenant_mode: bool) -> Result<Reply, Failure> {
+    restrict_tenant_permissions(&mut s.view, tenant_mode);
     let mut r = response(
         StatusCode::OK,
         id,
@@ -79,6 +86,7 @@ pub(super) async fn session(
     let origin = crate::origin::same_origin(headers);
     let proof = csrf_proof(headers);
     if rotate {
+        let tenant_mode = state.tenant_mode;
         let proof = proof.filter(|_| origin);
         let s = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -91,7 +99,7 @@ pub(super) async fn session(
             Some(_) => AUTH,
             None => INTERNAL,
         })?;
-        return issued(id, s);
+        return issued(id, s, tenant_mode);
     }
     if !origin {
         return Err(DENIED);
