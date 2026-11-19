@@ -2,6 +2,8 @@
 
 Use the [root README](../README.md) for first-time setup and the
 [Compose guide](../deploy/compose/README.md) for deployment and recovery.
+See [Shared Rust control plane](shared-tenant-control-plane.md) for the
+separate, opt-in tenant deployment.
 
 ## Boundaries
 

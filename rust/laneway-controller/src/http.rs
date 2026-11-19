@@ -47,6 +47,7 @@ type Reply = Response<Full<Bytes>>;
 
 #[derive(Clone)]
 pub struct State {
+    pub(crate) tenant_mode: bool,
     workload_mtls_enabled: bool,
     pub(crate) database: Arc<PathBuf>,
     pub(crate) queries: Arc<Semaphore>,
@@ -76,6 +77,7 @@ impl State {
         allow_loopback_callbacks: bool,
     ) -> anyhow::Result<Self> {
         Ok(Self {
+            tenant_mode: false,
             snapshot_validity,
             locations,
             workload_mtls_enabled,
@@ -471,6 +473,14 @@ async fn dispatch(
         return login::handle(req, state, id, peer).await;
     }
     if create_network {
+        if state.tenant_mode {
+            return Err(Failure(
+                StatusCode::FORBIDDEN,
+                "ERROR_CODE_PERMISSION_DENIED",
+                "additional workload networks are not enabled for this deployment",
+                false,
+            ));
+        }
         return management::create(
             req,
             state,
@@ -597,6 +607,7 @@ async fn dispatch(
             )),
             Credential::Session(token) if session_view => {
                 let mut r = SessionStore::open(&state.database)?.view(&token, csrf.as_deref())?;
+                mutations::restrict_tenant_permissions(&mut r.list, state.tenant_mode);
                 r.list["idle_expires_at_unix_seconds"] = json!(r.idle);
                 r.list["absolute_expires_at_unix_seconds"] = json!(r.absolute);
                 Ok((

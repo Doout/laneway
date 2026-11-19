@@ -25,6 +25,20 @@ struct QuicListener {
     address: Option<SocketAddr>,
 }
 
+mod shared;
+pub use shared::start as start_shared;
+
+struct Serving {
+    state: super::http::State,
+    address: SocketAddr,
+    config: ServerConfig,
+    quic: Option<QuicListener>,
+    renewal: Option<service_tls::Renewal>,
+    alerts: Option<Option<crate::webhook_alerts::Webhook>>,
+    #[cfg(unix)]
+    _lifecycle_lock: File,
+}
+
 #[cfg(unix)]
 pub fn initialize(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     const INIT: &str = "usage: laneway-controller init DATABASE CERT_PEM NETWORK_NAME IPV4_POOL";
@@ -52,7 +66,18 @@ pub fn initialize(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     Ok(())
 }
 
-pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
+pub fn start(args: impl Iterator<Item = OsString>) -> Result<()> {
+    let serving = prepare(args, None)?;
+    runtime()?.block_on(serve(serving, stop()))
+}
+
+fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+}
+
+fn prepare(mut args: impl Iterator<Item = OsString>, tenant_host: Option<&str>) -> Result<Serving> {
     let database = PathBuf::from(args.next().context(USAGE)?);
     let address: SocketAddr = args
         .next()
@@ -67,7 +92,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         "expected a regular controller database file, not a symlink"
     );
     #[cfg(unix)]
-    let _lifecycle_lock = laneway_controller::database_lock::acquire(&database)?;
+    let lifecycle_lock = laneway_controller::database_lock::acquire(&database)?;
     let mut root = None;
     let mut issuer = None;
     let mut client_ca = None;
@@ -189,6 +214,15 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let identity = Arc::new(service_tls::Identity::load(&cert, &key)?);
     let roots = client_ca.as_deref().map(tls_roots).transpose()?;
     let seed = identity.active();
+    if tenant_host.is_some() {
+        ensure!(
+            laneway_controller::Inventory::open(&database)?
+                .networks(2)?
+                .len()
+                == 1,
+            "a shared deployment must contain exactly one workload network"
+        );
+    }
     laneway_controller::SessionStore::prepare_database(
         &database,
         seed.end_entity_cert()?.as_ref(),
@@ -222,6 +256,7 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         location_database,
         allow_loopback_callbacks,
     )?;
+    state.tenant_mode = tenant_host.is_some();
     let renewal = renewal_dir
         .as_deref()
         .map(|directory| {
@@ -241,6 +276,36 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         })
         .transpose()?;
     let active = identity.active();
+    if let Some(host) = tenant_host {
+        use rustls::{
+            client::danger::ServerCertVerifier,
+            pki_types::{ServerName, UnixTime},
+        };
+
+        let (leaf, chain) = active
+            .cert
+            .split_first()
+            .context("missing controller certificate")?;
+        rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(
+                roots
+                    .clone()
+                    .context("shared controller requires a trust root")?,
+            ),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()?
+        .verify_server_cert(
+            leaf,
+            chain,
+            &ServerName::try_from(host)?,
+            &[],
+            UnixTime::now(),
+        )
+        .context(
+            "controller certificate does not match the deployment trust anchor and hostname",
+        )?;
+    }
     state.bootstrap_discovery = if let Some(profile) = bootstrap_profile {
         let ca = client_ca
             .as_ref()
@@ -284,17 +349,16 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         .transpose()
         .context("load live console build")?
         .map(Arc::new);
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(serve(
-            state,
-            address,
-            config,
-            quic,
-            renewal,
-            alerts.then_some(webhook),
-        ))
+    Ok(Serving {
+        state,
+        address,
+        config,
+        quic,
+        renewal,
+        alerts: alerts.then_some(webhook),
+        #[cfg(unix)]
+        _lifecycle_lock: lifecycle_lock,
+    })
 }
 
 fn pem(path: &Path, private: bool) -> Result<Cursor<zeroize::Zeroizing<Vec<u8>>>> {
@@ -370,14 +434,17 @@ async fn stop() -> std::io::Result<()> {
     }
 }
 
-async fn serve(
-    state: super::http::State,
-    address: SocketAddr,
-    config: ServerConfig,
-    quic: Option<QuicListener>,
-    renewal: Option<service_tls::Renewal>,
-    alerts: Option<Option<crate::webhook_alerts::Webhook>>,
-) -> Result<()> {
+async fn serve(serving: Serving, stop: impl Future<Output = std::io::Result<()>>) -> Result<()> {
+    let Serving {
+        state,
+        address,
+        config,
+        quic,
+        renewal,
+        alerts,
+        #[cfg(unix)]
+        _lifecycle_lock,
+    } = serving;
     let listener = TcpListener::bind(address).await?;
     // Bind both sockets before announcing readiness. By default UDP shares the
     // actual TCP address even when the lab requests an ephemeral port.
@@ -413,7 +480,6 @@ async fn serve(
         }
     };
     tokio::pin!(alerts);
-    let stop = stop();
     tokio::pin!(stop);
     loop {
         tokio::select! {

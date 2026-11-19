@@ -14,12 +14,12 @@ use laneway_protocol::{
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use tokio::{
     io::AsyncWriteExt,
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
     time::timeout,
 };
-use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor};
+use tokio_rustls::{LazyConfigAcceptor, TlsAcceptor, server::StartHandshake};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -39,6 +39,7 @@ use crate::{
 };
 
 const CONTROL_PREFACE: &[u8] = b"LWC1";
+mod shared;
 const MAX_CONTROL_PAYLOAD: usize = 1 << 20;
 const MAX_PACKET_PAYLOAD: u32 = 2048;
 const REQUIRED_RELAY_CAPABILITIES: u64 =
@@ -60,7 +61,6 @@ struct Inner {
     registry: Registry,
     metrics: Arc<Metrics>,
     handshake_timeout: Duration,
-    max_sessions: usize,
     tcp_tls: Option<Arc<rustls::ServerConfig>>,
     tcp_config: Option<TcpFallbackConfig>,
     tcp_packet_pool: Option<PacketPool>,
@@ -72,6 +72,7 @@ pub struct Server {
     endpoint: Endpoint,
     tcp_listener: Option<TcpListener>,
     inner: Arc<Inner>,
+    slots: Arc<Semaphore>,
     metrics_interval: Duration,
     controller: Option<Arc<ControllerClient>>,
     diagnostics: Option<diagnostics::Server>,
@@ -81,6 +82,10 @@ pub struct Server {
 impl Server {
     /// Validates credentials and static authorization before binding the UDP socket.
     pub fn bind(config: Config) -> Result<Self> {
+        Self::bind_with_tcp(config, true)
+    }
+
+    fn bind_with_tcp(config: Config, bind_tcp: bool) -> Result<Self> {
         // reqwest's `rustls-tls-no-provider` feature deliberately leaves the
         // process-wide crypto provider to the embedding binary. Install the
         // same ring provider used by Quinn before controller client creation;
@@ -118,7 +123,7 @@ impl Server {
         let endpoint = Endpoint::server(server_config, config.listen_addr()?)
             .context("bind QUIC relay endpoint")?;
         let tcp_address = config.tcp_fallback_addr()?;
-        let tcp_listener = if let Some(address) = tcp_address {
+        let tcp_listener = if let Some(address) = tcp_address.filter(|_| bind_tcp) {
             let listener = std::net::TcpListener::bind(address)
                 .with_context(|| format!("bind TCP fallback endpoint {address}"))?;
             listener
@@ -128,7 +133,7 @@ impl Server {
         } else {
             None
         };
-        let tcp_tls = if tcp_listener.is_some() {
+        let tcp_tls = if tcp_address.is_some() {
             Some(tls::tcp_server_config(&config, workload)?)
         } else {
             None
@@ -176,12 +181,12 @@ impl Server {
         Ok(Self {
             endpoint,
             tcp_listener,
+            slots: Arc::new(Semaphore::new(config.relay.max_sessions)),
             inner: Arc::new(Inner {
                 authorizations,
                 registry,
                 metrics,
                 handshake_timeout: config.relay.handshake_timeout,
-                max_sessions: config.relay.max_sessions,
                 tcp_tls,
                 tcp_config,
                 tcp_packet_pool,
@@ -192,6 +197,15 @@ impl Server {
             diagnostics,
             renewal,
         })
+    }
+
+    /// Serve all tenant relay identities with one public TCP listener and
+    /// independent QUIC listeners, trust roots and packet tables.
+    pub async fn serve_tenants(
+        path: &std::path::Path,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
+        shared::run(path, shutdown).await
     }
 
     /// Returns the actual bound UDP address, including an assigned ephemeral port.
@@ -228,7 +242,7 @@ impl Server {
     where
         F: Future<Output = ()>,
     {
-        let slots = Arc::new(Semaphore::new(self.inner.max_sessions));
+        let slots = self.slots;
         let tcp_handshakes = Arc::new(Semaphore::new(128));
         let mut tasks = JoinSet::new();
         let (stop, stopped) = tokio::sync::watch::channel(false);
@@ -411,14 +425,6 @@ async fn serve_shared_tcp(
     slots: Arc<Semaphore>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    let public = inner
-        .public_https
-        .as_ref()
-        .context("public HTTPS is unavailable")?;
-    let fallback = inner
-        .tcp_tls
-        .as_ref()
-        .context("TCP fallback TLS configuration is unavailable")?;
     let deadline = tokio::time::Instant::now()
         + inner
             .tcp_config
@@ -432,6 +438,26 @@ async fn serve_shared_tcp(
         }
         _ = wait_shutdown(&mut shutdown) => return Ok(()),
     };
+    serve_shared_tls(inner, hello, peer, admission, slots, shutdown, deadline).await
+}
+
+async fn serve_shared_tls(
+    inner: Arc<Inner>,
+    hello: StartHandshake<TcpStream>,
+    peer: IpAddr,
+    admission: OwnedSemaphorePermit,
+    slots: Arc<Semaphore>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    let public = inner
+        .public_https
+        .as_ref()
+        .context("public HTTPS is unavailable")?;
+    let fallback = inner
+        .tcp_tls
+        .as_ref()
+        .context("TCP fallback TLS configuration is unavailable")?;
     if hello
         .client_hello()
         .alpn()

@@ -27,6 +27,19 @@ async fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    if env::args_os()
+        .nth(1)
+        .as_deref()
+        .is_some_and(|arg| arg == "--tenants")
+    {
+        let mut args = env::args_os().skip(2);
+        let path = PathBuf::from(args.next().context("--tenants requires MANIFEST.json")?);
+        anyhow::ensure!(
+            args.next().is_none(),
+            "usage: laneway-relay --tenants MANIFEST.json"
+        );
+        return Server::serve_tenants(&path, shutdown_signal()).await;
+    }
     let arguments = parse_args()?;
     let config = Config::load(&arguments.config)?;
     if arguments.check {
@@ -79,7 +92,7 @@ fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> R
         if argument == "--config" || argument == "-config" {
             config = args.next().context("--config requires a path")?.into();
         } else if argument == "-h" || argument == "--help" {
-            println!("laneway-relay [--config PATH] [--check-config]");
+            println!("laneway-relay [--config PATH] [--check-config] | --tenants MANIFEST.json");
             std::process::exit(0);
         } else if argument == "--check-config" {
             check = true;
