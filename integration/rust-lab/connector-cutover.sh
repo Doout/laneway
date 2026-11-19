@@ -30,7 +30,7 @@ fixture() {
     relay_endpoint=localhost:4434
   fi
   endpoint=https://localhost:8443
-  printf '%s\n' rust-connector-lab-admin-token > "$work/admin.token"
+  printf '%s\n' rust-connector-cutover-disposable-admin-token > "$work/admin.token"
   "$cli" pki init -out-dir "$work/pki" >/dev/null
   for role in controller relay; do
     if [ "$role" = controller ]; then id="$controller"; else id="$relay"; fi
