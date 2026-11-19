@@ -6,6 +6,8 @@ use std::{env, io, path::Path};
 mod discovery_limit;
 mod http;
 mod origin;
+#[cfg(unix)]
+mod platform;
 mod quic;
 mod server;
 mod webhook_alerts;
@@ -23,6 +25,8 @@ fn main() -> Result<()> {
         }
         Some("serve") => return server::start(args),
         Some("serve-tenants") => return server::start_shared(args),
+        #[cfg(unix)]
+        Some("platform") => return platform::command(args),
         #[cfg(unix)]
         Some("init") => return server::initialize(args),
         #[cfg(unix)]

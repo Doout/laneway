@@ -27,6 +27,8 @@ struct QuicListener {
 
 mod shared;
 pub use shared::start as start_shared;
+#[cfg(unix)]
+pub(crate) use shared::{validate_staged_tenant, validated_entries};
 
 struct Serving {
     state: super::http::State,

@@ -17,6 +17,18 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     File::open(path)?.take(262_145).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 262_144, "tenant manifest exceeds 256 KiB");
     let manifest: Manifest = serde_json::from_slice(&bytes).context("decode tenant manifest")?;
+    let cells = validated_entries(&manifest)?
+        .into_iter()
+        .map(|(host, cell)| {
+            prepare(arguments(cell).into_iter(), Some(&host))
+                .with_context(|| format!("prepare controller for {host}"))
+                .map(|serving| (host, serving))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    runtime()?.block_on(run(cells))
+}
+
+pub(crate) fn validated_entries(manifest: &Manifest) -> Result<Vec<(String, &Deployment)>> {
     let entries = manifest.entries().map_err(anyhow::Error::msg)?;
     let mut databases = BTreeSet::new();
     let mut renewals = BTreeSet::new();
@@ -76,15 +88,13 @@ pub fn start(mut args: impl Iterator<Item = OsString>) -> Result<()> {
             "{host}: duplicate root credential"
         );
     }
-    let cells = entries
-        .into_iter()
-        .map(|(host, cell)| {
-            prepare(arguments(cell).into_iter(), Some(&host))
-                .with_context(|| format!("prepare controller for {host}"))
-                .map(|serving| (host, serving))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    runtime()?.block_on(run(cells))
+    Ok(entries)
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_staged_tenant(host: &str, deployment: &Deployment) -> Result<()> {
+    prepare(arguments(deployment).into_iter(), Some(host))?;
+    Ok(())
 }
 
 fn certificates(path: &Path) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {

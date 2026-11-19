@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,6 +179,179 @@ private_key = %q
 		t.Fatalf("controller did not reject duplicate database: %v: %s", err, output)
 	}
 	writeManifest(manifest, b.config)
+	roots := x509.NewCertPool()
+	roots.AddCert(webCA)
+	web := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return new(net.Dialer).DialContext(ctx, network, publicAddress)
+		},
+	}}
+	t.Cleanup(web.CloseIdleConnections)
+	base := func(c tenantLab) string { return "https://" + c.host + ":" + publicPort }
+	discovered := func(cell tenantLab) bool {
+		r, err := web.Get(base(cell) + "/.well-known/laneway/bootstrap.json")
+		if err != nil {
+			return false
+		}
+		defer r.Body.Close()
+		var body struct {
+			NetworkID string `json:"network_id"`
+		}
+		return r.StatusCode == 200 && json.NewDecoder(r.Body).Decode(&body) == nil && body.NetworkID == cell.network.String()
+	}
+	t.Run("operator directory stages a separate instance", func(t *testing.T) {
+		// Stage and start the candidate only inside this subtest.
+		defer web.CloseIdleConnections()
+		ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		defer cancel()
+		state := filepath.Join(dir, "platform-state")
+		run := func(args ...string) {
+			t.Helper()
+			if output, err := exec.CommandContext(ctx, controllerBinary, append([]string{"platform"}, args...)...).CombinedOutput(); err != nil {
+				t.Fatalf("platform %s: %v: %s", args[0], err, output)
+			}
+		}
+		run("init", state)
+		password, err := os.ReadFile(filepath.Join(state, "operator.password"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		address := tenantTCPAddress(t)
+		origin := "http://" + address
+		startTenantProcess(t, controllerBinary, "platform", "serve", state, manifest, address)
+		client := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+		request := func(method, path, from, body string, authenticated bool) (int, string) {
+			t.Helper()
+			req, err := http.NewRequestWithContext(ctx, method, origin+path, strings.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if method == "POST" {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.Header.Set("Origin", from)
+			}
+			if authenticated {
+				req.SetBasicAuth("operator", strings.TrimSpace(string(password)))
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return 0, ""
+			}
+			defer resp.Body.Close()
+			value, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return resp.StatusCode, string(value)
+		}
+		waitFor(t, ctx, "platform listener", func() bool {
+			status, _ := request("GET", "/", "", "", false)
+			return status == http.StatusUnauthorized
+		})
+		for _, check := range []struct {
+			path, from, body string
+			want             int
+		}{
+			{"/tenants", "http://other.test", "slug=gamma", http.StatusForbidden},
+			{"/tenants", origin, "slug=alpha", http.StatusConflict},
+			{"/tenants", origin, "slug=platform", http.StatusConflict},
+			{"/tenants", origin, "slug=gamma", http.StatusSeeOther},
+			{"/tenants", origin, "slug=gamma", http.StatusConflict},
+		} {
+			if status, _ := request("POST", check.path, check.from, check.body, true); status != check.want {
+				t.Fatalf("reserve %q: HTTP %d, want %d", check.body, status, check.want)
+			}
+		}
+		status, page := request("GET", "/", "", "", true)
+		if status != http.StatusOK || !strings.Contains(page, "alpha.lane.test") ||
+			!strings.Contains(page, "beta.lane.test") || !strings.Contains(page, "Reserved · awaiting staging") ||
+			strings.Contains(page, strings.TrimSpace(string(password))) || strings.Contains(page, a.root) {
+			t.Fatal("platform must show tenant metadata and no credentials or paths")
+		}
+		if status, _ := request("GET", "/v1/admin/networks", "", "", true); status != http.StatusNotFound {
+			t.Fatalf("instance API exposed on platform: HTTP %d", status)
+		}
+		gamma := create("gamma", "gamma."+domain, "100.96.33.0/24")
+		gamma.config["database"] = filepath.Join(dir, "gamma-staged.db")
+		gammaInput := filepath.Join(dir, "gamma-deployment.json")
+		_, gammaRelayPort, err := net.SplitHostPort(gamma.udp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provision := map[string]any{
+			"deployment":        gamma.config,
+			"ipv4_pool":         "100.96.33.0/24",
+			"relay_certificate": filepath.Join(dir, "gamma-relay.crt"),
+			"relay_endpoint":    gamma.host + ":" + gammaRelayPort,
+		}
+		raw, err := json.Marshal(provision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, gammaInput, raw, 0600)
+		before, err := os.ReadFile(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unsafeInput := filepath.Join(dir, "gamma-duplicate-credential.json")
+		unsafeConfig := maps.Clone(gamma.config)
+		unsafeConfig["root_token"] = a.root
+		unsafeProvision := maps.Clone(provision)
+		unsafeProvision["deployment"] = unsafeConfig
+		unsafeJSON, err := json.Marshal(unsafeProvision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, unsafeInput, unsafeJSON, 0600)
+		if output, err := exec.CommandContext(ctx, controllerBinary, "platform", "stage", state, manifest,
+			"gamma", unsafeInput).CombinedOutput(); err == nil ||
+			!bytes.Contains(output, []byte("duplicate root credential")) {
+			t.Fatalf("staging accepted shared credentials: %v: %s", err, output)
+		}
+		if _, err := os.Stat(gamma.config["database"]); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("rejected staging published a database")
+		}
+		run("stage", state, manifest, "gamma", gammaInput)
+		after, err := os.ReadFile(manifest)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatal("staging changed the active manifest")
+		}
+		candidatePath := filepath.Join(state, "gamma.manifest.json")
+		candidate, err := os.ReadFile(candidatePath)
+		if err != nil || !bytes.Contains(candidate, []byte("gamma-staged.db")) {
+			t.Fatal("missing staged deployment")
+		}
+		status, page = request("GET", "/", "", "", true)
+		if status != http.StatusOK || !strings.Contains(page, "Staged · awaiting activation") {
+			t.Fatal("platform did not show the staged tenant")
+		}
+		// Only start gamma here; the other fixture tenants bootstrap below.
+		var config struct {
+			Domain       string            `json:"domain"`
+			PublicListen string            `json:"public_listen"`
+			Tenants      []json.RawMessage `json:"tenants"`
+		}
+		if err := json.Unmarshal(candidate, &config); err != nil || len(config.Tenants) != 3 {
+			t.Fatal("candidate did not preserve existing tenant entries")
+		}
+		config.Tenants = config.Tenants[2:]
+		gammaManifest := filepath.Join(dir, "gamma-test-manifest.json")
+		raw, err = json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, gammaManifest, raw, 0600)
+		startTenantProcess(t, controllerBinary, "serve-tenants", gammaManifest)
+		waitFor(t, ctx, "staged tenant controller", func() bool {
+			_, err := gamma.client.Networks(ctx, 2)
+			return err == nil
+		})
+		startTenantProcess(t, relayBinary, "--tenants", gammaManifest)
+		waitFor(t, ctx, "staged tenant public HTTPS", func() bool { return discovered(gamma) })
+	})
 	startTenantProcess(t, controllerBinary, "serve-tenants", manifest)
 	for _, cell := range []tenantLab{a, b, baseCell} {
 		waitFor(t, ctx, "tenant controller "+cell.slug, func() bool {
@@ -196,28 +370,8 @@ private_key = %q
 		}
 	}
 	startTenantProcess(t, relayBinary, "--tenants", manifest)
-	roots := x509.NewCertPool()
-	roots.AddCert(webCA)
-	web := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13},
-		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			return new(net.Dialer).DialContext(ctx, network, publicAddress)
-		},
-	}}
-	t.Cleanup(web.CloseIdleConnections)
-	base := func(c tenantLab) string { return "https://" + c.host + ":" + publicPort }
 	for _, cell := range []tenantLab{a, b, baseCell} {
-		waitFor(t, ctx, "tenant HTTPS discovery "+cell.slug, func() bool {
-			r, err := web.Get(base(cell) + "/.well-known/laneway/bootstrap.json")
-			if err != nil {
-				return false
-			}
-			defer r.Body.Close()
-			var body struct {
-				NetworkID string `json:"network_id"`
-			}
-			return r.StatusCode == 200 && json.NewDecoder(r.Body).Decode(&body) == nil && body.NetworkID == cell.network.String()
-		})
+		waitFor(t, ctx, "tenant HTTPS discovery "+cell.slug, func() bool { return discovered(cell) })
 		if os.Getenv("LANEWAY_CONSOLE_DIR") != "" {
 			response, err := web.Get(base(cell) + "/")
 			if err != nil {
