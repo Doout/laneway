@@ -192,6 +192,7 @@ pub(crate) struct ControllerConfig {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PublicHttpsConfig {
     pub(crate) server_name: String,
+    pub(crate) platform_socket: Option<PathBuf>,
     pub(crate) certificate: Option<PathBuf>,
     pub(crate) private_key: Option<PathBuf>,
     pub(crate) cache_dir: Option<PathBuf>,
@@ -228,7 +229,8 @@ impl PublicHttpsConfig {
                 &self.certificate,
                 &self.private_key,
                 &self.cache_dir,
-                &self.acme_ca
+                &self.acme_ca,
+                &self.platform_socket,
             ]
             .into_iter()
             .flatten()

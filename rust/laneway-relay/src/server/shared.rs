@@ -40,6 +40,10 @@ pub(super) async fn run(path: &Path, shutdown: impl Future<Output = ()>) -> Resu
             .public_https
             .as_ref()
             .context("each tenant relay requires public HTTPS")?;
+        ensure!(
+            public.platform_socket.is_none() || host == manifest.domain,
+            "only the shared root hostname can serve the Platform"
+        );
         let controller = config
             .controller
             .as_ref()
