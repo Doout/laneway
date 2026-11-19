@@ -7,10 +7,52 @@ directory, sessions, database, root credential, workload CA, and network.
 The platform console is also isolated: its administrators cannot browse a
 customer's network from that console.
 
-This is an opt-in, operator-provisioned deployment. Each tenant has one
-routable workload network. Creating a tenant requires provisioning a new
-deployment and adding it to the manifest; there is no self-service signup,
-cross-tenant connectivity, or tenant creation from the web console.
+Shared mode is opt-in. Each tenant has one routable workload network.
+Standalone self-hosted installations use the existing installer and
+`laneway-controller serve`; they do not need a Platform directory, a tenant
+manifest, or a connection to the hosted control plane.
+
+## Preview the operator Platform
+
+The Platform is a separate, loopback-only console. It lists configured
+tenant hostnames and tracks new requests without exposing instance APIs or
+credentials. Do not proxy this preview publicly; use SSH forwarding for
+remote access. Starting the Platform does not change the root hostname or
+any existing tenant.
+
+```sh
+laneway-controller platform init /path/to/private/platform
+laneway-controller platform serve /path/to/private/platform /path/to/active-tenants.json 127.0.0.1:4177
+```
+
+Open `http://127.0.0.1:4177/` and sign in as `operator` with the password
+in the private state directory's `operator.password` file. Choose
+**Reserve name** to queue a tenant. An initial manifest may contain just
+`domain`, `public_listen`, and an empty `tenants` array.
+
+Prepare tenant-specific certificates, credentials, and relay configuration
+as described below. Write a private provisioning JSON file with
+`deployment` (the same object used in the manifest), `ipv4_pool`,
+`relay_certificate` (the relay workload certificate's absolute path), and
+`relay_endpoint` (the node-reachable host and UDP port). Point the
+deployment's `database` at a new absolute path.
+Run staging as the service user, or arrange ownership of the resulting
+database and lock file before activation.
+
+```sh
+laneway-controller platform stage /path/to/private/platform /path/to/active-tenants.json acme /path/to/acme-provision.json
+```
+
+Staging initializes a fresh database, registers its relay, and checks the candidate against
+shared-runtime identity rules. It writes `acme.manifest.json` into the
+private Platform directory without publishing anything or restarting
+services. Review the relay configuration and DNS. Before applying, compare
+the printed base SHA-256 with the current active manifest; never apply a
+stale candidate. Activate one tenant at a time through the normal shared
+deployment process, then verify HTTPS and bootstrap the tenant owner with
+the existing CLI. If staging fails after writing a database, inspect that
+unpublished file before reusing its path. Public Platform auth, automatic
+activation, and owner invite links are not part of this preview.
 
 ## Provision a tenant
 

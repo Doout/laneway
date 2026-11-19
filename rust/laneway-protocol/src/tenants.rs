@@ -1,10 +1,10 @@
 //! Trusted operator configuration for the shared controller and relay.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf};
 
 /// A registry of explicitly provisioned hostnames. Unknown SNI never falls back.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     /// DNS name of the platform console and parent of the tenant hostnames.
@@ -18,7 +18,7 @@ pub struct Manifest {
 }
 
 /// A tenant's DNS label and deployment inputs.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tenant {
     /// A single, canonical lowercase DNS label.
@@ -28,7 +28,7 @@ pub struct Tenant {
 }
 
 /// One independent controller identity, database, and relay configuration.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Deployment {
     /// Existing controller database.
@@ -60,12 +60,19 @@ pub struct Deployment {
 impl Manifest {
     /// Returns exact hostname mappings after validating names, paths and listeners.
     pub fn entries(&self) -> Result<Vec<(String, &Deployment)>, &'static str> {
+        if self.tenants.is_empty() {
+            return Err("shared runtime requires at least one tenant");
+        }
+        self.directory_entries()
+    }
+
+    /// Validates a directory manifest, including an empty registry before its first tenant.
+    pub fn directory_entries(&self) -> Result<Vec<(String, &Deployment)>, &'static str> {
         if self.domain.len() > 189
             || self.domain.split('.').count() < 2
             || !self.domain.split('.').all(label)
             || self.domain.parse::<std::net::IpAddr>().is_ok()
             || self.public_listen.port() == 0
-            || self.tenants.is_empty()
             || self.tenants.len() > 64
         {
             return Err("invalid tenant registry domain, public listener, or tenant count");
@@ -77,10 +84,7 @@ impl Manifest {
         let mut names = BTreeSet::new();
         for tenant in &self.tenants {
             let slug = tenant.slug.as_str();
-            if !label(slug)
-                || matches!(slug, "admin" | "api" | "www" | "platform")
-                || !names.insert(slug)
-            {
+            if !valid_slug(slug) || !names.insert(slug) {
                 return Err("duplicate, reserved, or invalid tenant slug");
             }
             entries.push((format!("{slug}.{}", self.domain), &tenant.deployment));
@@ -119,6 +123,11 @@ impl Manifest {
         }
         Ok(entries)
     }
+}
+
+/// Returns whether the canonical label is available for tenant use.
+pub fn valid_slug(s: &str) -> bool {
+    label(s) && !matches!(s, "admin" | "api" | "www" | "platform")
 }
 
 fn label(s: &str) -> bool {
@@ -172,6 +181,17 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn validates_an_empty_platform_without_starting_a_shared_runtime() {
+        let mut config = manifest();
+        config.tenants.clear();
+        config.platform = None;
+        assert!(config.directory_entries().unwrap().is_empty());
+        assert!(config.entries().is_err());
+        config.domain = "not/a-domain".into();
+        assert!(config.directory_entries().is_err());
     }
 
     #[test]
