@@ -31,7 +31,7 @@ jobs:
       - name: Check scripts
         run: |
           python3 -m unittest discover -s deploy/compose -p 'test_*.py'
-          shellcheck integration/rust-release-macos*.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh
+          shellcheck integration/rust-release-macos*.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh integration/rust-release-systemd.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
           sh integration/rust-compose-release.sh
           sh integration/rust-go-runtime-guard.sh
@@ -176,7 +176,11 @@ jobs:
           archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
           case "$CHECK" in
             systemd)
-              sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "$archive" \
+              fixtures="$RUNNER_TEMP/laneway-go-fixtures"
+              mkdir "$fixtures"
+              CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway-relay ./integration/netprobe ./integration/rustnodecontroller
+              sudo env PATH="$PATH" LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$fixtures" \
+                bash integration/rust-release-systemd.sh "$archive" \
                 "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}" ;;
             fleet-update)
               tar -xzf "$RUNNER_TEMP/activation-fixture.tar.gz" -C "$RUNNER_TEMP"
@@ -534,8 +538,10 @@ jobs:
         timeout-minutes: 15
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends age jq
+          sudo apt-get install -y --no-install-recommends age jq || {
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends age jq
+          }
           sudo modprobe tun
           if ! getent ahostsv4 laneway-release.localhost >/dev/null; then
             printf '%s\n' '127.0.0.1 laneway-release.localhost' | sudo tee -a /etc/hosts >/dev/null

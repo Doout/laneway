@@ -139,15 +139,19 @@ grep -Fxq -- '- Outer installer archive signature verification: **true**' "$dest
 [[ $(compose "$destination" exec -T controller /usr/local/bin/laneway-controller --version) == "${tag#v}" ]]
 [[ $(compose "$destination" exec -T relay /usr/local/bin/laneway-relay --version) == "${tag#v}" ]]
 
-# Replace ACME with a disposable local HTTPS certificate only after the
-# unmodified release has successfully installed. Readiness then checks the
-# signed discovery data against the image digests and authenticated inventory.
+# Only after the unmodified release has successfully installed, use a local
+# HTTPS certificate and a short relay authorization poll for the lab. The
+# latter keeps enrollment from waiting a production poll without bypassing
+# controller authorization. Readiness still checks signed discovery and images.
 install -m 0444 "$work/lab.crt" "$destination/generated/pki/lab-public.crt"
 install -m 0400 "$work/lab.key" "$destination/generated/pki/lab-public.key"
 chown 65532:65532 "$destination/generated/pki/lab-public.key"
-sed -i '/^cache_dir = "\/var\/lib\/laneway-public"$/d' "$destination/generated/config/relay.rust.toml"
+relay_config="$destination/generated/config/relay.rust.toml"
+sed -i -e '/^cache_dir = "\/var\/lib\/laneway-public"$/d' \
+  -e '/^\[controller\]$/,/^\[/s/^poll_interval = .*$/poll_interval = "1s"/' "$relay_config"
+grep -Fxq 'poll_interval = "1s"' "$relay_config"
 printf '\ncertificate = "/run/laneway-secrets/lab-public.crt"\nprivate_key = "/run/laneway-secrets/lab-public.key"\n' \
-  >> "$destination/generated/config/relay.rust.toml"
+  >> "$relay_config"
 sed -i '/^  relay:$/,/^  exit-node:$/ { /    volumes:$/a\      - ./generated/pki/lab-public.crt:/run/laneway-secrets/lab-public.crt:ro\n      - ./generated/pki/lab-public.key:/run/laneway-secrets/lab-public.key:ro
 }' "$destination/compose.rust.yaml"
 compose "$destination" up -d --no-deps --force-recreate --pull never --wait --wait-timeout 90 relay

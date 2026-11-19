@@ -417,7 +417,11 @@ jobs:
           sudo modprobe wireguard
           sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
           archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
-          sudo env PATH="$PATH" bash integration/rust-release-systemd.sh "$archive" "$PACKAGE_GOARCH" "$PREVIEW_VERSION"
+          fixtures="$RUNNER_TEMP/laneway-go-fixtures"
+          mkdir "$fixtures"
+          CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway-relay ./integration/netprobe ./integration/rustnodecontroller
+          sudo env PATH="$PATH" LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$fixtures" \
+            bash integration/rust-release-systemd.sh "$archive" "$PACKAGE_GOARCH" "$PREVIEW_VERSION"
           sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "$archive" \
             "$RUNNER_TEMP/laneway-rust/activation-fixture"
 

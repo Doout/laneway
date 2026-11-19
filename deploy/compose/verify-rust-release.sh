@@ -28,7 +28,13 @@ fi
 
 umask 077
 work=$(mktemp -d)
-trap 'find "$work" -depth -delete' EXIT
+workers=
+cleanup() {
+  for pid in $workers; do kill "$pid" 2>/dev/null || true; done
+  for pid in $workers; do wait "$pid" 2>/dev/null || true; done
+  find "$work" -depth -delete
+}
+trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -84,25 +90,40 @@ verified_digest() {
 }
 
 # Do not publish partial settings when any member fails.
-controller=$(verified_digest ghcr.io/doout/laneway-controller-rust) || exit 1
-relay=$(verified_digest ghcr.io/doout/laneway-relay-rust) || exit 1
-exit_node=$(verified_digest ghcr.io/doout/laneway-exit-node-rust) || exit 1
-case "$mode" in install|publish)
-  admin=$(verified_digest ghcr.io/doout/laneway-admin) || exit 1
-  connector=$(verified_digest ghcr.io/doout/lane-edge-rust) || exit 1
-  ;;
+set -- laneway-controller-rust laneway-relay-rust laneway-exit-node-rust
+case "$mode" in
+  install|publish) set -- "$@" laneway-admin lane-edge-rust ;;
 esac
 if [ "$mode" = publish ]; then
-  verified_digest ghcr.io/doout/laneway-node-rust >/dev/null || exit 1
+  set -- "$@" laneway-node-rust
   # Each entry above must exist exactly once. No other runtime or duplicate
   # reference may be included in a newly published release.
-  [ "$(awk 'END { print NR }' "$work/image-digests.txt")" -eq 6 ] ||
+  [ "$(awk 'END { print NR }' "$work/image-digests.txt")" -eq "$#" ] ||
     die "expected exactly five Rust runtimes and the operator image"
 fi
+for name; do
+  if [ "$mode" = publish ]; then
+    verified_digest "ghcr.io/doout/$name" > "$work/$name.digest" &
+    workers="$workers $!"
+  else
+    verified_digest "ghcr.io/doout/$name" > "$work/$name.digest" || exit 1
+  fi
+done
+failed=0
+while [ -n "$workers" ]; do
+  workers=${workers# }
+  pid=${workers%% *}
+  wait "$pid" || failed=1
+  workers=${workers#"$pid"}
+done
+[ "$failed" -eq 0 ] || die "release image verification failed"
+
 printf 'LANEWAY_RUST_VERSION=%s\nLANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=%s\nLANEWAY_RUST_RELAY_IMAGE_DIGEST=%s\nLANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=%s\n' \
-  "${tag#v}" "$controller" "$relay" "$exit_node"
+  "${tag#v}" "$(cat "$work/laneway-controller-rust.digest")" "$(cat "$work/laneway-relay-rust.digest")" \
+  "$(cat "$work/laneway-exit-node-rust.digest")"
 case "$mode" in install|publish)
-  printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\nLANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=%s\n' "$admin" "$connector"
+  printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\nLANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=%s\n' \
+    "$(cat "$work/laneway-admin.digest")" "$(cat "$work/lane-edge-rust.digest")"
   ;;
 esac
 if [ "$mode" = prepare ]; then cat "$work/bootstrap-artifacts.toml"; fi
