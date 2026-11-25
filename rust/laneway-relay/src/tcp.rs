@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use bytes::Bytes;
 use laneway_protocol::{
-    AuthenticatedIdentity, TcpRecordKind, decode_packet, decode_tcp_record_prefix,
+    AuthenticatedIdentity, TcpRecordKind, decode_frame, decode_tcp_record_prefix,
     encode_tcp_record_prefix,
 };
 use rustls::ProtocolVersion;
@@ -97,6 +97,15 @@ pub(crate) async fn accept(
     .await
     .context("TCP fallback TLS handshake timed out")?
     .context("TCP fallback TLS handshake failed")?;
+    established(stream, config, packet_pool, metrics)
+}
+
+pub(crate) fn established(
+    stream: TlsStream<TcpStream>,
+    config: &TcpFallbackConfig,
+    packet_pool: PacketPool,
+    metrics: Arc<Metrics>,
+) -> Result<Parts> {
     let state = stream.get_ref().1;
     ensure!(
         state.protocol_version() == Some(ProtocolVersion::TLSv1_3),
@@ -178,8 +187,7 @@ async fn reader_loop(
                     .try_send(payload)
                     .context("TCP fallback control receive queue full")?,
                 Record::Packet(payload) => {
-                    decode_packet(payload.as_ref())
-                        .context("invalid TCP fallback packet record")?;
+                    decode_frame(payload.as_ref()).context("invalid TCP fallback packet record")?;
                     packets
                         .try_send(payload)
                         .context("TCP fallback packet receive queue full")?;

@@ -1,4 +1,20 @@
 # syntax=docker/dockerfile:1.9@sha256:fe40cf4e92cd0c467be2cfc30657a680ae2398318afd50b0c80585784c604f28
+FROM rust:1.95-alpine@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2 AS rust-build-base
+ARG CARGO_BUILD_JOBS=4
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY rust/ ./rust/
+COPY api/proto/ ./api/proto/
+
+FROM rust-build-base AS build-cli
+ARG VERSION=dev
+RUN LANEWAY_CLI_RELEASE_VERSION="${VERSION}" CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-cli
+
+FROM rust-build-base AS build-healthcheck
+RUN CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-healthcheck
+
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
 ARG VERSION=dev
 ARG TARGETOS
@@ -7,12 +23,9 @@ WORKDIR /src
 COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags laneway_compat -trimpath \
     -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway ./cmd/laneway
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
+    -o /out/laneway-compat ./cmd/laneway
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 RUN apk add --no-cache \
@@ -25,8 +38,9 @@ RUN apk add --no-cache \
     && addgroup -g 65532 laneway \
     && adduser -D -H -u 65532 -G laneway laneway \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway
-COPY --from=build /out/laneway /usr/local/bin/laneway
-COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+COPY --from=build-cli /src/rust/target/release/laneway /usr/local/bin/laneway
+COPY --from=build /out/laneway-compat /usr/local/bin/laneway-compat
+COPY --from=build-healthcheck /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 RUN apk add --no-cache --virtual .cap-tools libcap-setcap=2.78-r0 \
     && setcap cap_net_admin=ep /bin/setpriv \
     && apk del .cap-tools

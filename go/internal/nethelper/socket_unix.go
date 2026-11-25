@@ -142,7 +142,7 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 		return nil, fmt.Errorf("resolve Laneway executable: %w", err)
 	}
 	if os.Geteuid() != 0 && !options.Direct {
-		if err := validateRootOwnedExecutable(executable); err != nil {
+		if err := ValidateRootOwnedExecutable(executable); err != nil {
 			return nil, err
 		}
 	}
@@ -180,7 +180,7 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 		if commandName, err = filepath.EvalSymlinks(commandName); err != nil {
 			return nil, fmt.Errorf("resolve sudo executable: %w", err)
 		}
-		if err := validateRootOwnedExecutable(commandName); err != nil {
+		if err := ValidateRootOwnedExecutable(commandName); err != nil {
 			return nil, fmt.Errorf("unsafe sudo executable: %w", err)
 		}
 		args = append([]string{"--", executable}, args...)
@@ -263,7 +263,8 @@ func Start(ctx context.Context, setup Setup, options StartOptions) (*Session, er
 	return &Session{conn: client, TUN: tun, next: 1, wait: waitDone, kill: command.Process.Kill, helperPID: reply.HelperPID}, nil
 }
 
-func validateRootOwnedExecutable(path string) error {
+// ValidateRootOwnedExecutable checks the safety of an executable before sudo.
+func ValidateRootOwnedExecutable(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("inspect privileged executable %q: %w", path, err)

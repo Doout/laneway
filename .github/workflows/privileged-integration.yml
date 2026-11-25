@@ -22,7 +22,7 @@ jobs:
       matrix:
         include:
           - suite: go-linux-netns
-            label: Go kernel and full-stack network namespaces
+            label: Go kernel and Rust relay full-stack network namespaces
             script: integration/linux-netns.sh
             runner: ubuntu-24.04
           - suite: rust-kernel-netns
@@ -30,7 +30,7 @@ jobs:
             script: integration/rust-kernel-netns.sh
             runner: ubuntu-24.04
           - suite: rust-node-interop
-            label: Rust node and Go/Rust relay interoperability
+            label: Go and Rust nodes through the Rust relay
             script: integration/rust-node-interop.sh
             runner: ubuntu-24.04
           - suite: rust-controller-node-netns

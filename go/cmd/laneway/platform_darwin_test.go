@@ -3,10 +3,45 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 )
+
+func TestMacOSPackageInstallsPrivateCompatibilityHelper(t *testing.T) {
+	directory := t.TempDir()
+	client := filepath.Join(directory, "laneway")
+	compat := filepath.Join(directory, "laneway-compat")
+	node := filepath.Join(directory, "lanewayd")
+	for _, path := range []string{client, compat, node} {
+		if err := os.WriteFile(path, []byte("fixture"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, source := range []string{client, compat} {
+		files, err := macInstallFiles(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := map[string]string{
+			macClientPath: client,
+			macCompatPath: compat,
+			macHelperPath: compat,
+			macNodePath:   node,
+		}
+		for _, file := range files {
+			if expected[file.destination] != file.source {
+				t.Fatalf("unexpected install file %+v", file)
+			}
+			delete(expected, file.destination)
+		}
+		if len(expected) != 0 {
+			t.Fatalf("missing install files %v", expected)
+		}
+	}
+}
 
 func TestMacOSCLIContainsOnlyUserClientCommands(t *testing.T) {
 	root := newRootCommand()
@@ -15,7 +50,7 @@ func TestMacOSCLIContainsOnlyUserClientCommands(t *testing.T) {
 		names = append(names, item.Name())
 	}
 	sort.Strings(names)
-	want := []string{"_network-helper", "bootstrap", "configure", "connect", "login", "logout", "update", "version"}
+	want := []string{"_network-helper", "bootstrap", "configure", "connect", "credential", "login", "logout", "start", "update", "version"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("macOS commands = %v, want %v", names, want)
 	}

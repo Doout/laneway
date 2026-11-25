@@ -44,16 +44,47 @@ pub(crate) struct Session {
     allow_e2e: bool,
     direct_endpoint: Option<SocketAddr>,
     max_routes: u32,
-    outbound: mpsc::Sender<Bytes>,
+    outbound: mpsc::Sender<QueuedFrame>,
     control: mpsc::Sender<relay_envelope::Body>,
     cancel: watch::Sender<bool>,
 }
 
 pub(crate) struct SessionChannels {
     pub(crate) session: Arc<Session>,
-    pub(crate) outbound: mpsc::Receiver<Bytes>,
+    pub(crate) outbound: mpsc::Receiver<QueuedFrame>,
     pub(crate) control: mpsc::Receiver<relay_envelope::Body>,
     pub(crate) canceled: watch::Receiver<bool>,
+}
+
+#[derive(Debug)]
+pub(crate) struct QueuedFrame {
+    bytes: Option<Bytes>,
+    metrics: Arc<Metrics>,
+}
+
+impl QueuedFrame {
+    pub(crate) fn new(bytes: Bytes, metrics: &Arc<Metrics>) -> Self {
+        let depth = metrics.queue_enqueue_started(bytes.len());
+        metrics.queue_enqueue_completed(depth);
+        Self {
+            bytes: Some(bytes),
+            metrics: Arc::clone(metrics),
+        }
+    }
+
+    pub(crate) fn into_bytes(mut self) -> Bytes {
+        let bytes = self.bytes.take().expect("queued bytes");
+        self.metrics.queue_removed(bytes.len());
+        bytes
+    }
+}
+
+impl Drop for QueuedFrame {
+    fn drop(&mut self) {
+        if let Some(bytes) = &self.bytes {
+            self.metrics.queue_removed(bytes.len());
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -187,7 +218,7 @@ impl PacketLimiter {
 pub(crate) struct BenchmarkForwarder {
     registry: Registry,
     sender: Arc<Session>,
-    recipient_outbound: mpsc::Receiver<Bytes>,
+    recipient_outbound: mpsc::Receiver<QueuedFrame>,
     pool: PacketPool,
 }
 
@@ -304,8 +335,7 @@ impl BenchmarkForwarder {
         let Ok(forwarded) = self.recipient_outbound.try_recv() else {
             return false;
         };
-        self.registry.metrics.queue_removed(1);
-        PacketHeader::decode(&forwarded).is_ok()
+        PacketHeader::decode(&forwarded.into_bytes()).is_ok()
     }
 }
 
@@ -689,7 +719,11 @@ impl Registry {
                     bail!("E2E packet capability or credential authorization is unavailable");
                 }
             } else {
-                let (source, destination) = packet_addresses(packet)?;
+                let (source, destination) = packet_addresses(packet).inspect_err(|_| {
+                    self.metrics
+                        .dropped_malformed
+                        .fetch_add(1, Ordering::Relaxed);
+                })?;
                 if source.is_ipv6() && (!session.allow_ipv6 || !target.recipient.allow_ipv6) {
                     self.metrics
                         .dropped_capability
@@ -713,6 +747,9 @@ impl Registry {
                 }) {
                     match rejection {
                         PacketRejection::Credential => {
+                            self.metrics
+                                .dropped_capability
+                                .fetch_add(1, Ordering::Relaxed);
                             bail!("sender or recipient authorization is expired or revoked")
                         }
                         PacketRejection::Source => {
@@ -729,6 +766,7 @@ impl Registry {
                             self.metrics
                                 .dropped_capability
                                 .fetch_add(1, Ordering::Relaxed);
+                            self.metrics.dropped_policy.fetch_add(1, Ordering::Relaxed);
                             bail!("packet denied by controller policy")
                         }
                     }
@@ -785,9 +823,7 @@ impl Registry {
         let length = output.len() as u64;
         // Account before publishing through the permit so a fast receiver can
         // never decrement the gauge before the producer increment is visible.
-        let queue_depth = self.metrics.queue_enqueue_started();
-        permit.send(output);
-        self.metrics.queue_enqueue_completed(queue_depth);
+        permit.send(QueuedFrame::new(output, &self.metrics));
         self.metrics
             .forwarded_packets
             .fetch_add(1, Ordering::Relaxed);
@@ -1135,7 +1171,7 @@ mod tests {
         registry
             .forward(&first.session, Bytes::from(frame))
             .unwrap();
-        let forwarded = second.outbound.recv().await.unwrap();
+        let forwarded = second.outbound.recv().await.unwrap().into_bytes();
         assert_eq!(
             PacketHeader::decode(&forwarded).unwrap().route_handle,
             second_handle
@@ -1179,7 +1215,7 @@ mod tests {
         registry
             .forward(&first.session, Bytes::from(frame))
             .unwrap();
-        let forwarded = second.outbound.recv().await.unwrap();
+        let forwarded = second.outbound.recv().await.unwrap().into_bytes();
         let (header, payload) = decode_frame(&forwarded).unwrap();
         assert_eq!(header.flags, PACKET_FLAG_E2E_ENCRYPTED);
         assert_eq!(header.route_handle, second_handle);

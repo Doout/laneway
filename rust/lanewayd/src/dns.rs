@@ -147,7 +147,9 @@ impl DnsManager {
                 && metadata.len() <= MAX_JOURNAL_BYTES,
             "DNS ownership journal is invalid or oversized"
         );
-        let raw = fs::read(&self.journal).context("read DNS ownership journal")?;
+        let file = fs::File::open(&self.journal).context("open DNS ownership journal")?;
+        let raw = laneway_protocol::read_bounded(file, MAX_JOURNAL_BYTES)
+            .context("read DNS ownership journal")?;
         let journal: Journal =
             serde_json::from_slice(&raw).context("decode DNS ownership journal")?;
         ensure!(

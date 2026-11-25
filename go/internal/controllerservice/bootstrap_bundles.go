@@ -107,8 +107,9 @@ func (s *Service) createBootstrapBundle(w http.ResponseWriter, r *http.Request) 
 	payload := []byte(request.Payload)
 	now := s.now().UTC()
 	expiresAt := time.Unix(request.ExpiresAtUnix, 0).UTC()
-	if len(payload) == 0 || len(payload) > bootstrap.MaxBundleBytes || strings.IndexByte(request.Payload, 0) >= 0 ||
-		!strings.HasPrefix(request.Payload, "#!/bin/bash\n") {
+	validShebang := strings.HasPrefix(request.Payload, "#!/bin/bash\n") ||
+		strings.HasPrefix(request.Payload, "#!/bin/bash -p\n")
+	if len(payload) == 0 || len(payload) > bootstrap.MaxBundleBytes || strings.IndexByte(request.Payload, 0) >= 0 || !validShebang {
 		s.writeError(w, malformed("bootstrap payload must be a bounded bash script"), false)
 		return
 	}

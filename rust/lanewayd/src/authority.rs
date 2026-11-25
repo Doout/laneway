@@ -11,7 +11,7 @@ use tokio::time::{Instant, sleep, sleep_until};
 use tracing::warn;
 
 use crate::{
-    controller::{Client, PollResult, Snapshot},
+    controller::{PollResult, QuicControl, Snapshot},
     tls::LocalCertificateHealth,
 };
 
@@ -22,7 +22,17 @@ pub(crate) trait ConfigurationSource: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + 'a>>;
 }
 
-impl ConfigurationSource for Client {
+#[cfg(feature = "native")]
+impl ConfigurationSource for crate::controller::Client {
+    fn poll<'a>(
+        &'a self,
+        known_epoch: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + 'a>> {
+        Box::pin(async move { self.poll(known_epoch).await })
+    }
+}
+
+impl ConfigurationSource for QuicControl {
     fn poll<'a>(
         &'a self,
         known_epoch: u64,
@@ -126,6 +136,8 @@ pub(crate) struct Runner<S, A> {
     node: Id,
     local_certificate: LocalCertificateHealth,
     poll_interval: Duration,
+    #[cfg(feature = "native")]
+    filter: Option<crate::ConfigurationFilter>,
 }
 
 impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A> {
@@ -151,7 +163,15 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
             node,
             local_certificate,
             poll_interval,
+            #[cfg(feature = "native")]
+            filter: None,
         })
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn with_filter(mut self, filter: Option<crate::ConfigurationFilter>) -> Self {
+        self.filter = filter;
+        self
     }
 
     pub(crate) async fn run(&self) -> Result<()> {
@@ -166,11 +186,14 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
                 .authority
                 .retained()
                 .context("controller authority disappeared")?;
-            let lease = deadline(retained.valid_until);
+            let lease = deadline(retained.effective_deadline());
             tokio::select! {
                 _ = sleep(delay) => {
-                    let poll = self.client.poll(self.authority.epoch());
-                    let result = if failed_closed {
+                    let poll = async {
+                        let result = self.client.poll(self.authority.epoch()).await?;
+                        self.prepare_poll(result).await
+                    };
+                    let prepared = if failed_closed {
                         poll.await
                     } else {
                         tokio::select! {
@@ -184,20 +207,21 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
                             }
                         }
                     };
-                    let prepared = match result {
-                        Ok(result) => self.prepare_poll(result).await,
-                        Err(error) => Err(error),
-                    };
                     match prepared {
+                        #[cfg(feature = "native")]
+                        Ok(PreparedPoll::SessionRejected(error)) => {
+                            self.applier.fail_close().await.context("fail close session route selection")?;
+                            return Err(error.context("controller withdrew session route selection"));
+                        }
                         Ok(prepared) => match self.apply_poll(prepared, failed_closed).await {
-                        Ok(now_active) => {
-                            failed_closed = !now_active;
-                            delay = self.poll_interval;
-                        }
-                        Err(error) => {
-                            warn!(%error, "controller node snapshot poll failed");
-                            delay = self.poll_interval;
-                        }
+                            Ok(now_active) => {
+                                failed_closed = !now_active;
+                                delay = self.poll_interval;
+                            }
+                            Err(error) => {
+                                warn!(%error, "controller node snapshot poll failed");
+                                delay = self.poll_interval;
+                            }
                         },
                         Err(error) => {
                             warn!(%error, "controller node snapshot poll failed");
@@ -218,21 +242,35 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
     async fn prepare_poll(&self, result: PollResult) -> Result<PreparedPoll> {
         match result {
             PollResult::Modified(configuration) => {
-                let snapshot = Arc::new(
-                    Snapshot::compile(
-                        *configuration,
-                        self.network,
-                        self.node,
-                        &self.local_certificate,
-                    )?
-                    .resolve_relays()
-                    .await?,
-                );
+                #[cfg(feature = "native")]
+                let original = self.filter.as_ref().map(|_| (*configuration).clone());
+                let snapshot = Snapshot::compile(
+                    *configuration,
+                    self.network,
+                    self.node,
+                    &self.local_certificate,
+                )?;
                 ensure!(
                     snapshot.epoch > self.authority.epoch(),
                     "controller configuration epoch did not advance"
                 );
-                Ok(PreparedPoll::Modified(snapshot))
+                #[cfg(feature = "native")]
+                let snapshot = if !snapshot.local_certificate_revoked
+                    && let (Some(filter), Some(original)) = (&self.filter, original)
+                {
+                    let mut snapshot = snapshot;
+                    if let Err(error) = filter(&original)
+                        .and_then(|routes| snapshot.filter_session(routes, self.node))
+                    {
+                        return Ok(PreparedPoll::SessionRejected(error));
+                    }
+                    snapshot
+                } else {
+                    snapshot
+                };
+                Ok(PreparedPoll::Modified(Arc::new(
+                    snapshot.resolve_relays().await?,
+                )))
             }
             PollResult::NotModified { valid_until } => {
                 let retained = self
@@ -248,6 +286,8 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
 
     async fn apply_poll(&self, prepared: PreparedPoll, failed_closed: bool) -> Result<bool> {
         match prepared {
+            #[cfg(feature = "native")]
+            PreparedPoll::SessionRejected(error) => Err(error),
             PreparedPoll::Modified(snapshot) => {
                 if snapshot.local_certificate_revoked {
                     self.applier
@@ -287,12 +327,13 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
 enum PreparedPoll {
     Modified(Arc<Snapshot>),
     Renewed(Arc<Snapshot>),
+    #[cfg(feature = "native")]
+    SessionRejected(anyhow::Error),
 }
 
 fn deadline(unix_seconds: u64) -> Instant {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    Instant::now() + Duration::from_secs(unix_seconds.saturating_sub(now_unix))
+        .unwrap_or_default();
+    Instant::now() + Duration::from_secs(unix_seconds).saturating_sub(now_unix)
 }

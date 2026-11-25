@@ -39,16 +39,29 @@ type fixture struct {
 
 func newFixture(t *testing.T, maxBody int64, nodeAuth NodeAuthorizer) fixture {
 	t.Helper()
-	store, err := controller.Open(context.Background(), filepath.Join(t.TempDir(), "controller.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	authState, err := store.AdministratorAuthState(context.Background())
+	ctx := context.Background()
+	store, err := controller.Open(ctx, filepath.Join(t.TempDir(), "controller.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	network, err := store.CreateNetwork(context.Background(), "test", netip.MustParsePrefix("10.44.0.0/24"))
+	networkID, err := identity.NewNetworkID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controllerServiceID, err := identity.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, created, err := store.EnsureControllerInitialNetwork(ctx, controller.ControllerInitialNetwork{
+		NetworkID: networkID, Name: "test", IPv4Pool: netip.MustParsePrefix("10.44.0.0/24"),
+	}, identity.AuthenticatedIdentity{
+		NetworkID: networkID, Role: identity.IdentityRoleController, SubjectID: controllerServiceID,
+	})
+	if err != nil || !created {
+		t.Fatalf("seed controller initial network: created=%t err=%v", created, err)
+	}
+	authState, err := store.AdministratorAuthState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

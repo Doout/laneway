@@ -407,7 +407,9 @@ describe('cookie session runtime races', () => {
     FakeBroadcastChannel.instances[0].emit({ type: 'session-changed', sessionId: newSessionId })
     expect(await screen.findByLabelText('session ID')).toHaveTextContent(newSessionId)
     resolveError({ error: 'stale permission error' })
-    expect(await screen.findByLabelText('result')).toHaveTextContent('The administrator session changed while the error response was being read.')
+    await waitFor(() => expect(screen.getByLabelText('result')).toHaveTextContent(
+      'The administrator session changed while the error response was being read.',
+    ))
     expect(screen.getByLabelText('auth state')).toHaveTextContent('authenticated')
     expect(screen.getByLabelText('auth error')).toBeEmptyDOMElement()
   })

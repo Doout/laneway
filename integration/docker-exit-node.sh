@@ -396,7 +396,7 @@ docker run -d --name "${relay_name}" --hostname "${relay_name}" --label "${owner
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
   -v "${work_dir}/relay:/secrets:ro" "${relay_image}" -config /secrets/relay.toml -diagnostics 127.0.0.1:6060 >/dev/null
-wait_log "${relay_name}" "laneway-relay QUIC="
+wait_log "${relay_name}" "laneway Rust relay listening"
 
 node_create() {
   local name="$1" directory="$2" volume="$3"
@@ -552,7 +552,7 @@ docker exec "${client_name}" /test/netprobe udp-bench-client -target "${saturati
   -scenario docker-exit-relay-saturation -scope controller-authorized-double-nat \
   -duration 750ms -size 1200 -pps 3000 -flows 1 >/dev/null
 throttled="$(docker run --rm --label "${owner}" --network "container:${relay_name}" "${probe_image}" \
-  metric -url http://127.0.0.1:6060/metrics -name laneway_throttled_packets_total)"
+  metric -url http://127.0.0.1:6060/metrics -name laneway_relay_throttled_packets_total)"
 [[ "${throttled}" =~ ^[0-9]+$ && "${throttled}" -gt 0 ]] || { echo "ERROR: relay did not expose saturation drops" >&2; exit 1; }
 admin controller audit --network-id "${network_id}" --limit 1 "${admin_connection[@]}" >/dev/null
 node_net_admin_exec "${client_name}" nft delete table inet laneway_test_direct_block

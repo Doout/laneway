@@ -48,6 +48,9 @@ type ForegroundOptions struct {
 	// routes explicitly selected for this temporary session. It must fail
 	// closed when a requested route or exit is no longer authorized.
 	FilterConfiguration func(*lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error)
+	// RewindCredentials resets anonymous file offsets before their second
+	// consumer. On macOS /dev/fd paths share the original file's offset.
+	RewindCredentials func() error
 }
 
 // RunForeground runs the authenticated node dataplane under caller-owned
@@ -63,6 +66,7 @@ func RunForeground(ctx context.Context, cfg config.Config, options ForegroundOpt
 	return nonCancellationError(runConfig(ctx, cfg, "", runtimeOptions{
 		networkOpener: options.NetworkOpener, status: options.Status,
 		filterConfiguration: options.FilterConfiguration, foreground: true,
+		rewindCredentials: options.RewindCredentials,
 	}))
 }
 
@@ -88,6 +92,7 @@ type runtimeOptions struct {
 	status              func(RuntimeStatus)
 	filterConfiguration func(*lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error)
 	foreground          bool
+	rewindCredentials   func() error
 	wireGuardOpener     func(context.Context, wireguard.SecureManagerConfig) (secureWireGuardRuntime, error)
 }
 

@@ -61,15 +61,14 @@ func (f *runtimeCredentialFiles) add(directory, label string, contents []byte) (
 	if err := file.Chmod(0o600); err != nil {
 		return "", err
 	}
+	// Unlink before writing so credentials are never visible under a pathname.
+	if err := os.Remove(file.Name()); err != nil {
+		return "", err
+	}
 	if _, err := file.Write(contents); err != nil {
 		return "", err
 	}
 	if _, err := file.Seek(0, 0); err != nil {
-		return "", err
-	}
-	// Keep credential bytes reachable only through this process's open file
-	// descriptors. A crash closes the descriptors and leaves no pathname.
-	if err := os.Remove(file.Name()); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%s/%d", credentialDescriptorDirectory, file.Fd()), nil
@@ -82,6 +81,17 @@ func (f *runtimeCredentialFiles) close() error {
 	}
 	f.files = nil
 	return result
+}
+
+// Opening /dev/fd/N on macOS shares N's file offset. Reset it before a
+// different TLS consumer reads the anonymous material.
+func (f *runtimeCredentialFiles) rewind() error {
+	for _, file := range f.files {
+		if _, err := file.Seek(0, 0); err != nil {
+			return fmt.Errorf("rewind anonymous runtime credentials: %w", err)
+		}
+	}
+	return nil
 }
 
 func runConnect(args []string) error {
@@ -247,81 +257,19 @@ func runConnect(args []string) error {
 		caPath, certPath, keyPath, wireGuardKeyPath = profileFiles.ca, profileFiles.certificate, profileFiles.privateKey, profileFiles.wireGuardKey
 		savedProfile, savedProfileFiles = profile, profileFiles
 	}
-	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
-	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
-	configurationClient, err := controllerclient.New(controllerclient.Options{
-		Endpoint: metadata.Controller.EnrollmentEndpoint, QUICEndpoint: metadata.Controller.QUICEndpoint,
-		CAFile: caPath, CertificateFile: certPath, PrivateKeyFile: keyPath, ServerName: metadata.Controller.ServerName,
-		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedController,
+	prepared, err := prepareConnect(ctx, foregroundConnect{
+		metadata: metadata, enrollment: enrollment, runtimeDir: runtimeDir, caPath: caPath,
+		certPath: certPath, keyPath: keyPath, wireGuardKeyPath: wireGuardKeyPath,
+		routes: routes, localLAN: localLAN, dns: dns, options: options, saved: usingSavedLogin,
 	})
 	if err != nil {
 		return err
 	}
-	configurationCtx, cancelConfiguration := context.WithTimeout(ctx, 20*time.Second)
-	initial, _, err := configurationClient.Configuration(configurationCtx, 0)
-	cancelConfiguration()
-	if err != nil {
-		return fmt.Errorf("fetch temporary session configuration: %w", err)
-	}
-	name := connectLocalName(initial, enrollment.identity.NodeID)
-	selectedExit, err := resolveConnectExit(initial, options.exitSelector, enrollment.identity.NodeID)
-	if err != nil {
-		return err
-	}
-	filter := connectConfigurationFilter(routes, selectedExit, enrollment.identity.NodeID)
-	if usingSavedLogin && len(routes) == 0 {
-		filter = connectAuthorizedConfigurationFilter(selectedExit, enrollment.identity.NodeID)
-	}
-	filteredInitial, err := filter(initial)
-	if err != nil {
-		return err
-	}
-	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, options.failureMode, dns, localLAN)
-	if err != nil {
-		return err
-	}
-	selection := "overlay-only"
-	if usingSavedLogin && len(routes) == 0 {
-		selection = "authorized-private-routes"
-	}
-	if len(routes) != 0 {
-		values := make([]string, 0, len(routes))
-		for _, prefix := range routes {
-			values = append(values, prefix.String())
-		}
-		selection = "routes=" + strings.Join(values, ",")
-	}
-	if !selectedExit.IsZero() {
-		selection = "exit=" + options.exitSelector + " failure-mode=" + options.failureMode
-	}
-	lastPath := ""
-	ownedRoutes := connectPrefixList(routes)
-	if usingSavedLogin && len(routes) == 0 {
-		ownedRoutes = connectPrefixList(connectSubnetPrefixes(filteredInitial))
-	}
-	bypasses := connectPrefixList(localLAN)
-	dnsOwnership := "native"
-	if len(dns) != 0 {
-		dnsOwnership = "temporary-session"
-	}
-	status := func(value nodeapp.RuntimeStatus) {
-		if value.Path == lastPath {
-			return
-		}
-		lastPath = value.Path
-		overlays := make([]string, 0, len(value.OverlayAddresses))
-		for _, prefix := range value.OverlayAddresses {
-			overlays = append(overlays, prefix.String())
-		}
-		lease := "durable"
-		if !enrollment.leaseExpiresAt.IsZero() {
-			lease = fmt.Sprint(enrollment.leaseExpiresAt.Unix())
-		}
-		fmt.Printf("laneway connected actor=user network=%s node=%s name=%s overlay=%s identity_lease_expires_at=%s interface=%s selection=%s owned_routes=%s bypasses=%s dns_owner=%s cleanup_journal=helper-active path=%s\n",
-			value.NetworkID, value.NodeID, name, strings.Join(overlays, ","), lease, value.Interface,
-			selection, ownedRoutes, bypasses, dnsOwnership, value.Path)
-	}
+	cfg := prepared.config
 	for {
+		if err := credentials.rewind(); err != nil {
+			return err
+		}
 		sessionCtx := ctx
 		cancelSession := func() {}
 		if usingSavedLogin {
@@ -332,7 +280,8 @@ func runConnect(args []string) error {
 			sessionCtx, cancelSession = context.WithDeadline(ctx, renewAt)
 		}
 		err = nodeapp.RunForeground(sessionCtx, cfg, nodeapp.ForegroundOptions{
-			NetworkOpener: helperNetworkOpener, Status: status, FilterConfiguration: filter,
+			NetworkOpener: helperNetworkOpener, Status: prepared.status, FilterConfiguration: prepared.filter,
+			RewindCredentials: credentials.rewind,
 		})
 		cancelSession()
 		if err != nil {
@@ -361,13 +310,129 @@ func runConnect(args []string) error {
 			return err
 		}
 		caPath, certPath, keyPath, wireGuardKeyPath = savedProfileFiles.ca, savedProfileFiles.certificate, savedProfileFiles.privateKey, savedProfileFiles.wireGuardKey
-		cfg, err = connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, options.failureMode, dns, localLAN)
+		cfg, err = connectConfig(runtimeDir, metadata, prepared.name, caPath, certPath, keyPath, wireGuardKeyPath, prepared.selectedExit, options.failureMode, dns, localLAN)
 		if err != nil {
 			return err
 		}
-		lastPath = ""
+		prepared.lastPath = ""
 		fmt.Printf("laneway refreshed saved login network=%s node=%s; reconnecting authorized routes\n", savedProfile.NetworkID, savedProfile.NodeID)
 	}
+}
+
+type foregroundConnect struct {
+	metadata                                                bootstrap.Metadata
+	enrollment                                              connectEnrollment
+	runtimeDir, caPath, certPath, keyPath, wireGuardKeyPath string
+	routes, localLAN                                        []netip.Prefix
+	dns                                                     []netip.Addr
+	options                                                 connectPlatformOptions
+	saved                                                   bool
+	validateSnapshot                                        func(*lanewayv1.NodeConfiguration) error
+}
+
+type preparedConnect struct {
+	config       config.Config
+	filter       func(*lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error)
+	status       func(nodeapp.RuntimeStatus)
+	selectedExit identity.NodeID
+	name         string
+	lastPath     string
+}
+
+func prepareConnect(ctx context.Context, session foregroundConnect) (*preparedConnect, error) {
+	metadata, enrollment, options := session.metadata, session.enrollment, session.options
+	caPath, certPath, keyPath, wireGuardKeyPath := session.caPath, session.certPath, session.keyPath, session.wireGuardKeyPath
+	routes, localLAN, dns, usingSavedLogin := session.routes, session.localLAN, session.dns, session.saved
+	runtimeDir := session.runtimeDir
+	expectedNetwork, _ := identity.ParseNetworkID(metadata.NetworkID)
+	expectedController, _ := identity.ParseID(metadata.Controller.ServiceID)
+	configurationClient, err := controllerclient.New(controllerclient.Options{
+		Endpoint: metadata.Controller.EnrollmentEndpoint, QUICEndpoint: metadata.Controller.QUICEndpoint,
+		CAFile: caPath, CertificateFile: certPath, PrivateKeyFile: keyPath, ServerName: metadata.Controller.ServerName,
+		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedController,
+	})
+	if err != nil {
+		return nil, err
+	}
+	configurationCtx, cancelConfiguration := context.WithTimeout(ctx, 20*time.Second)
+	initial, _, err := configurationClient.Configuration(configurationCtx, 0)
+	cancelConfiguration()
+	if err != nil {
+		return nil, fmt.Errorf("fetch temporary session configuration: %w", err)
+	}
+	if session.validateSnapshot != nil {
+		if err := session.validateSnapshot(initial); err != nil {
+			return nil, err
+		}
+	}
+	name := connectLocalName(initial, enrollment.identity.NodeID)
+	selectedExit, err := resolveConnectExit(initial, options.exitSelector, enrollment.identity.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	filter := connectConfigurationFilter(routes, selectedExit, enrollment.identity.NodeID)
+	if usingSavedLogin && len(routes) == 0 {
+		filter = connectAuthorizedConfigurationFilter(selectedExit, enrollment.identity.NodeID)
+	}
+	filteredInitial, err := filter(initial)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := connectConfig(runtimeDir, metadata, name, caPath, certPath, keyPath, wireGuardKeyPath, selectedExit, options.failureMode, dns, localLAN)
+	if err != nil {
+		return nil, err
+	}
+	selection := "overlay-only"
+	if usingSavedLogin && len(routes) == 0 {
+		selection = "authorized-private-routes"
+	}
+	if len(routes) != 0 {
+		values := make([]string, 0, len(routes))
+		for _, prefix := range routes {
+			values = append(values, prefix.String())
+		}
+		selection = "routes=" + strings.Join(values, ",")
+	}
+	if !selectedExit.IsZero() {
+		selection = "exit=" + options.exitSelector + " failure-mode=" + options.failureMode
+	}
+	if session.validateSnapshot != nil {
+		filterConfiguration := filter
+		filter = func(configuration *lanewayv1.NodeConfiguration) (*lanewayv1.NodeConfiguration, error) {
+			if err := session.validateSnapshot(configuration); err != nil {
+				return nil, err
+			}
+			return filterConfiguration(configuration)
+		}
+	}
+	prepared := &preparedConnect{config: cfg, filter: filter, selectedExit: selectedExit, name: name}
+	ownedRoutes := connectPrefixList(routes)
+	if usingSavedLogin && len(routes) == 0 {
+		ownedRoutes = connectPrefixList(connectSubnetPrefixes(filteredInitial))
+	}
+	bypasses := connectPrefixList(localLAN)
+	dnsOwnership := "native"
+	if len(dns) != 0 {
+		dnsOwnership = "temporary-session"
+	}
+	prepared.status = func(value nodeapp.RuntimeStatus) {
+		if value.Path == prepared.lastPath {
+			return
+		}
+		prepared.lastPath = value.Path
+		overlays := make([]string, 0, len(value.OverlayAddresses))
+		for _, prefix := range value.OverlayAddresses {
+			overlays = append(overlays, prefix.String())
+		}
+		lease := "durable"
+		if !enrollment.leaseExpiresAt.IsZero() {
+			lease = fmt.Sprint(enrollment.leaseExpiresAt.Unix())
+		}
+		fmt.Printf("laneway connected actor=user network=%s node=%s name=%s overlay=%s identity_lease_expires_at=%s interface=%s selection=%s owned_routes=%s bypasses=%s dns_owner=%s cleanup_journal=helper-active path=%s\n",
+			value.NetworkID, value.NodeID, name, strings.Join(overlays, ","), lease, value.Interface,
+			selection, ownedRoutes, bypasses, dnsOwnership, value.Path)
+	}
+	return prepared, nil
 }
 
 func connectPrefixList(prefixes []netip.Prefix) string {

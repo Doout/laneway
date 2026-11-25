@@ -25,9 +25,9 @@ func TestBootstrapBundleIsBoundedSingleUseAndExpires(t *testing.T) {
 	now := time.Unix(2_000_000_000, 0).UTC()
 	f.service.now = func() time.Time { return now }
 	f.service.bootstrapBundles.now = f.service.now
-	payload := "#!/bin/bash\nprintf 'encrypted wrapper'\n"
+	payload := "#!/bin/bash -p\nprintf 'encrypted wrapper'\n"
 
-	create := func(expiry time.Time) bootstrapBundleResponse {
+	create := func(payload string, expiry time.Time) bootstrapBundleResponse {
 		t.Helper()
 		body, err := json.Marshal(bootstrapBundleRequest{Payload: payload, ExpiresAtUnix: expiry.Unix()})
 		if err != nil {
@@ -50,7 +50,7 @@ func TestBootstrapBundleIsBoundedSingleUseAndExpires(t *testing.T) {
 		return result
 	}
 
-	first := create(now.Add(bootstrap.MaxBundleLifetime))
+	first := create(payload, now.Add(bootstrap.MaxBundleLifetime))
 	authState, err := f.store.AdministratorAuthState(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestBootstrapBundleIsBoundedSingleUseAndExpires(t *testing.T) {
 		t.Fatalf("replay status = %d", replay.Code)
 	}
 
-	concurrent := create(now.Add(time.Minute))
+	concurrent := create(payload, now.Add(time.Minute))
 	const requestCount = 32
 	codes := make(chan int, requestCount)
 	var requests sync.WaitGroup
@@ -129,14 +129,15 @@ func TestBootstrapBundleIsBoundedSingleUseAndExpires(t *testing.T) {
 		t.Fatalf("concurrent downloads: ok=%d not-found=%d", ok, missing)
 	}
 
-	private := create(now.Add(time.Minute))
+	legacyPayload := "#!/bin/bash\nprintf 'legacy wrapper'\n"
+	private := create(legacyPayload, now.Add(time.Minute))
 	privateResponse := httptest.NewRecorder()
 	f.service.Handler().ServeHTTP(privateResponse, relayRequest(private.BundleID))
-	if privateResponse.Code != http.StatusOK || privateResponse.Body.String() != payload {
+	if privateResponse.Code != http.StatusOK || privateResponse.Body.String() != legacyPayload {
 		t.Fatalf("relay fetch status=%d body=%q", privateResponse.Code, privateResponse.Body.String())
 	}
 
-	expired := create(now.Add(time.Minute))
+	expired := create(payload, now.Add(time.Minute))
 	now = now.Add(time.Minute)
 	expiredResponse := httptest.NewRecorder()
 	f.service.Handler().ServeHTTP(expiredResponse, relayRequest(expired.BundleID))
@@ -152,6 +153,7 @@ func TestBootstrapBundleRejectsUnsafePayloadAndLifetime(t *testing.T) {
 	f.service.bootstrapBundles.now = f.service.now
 	for _, requestBody := range []bootstrapBundleRequest{
 		{Payload: "not a script", ExpiresAtUnix: now.Add(time.Minute).Unix()},
+		{Payload: "#!/bin/bash -x\necho ok\n", ExpiresAtUnix: now.Add(time.Minute).Unix()},
 		{Payload: "#!/bin/bash\necho ok\n", ExpiresAtUnix: now.Add(bootstrap.MaxBundleLifetime + time.Second).Unix()},
 	} {
 		body, _ := json.Marshal(requestBody)

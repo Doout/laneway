@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,9 @@ func TestRootHelpDoesNotLoadNodeConfiguration(t *testing.T) {
 	if err := run(nil); err != nil {
 		t.Fatalf("root help from %s: %v", workingDirectory, err)
 	}
+	if runtime.GOOS != "linux" {
+		return
+	}
 	if err := run([]string{"control", "--help"}); err != nil {
 		t.Fatalf("control help from %s: %v", workingDirectory, err)
 	}
@@ -29,23 +33,62 @@ func TestRootHelpDoesNotLoadNodeConfiguration(t *testing.T) {
 
 func TestPublicCommandTreeGroupsWorkflows(t *testing.T) {
 	root := newRootCommand()
-	for _, name := range []string{"connect", "login", "logout", "node", "control", "version"} {
-		command, _, err := root.Find([]string{name})
-		if err != nil || command.Hidden {
-			t.Fatalf("public command %q: hidden=%t error=%v", name, command != nil && command.Hidden, err)
+	public := []string{"connect", "login", "logout", "configure", "start", "credential", "update", "version"}
+	hidden := []string{"bootstrap", "_network-helper"}
+	linuxPublic := []string{"node", "control"}
+	linuxHidden := []string{"config", "connector", "controller", "exit", "id", "invite", "join", "pki", "renew", "route", "status", "peers", "routes", "up"}
+	if runtime.GOOS == "linux" {
+		public = append(public, linuxPublic...)
+		hidden = append(hidden, linuxHidden...)
+	}
+	for _, names := range []struct {
+		names  []string
+		hidden bool
+	}{{public, false}, {hidden, true}} {
+		for _, name := range names.names {
+			command, remaining, err := root.Find([]string{name})
+			if err != nil || command == nil || command.CommandPath() != "laneway "+name ||
+				len(remaining) != 0 || command.Hidden != names.hidden {
+				t.Fatalf("command %q: resolved=%v remaining=%q error=%v, expected hidden=%t", name, command, remaining, err, names.hidden)
+			}
 		}
 	}
-	for _, name := range []string{"bootstrap", "config", "connector", "controller", "exit", "id", "invite", "join", "pki", "renew", "route", "status", "peers", "routes", "up"} {
-		command, _, err := root.Find([]string{name})
-		if err != nil || !command.Hidden {
-			t.Fatalf("compatibility command %q: hidden=%t error=%v", name, command != nil && command.Hidden, err)
+	if runtime.GOOS != "linux" {
+		for _, name := range append(linuxPublic, linuxHidden...) {
+			for _, command := range root.Commands() {
+				if command.Name() == name {
+					t.Fatalf("Linux-only command %q is registered on %s", name, runtime.GOOS)
+				}
+			}
 		}
+		return
 	}
 	for _, name := range []string{"status", "peers", "routes", "up", "exit", "route"} {
 		command, _, err := root.Find([]string{"node", name})
 		if err != nil || command.Hidden {
 			t.Fatalf("node command %q: hidden=%t error=%v", name, command != nil && command.Hidden, err)
 		}
+	}
+}
+
+func TestProductEntryPointsOfferOfflineHelp(t *testing.T) {
+	for _, path := range []string{"configure", "configure server", "start", "credential", "update", "update client", "update server", "update connector"} {
+		t.Run(path, func(t *testing.T) {
+			args := strings.Fields(path)
+			root := newRootCommand()
+			target, rest, err := root.Find(args)
+			if err != nil || len(rest) != 0 || target.CommandPath() != "laneway "+path || target.Hidden {
+				t.Fatalf("cannot resolve public command %q", path)
+			}
+			root.SetOut(io.Discard)
+			root.SetArgs(append(args, "--help"))
+			if err := root.Execute(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	if err := runProductUpdate("", []string{"unknown"}); err == nil {
+		t.Fatal("accepted unknown update target")
 	}
 }
 
@@ -71,15 +114,27 @@ func TestControlCommandIsIndependentOfWorkingDirectory(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(original) })
 
-	if err := run([]string{"control", "status", "--json"}); err != nil {
-		t.Fatal(err)
+	var commandError error
+	if runtime.GOOS == "linux" {
+		commandError = run([]string{"control", "status", "--json"})
+	} else {
+		control := controlCommand()
+		control.SetArgs([]string{"status", "--json"})
+		commandError = control.Execute()
+	}
+	if commandError != nil {
+		t.Fatal(commandError)
 	}
 	contents, err := os.ReadFile(output)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
-	want := []string{workingDirectory, "status", "--json"}
+	physicalDirectory, err := filepath.EvalSymlinks(workingDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{physicalDirectory, "status", "--json"}
 	if strings.Join(lines, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("operator invocation = %q, want %q", lines, want)
 	}

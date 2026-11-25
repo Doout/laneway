@@ -1,11 +1,13 @@
-# Rust Node with the Go controller
+# Linux system networking with the Go controller
+
+For a new host with the Linux system package, run `sudo laneway configure --system` and paste a native node invitation. Then run `sudo laneway start --system`. This starts a foreground TUN node using controller-authorized QUIC relay endpoints. Use an explicit configuration to select TCP fallback or enable gateway forwarding.
 
 Start with
 [`node-rust-controller.toml`](../deploy/examples/node-rust-controller.toml),
 then validate the installed configuration before opening a TUN device:
 
 ```sh
-lanewayd-rs --config /etc/laneway/node-rust-controller.toml --check-config
+lanewayd run --system --config /etc/laneway/node-rust-controller.toml --check-config
 ```
 
 The Rust daemon uses the same protected local socket API as the Go Node:

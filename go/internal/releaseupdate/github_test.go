@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -97,5 +99,133 @@ func TestChecksumForAssetRejectsDuplicate(t *testing.T) {
 	_, err := checksumForAsset(manifest, "client")
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("checksumForAsset error = %v", err)
+	}
+}
+
+func TestDownloadLatestSignedPair(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell verifier fixture")
+	}
+	cli := []byte("Go CLI")
+	node := []byte("Rust daemon")
+	bin := t.TempDir()
+	verifier := `#!/bin/sh
+set -eu
+[ "$#" -eq 8 ]
+[ "$1" = verify-blob ] && [ "$2" = --bundle ]
+[ "$(cat "$3")" = detached-bundle ]
+[ "$4" = --certificate-identity ]
+[ "$5" = https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v1.2.3 ]
+[ "$6" = --certificate-oidc-issuer ] && [ "$7" = https://token.actions.githubusercontent.com ]
+[ -z "${COSIGN_INSECURE_IGNORE_TLOG+x}" ] && [ -z "${Cosign_fixture_override+x}" ]
+grep -F 'lanewayd_linux_arm64' "$8" >/dev/null
+[ "${VERIFY_FAILURE:-0}" = 0 ]
+`
+	if err := os.WriteFile(filepath.Join(bin, "cosign"), []byte(verifier), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("COSIGN_INSECURE_IGNORE_TLOG", "true")
+	t.Setenv("Cosign_fixture_override", "true")
+
+	for _, test := range []struct {
+		name, signFailure, wantError string
+		tamper, retain               bool
+	}{
+		{name: "verified"},
+		{name: "staged signed metadata", retain: true},
+		{name: "untrusted metadata not staged", retain: true, signFailure: "1", wantError: "signature verification failed"},
+		{name: "signature rejected", signFailure: "1", wantError: "signature verification failed"},
+		{name: "daemon content rejected", tamper: true, wantError: "failed checksum verification"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("VERIFY_FAILURE", test.signFailure)
+			if test.signFailure == "" {
+				t.Setenv("VERIFY_FAILURE", "0")
+			}
+			var latest atomic.Int32
+			var downloads atomic.Int32
+			var server *httptest.Server
+			server = httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/Doout/laneway/releases/latest":
+					latest.Add(1)
+					http.Redirect(response, request, server.URL+"/Doout/laneway/releases/tag/v1.2.3", http.StatusFound)
+				case "/Doout/laneway/releases/tag/v1.2.3":
+					response.WriteHeader(http.StatusOK)
+				case "/Doout/laneway/releases/download/v1.2.3/checksums.txt":
+					fmt.Fprintf(response, "%x  laneway_linux_arm64\n%x  lanewayd_linux_arm64\n", sha256.Sum256(cli), sha256.Sum256(node))
+				case "/Doout/laneway/releases/download/v1.2.3/checksums.sigstore.json":
+					_, _ = response.Write([]byte("detached-bundle"))
+				case "/Doout/laneway/releases/download/v1.2.3/laneway_linux_arm64":
+					downloads.Add(1)
+					_, _ = response.Write(cli)
+				case "/Doout/laneway/releases/download/v1.2.3/lanewayd_linux_arm64":
+					downloads.Add(1)
+					if test.tamper {
+						_, _ = response.Write([]byte("unexpected content"))
+					} else {
+						_, _ = response.Write(node)
+					}
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			client := &Client{baseURL: server.URL, repository: "Doout/laneway", httpClient: server.Client(),
+				locateVerifier: func() (string, error) { return filepath.Join(bin, "cosign"), nil }}
+			work := t.TempDir()
+			assets := []Asset{
+				{Name: "laneway_linux_arm64", Destination: filepath.Join(work, "laneway"), MaxBytes: 1024},
+				{Name: "lanewayd_linux_arm64", Destination: filepath.Join(work, "lanewayd"), MaxBytes: 1024},
+			}
+			var tag string
+			var err error
+			if test.retain {
+				tag, err = client.StageLatestSigned(context.Background(), work, assets...)
+			} else {
+				tag, err = client.DownloadLatestSigned(context.Background(), assets...)
+			}
+			if latest.Load() != 1 {
+				t.Fatalf("resolved latest %d times", latest.Load())
+			}
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("expected %q, got %v", test.wantError, err)
+				}
+				if _, statErr := os.Stat(assets[1].Destination); !os.IsNotExist(statErr) {
+					t.Fatalf("unverified daemon was staged: %v", statErr)
+				}
+				if test.signFailure != "" {
+					if downloads.Load() != 0 {
+						t.Fatal("downloaded an asset before verifying its manifest")
+					}
+					if _, statErr := os.Stat(filepath.Join(work, "checksums.sigstore.json")); !os.IsNotExist(statErr) {
+						t.Fatalf("staged an untrusted signature: %v", statErr)
+					}
+				}
+				return
+			}
+			if err != nil || tag != "v1.2.3" || downloads.Load() != 2 {
+				t.Fatalf("update downloads = %d, tag = %q, error = %v", downloads.Load(), tag, err)
+			}
+			if test.retain {
+				bundle, err := os.ReadFile(filepath.Join(work, "checksums.sigstore.json"))
+				if err != nil || string(bundle) != "detached-bundle" {
+					t.Fatalf("staged bundle = %q, %v", bundle, err)
+				}
+				manifest, err := os.ReadFile(filepath.Join(work, "checksums.txt"))
+				expected := fmt.Sprintf("%x  laneway_linux_arm64\n%x  lanewayd_linux_arm64\n", sha256.Sum256(cli), sha256.Sum256(node))
+				if err != nil || string(manifest) != expected {
+					t.Fatalf("staged manifest = %q, %v", manifest, err)
+				}
+			}
+			for index, expected := range [][]byte{cli, node} {
+				contents, err := os.ReadFile(assets[index].Destination)
+				if err != nil || string(contents) != string(expected) {
+					t.Fatalf("staged %s = %q, %v", assets[index].Name, contents, err)
+				}
+			}
+		})
 	}
 }

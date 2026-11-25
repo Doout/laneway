@@ -1,13 +1,40 @@
-#!/bin/sh
+#!/bin/sh -p
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset ENV BASH_ENV CDPATH LD_PRELOAD LD_LIBRARY_PATH
+IFS=$(printf ' \t\n_'); IFS=${IFS%_}
 set -eu
+umask 077
+
+for trusted_command_dir in /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin; do
+  [ -d "$trusted_command_dir" ] && [ ! -L "$trusted_command_dir" ] && \
+    [ "$(/usr/bin/stat -c '%u:%g' "$trusted_command_dir")" = 0:0 ] || {
+      echo "Laneway installer: trusted command directory is unsafe: $trusted_command_dir" >&2
+      exit 1
+    }
+  trusted_command_mode=$((0$(/usr/bin/stat -c %a "$trusted_command_dir")))
+  [ $((trusted_command_mode & 0022)) -eq 0 ] || {
+    echo "Laneway installer: trusted command directory is writable by group or other: $trusted_command_dir" >&2
+    exit 1
+  }
+done
 
 source_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-repository=${LANEWAY_REPOSITORY:-Doout/laneway}
+repository=Doout/laneway
 noninteractive=${LANEWAY_NONINTERACTIVE:-false}
 answers_file=${LANEWAY_INSTALLER_ANSWERS_FILE:-/var/lib/laneway-installer/control-plane.answers}
 production_mode=${LANEWAY_PRODUCTION_MODE:-false}
-cosign_bin=${LANEWAY_COSIGN_BIN-cosign}
-checksum_signature_verified=${LANEWAY_CHECKSUM_SIGNATURE_VERIFIED:-unknown}
+cosign_bin=/usr/local/libexec/laneway/cosign-v3.1.3
+checksum_signature_verified=false
+installer_work=
+installer_work_claimed=false
+issuer_answer_dir=
+issuer_source_dir=
+recovery_kit=
+backup_recipient=
+answers_dir=
+answers_dir_needs_claim=false
+answers_temporary=
 
 die() { echo "Laneway installer: $*" >&2; exit 1; }
 add_missing() {
@@ -15,8 +42,124 @@ add_missing() {
 $1"; else missing=$1; fi
 }
 
+if [ "${LANEWAY_REPOSITORY+x}" = x ] || \
+  [ "${LANEWAY_RELEASE_BASE_URL+x}" = x ] || \
+  [ "${LANEWAY_COSIGN_BIN+x}" = x ] || \
+  [ "${LANEWAY_CHECKSUM_SIGNATURE_VERIFIED+x}" = x ]; then
+  die "release trust and source overrides are not allowed"
+fi
+
+cleanup() {
+  if [ -n "$answers_temporary" ] && [ -f "$answers_temporary" ] && \
+    [ ! -L "$answers_temporary" ]; then
+    find "$answers_temporary" -maxdepth 0 -delete 2>/dev/null || true
+  fi
+  if [ "$installer_work_claimed" = true ] && [ -n "$installer_work" ] && \
+    [ -e "$installer_work" ]; then
+    find "$installer_work" -depth -delete 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 case "$production_mode" in true|false) ;; *) die "LANEWAY_PRODUCTION_MODE must be true or false" ;; esac
 if [ "$production_mode" = true ]; then install_profile=production; else install_profile=quick; fi
+
+if env | grep -E '^COMPOSE_[A-Za-z0-9_]*=' >/dev/null; then
+  die "ambient COMPOSE_* overrides are not allowed"
+fi
+if env | grep -E '^(COSIGN|SIGSTORE|TUF)_[A-Za-z0-9_]*=' >/dev/null; then
+  die "ambient signature trust overrides are not allowed"
+fi
+if [ "${CURL_CA_BUNDLE+x}" = x ] || [ "${SSL_CERT_FILE+x}" = x ] || \
+  [ "${SSL_CERT_DIR+x}" = x ]; then
+  die "ambient TLS trust overrides are not allowed"
+fi
+if [ "${DOCKER_HOST+x}" = x ] || [ "${DOCKER_CONTEXT+x}" = x ] || \
+  [ "${DOCKER_TLS+x}" = x ] || \
+  [ "${DOCKER_TLS_VERIFY+x}" = x ] || [ "${DOCKER_CERT_PATH+x}" = x ] || \
+  [ "${DOCKER_CONFIG+x}" = x ]; then
+  die "Docker target overrides are not allowed"
+fi
+HOME=/root
+export HOME
+
+compose_environment() {
+  env \
+    -u LANEWAY_VERSION \
+    -u LANEWAY_CONTROLLER_IMAGE_DIGEST \
+    -u LANEWAY_RELAY_IMAGE_DIGEST \
+    -u LANEWAY_ADMIN_IMAGE_DIGEST \
+    -u LANEWAY_CONNECTOR_IMAGE_DIGEST \
+    -u LANEWAY_EXIT_NODE_IMAGE_DIGEST \
+    -u LANEWAY_BIND_ADDRESS \
+    -u LANEWAY_CONTROLLER_PORT \
+    -u LANEWAY_RELAY_QUIC_PORT \
+    -u LANEWAY_RELAY_TCP_PORT \
+    -u LANEWAY_EXIT_DIRECT_PORT \
+    -u LANEWAY_CONTROLLER_SERVER_NAME \
+    -u COMPOSE_PROJECT_NAME \
+    -u COMPOSE_PROFILES \
+    -u COMPOSE_FILE \
+    -u COMPOSE_PATH_SEPARATOR \
+    -u COMPOSE_ENV_FILES \
+    -u COMPOSE_DISABLE_ENV_FILE \
+    -u COMPOSE_CONVERT_WINDOWS_PATHS \
+    -u COMPOSE_IGNORE_ORPHANS \
+    -u COMPOSE_REMOVE_ORPHANS \
+    -u COMPOSE_PARALLEL_LIMIT \
+    -u COMPOSE_ANSI \
+    -u COMPOSE_PROGRESS \
+    -u COMPOSE_STATUS_STDOUT \
+    -u COMPOSE_MENU \
+    -u COMPOSE_EXPERIMENTAL \
+    -u COMPOSE_BAKE \
+    -u COMPOSE_HTTP_TIMEOUT \
+    -u DOCKER_DEFAULT_PLATFORM \
+    DOCKER_CONFIG=/root/.docker \
+    DOCKER_CONTEXT=default \
+    "$@"
+}
+
+validate_answers_file() {
+  if [ ! -e "$answers_file" ] && [ ! -L "$answers_file" ]; then
+    return
+  fi
+  if [ ! -f "$answers_file" ] || [ -L "$answers_file" ]; then
+    die "remembered-answer file is not a safe regular file: $answers_file"
+  fi
+  [ "$(stat -c '%u:%g:%a:%h' "$answers_file")" = 0:0:600:1 ] || \
+    die "remembered-answer file must be root-owned, mode 0600, and have one link"
+  awk '
+    /^[[:space:]]*($|#)/ { next }
+    {
+      name = $0
+      if (name !~ /^[A-Z][A-Z0-9_]*=/) exit 1
+      sub(/=.*/, "", name)
+      if (name != "LANEWAY_DOMAIN" && name != "LANEWAY_DEPLOY_DIR" &&
+          name != "LANEWAY_NETWORK_NAME" && name != "LANEWAY_IPV4_POOL" &&
+          name != "LANEWAY_BIND_ADDRESS" && name != "LANEWAY_CONTROLLER_PORT" &&
+          name != "LANEWAY_RELAY_QUIC_PORT" && name != "LANEWAY_RELAY_TCP_PORT" &&
+          name != "LANEWAY_PREPARED_INPUT_DIR" && name != "LANEWAY_RECOVERY_KIT_DIR" &&
+          name != "LANEWAY_BACKUP_RECIPIENT") exit 1
+    }
+  ' "$answers_file" || die "remembered-answer file contains a malformed or unknown assignment"
+  for answer_key in LANEWAY_DOMAIN LANEWAY_DEPLOY_DIR LANEWAY_NETWORK_NAME \
+    LANEWAY_IPV4_POOL LANEWAY_BIND_ADDRESS LANEWAY_CONTROLLER_PORT \
+    LANEWAY_RELAY_QUIC_PORT LANEWAY_RELAY_TCP_PORT LANEWAY_PREPARED_INPUT_DIR \
+    LANEWAY_RECOVERY_KIT_DIR LANEWAY_BACKUP_RECIPIENT; do
+    canonical_count=$(grep -c "^${answer_key}=" "$answers_file" || true)
+    mention_count=$(grep -Ec "^[[:space:]]*(export[[:space:]]+)?${answer_key}[[:space:]]*=" "$answers_file" || true)
+    [ "$mention_count" -eq "$canonical_count" ] || die "remembered-answer file contains malformed $answer_key"
+    [ "$canonical_count" -le 1 ] || die "remembered-answer file contains duplicate $answer_key"
+    if [ "$canonical_count" -eq 1 ]; then
+      answer_value=$(sed -n "s/^${answer_key}=//p" "$answers_file")
+      [ -n "$answer_value" ] || die "remembered-answer file contains empty $answer_key"
+    fi
+  done
+}
 
 remembered() {
   key=$1
@@ -25,30 +168,26 @@ remembered() {
     printf '%s' "$fallback"
     return
   fi
-  if [ ! -f "$answers_file" ] || [ -L "$answers_file" ]; then
-    die "remembered-answer file is not a safe regular file: $answers_file"
+  if grep -q "^${key}=" "$answers_file"; then
+    sed -n "s/^${key}=//p" "$answers_file"
+  else
+    printf '%s' "$fallback"
   fi
-  [ "$(stat -c %u "$answers_file")" -eq 0 ] || die "remembered-answer file must be owned by root"
-  [ "$(stat -c %a "$answers_file")" = 600 ] || die "remembered-answer file must have mode 0600"
-  matches=$(sed -n "s/^${key}=//p" "$answers_file")
-  count=$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l)
-  [ "$count" -le 1 ] || die "remembered-answer file contains duplicate $key"
-  if [ -n "$matches" ]; then printf '%s' "$matches"; else printf '%s' "$fallback"; fi
 }
 
 save_answers() {
-  case "$answers_file" in /*) ;; *) die "remembered-answer file must use an absolute path" ;; esac
-  answers_dir=$(dirname "$answers_file")
-  if [ -e "$answers_dir" ] || [ -L "$answers_dir" ]; then
-    if [ ! -d "$answers_dir" ] || [ -L "$answers_dir" ]; then
-      die "remembered-answer directory is unsafe: $answers_dir"
+  if [ "$answers_dir_needs_claim" = true ]; then
+    if [ -e "$answers_dir" ] || [ -L "$answers_dir" ]; then
+      die "remembered-answer directory appeared before publication; refusing to reuse it"
     fi
-    [ "$(stat -c %u "$answers_dir")" -eq 0 ] || die "remembered-answer directory must be owned by root"
-    [ "$(stat -c %a "$answers_dir")" = 700 ] || die "remembered-answer directory must have mode 0700"
-  else
-    install -d -m 0700 -o 0 -g 0 "$answers_dir"
+    mkdir "$answers_dir" 2>/dev/null || \
+      die "could not atomically claim remembered-answer directory"
+    chmod 0700 "$answers_dir"
+    chown 0:0 "$answers_dir"
+    answers_dir_needs_claim=false
   fi
-  temporary=$(mktemp "$answers_dir/.control-plane-installer.XXXXXX")
+  revalidate_answers_directory
+  answers_temporary=$(mktemp "$answers_dir/.control-plane-installer.XXXXXX")
   {
     printf 'LANEWAY_DOMAIN=%s\n' "$domain"
     printf 'LANEWAY_DEPLOY_DIR=%s\n' "$destination"
@@ -58,13 +197,17 @@ save_answers() {
     printf 'LANEWAY_CONTROLLER_PORT=%s\n' "$controller_port"
     printf 'LANEWAY_RELAY_QUIC_PORT=%s\n' "$relay_quic_port"
     printf 'LANEWAY_RELAY_TCP_PORT=%s\n' "$relay_tcp_port"
-    printf 'LANEWAY_PREPARED_INPUT_DIR=%s\n' "${issuer_dir:-}"
-    printf 'LANEWAY_RECOVERY_KIT_DIR=%s\n' "${recovery_kit:-}"
-    printf 'LANEWAY_BACKUP_RECIPIENT=%s\n' "${backup_recipient:-}"
-  } > "$temporary"
-  chmod 0600 "$temporary"
-  chown 0:0 "$temporary"
-  mv "$temporary" "$answers_file"
+    [ -z "${issuer_answer_dir:-}" ] || printf 'LANEWAY_PREPARED_INPUT_DIR=%s\n' "$issuer_answer_dir"
+    [ -z "${recovery_kit:-}" ] || printf 'LANEWAY_RECOVERY_KIT_DIR=%s\n' "$recovery_kit"
+    [ -z "${backup_recipient:-}" ] || printf 'LANEWAY_BACKUP_RECIPIENT=%s\n' "$backup_recipient"
+  } > "$answers_temporary"
+  chmod 0600 "$answers_temporary"
+  chown 0:0 "$answers_temporary"
+  [ "$(stat -c '%u:%g:%a:%h' "$answers_temporary")" = 0:0:600:1 ] || \
+    die "temporary remembered-answer file is unsafe"
+  revalidate_answers_directory
+  mv "$answers_temporary" "$answers_file"
+  answers_temporary=
 }
 
 ask() {
@@ -104,29 +247,277 @@ valid_ipv4() {
   case "$fourth" in *.*) return 1 ;; esac
   for octet in "$first" "$second" "$third" "$fourth"; do
     case "$octet" in ''|*[!0-9]*) return 1 ;; esac
+    canonical_octet=$(awk -v value="$octet" 'BEGIN { printf "%d", value + 0 }')
+    [ "$canonical_octet" = "$octet" ] || return 1
     [ "$octet" -le 255 ] || return 1
   done
 }
 
 valid_ipv4_pool() {
-  candidate=$1
-  address=${candidate%/*}
-  prefix=${candidate#*/}
-  [ "$address" != "$candidate" ] || return 1
-  [ "$prefix" != "$candidate" ] || return 1
-  valid_ipv4 "$address" || return 1
-  case "$prefix" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$prefix" -le 32 ]
+  printf '%s\n' "$1" | awk -F/ '
+    function overlaps(first, last, reserved_first, reserved_last) {
+      return first <= reserved_last && reserved_first <= last
+    }
+    NF != 2 { exit 1 }
+    $2 !~ /^[0-9]+$/ || sprintf("%d", $2 + 0) != $2 || $2 < 8 || $2 > 30 { exit 1 }
+    {
+      octet_count = split($1, octets, ".")
+      if (octet_count != 4) exit 1
+      for (octet_index = 1; octet_index <= 4; octet_index++) {
+        if (octets[octet_index] !~ /^[0-9]+$/ ||
+            sprintf("%d", octets[octet_index] + 0) != octets[octet_index] ||
+            octets[octet_index] < 0 || octets[octet_index] > 255) exit 1
+      }
+      address = ((octets[1] * 256 + octets[2]) * 256 + octets[3]) * 256 + octets[4]
+      block = 2 ^ (32 - $2)
+      if (address % block != 0) exit 1
+      last = address + block - 1
+      if (overlaps(address, last, 0, 0) ||
+          overlaps(address, last, 127 * 16777216, 127 * 16777216 + 16777215) ||
+          overlaps(address, last, 169 * 16777216 + 254 * 65536, 169 * 16777216 + 254 * 65536 + 65535) ||
+          overlaps(address, last, 224 * 16777216, 239 * 16777216 + 16777215)) exit 1
+    }
+  '
+}
+
+canonical_absolute_path() {
+  candidate_path=$1
+  case "$candidate_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  case "$candidate_path" in
+    /|*/|*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+  esac
+  case "$candidate_path" in *[!A-Za-z0-9_./-]*) return 1 ;; esac
+}
+
+trusted_directory_chain() {
+  checked_path=$1
+  while :; do
+    [ -d "$checked_path" ] && [ ! -L "$checked_path" ] || return 1
+    directory_stat=$(stat -c '%u:%g:%a' "$checked_path") || return 1
+    directory_uid=${directory_stat%%:*}
+    directory_remainder=${directory_stat#*:}
+    directory_gid=${directory_remainder%%:*}
+    directory_mode=${directory_remainder#*:}
+    [ "$directory_uid" -eq 0 ] && [ "$directory_gid" -eq 0 ] || return 1
+    directory_mode_value=$((0$directory_mode))
+    if [ $((directory_mode_value & 0022)) -ne 0 ] && \
+      [ "$directory_mode" != 1777 ]; then
+      return 1
+    fi
+    [ "$checked_path" != / ] || break
+    checked_path=$(dirname "$checked_path")
+  done
+}
+
+revalidate_answers_directory() {
+  [ -d "$answers_dir" ] && [ ! -L "$answers_dir" ] && \
+    [ "$(stat -c '%u:%g:%a' "$answers_dir")" = 0:0:700 ] || \
+    die "remembered-answer directory must be root-owned with mode 0700"
+  trusted_directory_chain "$answers_dir" || \
+    die "remembered-answer directory ancestry must be root-owned and non-replaceable"
+  physical_answers_dir=$(CDPATH='' cd -- "$answers_dir" 2>/dev/null && pwd -P) || \
+    die "remembered-answer directory cannot be resolved"
+  [ "$physical_answers_dir" = "$answers_dir" ] || \
+    die "remembered-answer directory changed during publication"
+}
+
+resolve_answers_file_path() {
+  requested_answers_file=$answers_file
+  canonical_absolute_path "$requested_answers_file" || \
+    die "remembered-answer file must use a canonical safe absolute path"
+  requested_answers_dir=${requested_answers_file%/*}
+  answers_leaf=${requested_answers_file##*/}
+  [ -n "$requested_answers_dir" ] || requested_answers_dir=/
+  if [ -e "$requested_answers_dir" ] || [ -L "$requested_answers_dir" ]; then
+    [ -d "$requested_answers_dir" ] && [ ! -L "$requested_answers_dir" ] || \
+      die "remembered-answer directory is unsafe"
+    physical_answers_dir=$(CDPATH='' cd -- "$requested_answers_dir" 2>/dev/null && pwd -P) || \
+      die "remembered-answer directory cannot be resolved"
+    [ "$physical_answers_dir" = "$requested_answers_dir" ] || \
+      die "remembered-answer directory must not contain symbolic-link ancestors"
+    answers_dir=$physical_answers_dir
+    answers_dir_needs_claim=false
+    revalidate_answers_directory
+  else
+    requested_answers_parent=${requested_answers_dir%/*}
+    answers_dir_leaf=${requested_answers_dir##*/}
+    [ -n "$requested_answers_parent" ] || requested_answers_parent=/
+    [ -n "$answers_dir_leaf" ] || die "remembered-answer directory is invalid"
+    physical_answers_parent=$(CDPATH='' cd -- "$requested_answers_parent" 2>/dev/null && pwd -P) || \
+      die "remembered-answer directory parent must already exist"
+    [ "$physical_answers_parent" = "$requested_answers_parent" ] || \
+      die "remembered-answer directory parent must not contain symbolic-link ancestors"
+    trusted_directory_chain "$physical_answers_parent" || \
+      die "remembered-answer directory parent ancestry must be root-owned and non-replaceable"
+    if [ "$physical_answers_parent" = / ]; then
+      answers_dir=/$answers_dir_leaf
+    else
+      answers_dir=$physical_answers_parent/$answers_dir_leaf
+    fi
+    answers_dir_needs_claim=true
+  fi
+  answers_file=$answers_dir/$answers_leaf
+}
+
+resolve_new_directory_path() {
+  unresolved_path=$1
+  path_label=$2
+  canonical_absolute_path "$unresolved_path" || \
+    die "$path_label directory must be a canonical safe absolute path"
+  unresolved_parent=${unresolved_path%/*}
+  unresolved_leaf=${unresolved_path##*/}
+  [ -n "$unresolved_parent" ] || unresolved_parent=/
+  resolved_parent=$(CDPATH='' cd -- "$unresolved_parent" 2>/dev/null && pwd -P) || \
+    die "$path_label directory parent must already exist"
+  case "$resolved_parent" in *[!A-Za-z0-9_./-]*) die "$path_label directory parent resolves to an unsafe path" ;; esac
+  trusted_directory_chain "$resolved_parent" || \
+    die "$path_label directory parent ancestry must be root-owned and non-replaceable"
+  if [ "$resolved_parent" = / ]; then
+    RESOLVED_PATH=/$unresolved_leaf
+  else
+    RESOLVED_PATH=$resolved_parent/$unresolved_leaf
+  fi
+  case "$RESOLVED_PATH" in
+    /dev/shm|/dev/shm/*) die "$path_label directory must be outside /dev/shm" ;;
+  esac
+}
+
+resolve_existing_directory_path() {
+  unresolved_path=$1
+  path_label=$2
+  canonical_absolute_path "$unresolved_path" || \
+    die "$path_label directory must be a canonical safe absolute path"
+  [ -d "$unresolved_path" ] && [ ! -L "$unresolved_path" ] || \
+    die "$path_label directory is missing or unsafe"
+  resolved_existing=$(CDPATH='' cd -- "$unresolved_path" 2>/dev/null && pwd -P) || \
+    die "$path_label directory cannot be resolved"
+  case "$resolved_existing" in *[!A-Za-z0-9_./-]*) die "$path_label directory resolves to an unsafe path" ;; esac
+  trusted_directory_chain "$resolved_existing" || \
+    die "$path_label directory ancestry must be root-owned and non-replaceable"
+  RESOLVED_PATH=$resolved_existing
+}
+
+paths_overlap() {
+  first_path=$1
+  second_path=$2
+  [ "$first_path" = "$second_path" ] && return 0
+  case "$first_path/" in "$second_path/"*) return 0 ;; esac
+  case "$second_path/" in "$first_path/"*) return 0 ;; esac
+  return 1
+}
+
+ensure_installer_work() {
+  [ -z "$installer_work" ] || return 0
+  trusted_directory_chain /var/tmp || \
+    die "/var/tmp ancestry must be root-owned and non-replaceable"
+  work_candidate=$(mktemp -d /var/tmp/laneway-installer.XXXXXX)
+  [ "${work_candidate%/*}" = /var/tmp ] && [ -d "$work_candidate" ] && \
+    [ ! -L "$work_candidate" ] || die "installer work directory escaped /var/tmp"
+  installer_work=$work_candidate
+  installer_work_claimed=true
+  [ "$(stat -c '%u:%g:%a' "$installer_work")" = 0:0:700 ] || \
+    die "installer work directory must be root-owned with mode 0700"
+}
+
+resolve_cosign_command() {
+  [ -f "$cosign_bin" ] && [ ! -L "$cosign_bin" ] && [ -x "$cosign_bin" ] || \
+    die "pinned Cosign verifier is unavailable"
+  cosign_parent=$(dirname "$cosign_bin")
+  physical_cosign_parent=$(CDPATH='' cd -- "$cosign_parent" 2>/dev/null && pwd -P) || \
+    die "Cosign parent directory cannot be resolved"
+  [ "$physical_cosign_parent" = "$cosign_parent" ] || \
+    die "Cosign path must not contain symbolic-link ancestors"
+  trusted_directory_chain "$cosign_parent" || \
+    die "Cosign path ancestry must be root-owned and non-replaceable"
+  [ "$(stat -c '%u:%g:%h' "$cosign_bin")" = 0:0:1 ] || \
+    die "Cosign must be a root-owned single-link regular file"
+  cosign_mode=$((0$(stat -c %a "$cosign_bin")))
+  [ $((cosign_mode & 0022)) -eq 0 ] || \
+    die "Cosign must not be writable by group or other"
+  cosign_version=$("$cosign_bin" version --json 2>/dev/null | \
+    sed -n 's/.*"gitVersion":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+  [ "$cosign_version" = v3.1.3 ] || \
+    die "pinned Cosign verifier must report version v3.1.3"
+}
+
+validate_issuer_file() {
+  issuer_file=$1
+  issuer_mode=$2
+  [ -f "$issuer_file" ] && [ ! -L "$issuer_file" ] || \
+    die "prepared input contains an unsafe file: ${issuer_file##*/}"
+  [ "$(stat -c '%u:%g:%a:%h' "$issuer_file")" = "0:0:$issuer_mode:1" ] || \
+    die "prepared input file ${issuer_file##*/} must be root-owned, mode 0$issuer_mode, and have one link"
+}
+
+snapshot_issuer_dir() {
+  source_issuer=$1
+  resolve_existing_directory_path "$source_issuer" "prepared input"
+  source_issuer=$RESOLVED_PATH
+  issuer_source_dir=$source_issuer
+  [ "$(stat -c '%u:%g:%a' "$source_issuer")" = 0:0:700 ] || \
+    die "prepared input directory must be root-owned with mode 0700"
+  paths_overlap "$destination" "$source_issuer" && \
+    die "prepared input and deployment directories must not overlap"
+  if [ -e "$source_issuer/ca.key" ] || [ -L "$source_issuer/ca.key" ]; then
+    die "offline root ca.key must not be present in control-plane input"
+  fi
+  validate_issuer_file "$source_issuer/ca.crt" 444
+  validate_issuer_file "$source_issuer/intermediate-chain.crt" 444
+  validate_issuer_file "$source_issuer/intermediate.key" 400
+  recipient_present=false
+  if [ -e "$source_issuer/recovery-recipient.txt" ] || \
+    [ -L "$source_issuer/recovery-recipient.txt" ]; then
+    validate_issuer_file "$source_issuer/recovery-recipient.txt" 444
+    recipient_present=true
+  fi
+  ensure_installer_work
+  issuer_snapshot=$installer_work/issuer
+  mkdir "$issuer_snapshot" 2>/dev/null || die "could not claim protected issuer staging"
+  chmod 0700 "$issuer_snapshot"
+  chown 0:0 "$issuer_snapshot"
+  install -m 0444 -o 0 -g 0 "$source_issuer/ca.crt" "$issuer_snapshot/ca.crt"
+  install -m 0444 -o 0 -g 0 "$source_issuer/intermediate-chain.crt" "$issuer_snapshot/intermediate-chain.crt"
+  install -m 0400 -o 0 -g 0 "$source_issuer/intermediate.key" "$issuer_snapshot/intermediate.key"
+  if [ "$recipient_present" = true ]; then
+    install -m 0444 -o 0 -g 0 "$source_issuer/recovery-recipient.txt" "$issuer_snapshot/recovery-recipient.txt"
+  fi
+  [ "$(stat -c '%u:%g:%a' "$issuer_snapshot")" = 0:0:700 ] || \
+    die "protected issuer staging has unsafe ownership or mode"
+  issuer_dir=$issuer_snapshot
 }
 
 missing=
-for command in age age-keygen chown curl date dirname docker find getent grep install jq laneway ln sed sha256sum ss stat sync wc; do
+for command in age age-keygen awk chmod chown curl date dirname docker env find getent grep install jq laneway ln mkdir mktemp mv sed sha256sum ss stat sync wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
 [ "$(id -u)" -eq 0 ] || add_missing "root privileges (run with sudo)"
-if command -v docker >/dev/null 2>&1; then
-  docker compose version >/dev/null 2>&1 || add_missing "Docker Compose v2"
+if command -v awk >/dev/null 2>&1 && command -v grep >/dev/null 2>&1 && \
+  command -v sed >/dev/null 2>&1 && command -v stat >/dev/null 2>&1; then
+  resolve_answers_file_path
+  validate_answers_file
 fi
+if [ -e /root/.docker ] || [ -L /root/.docker ]; then
+  if [ ! -d /root/.docker ] || [ -L /root/.docker ]; then
+    add_missing "a safe Docker configuration directory at /root/.docker"
+  elif ! trusted_directory_chain /root/.docker; then
+    add_missing "a root-owned, non-replaceable Docker configuration directory at /root/.docker"
+  else
+    docker_config_mode=$(stat -c %a /root/.docker)
+    docker_config_mode_value=$((0$docker_config_mode))
+    if [ $((docker_config_mode_value & 0022)) -ne 0 ]; then
+      add_missing "a non-group/world-writable Docker configuration directory at /root/.docker"
+    fi
+  fi
+elif ! trusted_directory_chain /root; then
+  add_missing "a root-owned, non-replaceable /root directory"
+fi
+if command -v docker >/dev/null 2>&1; then
+  compose_environment docker --context default compose version >/dev/null 2>&1 || add_missing "Docker Compose v2"
+fi
+resolve_cosign_command
 if [ -n "$missing" ]; then
   echo "Laneway pre-check found missing prerequisites:" >&2
   printf '%s\n' "$missing" | while IFS= read -r item; do printf '  - %s\n' "$item" >&2; done
@@ -174,8 +565,8 @@ getent ahosts "$domain" >/dev/null 2>&1 || die "public DNS does not resolve: $do
 
 ask "Deployment directory" "${LANEWAY_DEPLOY_DIR:-$(remembered LANEWAY_DEPLOY_DIR /opt/laneway)}"
 destination=$REPLY
-case "$destination" in /*) ;; *) die "deployment directory must be an absolute path" ;; esac
-[ "$destination" != / ] || die "deployment directory cannot be /"
+resolve_new_directory_path "$destination" "deployment"
+destination=$RESOLVED_PATH
 if [ -e "$destination" ] || [ -L "$destination" ]; then
   die "deployment directory already exists; refusing to overwrite it: $destination"
 fi
@@ -207,21 +598,19 @@ valid_port "$relay_tcp_port" || die "relay TCP port is invalid"
 [ "$controller_port" != "$relay_quic_port" ] || die "controller and relay UDP ports must differ"
 [ "$controller_port" != "$relay_tcp_port" ] || die "controller and relay TCP ports must differ"
 
-validate_issuer_dir() {
-  directory=$1
-  case "$directory" in /*) ;; *) die "prepared input directory must be an absolute path" ;; esac
-  if [ ! -d "$directory" ] || [ -L "$directory" ]; then
-    die "prepared input directory is missing or unsafe"
-  fi
-  if [ -e "$directory/ca.key" ] || [ -L "$directory/ca.key" ]; then
-    die "offline root ca.key must not be present in control-plane input"
-  fi
-  for name in ca.crt intermediate-chain.crt intermediate.key; do
-    if [ ! -f "$directory/$name" ] || [ -L "$directory/$name" ]; then
-      die "prepared input is missing a regular $name"
-    fi
-  done
+check_available_port() {
+  port_protocol=$1
+  port_number=$2
+  case "$port_protocol" in tcp) port_flag=-ltn ;; udp) port_flag=-lun ;; esac
+  port_listeners=$(ss -H "$port_flag" "sport = :$port_number") || \
+    die "cannot inspect $port_protocol port $port_number"
+  [ -z "$port_listeners" ] || \
+    die "$port_protocol port $port_number is already occupied by foreign state"
 }
+check_available_port tcp "$controller_port"
+check_available_port udp "$controller_port"
+check_available_port udp "$relay_quic_port"
+check_available_port tcp "$relay_tcp_port"
 
 automatic_issuer=false
 issuer_dir=${LANEWAY_ISSUER_DIR:-}
@@ -230,7 +619,8 @@ if [ -z "$issuer_dir" ]; then
   issuer_dir=$REPLY
 fi
 if [ -n "$issuer_dir" ]; then
-  validate_issuer_dir "$issuer_dir"
+  snapshot_issuer_dir "$issuer_dir"
+  issuer_answer_dir=$issuer_source_dir
   backup_recipient=${LANEWAY_BACKUP_RECIPIENT:-$(remembered LANEWAY_BACKUP_RECIPIENT)}
   if [ -z "$backup_recipient" ] && [ -f "$issuer_dir/recovery-recipient.txt" ] && [ ! -L "$issuer_dir/recovery-recipient.txt" ]; then
     [ "$(wc -l < "$issuer_dir/recovery-recipient.txt")" -eq 1 ] || die "prepared recovery recipient file must contain exactly one line"
@@ -242,27 +632,44 @@ if [ -n "$issuer_dir" ]; then
   fi
   printf '%s\n' "$backup_recipient" | grep -Eq '^age1[0-9a-z]{58}$' || \
     die "recovery recipient must be an age X25519 public recipient"
-  recovery_description="prepared input: $issuer_dir"
+  recovery_description="prepared input: $issuer_answer_dir"
 else
   automatic_issuer=true
   recovery_default=/root/laneway-recovery-$domain-$(date -u +%Y%m%dT%H%M%SZ)
   ask "Recovery kit directory" "${LANEWAY_RECOVERY_KIT_DIR:-$(remembered LANEWAY_RECOVERY_KIT_DIR "$recovery_default")}"
   recovery_kit=$REPLY
-  case "$recovery_kit" in /*) ;; *) die "recovery kit directory must be an absolute path" ;; esac
-  [ "$recovery_kit" != / ] || die "recovery kit directory cannot be /"
+  resolve_new_directory_path "$recovery_kit" "recovery kit"
+  recovery_kit=$RESOLVED_PATH
+  paths_overlap "$destination" "$recovery_kit" && \
+    die "recovery kit and deployment directories must not overlap"
   if [ -e "$recovery_kit" ] || [ -L "$recovery_kit" ]; then
     die "recovery kit already exists; refusing to overwrite it: $recovery_kit"
   fi
   recovery_description="generate automatically; copy $recovery_kit off-host after setup"
 fi
 
-save_answers
+ensure_installer_work
+metadata_dir=$installer_work
+base_url=https://github.com/$repository/releases/download/$tag
+for metadata_name in image-digests.txt checksums.txt checksums.sigstore.json; do
+  curl --disable --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --fail --location --silent --show-error \
+    "$base_url/$metadata_name" -o "$metadata_dir/$metadata_name"
+done
 
-metadata_dir=$(mktemp -d)
-cleanup() { [ ! -e "$metadata_dir" ] || find "$metadata_dir" -depth -delete; }
-trap cleanup EXIT HUP INT TERM
-base_url=${LANEWAY_RELEASE_BASE_URL:-https://github.com/$repository/releases/download/$tag}
-curl --fail --location --silent --show-error "$base_url/image-digests.txt" -o "$metadata_dir/image-digests.txt"
+identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag"
+"$cosign_bin" verify-blob --bundle "$metadata_dir/checksums.sigstore.json" \
+  --certificate-identity "$identity" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  "$metadata_dir/checksums.txt" >/dev/null || \
+  die "release checksum signature verification failed"
+(
+  cd "$metadata_dir"
+  grep '  image-digests.txt$' checksums.txt > image-digests-checksum.txt
+  [ "$(wc -l < image-digests-checksum.txt)" -eq 1 ]
+  sha256sum -c image-digests-checksum.txt >/dev/null
+) || die "signed release checksum does not match image-digests.txt"
+checksum_signature_verified=true
 
 image_digest() {
   image=$1
@@ -276,8 +683,6 @@ relay_digest=$(image_digest ghcr.io/doout/laneway-relay)
 admin_digest=$(image_digest ghcr.io/doout/laneway-admin)
 connector_digest=$(image_digest ghcr.io/doout/lane-edge)
 exit_node_digest=$(image_digest ghcr.io/doout/laneway-exit-node)
-identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag"
-image_signatures_verified=true
 for reference in \
   "ghcr.io/doout/laneway-controller@$controller_digest" \
   "ghcr.io/doout/laneway-relay@$relay_digest" \
@@ -285,17 +690,11 @@ for reference in \
   "ghcr.io/doout/lane-edge@$connector_digest" \
   "ghcr.io/doout/laneway-exit-node@$exit_node_digest"
 do
-  if [ -n "$cosign_bin" ] && command -v "$cosign_bin" >/dev/null 2>&1 && \
-    "$cosign_bin" verify --certificate-identity "$identity" \
-      --certificate-oidc-issuer https://token.actions.githubusercontent.com "$reference" >/dev/null; then
-    :
-  elif [ "$production_mode" = true ]; then
-    die "production signature verification failed for $reference"
-  else
-    image_signatures_verified=false
-    echo "WARNING: image signature could not be verified now: $reference" >&2
-  fi
+  "$cosign_bin" verify --certificate-identity "$identity" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$reference" >/dev/null || die "image signature verification failed for $reference"
 done
+image_signatures_verified=true
 
 network_id=$(laneway id)
 controller_id=$(laneway id)
@@ -330,19 +729,24 @@ else
 fi
 [ "$confirmation" = deploy ] || die "cancelled before changing the deployment"
 
+save_answers
+
 if [ "$automatic_issuer" = true ]; then
   if [ ! -f "$source_dir/prepare-control-plane.sh" ] || [ -L "$source_dir/prepare-control-plane.sh" ]; then
     die "packaged automatic issuer helper is missing or unsafe"
   fi
   "$source_dir/prepare-control-plane.sh" "$recovery_kit"
-  issuer_dir=$recovery_kit/control-plane-input
-  validate_issuer_dir "$issuer_dir"
+  generated_issuer_dir=$recovery_kit/control-plane-input
+  snapshot_issuer_dir "$generated_issuer_dir"
   [ "$(wc -l < "$issuer_dir/recovery-recipient.txt")" -eq 1 ] || die "generated recovery recipient file is invalid"
   backup_recipient=$(sed -n '1p' "$issuer_dir/recovery-recipient.txt")
   printf '%s\n' "$backup_recipient" | grep -Eq '^age1[0-9a-z]{58}$' || die "generated recovery recipient is invalid"
 fi
 
-install -d -m 0700 -o 0 -g 0 "$destination"
+mkdir "$destination" 2>/dev/null || \
+  die "deployment directory appeared before publication; refusing to reuse it: $destination"
+chmod 0700 "$destination"
+chown 0:0 "$destination"
 for name in compose.yaml laneway-control bootstrap.sh preflight.sh prepare.sh recovery.sh validate.sh install-control-plane.sh prepare-control-plane.sh upgrade-control-plane.sh README.md; do
   if [ ! -f "$source_dir/$name" ] || [ -L "$source_dir/$name" ]; then
     die "packaged deployment file is missing or unsafe: $name"
@@ -377,9 +781,9 @@ firewall were not changed by the installer.
 - Release checksum signature verified: **$checksum_signature_verified**
 - All container image signatures verified: **$image_signatures_verified**
 
-Signature verification can depend on registry and transparency-log availability.
-The \`production-check\` command is fail-closed and records a root-only marker only
-after signatures, configuration, service health, DNS, and recovery backup checks pass.
+The installer fails closed unless the release package and every container image
+pass signature verification. The \`production-check\` command records a root-only
+marker only after configuration, service health, DNS, and recovery backup checks pass.
 
 Cloud firewall policy cannot be inspected reliably from inside this host. Confirm it
 in your provider's control panel before putting Laneway into production.

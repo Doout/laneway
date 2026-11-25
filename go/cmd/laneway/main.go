@@ -37,7 +37,7 @@ func main() {
 	if filepath.Base(os.Args[0]) == "lanewayd" {
 		args = append([]string{"node", "run"}, args...)
 	}
-	if err := run(args); err != nil {
+	if err := processCommand(args); err != nil {
 		fmt.Fprintln(os.Stderr, "laneway:", err)
 		os.Exit(1)
 	}
@@ -48,6 +48,12 @@ func run(args []string) error {
 }
 
 func runNetworkHelper(args []string) error {
+	return runNetworkHelperCommand(args, func(fd int) error {
+		return nethelper.ServeInheritedFD(context.Background(), fd, nethelper.ProductionConfig())
+	})
+}
+
+func runNetworkHelperCommand(args []string, serve func(int) error) error {
 	fs := flag.NewFlagSet("_network-helper", flag.ContinueOnError)
 	fd := fs.Int("control-fd", -1, "inherited control socket descriptor")
 	if err := fs.Parse(args); err != nil {
@@ -56,7 +62,7 @@ func runNetworkHelper(args []string) error {
 	if fs.NArg() != 0 || *fd < 0 {
 		return errors.New("invalid privileged helper invocation")
 	}
-	return nethelper.ServeInheritedFD(context.Background(), *fd, nethelper.ProductionConfig())
+	return serve(*fd)
 }
 
 func runNode(args []string) error {
@@ -711,12 +717,23 @@ func printJSON(value any) error {
 }
 
 func runConfig(args []string) error {
-	if len(args) == 0 || args[0] != "validate" {
-		return errors.New("usage: laneway config validate [-config path]")
+	if len(args) == 0 {
+		return errors.New("usage: laneway config <validate|inspect-controller-initial-network> [-config path]")
 	}
+	switch args[0] {
+	case "validate":
+		return runConfigValidate(args[1:])
+	case "inspect-controller-initial-network":
+		return runConfigInspectControllerInitialNetwork(args[1:])
+	default:
+		return errors.New("usage: laneway config <validate|inspect-controller-initial-network> [-config path]")
+	}
+}
+
+func runConfigValidate(args []string) error {
 	fs := flag.NewFlagSet("config validate", flag.ContinueOnError)
 	path := fs.String("config", "/etc/laneway/laneway.toml", "configuration file")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if _, err := config.Load(*path); err != nil {
@@ -724,6 +741,45 @@ func runConfig(args []string) error {
 	}
 	fmt.Println("configuration is valid")
 	return nil
+}
+
+type controllerInitialNetworkInspection struct {
+	Configured         bool   `json:"configured"`
+	NetworkID          string `json:"network_id,omitempty"`
+	Name               string `json:"name,omitempty"`
+	IPv4Pool           string `json:"ipv4_pool,omitempty"`
+	IPv6Pool           string `json:"ipv6_pool,omitempty"`
+	BootstrapNetworkID string `json:"bootstrap_network_id,omitempty"`
+}
+
+func runConfigInspectControllerInitialNetwork(args []string) error {
+	fs := flag.NewFlagSet("config inspect-controller-initial-network", flag.ContinueOnError)
+	path := fs.String("config", "/etc/laneway/controller.toml", "controller configuration file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: laneway config inspect-controller-initial-network [-config path]")
+	}
+	cfg, err := config.Load(*path)
+	if err != nil {
+		return err
+	}
+	if cfg.Mode != config.ModeController {
+		return fmt.Errorf("configuration mode is %q, want %q", cfg.Mode, config.ModeController)
+	}
+	initial := cfg.Controller.InitialNetwork
+	inspection := controllerInitialNetworkInspection{
+		Configured:         initial.NetworkID != "",
+		BootstrapNetworkID: cfg.Bootstrap.NetworkID,
+	}
+	if inspection.Configured {
+		inspection.NetworkID = initial.NetworkID
+		inspection.Name = initial.Name
+		inspection.IPv4Pool = initial.IPv4Pool
+		inspection.IPv6Pool = initial.IPv6Pool
+	}
+	return printJSON(inspection)
 }
 
 func runPKI(args []string) error {

@@ -176,6 +176,20 @@ test('compiled live artifact uses same-origin cookie transport and real permissi
   expect(requests.filter((request) => request.method === 'GET').every((request) => request.csrf === undefined)).toBe(true)
 })
 
+test('compiled live artifact reports empty inventory without offering or attempting network creation', async ({ page }) => {
+  test.skip(expectedMode !== 'live', 'Live artifact contract')
+  const requests = await mockManagementApi(page, [])
+
+  await signIn(page)
+  await page.getByRole('link', { name: 'Infrastructure' }).click()
+
+  await expect(page.getByRole('heading', { name: 'Infrastructure' })).toBeVisible()
+  await expect(page.getByText('No network.')).toBeVisible()
+  await expect(page.getByRole('link', { name: /create network|add network/i })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /create network|add network/i })).toHaveCount(0)
+  expect(requests.some((request) => request.method === 'POST' && request.path === '/v1/admin/networks')).toBe(false)
+})
+
 test('compiled live artifact requires an explicit selection for multi-network inventory', async ({ page }) => {
   test.skip(expectedMode !== 'live', 'Live artifact contract')
   const requests = await mockManagementApi(page, [controllerNetwork, { ...controllerNetwork, network_id: '5'.repeat(32), name: 'Second controller canary' }])

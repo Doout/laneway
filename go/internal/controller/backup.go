@@ -281,6 +281,9 @@ func validateDatabase(ctx context.Context, path string, maximumSchema int) error
 	if version >= 9 {
 		requiredTables = append(requiredTables, "administrator_root_token_rotations")
 	}
+	if version >= 10 {
+		requiredTables = append(requiredTables, "controller_identity_state")
+	}
 	for _, table := range requiredTables {
 		var count int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_schema WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
@@ -329,6 +332,51 @@ func validateAdministratorBackupSchema(ctx context.Context, db *sql.DB, version 
 	if singletonCount != 1 {
 		return errors.New("backup administrator auth state is missing or corrupt")
 	}
+	if version >= 10 {
+		if err := validateControllerIdentityBackupState(ctx, db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateControllerIdentityBackupState(ctx context.Context, db *sql.DB) error {
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM controller_identity_state`).Scan(&count); err != nil {
+		return fmt.Errorf("validate controller identity state: %w", err)
+	}
+	if count == 0 {
+		return nil
+	}
+	if count != 1 {
+		return errors.New("backup controller identity state is corrupt")
+	}
+	var networkRaw, serviceRaw []byte
+	var bindingCreated, networkCreated int64
+	if err := db.QueryRowContext(ctx, `SELECT c.network_id,c.controller_service_id,c.created_at,n.created_at
+		FROM controller_identity_state c JOIN networks n ON n.id=c.network_id WHERE c.singleton=1`).
+		Scan(&networkRaw, &serviceRaw, &bindingCreated, &networkCreated); err != nil {
+		return fmt.Errorf("validate controller identity binding: %w", err)
+	}
+	if _, err := scanID(networkRaw); err != nil {
+		return errors.New("backup controller network binding is corrupt")
+	}
+	if _, err := scanID(serviceRaw); err != nil {
+		return errors.New("backup controller service binding is corrupt")
+	}
+	if bindingCreated < networkCreated {
+		return errors.New("backup controller identity binding predates its network")
+	}
+	var bindingAudits int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM audit_events
+		WHERE network_id=? AND actor_kind='system' AND actor_id IS NULL
+		AND action='controller.identity.bind' AND target_type='controller_service'
+		AND target_id=? AND created_at=?`, networkRaw, serviceRaw, bindingCreated).Scan(&bindingAudits); err != nil {
+		return fmt.Errorf("validate controller identity binding audit: %w", err)
+	}
+	if bindingAudits != 1 {
+		return errors.New("backup controller identity binding audit is missing or corrupt")
+	}
 	return nil
 }
 
@@ -340,6 +388,7 @@ var administratorSchemaTables = map[string]struct{}{
 	"administrator_recovery_grants":      {},
 	"administrator_auth_state":           {},
 	"administrator_root_token_rotations": {},
+	"controller_identity_state":          {},
 	"audit_events":                       {},
 }
 

@@ -22,6 +22,15 @@ import (
 	"laneway.dev/laneway/internal/platform"
 )
 
+// Use the installed Rust helper in cross-implementation tests. The default
+// runs this test binary as the reference Go implementation.
+func helperExecutable() string {
+	if path := os.Getenv("LANEWAY_TEST_HELPER"); path != "" {
+		return path
+	}
+	return os.Args[0]
+}
+
 func init() {
 	if len(os.Args) > 1 && os.Args[1] == "_network-helper" {
 		err := ServeInheritedFD(context.Background(), 0, ProductionConfig())
@@ -34,7 +43,7 @@ func init() {
 		session, err := Start(context.Background(), Setup{
 			Name: "lanecrash0", MTU: 1200, Addresses: []string{"100.64.99.2/32"},
 			Routes: RoutePlan{Routes: []Route{{Prefix: "203.0.113.0/24"}}},
-		}, StartOptions{Executable: os.Args[0], Direct: true})
+		}, StartOptions{Executable: helperExecutable(), Direct: true})
 		if err != nil {
 			os.Exit(72)
 		}
@@ -250,7 +259,7 @@ func TestPrivilegedHelperLifecycle(t *testing.T) {
 	session, err := Start(context.Background(), Setup{
 		Name: "lanehelp0", MTU: 1200, Addresses: []string{"100.64.99.1/32"},
 		Routes: RoutePlan{Routes: []Route{{Prefix: "198.51.100.0/24", Metric: 17}}},
-	}, StartOptions{Executable: os.Args[0], Direct: true})
+	}, StartOptions{Executable: helperExecutable(), Direct: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +347,7 @@ func TestSudoHelperLifecycle(t *testing.T) {
 	session, err := Start(context.Background(), Setup{
 		Name: "lanesudo0", MTU: 1200, Addresses: []string{"100.64.99.3/32"},
 		Routes: RoutePlan{Routes: []Route{{Prefix: "192.0.2.0/24"}}},
-	}, StartOptions{Executable: os.Args[0]})
+	}, StartOptions{Executable: helperExecutable()})
 	if err != nil {
 		t.Fatal(err)
 	}

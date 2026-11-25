@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    net::SocketAddr,
     pin::Pin,
     str::FromStr,
     sync::{
@@ -21,6 +22,7 @@ use laneway_protocol::{
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use tokio::{
     sync::mpsc,
+    task::JoinSet,
     time::{Instant, interval_at, sleep, timeout},
 };
 use tracing::{info, warn};
@@ -33,6 +35,7 @@ use crate::{
     config::Config,
     metrics::Metrics,
     packet_pool::{PacketPool, PooledPacket},
+    rootless::{AuthorizedPacket, PacketAuthority, rootless_packet_meta},
     routing::{locally_owned, packet_meta},
     state::{Handle, State},
     tcp_fallback, tls,
@@ -58,6 +61,7 @@ pub(crate) struct OutboundPacket {
     pub peer: Id,
     /// Complete raw IP packet.
     packet: PooledPacket,
+    generation: Option<Arc<()>>,
 }
 
 impl OutboundPacket {
@@ -67,12 +71,25 @@ impl OutboundPacket {
         Self {
             peer,
             packet: PooledPacket::unpooled(packet),
+            generation: None,
         }
+    }
+
+    pub(crate) fn with_generation(mut self, generation: Arc<()>) -> Self {
+        self.generation = Some(generation);
+        self
     }
 
     pub(crate) fn pooled(peer: Id, packet: &[u8], pool: &PacketPool) -> (Self, bool) {
         let (packet, miss) = pool.copy(packet);
-        (Self { peer, packet }, miss)
+        (
+            Self {
+                peer,
+                packet,
+                generation: None,
+            },
+            miss,
+        )
     }
 }
 
@@ -85,10 +102,18 @@ pub struct RelayClient {
     network: Id,
     node: Id,
     boot: Id,
-    owned: Arc<Vec<ipnet::IpNet>>,
-    inject: mpsc::Sender<Bytes>,
-    candidates: mpsc::Sender<EndpointCandidate>,
+    inject: PacketInjection,
+    candidates: Option<mpsc::Sender<EndpointCandidate>>,
     relay_cursor: AtomicUsize,
+}
+
+pub(crate) enum PacketInjection {
+    #[cfg(any(feature = "native", test))]
+    Native {
+        sender: mpsc::Sender<Bytes>,
+        owned: Arc<Vec<ipnet::IpNet>>,
+    },
+    Rootless(mpsc::Sender<AuthorizedPacket>),
 }
 
 struct QuicSession {
@@ -99,13 +124,56 @@ struct QuicSession {
     inbound_sequence: u64,
     outbound_sequence: u64,
     relay_service: Id,
-    relay_address: std::net::SocketAddr,
+    relay_address: SocketAddr,
+    rootless: Option<RootlessCarrier>,
 }
 
 struct TcpSession {
     connection: tcp_fallback::Session,
     negotiated: u64,
     inbound_sequence: u64,
+    rootless: Option<Arc<RootlessCarrier>>,
+}
+
+struct RootlessCarrier {
+    service: Id,
+    address: SocketAddr,
+    serial: Vec<u8>,
+    tcp: bool,
+}
+
+impl RootlessCarrier {
+    fn authorizes(&self, view: &PacketAuthority) -> bool {
+        let permitted = if self.tcp {
+            view.snapshot
+                .relays
+                .get(&self.service)
+                .is_some_and(|relay| {
+                    relay
+                        .resolved
+                        .iter()
+                        .any(|address| address.ip() == self.address.ip())
+                })
+        } else {
+            view.snapshot
+                .authorizes_relay(self.service, Some(self.address))
+        };
+        permitted && !view.snapshot.revoked_serials.contains(&self.serial)
+    }
+}
+
+pub(crate) struct TcpPacketPermit {
+    state: Arc<State>,
+    generation: Arc<()>,
+    relay: Arc<RootlessCarrier>,
+}
+
+impl TcpPacketPermit {
+    pub(crate) fn active(&self) -> bool {
+        self.state.rootless_authority().is_some_and(|view| {
+            Arc::ptr_eq(&self.generation, &view.generation) && self.relay.authorizes(&view)
+        })
+    }
 }
 
 type QuicRecovery<'a> = Pin<Box<dyn Future<Output = Result<QuicSession>> + Send + 'a>>;
@@ -113,7 +181,7 @@ type QuicRecovery<'a> = Pin<Box<dyn Future<Output = Result<QuicSession>> + Send 
 impl RelayClient {
     /// Constructs a relay client around a shared direct/relay QUIC endpoint.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         endpoint: Endpoint,
         config: Arc<Config>,
         state: Arc<State>,
@@ -121,9 +189,8 @@ impl RelayClient {
         network: Id,
         node: Id,
         boot: Id,
-        owned: Arc<Vec<ipnet::IpNet>>,
-        inject: mpsc::Sender<Bytes>,
-        candidates: mpsc::Sender<EndpointCandidate>,
+        inject: PacketInjection,
+        candidates: Option<mpsc::Sender<EndpointCandidate>>,
     ) -> Self {
         Self {
             endpoint,
@@ -133,11 +200,44 @@ impl RelayClient {
             network,
             node,
             boot,
-            owned,
             inject,
             candidates,
             relay_cursor: AtomicUsize::new(0),
         }
+    }
+
+    fn is_rootless(&self) -> bool {
+        matches!(self.inject, PacketInjection::Rootless(_))
+    }
+
+    fn offered_capabilities(&self, required: u64) -> u64 {
+        if self.is_rootless() {
+            return required
+                | Capability::LanewayIpv6V1 as u64
+                | Capability::LanewaySubnetRouterV1 as u64;
+        }
+        hello_capabilities_for(&self.config, required)
+    }
+
+    fn tcp_authorized(&self) -> Result<bool> {
+        let service = Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
+        if self.is_rootless() {
+            let fallback = self
+                .config
+                .tcp_fallback
+                .as_ref()
+                .context("TCP fallback disabled")?;
+            return Ok(self.state.tcp_relay_authorized(service, fallback.address));
+        }
+        if self.state.relay_targets().is_none() {
+            return Ok(true);
+        }
+        let address = self
+            .config
+            .relay
+            .address
+            .context("relay QUIC address is disabled")?;
+        Ok(self.state.relay_authorized(service, address))
     }
 
     /// Reconnects forever until canceled by task shutdown.
@@ -151,7 +251,7 @@ impl RelayClient {
                     record_connection(&self.metrics, &mut connected_once);
                     Metrics::set(&self.metrics.quic_active, true);
                     delay = self.config.relay.reconnect_min;
-                    info!(remote = ?self.config.relay.address, "Rust agent relay connected");
+                    info!(remote = %session.relay_address, "Rust agent relay connected");
                     if let Err(error) = self.run_quic_session(session, &mut outbound).await {
                         Metrics::increment(&self.metrics.quic_failures);
                         warn!(%error, "relay session ended; reconnecting");
@@ -211,9 +311,30 @@ impl RelayClient {
     }
 
     async fn prepare_quic(&self) -> Result<QuicSession> {
-        let (connection, relay_service, relay_address) = self.connect().await?;
+        let (connection, relay_service, relay_address) = if self.is_rootless() {
+            timeout(self.config.relay.handshake_timeout, self.connect())
+                .await
+                .context("relay QUIC dial deadline exceeded")??
+        } else {
+            self.connect().await?
+        };
+        let rootless = if self.is_rootless() {
+            let carrier = RootlessCarrier {
+                service: relay_service,
+                address: relay_address,
+                serial: tls::peer_certificate_serial(&connection)?,
+                tcp: false,
+            };
+            if self.authorized_view(&carrier).is_none() {
+                connection.close(0_u32.into(), b"relay authorization unavailable");
+                bail!("configured QUIC relay is no longer controller-authorized");
+            }
+            Some(carrier)
+        } else {
+            None
+        };
         let result = timeout(self.config.relay.handshake_timeout, async {
-            let offered = hello_capabilities_for(&self.config, REQUIRED_CAPABILITIES);
+            let offered = self.offered_capabilities(REQUIRED_CAPABILITIES);
             let (mut send, mut receive) = connection
                 .open_bi()
                 .await
@@ -261,6 +382,7 @@ impl RelayClient {
                 outbound_sequence,
                 relay_service,
                 relay_address,
+                rootless,
             })
         })
         .await
@@ -272,21 +394,32 @@ impl RelayClient {
     }
 
     async fn prepare_tcp(&self) -> Result<TcpSession> {
-        if self.state.relay_targets().is_some() {
-            let service =
-                Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
-            let address = self
-                .config
-                .relay
-                .address
-                .context("relay QUIC address is disabled")?;
-            ensure!(
-                self.state.relay_authorized(service, address),
-                "configured TCP fallback relay is no longer controller-authorized"
-            );
-        }
+        ensure!(
+            self.tcp_authorized()?,
+            "configured TCP fallback relay is no longer controller-authorized"
+        );
         let mut connection = tcp_fallback::connect(&self.config, self.network).await?;
-        let offered = hello_capabilities_for(&self.config, REQUIRED_TCP_CAPABILITIES);
+        let rootless = if self.is_rootless() {
+            let carrier = RootlessCarrier {
+                service: Id::from_str(&self.config.relay.service_id)?,
+                address: self
+                    .config
+                    .tcp_fallback
+                    .as_ref()
+                    .context("TCP fallback disabled")?
+                    .address,
+                serial: connection.certificate_serial.clone(),
+                tcp: true,
+            };
+            ensure!(
+                self.authorized_view(&carrier).is_some(),
+                "configured TCP relay is no longer controller-authorized"
+            );
+            Some(Arc::new(carrier))
+        } else {
+            None
+        };
+        let offered = self.offered_capabilities(REQUIRED_TCP_CAPABILITIES);
         let hello = ControlEnvelope {
             schema_version: SCHEMA_VERSION,
             sequence: 1,
@@ -328,7 +461,14 @@ impl RelayClient {
             connection,
             negotiated,
             inbound_sequence: 1,
+            rootless,
         })
+    }
+
+    fn authorized_view(&self, carrier: &RootlessCarrier) -> Option<Arc<PacketAuthority>> {
+        self.state
+            .rootless_authority()
+            .filter(|view| carrier.authorizes(view))
     }
 
     fn hello(&self, capabilities: u64) -> Hello {
@@ -365,9 +505,18 @@ impl RelayClient {
             let attempt = async {
                 let client =
                     tls::client_config(&self.config.tls, &self.config.relay, tls::RELAY_ALPN)?;
+                let dynamic_relay =
+                    self.config.controller.is_some() && self.config.relay.address.is_none();
+                let server_name = if self.is_rootless() || dynamic_relay {
+                    self.state
+                        .relay_server_name(service)
+                        .context("relay authority is unavailable")?
+                } else {
+                    self.config.relay.server_name.clone()
+                };
                 let connecting = self
                     .endpoint
-                    .connect_with(client, address, &self.config.relay.server_name)
+                    .connect_with(client, address, &server_name)
                     .context("start relay QUIC connection")?;
                 let connection = timeout(self.config.relay.handshake_timeout, connecting)
                     .await
@@ -399,6 +548,19 @@ impl RelayClient {
         mut session: QuicSession,
         outbound: &mut mpsc::Receiver<OutboundPacket>,
     ) -> Result<()> {
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        let mut control_reader = JoinSet::<Result<()>>::new();
+        let mut receive = session.receive;
+        control_reader.spawn(async move {
+            loop {
+                let envelope =
+                    read_message::<_, RelayEnvelope>(&mut receive, MAX_CONTROL_PAYLOAD).await?;
+                control_tx
+                    .send(envelope)
+                    .await
+                    .context("relay control reader stopped")?;
+            }
+        });
         let refresh = self.config.direct.candidate_refresh_interval;
         let mut candidate_refresh = interval_at(Instant::now() + refresh, refresh);
         let authority_cadence = Duration::from_millis(250);
@@ -411,14 +573,16 @@ impl RelayClient {
                         outbound.max_capacity().saturating_sub(outbound.capacity()),
                     );
                     let packet = packet.context("outbound packet queue closed")?;
-                    self.send_packet(&session.connection, packet, session.negotiated)?;
+                    self.send_packet(&session.connection, packet, session.negotiated, session.rootless.as_ref())?;
                 }
                 frame = session.connection.read_datagram() => {
                     let frame = frame.context("read relay datagram")?;
-                    self.receive_packet(frame, session.negotiated).await;
+                    self.receive_packet(frame, session.negotiated, session.rootless.as_ref());
                 }
-                envelope = read_message::<_, RelayEnvelope>(&mut session.receive, MAX_CONTROL_PAYLOAD) => {
-                    let envelope = envelope?;
+                envelope = control_rx.recv() => {
+                    let Some(envelope) = envelope else {
+                        return control_reader.join_next().await.context("relay control reader stopped")??;
+                    };
                     let expected = next_sequence(&mut session.inbound_sequence)?;
                     ensure!(envelope.schema_version == SCHEMA_VERSION && envelope.sequence == expected, "invalid relay envelope sequence");
                     self.control(envelope, session.negotiated)?;
@@ -435,7 +599,10 @@ impl RelayClient {
                 }
                 _ = authority_check.tick() => {
                     ensure!(
-                        self.state.relay_authorized(session.relay_service, session.relay_address),
+                        session.rootless.as_ref().map_or_else(
+                            || self.state.relay_authorized(session.relay_service, session.relay_address),
+                            |carrier| self.authorized_view(carrier).is_some(),
+                        ),
                         "active relay was withdrawn by controller"
                     );
                 }
@@ -463,12 +630,30 @@ impl RelayClient {
                         self.metrics.set_outbound_queue_depth(
                             outbound.max_capacity().saturating_sub(outbound.capacity()),
                         );
-                        if let Some(frame) = self.frame_packet(packet.context("outbound packet queue closed")?, session.negotiated)? {
-                            session.connection.writer.packet(Bytes::from_owner(frame)).await?;
+                        let packet = packet.context("outbound packet queue closed")?;
+                        let generation = packet.generation.clone();
+                        if let Some(frame) = self.frame_packet(packet, session.negotiated, session.rootless.as_deref())? {
+                            let frame = Bytes::from_owner(frame);
+                            if let (Some(relay), Some(generation)) = (&session.rootless, generation) {
+                                let permit = TcpPacketPermit {
+                                    state: Arc::clone(&self.state),
+                                    generation,
+                                    relay: Arc::clone(relay),
+                                };
+                                if !session.connection.writer.guarded_packet(frame, permit)? {
+                                    Metrics::increment(&self.metrics.queue_drops);
+                                }
+                            } else {
+                                session.connection.writer.packet(frame).await?;
+                            }
                         }
                     }
                     frame = session.connection.packets.recv() => {
-                        self.receive_packet(frame.context("TCP fallback packet queue closed")?, session.negotiated).await;
+                        self.receive_packet(
+                            frame.context("TCP fallback packet queue closed")?,
+                            session.negotiated,
+                            session.rootless.as_deref(),
+                        );
                     }
                     payload = session.connection.control.recv() => {
                         let envelope: RelayEnvelope = decode_message(&payload.context("TCP fallback control queue closed")?)?;
@@ -481,9 +666,12 @@ impl RelayClient {
                         recovery = Some(Box::pin(self.prepare_quic()));
                     }
                     _ = authority_check.tick() => {
-                        let service = Id::from_str(&self.config.relay.service_id).context("relay.service_id")?;
-                        let address = self.config.relay.address.context("relay QUIC address is disabled")?;
-                        ensure!(self.state.relay_authorized(service, address), "active TCP relay was withdrawn by controller");
+                        let authorized = if let Some(carrier) = &session.rootless {
+                            self.authorized_view(carrier).is_some()
+                        } else {
+                            self.tcp_authorized()?
+                        };
+                        ensure!(authorized, "active TCP relay was withdrawn by controller");
                     }
                     prepared = async { recovery.as_mut().expect("recovery future exists").await }, if recovery.is_some() => {
                         match prepared {
@@ -564,8 +752,9 @@ impl RelayClient {
         connection: &Connection,
         outbound: OutboundPacket,
         negotiated_capabilities: u64,
+        carrier: Option<&RootlessCarrier>,
     ) -> Result<()> {
-        let Some(frame) = self.frame_packet(outbound, negotiated_capabilities)? else {
+        let Some(frame) = self.frame_packet(outbound, negotiated_capabilities, carrier)? else {
             return Ok(());
         };
         connection
@@ -578,15 +767,30 @@ impl RelayClient {
         &self,
         outbound: OutboundPacket,
         negotiated_capabilities: u64,
+        carrier: Option<&RootlessCarrier>,
     ) -> Result<Option<PooledPacket>> {
         let Ok(meta) = packet_meta(&outbound.packet) else {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         };
-        if !self
-            .state
-            .allows(self.node, outbound.peer, &outbound.packet)
-        {
+        let authorized = if let Some(carrier) = carrier {
+            self.authorized_view(carrier).is_some_and(|view| {
+                outbound
+                    .generation
+                    .as_ref()
+                    .is_some_and(|queued| Arc::ptr_eq(queued, &view.generation))
+                    && view.outbound_peer(
+                        self.node,
+                        meta,
+                        &outbound.packet,
+                        negotiated_capabilities,
+                    ) == Some(outbound.peer)
+            })
+        } else {
+            self.state
+                .allows(self.node, outbound.peer, &outbound.packet)
+        };
+        if !authorized {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         }
@@ -626,7 +830,12 @@ impl RelayClient {
         Ok(Some(frame))
     }
 
-    async fn receive_packet(&self, frame: Bytes, negotiated_capabilities: u64) {
+    fn receive_packet(
+        &self,
+        frame: Bytes,
+        negotiated_capabilities: u64,
+        carrier: Option<&RootlessCarrier>,
+    ) {
         let Ok((header, packet)) = decode_packet(&frame) else {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.malformed_drops);
@@ -637,39 +846,79 @@ impl RelayClient {
             Metrics::increment(&self.metrics.invalid_drops);
             return;
         };
-        let Ok(meta) = packet_meta(packet) else {
-            Metrics::increment(&self.metrics.invalid_drops);
-            Metrics::increment(&self.metrics.malformed_drops);
-            return;
-        };
-        if !self.state.allows(peer, self.node, packet) {
-            Metrics::increment(&self.metrics.invalid_drops);
-            Metrics::increment(&self.metrics.policy_drops);
-            return;
-        }
-        let routes = self.state.routes.load();
-        if !packet_capabilities_allow(&self.config, &routes, meta, negotiated_capabilities, true) {
-            Metrics::increment(&self.metrics.invalid_drops);
-            Metrics::increment(&self.metrics.policy_drops);
-            return;
-        }
-        if !routes.authorizes_source(peer, meta.source)
-            || (!self.state.owns(&self.owned, meta.destination)
-                && !self.config.forwarding.exit_gateway)
-        {
-            Metrics::increment(&self.metrics.invalid_drops);
-            Metrics::increment(&self.metrics.auth_drops);
-            return;
-        }
-        let payload_offset = frame.len() - packet.len();
-        let sent = self.inject.try_send(frame.slice(payload_offset..));
-        let depth = self
-            .inject
-            .max_capacity()
-            .saturating_sub(self.inject.capacity());
-        self.metrics.set_inject_queue_depth(depth);
-        if sent.is_err() {
-            Metrics::increment(&self.metrics.queue_drops);
+        match &self.inject {
+            PacketInjection::Rootless(inject) => {
+                if header.flags != 0 {
+                    Metrics::increment(&self.metrics.malformed_drops);
+                    return;
+                }
+                let Some(view) = carrier.and_then(|carrier| self.authorized_view(carrier)) else {
+                    return;
+                };
+                let Some(meta) = rootless_packet_meta(packet) else {
+                    Metrics::increment(&self.metrics.malformed_drops);
+                    return;
+                };
+                if !view.allows_inbound(peer, self.node, meta, packet, negotiated_capabilities) {
+                    Metrics::increment(&self.metrics.policy_drops);
+                    return;
+                }
+                let payload_offset = frame.len() - packet.len();
+                if inject
+                    .try_send(AuthorizedPacket {
+                        bytes: frame.slice(payload_offset..),
+                        generation: Arc::clone(&view.generation),
+                        peer,
+                        capabilities: negotiated_capabilities,
+                    })
+                    .is_err()
+                {
+                    Metrics::increment(&self.metrics.queue_drops);
+                }
+                self.metrics.set_inject_queue_depth(
+                    inject.max_capacity().saturating_sub(inject.capacity()),
+                );
+            }
+            #[cfg(any(feature = "native", test))]
+            PacketInjection::Native { sender, owned } => {
+                let Ok(meta) = packet_meta(packet) else {
+                    Metrics::increment(&self.metrics.invalid_drops);
+                    Metrics::increment(&self.metrics.malformed_drops);
+                    return;
+                };
+                if !self.state.allows(peer, self.node, packet) {
+                    Metrics::increment(&self.metrics.invalid_drops);
+                    Metrics::increment(&self.metrics.policy_drops);
+                    return;
+                }
+                let routes = self.state.routes.load();
+                if !packet_capabilities_allow(
+                    &self.config,
+                    &routes,
+                    meta,
+                    negotiated_capabilities,
+                    true,
+                ) {
+                    Metrics::increment(&self.metrics.invalid_drops);
+                    Metrics::increment(&self.metrics.policy_drops);
+                    return;
+                }
+                if !routes.authorizes_source(peer, meta.source)
+                    || (!self.state.owns(owned, meta.destination)
+                        && !self.config.forwarding.exit_gateway)
+                {
+                    Metrics::increment(&self.metrics.invalid_drops);
+                    Metrics::increment(&self.metrics.auth_drops);
+                    return;
+                }
+                let payload_offset = frame.len() - packet.len();
+                let sent = sender.try_send(frame.slice(payload_offset..));
+                let depth = sender.max_capacity().saturating_sub(sender.capacity());
+                self.metrics.set_inject_queue_depth(depth);
+                if sent.is_err() {
+                    Metrics::increment(&self.metrics.queue_drops);
+                }
+            }
         }
     }
 
@@ -684,15 +933,25 @@ impl RelayClient {
                         && binding.max_packet_payload <= u32::from(self.config.tun.mtu),
                     "invalid binding packet limit"
                 );
-                ensure!(
-                    self.state
-                        .routes
-                        .load()
-                        .routes()
-                        .iter()
-                        .any(|route| route.via == peer),
-                    "relay bound an unconfigured peer"
-                );
+                if self.is_rootless() {
+                    let handles = self.state.handles.load();
+                    ensure!(
+                        handles.outbound.contains_key(&peer)
+                            || handles.inbound.contains_key(&binding.route_handle)
+                            || handles.outbound.len() < self.config.relay.max_routes as usize,
+                        "relay exceeded the negotiated handle bound"
+                    );
+                } else {
+                    ensure!(
+                        self.state
+                            .routes
+                            .load()
+                            .routes()
+                            .iter()
+                            .any(|route| route.via == peer),
+                        "relay bound an unconfigured peer"
+                    );
+                }
                 self.state.bind(
                     peer,
                     Handle {
@@ -710,8 +969,10 @@ impl RelayClient {
                     negotiated_capabilities & Capability::LanewayDirectPeerV1 as u64 != 0,
                     "relay sent endpoint candidate without direct-path negotiation"
                 );
-                if self.state.candidate_exchange_enabled() {
-                    self.candidates
+                if self.state.candidate_exchange_enabled()
+                    && let Some(candidates) = &self.candidates
+                {
+                    candidates
                         .try_send(candidate)
                         .context("direct candidate queue is full or closed")?;
                 }
@@ -740,7 +1001,8 @@ fn hello_capabilities(config: &Config) -> u64 {
 
 fn hello_capabilities_for(config: &Config, required: u64) -> u64 {
     let mut capabilities = required;
-    if required & Capability::LanewayQuicDatagramV1 as u64 != 0
+    if config.direct.enabled
+        && required & Capability::LanewayQuicDatagramV1 as u64 != 0
         && (config.controller.is_some() || !config.direct_peers.is_empty())
     {
         capabilities |= Capability::LanewayDirectPeerV1 as u64;
@@ -992,6 +1254,12 @@ mod tests {
         assert_ne!(capabilities & Capability::LanewayExitNodeV1 as u64, 0);
         assert_ne!(capabilities & Capability::LanewayIpv6V1 as u64, 0);
         assert_ne!(capabilities & Capability::LanewayDirectPeerV1 as u64, 0);
+
+        let mut relay_only = controller;
+        relay_only.direct.enabled = false;
+        let capabilities = hello_capabilities(&relay_only);
+        assert_eq!(capabilities & Capability::LanewayDirectPeerV1 as u64, 0);
+        assert_eq!(capabilities & REQUIRED_CAPABILITIES, REQUIRED_CAPABILITIES);
     }
 
     #[test]
@@ -1241,9 +1509,11 @@ via_node = "202122232425262728292a2b2c2d2e2f"
             Id::from_str(network).unwrap(),
             Id::from_str(node).unwrap(),
             Id::new([9; 16]).unwrap(),
-            Arc::new(vec!["100.96.0.1/32".parse::<IpNet>().unwrap()]),
-            inject_tx,
-            candidate_tx,
+            PacketInjection::Native {
+                sender: inject_tx,
+                owned: Arc::new(vec!["100.96.0.1/32".parse::<IpNet>().unwrap()]),
+            },
+            Some(candidate_tx),
         );
         let client_task = tokio::spawn(client.run(outbound_rx));
         if expect_connected {
@@ -1523,9 +1793,11 @@ via_node = "{second_node}"
             Id::from_str(network).unwrap(),
             Id::from_str(first_node).unwrap(),
             Id::new([1; 16]).unwrap(),
-            Arc::new(vec!["100.96.0.1/32".parse().unwrap()]),
-            first_inject_tx,
-            first_candidate_tx,
+            PacketInjection::Native {
+                sender: first_inject_tx,
+                owned: Arc::new(vec!["100.96.0.1/32".parse().unwrap()]),
+            },
+            Some(first_candidate_tx),
         );
         let first_task = tokio::spawn(first_client.run(first_outbound_rx));
 
@@ -1587,9 +1859,11 @@ via_node = "{first_node}"
             Id::from_str(network).unwrap(),
             Id::from_str(second_node).unwrap(),
             Id::new([2; 16]).unwrap(),
-            Arc::new(vec!["100.96.0.2/32".parse().unwrap()]),
-            second_inject_tx,
-            second_candidate_tx,
+            PacketInjection::Native {
+                sender: second_inject_tx,
+                owned: Arc::new(vec!["100.96.0.2/32".parse().unwrap()]),
+            },
+            Some(second_candidate_tx),
         );
         let second_task = tokio::spawn(second_client.run(second_outbound_rx));
         timeout(Duration::from_secs(3), async {

@@ -14,9 +14,6 @@ WORKDIR /src
 COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
 RUN mkdir -p /out/controller-state /out/relay-state /out/relay-public && chown 65532:65532 /out/controller-state /out/relay-state /out/relay-public
 
 FROM build-base AS build-controller
@@ -29,20 +26,47 @@ RUN test "${BINARY}" = laneway-controller && \
 FROM build-base AS build-admin
 ARG BINARY=laneway
 RUN test "${BINARY}" = laneway && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags laneway_compat -trimpath \
     -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway ./cmd/laneway
+    -o /out/laneway-compat ./cmd/laneway
 
-FROM build-base AS build-relay
+FROM rust:1.95-alpine@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2 AS rust-build-base
+ARG CARGO_BUILD_JOBS=4
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY rust/ ./rust/
+COPY api/proto/ ./api/proto/
+
+FROM rust-build-base AS build-cli
+ARG VERSION=dev
+RUN LANEWAY_CLI_RELEASE_VERSION="${VERSION}" CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-cli
+
+FROM rust-build-base AS build-healthcheck
+RUN CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-healthcheck
+
+FROM rust-build-base AS build-relay
 ARG BINARY=laneway-relay
+ARG VERSION=dev
 RUN test "${BINARY}" = laneway-relay && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway ./cmd/laneway-relay
+    LANEWAY_RELAY_RELEASE_VERSION="${VERSION}" CARGO_PROFILE_RELEASE_STRIP=symbols \
+      cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-relay
+
+FROM scratch AS relay-package
+COPY --from=build-relay /src/rust/target/release/laneway-relay /laneway-relay
+
+FROM build-relay AS build-node
+RUN LANEWAY_NODE_RELEASE_VERSION="${VERSION}" LANEWAY_CLI_RELEASE_VERSION="${VERSION}" CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --manifest-path rust/Cargo.toml --locked --release -p lanewayd -p laneway-cli
+
+FROM relay-package AS linux-package
+COPY --from=build-node /src/rust/target/release/lanewayd /lanewayd
+COPY --from=build-node /src/rust/target/release/laneway /laneway
 
 FROM scratch AS runtime
 COPY --from=build-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build-base /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+COPY --from=build-healthcheck /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --from=build-base --chown=65532:65532 /out/controller-state /var/lib/laneway-controller
 COPY --from=build-base --chown=65532:65532 /out/relay-state /var/lib/laneway-relay
 COPY --from=build-base --chown=65532:65532 /out/relay-public /var/lib/laneway-public
@@ -54,9 +78,10 @@ COPY --from=build-controller /out/laneway /usr/local/bin/laneway
 COPY --from=console /src/web/dist /usr/share/laneway-console
 
 FROM runtime AS admin
-COPY --from=build-admin /out/laneway /usr/local/bin/laneway
+COPY --from=build-cli /src/rust/target/release/laneway /usr/local/bin/laneway
+COPY --from=build-admin /out/laneway-compat /usr/local/bin/laneway-compat
 
 # Relay remains the historical no-target default. A legacy BINARY argument
 # must still match this fixed target or its builder fails before producing an image.
 FROM runtime AS relay
-COPY --from=build-relay /out/laneway /usr/local/bin/laneway
+COPY --from=relay-package /laneway-relay /usr/local/bin/laneway

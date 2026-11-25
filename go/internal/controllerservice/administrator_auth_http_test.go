@@ -169,6 +169,12 @@ func TestAdministratorBrowserSessionLifecycleAndFamilyLogout(t *testing.T) {
 	if bootstrap.Code != http.StatusNoContent || len(bootstrap.Header().Values("Set-Cookie")) != 0 {
 		t.Fatalf("bootstrap status=%d body=%s cookies=%v", bootstrap.Code, bootstrap.Body.String(), bootstrap.Header().Values("Set-Cookie"))
 	}
+	stateAfterBootstrap := httptest.NewRecorder()
+	handler.ServeHTTP(stateAfterBootstrap, httptest.NewRequest(http.MethodGet,
+		"https://controller.example/v1/admin/auth/state", nil))
+	if stateAfterBootstrap.Code != http.StatusOK || !strings.Contains(stateAfterBootstrap.Body.String(), `"sign_in"`) {
+		t.Fatalf("post-bootstrap state status=%d body=%s", stateAfterBootstrap.Code, stateAfterBootstrap.Body.String())
+	}
 
 	badOrigin := httptest.NewRequest(http.MethodPost, "http://controller.example/v1/admin/auth/login", strings.NewReader("not-json"))
 	badOrigin.Header.Set("Content-Type", "application/json")
@@ -187,6 +193,7 @@ func TestAdministratorBrowserSessionLifecycleAndFamilyLogout(t *testing.T) {
 	}
 	var view administratorSessionView
 	if err := json.Unmarshal(login.Body.Bytes(), &view); err != nil || view.SessionID == "" || view.CSRFToken == "" ||
+		view.Role != adminauth.RoleOwner || !view.AllNetworks || len(view.NetworkIDs) != 0 ||
 		view.IdleLifetimeSeconds < 60 || view.IdleExpiresAtUnixSeconds >= view.AbsoluteExpiresAtUnixSeconds {
 		t.Fatalf("invalid login view=%+v err=%v", view, err)
 	}
@@ -243,6 +250,17 @@ func TestAdministratorBrowserSessionLifecycleAndFamilyLogout(t *testing.T) {
 	handler.ServeHTTP(readResponse, readRequest)
 	if readResponse.Code != http.StatusOK {
 		t.Fatalf("authorized read status=%d body=%s", readResponse.Code, readResponse.Body.String())
+	}
+	var listed struct {
+		Networks []networkResponse `json:"networks"`
+	}
+	if err := json.Unmarshal(readResponse.Body.Bytes(), &listed); err != nil || len(listed.Networks) != 1 {
+		t.Fatalf("initial-owner network inventory=%+v err=%v", listed.Networks, err)
+	}
+	seed := listed.Networks[0]
+	if seed.NetworkID != fixture.network.ID.String() || seed.Name != "test" || seed.IPv4Pool != "10.44.0.0/24" ||
+		seed.IPv6Pool != "" || seed.ConfigurationEpoch != 1 || seed.CreatedAtUnix != fixture.network.CreatedAt.Unix() {
+		t.Fatalf("initial-owner network inventory=%+v want seeded network=%+v", seed, fixture.network)
 	}
 	afterSuccess, _, err := fixture.store.AuthenticateAdministratorSession(context.Background(), oldSession)
 	if err != nil || !afterSuccess.LastSeenAt.After(beforeFailure.LastSeenAt) {

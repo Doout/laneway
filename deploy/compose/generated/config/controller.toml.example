@@ -16,6 +16,11 @@ issuer_certificate = "/run/laneway-secrets/intermediate-chain.crt"
 admin_token_file = "/run/laneway-secrets/admin.token"
 leaf_validity = "720h"
 
+[controller.initial_network]
+network_id = "REPLACE_NETWORK_ID"
+name = "production"
+ipv4_pool = "100.96.0.0/16"
+
 # See deploy/examples/controller.toml for the optional public-Web-PKI
 # [bootstrap] listener. Keep it disabled until real release sizes/checksums and
 # a publicly trusted certificate are mounted into the controller container.

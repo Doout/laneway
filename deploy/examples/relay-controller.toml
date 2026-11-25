@@ -14,9 +14,6 @@ packet_rate_bits_per_second = 2000000
 packet_burst_bytes = 65536
 handshake_timeout = "10s"
 idle_timeout = "45s"
-# The Rust relay's candidate_republish_floor defaults to 5s. Leave it at the
-# default here so this controller-backed example remains valid for both the
-# strict Go and Rust relay configuration schemas.
 
 [controller]
 endpoint = "https://controller.example.com:8443"
@@ -28,3 +25,9 @@ poll_interval = "30s"
 
 [tcp_fallback]
 listen = ":443"
+
+# To share this TCP listener with public bootstrap HTTPS, enable this section.
+# ACME issuance and renewal are automatic. Keep the cache persistent and private.
+# [public_https]
+# server_name = "lane.example.com"
+# cache_dir = "/var/lib/laneway-public"

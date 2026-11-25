@@ -1,17 +1,21 @@
-use std::{fs, io::BufReader, sync::Arc};
+use std::{fs, sync::Arc};
 
 use anyhow::{Context, Result, bail, ensure};
 use laneway_protocol::{
     AuthenticatedIdentity, Id, Role, certificate_serial_from_der, identity_from_certificate_der,
 };
-use quinn::{
-    ClientConfig, ServerConfig, TransportConfig, VarInt,
-    crypto::rustls::{QuicClientConfig, QuicServerConfig},
+use quinn::{ClientConfig, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
+#[cfg(feature = "native")]
+use quinn::{ServerConfig, crypto::rustls::QuicServerConfig};
+#[cfg(any(feature = "native", test))]
+use rustls::{
+    DigitallySignedStruct, Error as TlsError, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    pki_types::ServerName,
 };
 use rustls::{
-    DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    RootCertStore,
+    pki_types::{CertificateDer, PrivateKeyDer, UnixTime},
     server::WebPkiClientVerifier,
 };
 use x509_parser::parse_x509_certificate;
@@ -20,18 +24,29 @@ use crate::config::{RelayConfig, TlsConfig};
 
 pub(crate) const RELAY_ALPN: &[u8] = b"laneway-relay/1";
 pub(crate) const TCP_FALLBACK_ALPN: &[u8] = b"laneway-fallback/1";
+#[cfg(feature = "native")]
 pub(crate) const DIRECT_ALPN: &[u8] = b"laneway-peer/1";
 const MAX_DATAGRAM_FRAME: usize = 5 + 1280;
 
 pub(crate) fn validate_local(config: &TlsConfig, network: Id, node: Id) -> Result<()> {
     let certificates = load_certificates(&config.certificate)?;
-    let identity = identity_from_certificate_der(
-        certificates
-            .first()
-            .context("local certificate chain is empty")?
-            .as_ref(),
-    )
-    .context("local certificate SPIFFE identity")?;
+    let key = load_private_key(&config.private_key)?;
+    let roots = root_store(&config.ca)?;
+    validate_local_material(&certificates, &key, &roots, network, node)
+}
+
+pub(crate) fn validate_local_material(
+    certificates: &[CertificateDer<'static>],
+    key: &PrivateKeyDer<'static>,
+    roots: &RootCertStore,
+    network: Id,
+    node: Id,
+) -> Result<()> {
+    let (leaf, intermediates) = certificates
+        .split_first()
+        .context("local certificate chain is empty")?;
+    let identity = identity_from_certificate_der(leaf.as_ref())
+        .context("local certificate SPIFFE identity")?;
     ensure!(
         identity
             == (AuthenticatedIdentity {
@@ -41,8 +56,16 @@ pub(crate) fn validate_local(config: &TlsConfig, network: Id, node: Id) -> Resul
             }),
         "local certificate identity differs from configuration"
     );
-    let _ = load_private_key(&config.private_key)?;
-    let _ = root_store(&config.ca)?;
+    WebPkiClientVerifier::builder(Arc::new(roots.clone()))
+        .build()
+        .context("build node certificate verifier")?
+        .verify_client_cert(leaf, intermediates, UnixTime::now())
+        .context("validate the node certificate chain and client usage")?;
+    let provider = rustls::crypto::ring::default_provider();
+    rustls::sign::CertifiedKey::from_der(certificates.to_vec(), key.clone_key(), &provider)
+        .context("load node certificate key pair")?
+        .keys_match()
+        .context("node certificate and private key must match")?;
     Ok(())
 }
 
@@ -55,6 +78,12 @@ pub(crate) struct LocalCertificateHealth {
 
 pub(crate) fn local_certificate_health(config: &TlsConfig) -> Result<LocalCertificateHealth> {
     let certificates = load_certificates(&config.certificate)?;
+    local_certificate_material_health(&certificates)
+}
+
+pub(crate) fn local_certificate_material_health(
+    certificates: &[CertificateDer<'_>],
+) -> Result<LocalCertificateHealth> {
     let der = certificates
         .first()
         .context("local certificate chain is empty")?
@@ -96,6 +125,7 @@ pub(crate) fn client_config(
     Ok(client)
 }
 
+#[cfg(feature = "native")]
 pub(crate) fn direct_client_config(
     tls: &TlsConfig,
     relay: &RelayConfig,
@@ -126,12 +156,14 @@ pub(crate) fn direct_client_config(
     Ok(client)
 }
 
+#[cfg(any(feature = "native", test))]
 #[derive(Debug)]
 struct DirectServerVerifier {
     roots: Arc<RootCertStore>,
     expected: AuthenticatedIdentity,
 }
 
+#[cfg(any(feature = "native", test))]
 impl ServerCertVerifier for DirectServerVerifier {
     fn verify_server_cert(
         &self,
@@ -240,6 +272,7 @@ pub(crate) fn validate_relay_certificate(
     Ok(identity)
 }
 
+#[cfg(feature = "native")]
 pub(crate) fn direct_server_config(tls: &TlsConfig, relay: &RelayConfig) -> Result<ServerConfig> {
     let certificates = load_certificates(&tls.certificate)?;
     let key = load_private_key(&tls.private_key)?;
@@ -344,7 +377,7 @@ pub(crate) fn validate_peer(
     Ok(identity)
 }
 
-fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
+pub(crate) fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
     let roots = load_certificates(path)?;
     let mut store = RootCertStore::empty();
     let (accepted, rejected) = store.add_parsable_certificates(roots);
@@ -355,16 +388,12 @@ fn root_store(path: &std::path::Path) -> Result<RootCertStore> {
     Ok(store)
 }
 
-fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("stat certificate {}", path.display()))?;
-    ensure!(
-        metadata.len() <= 4 << 20,
-        "certificate bundle exceeds 4 MiB"
-    );
+pub(crate) fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'static>>> {
     let file =
         fs::File::open(path).with_context(|| format!("open certificate {}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    let contents = laneway_protocol::read_bounded(file, 4 << 20)
+        .with_context(|| format!("read certificate {}", path.display()))?;
+    let mut reader = contents.as_slice();
     let certificates: Result<Vec<_>, _> = rustls_pemfile::certs(&mut reader).collect();
     let certificates =
         certificates.with_context(|| format!("parse certificate {}", path.display()))?;
@@ -374,21 +403,21 @@ fn load_certificates(path: &std::path::Path) -> Result<Vec<CertificateDer<'stati
     Ok(certificates)
 }
 
-fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("stat private key {}", path.display()))?;
-    ensure!(metadata.len() <= 1 << 20, "private key exceeds 1 MiB");
+pub(crate) fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
+    let file =
+        fs::File::open(path).with_context(|| format!("open private key {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let metadata = file.metadata().context("stat open private key")?;
         ensure!(
             private_key_mode_allowed(metadata.permissions().mode()),
             "private key may be owner/group-readable but not group-writable/executable or world-accessible"
         );
     }
-    let file =
-        fs::File::open(path).with_context(|| format!("open private key {}", path.display()))?;
-    let mut reader = BufReader::new(file);
+    let contents = laneway_protocol::read_bounded(file, 1 << 20)
+        .with_context(|| format!("read private key {}", path.display()))?;
+    let mut reader = contents.as_slice();
     rustls_pemfile::private_key(&mut reader)
         .with_context(|| format!("parse private key {}", path.display()))?
         .with_context(|| format!("private key file {} is empty", path.display()))

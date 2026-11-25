@@ -1,11 +1,11 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use laneway_protocol::Id;
+#[cfg(any(feature = "native", test))]
 use quinn::Connection;
+#[cfg(feature = "native")]
+use std::sync::atomic::AtomicBool;
 
 use crate::{
     controller::{CandidateExchangeAuthority, Snapshot},
@@ -32,6 +32,7 @@ pub struct Handles {
 
 /// An authenticated direct carrier and the canonical leaf-certificate serial
 /// checked against every controller revocation snapshot.
+#[cfg(any(feature = "native", test))]
 #[derive(Clone, Debug)]
 pub struct DirectPath {
     /// Live QUIC connection.
@@ -39,6 +40,7 @@ pub struct DirectPath {
     /// Canonical unsigned leaf certificate serial.
     pub certificate_serial: Vec<u8>,
     /// Ensures a failed carrier is logged at most once before it is detached.
+    #[cfg(feature = "native")]
     pub(crate) send_failure_reported: Arc<AtomicBool>,
 }
 
@@ -49,14 +51,18 @@ pub struct State {
     /// Current relay handle snapshot.
     pub handles: ArcSwap<Handles>,
     /// Current authenticated direct connections keyed by peer.
+    #[cfg(any(feature = "native", test))]
     pub direct: ArcSwap<HashMap<Id, DirectPath>>,
     authority: ArcSwapOption<Snapshot>,
+    rootless: ArcSwapOption<crate::rootless::PacketAuthority>,
     controller_managed: bool,
+    #[cfg(any(feature = "native", test))]
     local_node: Option<Id>,
 }
 
 impl State {
     /// Creates empty carrier state around one compiled route table.
+    #[cfg(any(feature = "native", test))]
     pub fn new(routes: RoutingTable) -> Self {
         Self::with_controller(routes, false, None)
     }
@@ -69,20 +75,24 @@ impl State {
     fn with_controller(
         routes: RoutingTable,
         controller_managed: bool,
-        local_node: Option<Id>,
+        _local_node: Option<Id>,
     ) -> Self {
         Self {
             routes: ArcSwap::from_pointee(routes),
             handles: ArcSwap::from_pointee(Handles::default()),
+            #[cfg(any(feature = "native", test))]
             direct: ArcSwap::from_pointee(HashMap::new()),
             authority: ArcSwapOption::empty(),
+            rootless: ArcSwapOption::empty(),
             controller_managed,
-            local_node,
+            #[cfg(any(feature = "native", test))]
+            local_node: _local_node,
         }
     }
 
     /// Publishes a complete authority snapshot and closes direct paths whose
     /// peer or certificate is no longer authorized.
+    #[cfg(any(feature = "native", test))]
     pub(crate) fn publish_authority(&self, snapshot: Arc<Snapshot>) {
         let paths = self.direct.swap(Arc::new(HashMap::new()));
         let mut retained = HashMap::new();
@@ -101,7 +111,45 @@ impl State {
     }
 
     pub(crate) fn authority_snapshot(&self) -> Option<Arc<Snapshot>> {
-        self.authority.load_full()
+        self.rootless
+            .load_full()
+            .map(|view| Arc::clone(&view.snapshot))
+            .or_else(|| self.authority.load_full())
+    }
+
+    pub(crate) fn publish_rootless(&self, authority: Arc<crate::rootless::PacketAuthority>) {
+        self.rootless.store(Some(authority));
+    }
+
+    pub(crate) fn rootless_authority(&self) -> Option<Arc<crate::rootless::PacketAuthority>> {
+        self.rootless
+            .load_full()
+            .filter(|view| !view.snapshot.expired())
+    }
+
+    pub(crate) fn tcp_relay_authorized(
+        &self,
+        service: Id,
+        destination: std::net::SocketAddr,
+    ) -> bool {
+        self.rootless_authority().is_some_and(|view| {
+            view.snapshot.relays.get(&service).is_some_and(|relay| {
+                relay
+                    .resolved
+                    .iter()
+                    .any(|address| address.ip() == destination.ip())
+            })
+        })
+    }
+
+    pub(crate) fn relay_server_name(&self, service: Id) -> Option<String> {
+        let authority = self
+            .authority_snapshot()
+            .filter(|snapshot| !snapshot.expired())?;
+        let endpoint = &authority.relays.get(&service)?.endpoint;
+        crate::controller::split_host_port(endpoint)
+            .ok()
+            .map(|(host, _)| host)
     }
 
     /// Returns the live candidate-exchange ceiling. Static mode has no
@@ -158,11 +206,13 @@ impl State {
 
     /// Removes all dynamic authority, routes, relay handles, and direct paths.
     pub(crate) fn fail_close(&self) {
+        self.rootless.store(None);
         self.authority.store(None);
         self.routes.store(Arc::new(
             RoutingTable::compile(&[]).expect("empty routes compile"),
         ));
         self.clear_handles();
+        #[cfg(any(feature = "native", test))]
         for path in self.direct.swap(Arc::new(HashMap::new())).values() {
             path.connection
                 .close(0_u32.into(), b"controller authority expired");
@@ -184,6 +234,7 @@ impl State {
     }
 
     /// Checks whether a direct certificate path remains controller-authorized.
+    #[cfg(feature = "native")]
     pub(crate) fn direct_authorized(&self, peer: Id, serial: &[u8]) -> bool {
         if !self.controller_managed {
             return true;
@@ -197,18 +248,22 @@ impl State {
 
     /// Reports whether a peer currently has either an authenticated direct
     /// carrier or a live relay/TCP route-handle binding.
+    #[cfg(feature = "native")]
     pub(crate) fn has_path(&self, peer: Id) -> bool {
         self.direct.load().contains_key(&peer) || self.handles.load().outbound.contains_key(&peer)
     }
 
+    #[cfg(feature = "native")]
     pub(crate) fn has_direct_path(&self, peer: Id) -> bool {
         self.direct.load().contains_key(&peer)
     }
 
+    #[cfg(feature = "native")]
     pub(crate) fn has_relay_path(&self, peer: Id) -> bool {
         self.handles.load().outbound.contains_key(&peer)
     }
 
+    #[cfg(any(feature = "native", test))]
     pub(crate) fn owns(&self, static_owned: &[ipnet::IpNet], address: std::net::IpAddr) -> bool {
         if !self.controller_managed {
             return crate::routing::locally_owned(static_owned, address);
@@ -257,6 +312,7 @@ impl State {
     }
 
     /// Publishes an authenticated direct path.
+    #[cfg(feature = "native")]
     pub fn attach_direct(&self, peer: Id, connection: Connection, certificate_serial: Vec<u8>) {
         let stable_id = connection.stable_id();
         let previous_snapshot = self.direct.rcu(|current| {
@@ -282,6 +338,7 @@ impl State {
     }
 
     /// Removes a direct path only when it still refers to this connection.
+    #[cfg(feature = "native")]
     pub fn detach_direct(&self, peer: Id, stable_id: usize) {
         self.direct.rcu(|current| {
             if current
@@ -422,9 +479,12 @@ mod tests {
             ]),
             candidate_exchange: crate::controller::CandidateExchangeAuthority {
                 enabled: true,
+                #[cfg(feature = "native")]
                 max_candidates: 8,
+                #[cfg(feature = "native")]
                 ttl: Duration::from_secs(120),
             },
+            #[cfg(feature = "native")]
             authorized_exits: HashSet::new(),
             certificate_renew_after: u64::MAX - 1,
             certificate_not_after: u64::MAX,

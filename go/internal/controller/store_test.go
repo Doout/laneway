@@ -68,7 +68,7 @@ func TestOpenMigratesAndConfiguresSQLite(t *testing.T) {
 	if foreignKeys != 1 || busy != busyTimeoutMS || journal != "wal" {
 		t.Fatalf("pragmas foreign_keys=%d busy_timeout=%d journal=%q", foreignKeys, busy, journal)
 	}
-	for _, table := range []string{"networks", "nodes", "certificates", "overlay_addresses", "routes", "acl_rules", "relays", "enrollment_tokens", "audit_events", "schema_versions"} {
+	for _, table := range []string{"networks", "nodes", "certificates", "overlay_addresses", "routes", "acl_rules", "relays", "enrollment_tokens", "audit_events", "schema_versions", "controller_identity_state"} {
 		var found string
 		if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&found); err != nil {
 			t.Errorf("table %s: %v", table, err)

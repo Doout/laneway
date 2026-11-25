@@ -90,6 +90,7 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[cfg(feature = "native")]
     pub(crate) fn add(counter: &AtomicU64, value: usize) {
         counter.fetch_add(value as u64, Ordering::Relaxed);
     }
@@ -188,6 +189,7 @@ impl Metrics {
         }
     }
 
+    #[cfg(any(feature = "native", test))]
     pub(crate) fn prometheus(&self) -> String {
         let snapshot = self.snapshot();
         let mut output = String::new();

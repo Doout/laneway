@@ -1,0 +1,539 @@
+
+CREATE TABLE networks (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    name TEXT NOT NULL UNIQUE CHECK(length(name) BETWEEN 1 AND 253),
+    ipv4_address BLOB NOT NULL CHECK(length(ipv4_address) = 4),
+    ipv4_prefix_length INTEGER NOT NULL CHECK(ipv4_prefix_length BETWEEN 8 AND 30),
+    next_ipv4 INTEGER NOT NULL DEFAULT 1 CHECK(next_ipv4 >= 1),
+    configuration_epoch INTEGER NOT NULL DEFAULT 1 CHECK(configuration_epoch >= 1),
+    created_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE nodes (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253),
+    enabled_capabilities INTEGER NOT NULL DEFAULT 0 CHECK(enabled_capabilities >= 0),
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+	UNIQUE(network_id, name),
+	UNIQUE(network_id, id)
+) STRICT;
+
+CREATE TABLE certificates (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+	node_id BLOB NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    serial BLOB NOT NULL CHECK(length(serial) BETWEEN 1 AND 32),
+    der BLOB NOT NULL CHECK(length(der) BETWEEN 1 AND 65536),
+    not_before INTEGER NOT NULL,
+    not_after INTEGER NOT NULL CHECK(not_after > not_before),
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(length(revocation_reason) <= 1024),
+	UNIQUE(network_id, serial),
+	FOREIGN KEY(network_id, node_id) REFERENCES nodes(network_id, id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE overlay_addresses (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    node_id BLOB NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    address BLOB NOT NULL CHECK(length(address) IN (4, 16)),
+	prefix_length INTEGER NOT NULL CHECK(
+		(length(address) = 4 AND prefix_length BETWEEN 0 AND 32) OR
+		(length(address) = 16 AND prefix_length BETWEEN 0 AND 128)
+	),
+    created_at INTEGER NOT NULL,
+    released_at INTEGER,
+	UNIQUE(network_id, address),
+	FOREIGN KEY(network_id, node_id) REFERENCES nodes(network_id, id) ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX one_active_ipv4_per_node ON overlay_addresses(node_id)
+    WHERE length(address) = 4 AND released_at IS NULL;
+
+CREATE TABLE routes (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    node_id BLOB NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    prefix_address BLOB NOT NULL CHECK(length(prefix_address) IN (4, 16)),
+	prefix_length INTEGER NOT NULL CHECK(
+		(length(prefix_address) = 4 AND prefix_length BETWEEN 0 AND 32) OR
+		(length(prefix_address) = 16 AND prefix_length BETWEEN 0 AND 128)
+	),
+    kind TEXT NOT NULL CHECK(kind IN ('overlay','subnet','exit')),
+    mode TEXT NOT NULL CHECK(mode IN ('none','nat','routed')),
+    metric INTEGER NOT NULL CHECK(metric BETWEEN 0 AND 1000000),
+    state TEXT NOT NULL CHECK(state IN ('advertised','approved','withdrawn','rejected')),
+    valid_until INTEGER,
+    created_at INTEGER NOT NULL,
+    approved_at INTEGER,
+    withdrawn_at INTEGER,
+	CHECK(
+		(kind = 'exit' AND prefix_length = 0 AND mode IN ('nat','routed')) OR
+		(kind = 'subnet' AND prefix_length > 0 AND mode IN ('nat','routed')) OR
+		(kind = 'overlay' AND mode = 'none' AND
+		 ((length(prefix_address) = 4 AND prefix_length = 32) OR
+		  (length(prefix_address) = 16 AND prefix_length = 128)))
+	),
+	CHECK(valid_until IS NULL OR valid_until > created_at),
+	FOREIGN KEY(network_id, node_id) REFERENCES nodes(network_id, id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX routes_network_state ON routes(network_id, state);
+CREATE UNIQUE INDEX one_active_route_advertisement ON routes
+	(network_id,node_id,prefix_address,prefix_length,kind)
+	WHERE state IN ('advertised','approved');
+
+CREATE TABLE acl_rules (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    priority INTEGER NOT NULL CHECK(priority BETWEEN 0 AND 4294967295),
+    action TEXT NOT NULL CHECK(action IN ('accept','deny')),
+    selector_json TEXT NOT NULL CHECK(length(selector_json) BETWEEN 2 AND 16384),
+    description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 1024),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX acl_rules_order ON acl_rules(network_id, priority, id);
+
+CREATE TABLE relays (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    node_id BLOB REFERENCES nodes(id) ON DELETE SET NULL,
+    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 253),
+    endpoint TEXT NOT NULL CHECK(length(endpoint) BETWEEN 1 AND 2048),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    UNIQUE(network_id, name),
+	UNIQUE(network_id, endpoint)
+) STRICT;
+
+CREATE TABLE enrollment_tokens (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+    label TEXT NOT NULL DEFAULT '' CHECK(length(label) <= 256),
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    consumed_at INTEGER,
+	consumed_by BLOB REFERENCES nodes(id) ON DELETE SET NULL,
+	CHECK(expires_at > created_at)
+) STRICT;
+CREATE INDEX enrollment_tokens_expiry ON enrollment_tokens(expires_at) WHERE consumed_at IS NULL;
+
+CREATE TABLE audit_events (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE,
+    actor_node_id BLOB REFERENCES nodes(id) ON DELETE SET NULL,
+    action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 128),
+    target_type TEXT NOT NULL CHECK(length(target_type) BETWEEN 1 AND 64),
+    target_id BLOB CHECK(target_id IS NULL OR length(target_id) = 16),
+    details_json TEXT NOT NULL DEFAULT '{}' CHECK(length(details_json) BETWEEN 2 AND 16384),
+    created_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX audit_events_network_time ON audit_events(network_id, created_at, id);
+
+-- Next Laneway schema migration --
+
+ALTER TABLE networks ADD COLUMN ipv6_address BLOB CHECK(ipv6_address IS NULL OR length(ipv6_address) = 16);
+ALTER TABLE networks ADD COLUMN ipv6_prefix_length INTEGER CHECK(ipv6_prefix_length IS NULL OR ipv6_prefix_length BETWEEN 64 AND 120);
+ALTER TABLE networks ADD COLUMN next_ipv6 INTEGER NOT NULL DEFAULT 1 CHECK(next_ipv6 >= 1);
+CREATE UNIQUE INDEX one_active_ipv6_per_node ON overlay_addresses(node_id)
+    WHERE length(address) = 16 AND released_at IS NULL;
+
+-- Next Laneway schema migration --
+
+ALTER TABLE relays ADD COLUMN service_id BLOB CHECK(service_id IS NULL OR length(service_id) = 16);
+CREATE UNIQUE INDEX relays_network_service_identity ON relays(network_id, service_id)
+    WHERE service_id IS NOT NULL;
+
+-- Next Laneway schema migration --
+
+ALTER TABLE nodes ADD COLUMN enrollment_class TEXT NOT NULL DEFAULT 'durable'
+    CHECK(enrollment_class IN ('durable','ephemeral','remembered'));
+ALTER TABLE nodes ADD COLUMN lease_expires_at INTEGER;
+CREATE INDEX nodes_ephemeral_expiry ON nodes(lease_expires_at)
+    WHERE enrollment_class='ephemeral' AND revoked_at IS NULL;
+
+ALTER TABLE enrollment_tokens ADD COLUMN enrollment_class TEXT NOT NULL DEFAULT 'durable'
+    CHECK(enrollment_class IN ('durable','ephemeral','remembered'));
+ALTER TABLE enrollment_tokens ADD COLUMN session_lifetime_seconds INTEGER;
+CREATE INDEX enrollment_tokens_class_expiry ON enrollment_tokens(enrollment_class,expires_at)
+    WHERE consumed_at IS NULL;
+
+-- Next Laneway schema migration --
+
+ALTER TABLE enrollment_tokens ADD COLUMN requested_name TEXT
+    CHECK(requested_name IS NULL OR length(requested_name) BETWEEN 1 AND 253);
+
+-- Next Laneway schema migration --
+
+ALTER TABLE nodes ADD COLUMN wireguard_public_key BLOB
+    CHECK(wireguard_public_key IS NULL OR length(wireguard_public_key) = 32);
+CREATE UNIQUE INDEX nodes_wireguard_public_key ON nodes(wireguard_public_key)
+    WHERE wireguard_public_key IS NOT NULL;
+
+-- Next Laneway schema migration --
+
+ALTER TABLE enrollment_tokens ADD COLUMN enabled_capabilities INTEGER NOT NULL DEFAULT 0
+    CHECK(enabled_capabilities BETWEEN 0 AND 9223372036854775807);
+
+-- Next Laneway schema migration --
+
+CREATE TABLE administrator_principals (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    username TEXT NOT NULL UNIQUE CHECK(
+        length(username) BETWEEN 3 AND 64 AND
+        username = trim(username) AND
+        username GLOB '[a-z0-9]*' AND
+        substr(username, -1, 1) GLOB '[a-z0-9]' AND
+        username NOT GLOB '*[^a-z0-9._-]*'
+    ),
+    role TEXT NOT NULL CHECK(role IN ('owner','operator','auditor')),
+    all_networks INTEGER NOT NULL CHECK(all_networks IN (0,1)),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    disabled_at INTEGER,
+    CHECK(role <> 'owner' OR all_networks = 1),
+    CHECK(
+        (enabled = 1 AND disabled_at IS NULL) OR
+        (enabled = 0 AND disabled_at IS NOT NULL AND disabled_at >= created_at)
+    )
+) STRICT;
+
+CREATE TABLE administrator_principal_networks (
+    principal_id BLOB NOT NULL REFERENCES administrator_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    network_id BLOB NOT NULL REFERENCES networks(id) ON DELETE CASCADE
+        CHECK(length(network_id) = 16),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(principal_id, network_id)
+) STRICT;
+CREATE INDEX administrator_principal_networks_network
+    ON administrator_principal_networks(network_id, principal_id);
+
+CREATE TABLE administrator_credentials (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    principal_id BLOB NOT NULL REFERENCES administrator_principals(id) ON DELETE CASCADE
+        CHECK(length(principal_id) = 16),
+    credential_type TEXT NOT NULL CHECK(credential_type = 'password'),
+    secret_hash TEXT NOT NULL CHECK(length(secret_hash) BETWEEN 64 AND 512),
+    created_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(length(revocation_reason) <= 256),
+    UNIQUE(principal_id, id),
+    CHECK(
+        (revoked_at IS NULL AND revocation_reason = '') OR
+        (revoked_at IS NOT NULL AND revoked_at >= created_at AND length(revocation_reason) > 0)
+    )
+) STRICT;
+CREATE UNIQUE INDEX one_active_administrator_password
+    ON administrator_credentials(principal_id)
+    WHERE credential_type = 'password' AND revoked_at IS NULL;
+CREATE TRIGGER administrator_credentials_immutable_secret
+    BEFORE UPDATE OF principal_id, credential_type, secret_hash ON administrator_credentials
+BEGIN
+    SELECT RAISE(ABORT, 'administrator credential identity is immutable');
+END;
+
+CREATE TABLE administrator_sessions (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    principal_id BLOB NOT NULL CHECK(length(principal_id) = 16),
+    credential_id BLOB NOT NULL CHECK(length(credential_id) = 16),
+    token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+    csrf_hash BLOB NOT NULL UNIQUE CHECK(length(csrf_hash) = 32),
+    previous_session_id BLOB REFERENCES administrator_sessions(id) ON DELETE SET NULL
+        CHECK(previous_session_id IS NULL OR length(previous_session_id) = 16),
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    idle_lifetime_seconds INTEGER NOT NULL CHECK(idle_lifetime_seconds BETWEEN 60 AND 86400),
+    idle_expires_at INTEGER NOT NULL,
+    absolute_expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(length(revocation_reason) <= 256),
+    FOREIGN KEY(principal_id, credential_id)
+        REFERENCES administrator_credentials(principal_id, id) ON DELETE CASCADE,
+    CHECK(token_hash <> csrf_hash),
+    CHECK(previous_session_id IS NULL OR previous_session_id <> id),
+    CHECK(last_seen_at >= created_at),
+    CHECK(idle_expires_at = min(last_seen_at + idle_lifetime_seconds, absolute_expires_at)),
+    CHECK(absolute_expires_at > created_at),
+    CHECK(
+        (revoked_at IS NULL AND revocation_reason = '') OR
+        (revoked_at IS NOT NULL AND revoked_at >= created_at AND length(revocation_reason) > 0)
+    )
+) STRICT;
+CREATE INDEX administrator_sessions_active_principal
+    ON administrator_sessions(principal_id, created_at, id)
+    WHERE revoked_at IS NULL;
+CREATE INDEX administrator_sessions_active_expiry
+    ON administrator_sessions(idle_expires_at, absolute_expires_at)
+    WHERE revoked_at IS NULL;
+
+CREATE TABLE administrator_recovery_grants (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    secret_hash BLOB NOT NULL UNIQUE CHECK(length(secret_hash) = 32),
+    purpose TEXT NOT NULL CHECK(purpose IN ('bootstrap_owner','owner_recovery')),
+    target_principal_id BLOB REFERENCES administrator_principals(id) ON DELETE RESTRICT
+        CHECK(target_principal_id IS NULL OR length(target_principal_id) = 16),
+    recovery_generation INTEGER NOT NULL CHECK(recovery_generation >= 0),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+    consumed_at INTEGER,
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(length(revocation_reason) <= 256),
+    CHECK(
+        (purpose = 'bootstrap_owner' AND target_principal_id IS NULL) OR
+        (purpose = 'owner_recovery' AND target_principal_id IS NOT NULL)
+    ),
+    CHECK(consumed_at IS NULL OR (consumed_at >= created_at AND consumed_at <= expires_at)),
+    CHECK(revoked_at IS NULL OR revoked_at >= created_at),
+    CHECK(NOT (consumed_at IS NOT NULL AND revoked_at IS NOT NULL)),
+    CHECK(
+        (revoked_at IS NULL AND revocation_reason = '') OR
+        (revoked_at IS NOT NULL AND length(revocation_reason) > 0)
+    )
+) STRICT;
+CREATE UNIQUE INDEX one_pending_owner_bootstrap
+    ON administrator_recovery_grants(purpose)
+    WHERE purpose = 'bootstrap_owner' AND consumed_at IS NULL AND revoked_at IS NULL;
+CREATE UNIQUE INDEX one_pending_recovery_per_owner
+    ON administrator_recovery_grants(target_principal_id)
+    WHERE purpose = 'owner_recovery' AND consumed_at IS NULL AND revoked_at IS NULL;
+CREATE INDEX administrator_recovery_grants_pending_expiry
+    ON administrator_recovery_grants(expires_at)
+    WHERE consumed_at IS NULL AND revoked_at IS NULL;
+
+CREATE TABLE administrator_auth_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    root_service_principal_id BLOB NOT NULL UNIQUE CHECK(
+        length(root_service_principal_id) = 16 AND root_service_principal_id <> zeroblob(16)
+    ),
+    initial_owner_principal_id BLOB REFERENCES administrator_principals(id) ON DELETE RESTRICT
+        CHECK(initial_owner_principal_id IS NULL OR length(initial_owner_principal_id) = 16),
+    bootstrap_completed_at INTEGER,
+    recovery_generation INTEGER NOT NULL DEFAULT 0 CHECK(recovery_generation >= 0),
+    last_recovered_at INTEGER,
+    CHECK(
+        (initial_owner_principal_id IS NULL AND bootstrap_completed_at IS NULL) OR
+        (initial_owner_principal_id IS NOT NULL AND bootstrap_completed_at IS NOT NULL)
+    )
+) STRICT;
+INSERT INTO administrator_auth_state(singleton, root_service_principal_id)
+VALUES(1, randomblob(16));
+
+DROP INDEX audit_events_network_time;
+ALTER TABLE audit_events RENAME TO audit_events_v7;
+CREATE TABLE audit_events (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB REFERENCES networks(id) ON DELETE SET NULL
+        CHECK(network_id IS NULL OR length(network_id) = 16),
+    actor_kind TEXT NOT NULL CHECK(actor_kind IN (
+        'system','node','administrator','service_principal','unauthenticated','legacy_unknown'
+    )),
+    actor_id BLOB CHECK(actor_id IS NULL OR (length(actor_id) = 16 AND actor_id <> zeroblob(16))),
+    action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 128),
+    target_type TEXT NOT NULL CHECK(length(target_type) BETWEEN 1 AND 64),
+    target_id BLOB CHECK(target_id IS NULL OR length(target_id) = 16),
+    details_json TEXT NOT NULL DEFAULT '{}' CHECK(length(details_json) BETWEEN 2 AND 16384),
+    created_at INTEGER NOT NULL,
+    CHECK(
+        (actor_kind IN ('system','unauthenticated','legacy_unknown') AND actor_id IS NULL) OR
+        (actor_kind IN ('node','administrator','service_principal') AND actor_id IS NOT NULL)
+    )
+) STRICT;
+INSERT INTO audit_events
+    (id, network_id, actor_kind, actor_id, action, target_type, target_id, details_json, created_at)
+SELECT id, network_id,
+    CASE
+        WHEN actor_node_id IS NOT NULL THEN 'node'
+        WHEN action IN ('route.expire','ephemeral.expire') THEN 'system'
+        ELSE 'legacy_unknown'
+    END,
+    actor_node_id, action, target_type, target_id, details_json, created_at
+FROM audit_events_v7;
+DROP TABLE audit_events_v7;
+CREATE INDEX audit_events_network_time
+    ON audit_events(network_id, created_at DESC, id DESC)
+    WHERE network_id IS NOT NULL;
+CREATE INDEX audit_events_global_time
+    ON audit_events(created_at DESC, id DESC);
+CREATE INDEX audit_events_actor_time
+    ON audit_events(actor_kind, actor_id, created_at DESC, id DESC);
+
+-- Next Laneway schema migration --
+
+-- Schema v9 is an explicit upgrade from the published administrator-security
+-- foundation v8. Keep migration 8 byte-for-byte compatible with that branch;
+-- runtime session/RBAC hardening belongs here so stacked deployments migrate.
+
+DELETE FROM administrator_principal_networks
+WHERE principal_id IN (SELECT id FROM administrator_principals WHERE all_networks=1);
+CREATE TRIGGER administrator_scope_requires_scoped_principal
+    BEFORE INSERT ON administrator_principal_networks
+BEGIN
+    SELECT CASE WHEN COALESCE((SELECT all_networks FROM administrator_principals
+        WHERE id=NEW.principal_id), 1) <> 0
+        THEN RAISE(ABORT, 'administrator scope requires a scoped principal') END;
+END;
+CREATE TRIGGER administrator_scope_identity_immutable
+    BEFORE UPDATE OF principal_id, network_id ON administrator_principal_networks
+BEGIN
+    SELECT RAISE(ABORT, 'administrator scope identity is immutable');
+END;
+CREATE TRIGGER administrator_all_networks_requires_no_scopes
+    BEFORE UPDATE OF all_networks ON administrator_principals
+    WHEN NEW.all_networks=1 AND EXISTS(
+        SELECT 1 FROM administrator_principal_networks WHERE principal_id=NEW.id
+    )
+BEGIN
+    SELECT RAISE(ABORT, 'all-network administrator cannot retain network scopes');
+END;
+
+INSERT INTO audit_events
+    (id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
+SELECT randomblob(16),NULL,'system',NULL,'administrator.recovery.invalidate_schema_v9',
+    'administrator_recovery_grant',NULL,'{"reason":"schema v9 static-root boundary"}',unixepoch()
+WHERE EXISTS(SELECT 1 FROM administrator_recovery_grants
+    WHERE consumed_at IS NULL AND revoked_at IS NULL);
+UPDATE administrator_auth_state
+SET recovery_generation=recovery_generation+1
+WHERE singleton=1 AND EXISTS(SELECT 1 FROM administrator_recovery_grants
+    WHERE consumed_at IS NULL AND revoked_at IS NULL);
+UPDATE administrator_recovery_grants
+SET revoked_at=max(created_at,unixepoch()),revocation_reason='schema v9 security upgrade'
+WHERE consumed_at IS NULL AND revoked_at IS NULL;
+
+DROP INDEX administrator_sessions_active_principal;
+DROP INDEX administrator_sessions_active_expiry;
+ALTER TABLE administrator_sessions RENAME TO administrator_sessions_v8;
+CREATE TABLE administrator_sessions (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16 AND id <> zeroblob(16)),
+    principal_id BLOB NOT NULL CHECK(length(principal_id) = 16),
+    credential_id BLOB NOT NULL CHECK(length(credential_id) = 16),
+    token_hash BLOB NOT NULL UNIQUE CHECK(length(token_hash) = 32),
+    csrf_hash BLOB NOT NULL UNIQUE CHECK(length(csrf_hash) = 32),
+    previous_session_id BLOB REFERENCES administrator_sessions(id) ON DELETE SET NULL
+        CHECK(previous_session_id IS NULL OR length(previous_session_id) = 16),
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    idle_lifetime_seconds INTEGER NOT NULL CHECK(idle_lifetime_seconds BETWEEN 60 AND 86400),
+    maximum_sessions INTEGER NOT NULL CHECK(maximum_sessions BETWEEN 1 AND 20),
+    idle_expires_at INTEGER NOT NULL,
+    absolute_expires_at INTEGER NOT NULL,
+    revoked_at INTEGER,
+    revocation_reason TEXT NOT NULL DEFAULT '' CHECK(length(revocation_reason) <= 256),
+    FOREIGN KEY(principal_id, credential_id)
+        REFERENCES administrator_credentials(principal_id, id) ON DELETE CASCADE,
+    CHECK(token_hash <> csrf_hash),
+    CHECK(previous_session_id IS NULL OR previous_session_id <> id),
+    CHECK(last_seen_at >= created_at),
+    CHECK(last_seen_at < absolute_expires_at),
+    CHECK(idle_expires_at = min(last_seen_at + idle_lifetime_seconds, absolute_expires_at)),
+    CHECK(absolute_expires_at > created_at),
+    CHECK(
+        (revoked_at IS NULL AND revocation_reason = '') OR
+        (revoked_at IS NOT NULL AND revoked_at >= created_at AND length(revocation_reason) > 0)
+    )
+) STRICT;
+INSERT INTO administrator_sessions
+    (id,principal_id,credential_id,token_hash,csrf_hash,previous_session_id,
+     created_at,last_seen_at,idle_lifetime_seconds,maximum_sessions,
+     idle_expires_at,absolute_expires_at,revoked_at,revocation_reason)
+SELECT id,principal_id,credential_id,token_hash,csrf_hash,
+	NULL,
+    created_at,
+    min(last_seen_at,absolute_expires_at-1),
+    idle_lifetime_seconds,
+    5,
+    min(min(last_seen_at,absolute_expires_at-1)+idle_lifetime_seconds,absolute_expires_at),
+    absolute_expires_at,
+	COALESCE(revoked_at,max(created_at,unixepoch())),
+    CASE WHEN revoked_at IS NULL THEN 'schema v9 security upgrade' ELSE revocation_reason END
+FROM administrator_sessions_v8;
+INSERT INTO audit_events
+    (id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
+SELECT randomblob(16),NULL,'system',NULL,'administrator.sessions.invalidate_schema_v9',
+    'administrator_session',NULL,'{"reason":"schema v9 security upgrade"}',unixepoch()
+WHERE EXISTS(SELECT 1 FROM administrator_sessions_v8 WHERE revoked_at IS NULL);
+DROP TABLE administrator_sessions_v8;
+CREATE INDEX administrator_sessions_active_principal
+    ON administrator_sessions(principal_id, created_at, id)
+    WHERE revoked_at IS NULL;
+CREATE INDEX administrator_sessions_active_expiry
+    ON administrator_sessions(idle_expires_at, absolute_expires_at)
+    WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX one_administrator_session_successor
+    ON administrator_sessions(previous_session_id)
+    WHERE previous_session_id IS NOT NULL;
+
+DROP INDEX audit_events_network_time;
+DROP INDEX audit_events_global_time;
+DROP INDEX audit_events_actor_time;
+ALTER TABLE audit_events RENAME TO audit_events_v8;
+CREATE TABLE audit_events (
+    id BLOB PRIMARY KEY CHECK(length(id) = 16),
+    network_id BLOB REFERENCES networks(id) ON DELETE SET NULL
+        CHECK(network_id IS NULL OR length(network_id) = 16),
+    actor_kind TEXT NOT NULL CHECK(actor_kind IN (
+        'system','node','administrator','service_principal','recovery_grant','unauthenticated','legacy_unknown'
+    )),
+    actor_id BLOB CHECK(actor_id IS NULL OR (length(actor_id) = 16 AND actor_id <> zeroblob(16))),
+    action TEXT NOT NULL CHECK(length(action) BETWEEN 1 AND 128),
+    target_type TEXT NOT NULL CHECK(length(target_type) BETWEEN 1 AND 64),
+    target_id BLOB CHECK(target_id IS NULL OR length(target_id) = 16),
+    details_json TEXT NOT NULL DEFAULT '{}' CHECK(length(details_json) BETWEEN 2 AND 16384),
+    created_at INTEGER NOT NULL,
+    CHECK(
+        (actor_kind IN ('system','unauthenticated','legacy_unknown') AND actor_id IS NULL) OR
+        (actor_kind IN ('node','administrator','service_principal','recovery_grant') AND actor_id IS NOT NULL)
+    )
+) STRICT;
+INSERT INTO audit_events
+    (id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at)
+SELECT id,network_id,actor_kind,actor_id,action,target_type,target_id,details_json,created_at
+FROM audit_events_v8;
+DROP TABLE audit_events_v8;
+CREATE INDEX audit_events_network_time
+    ON audit_events(network_id, created_at DESC, id DESC)
+    WHERE network_id IS NOT NULL;
+CREATE INDEX audit_events_global_time
+    ON audit_events(created_at DESC, id DESC);
+CREATE INDEX audit_events_actor_time
+    ON audit_events(actor_kind, actor_id, created_at DESC, id DESC);
+CREATE TABLE administrator_root_token_rotations (
+    rotation_id BLOB PRIMARY KEY CHECK(length(rotation_id) = 16 AND rotation_id <> zeroblob(16)),
+    begin_audit_event_id BLOB NOT NULL UNIQUE REFERENCES audit_events(id) ON DELETE RESTRICT
+        CHECK(length(begin_audit_event_id) = 16),
+    complete_audit_event_id BLOB UNIQUE REFERENCES audit_events(id) ON DELETE RESTRICT
+        CHECK(complete_audit_event_id IS NULL OR length(complete_audit_event_id) = 16),
+    begun_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    CHECK(
+        (complete_audit_event_id IS NULL AND completed_at IS NULL) OR
+        (complete_audit_event_id IS NOT NULL AND completed_at IS NOT NULL AND completed_at >= begun_at)
+    )
+) STRICT;
+
+-- Next Laneway schema migration --
+
+CREATE TABLE controller_identity_state (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    network_id BLOB NOT NULL UNIQUE REFERENCES networks(id) ON DELETE RESTRICT
+        CHECK(length(network_id) = 16 AND network_id <> zeroblob(16)),
+    controller_service_id BLOB NOT NULL UNIQUE
+        CHECK(length(controller_service_id) = 16 AND controller_service_id <> zeroblob(16)),
+    created_at INTEGER NOT NULL
+) STRICT;
+CREATE TRIGGER controller_identity_state_immutable
+    BEFORE UPDATE ON controller_identity_state
+BEGIN
+    SELECT RAISE(ABORT, 'controller identity binding is immutable');
+END;
+CREATE TRIGGER controller_identity_state_undeletable
+    BEFORE DELETE ON controller_identity_state
+BEGIN
+    SELECT RAISE(ABORT, 'controller identity binding cannot be deleted');
+END;

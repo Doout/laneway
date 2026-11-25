@@ -27,14 +27,20 @@ pub struct Metrics {
     pub(crate) dropped_destination: AtomicU64,
     pub(crate) dropped_too_large: AtomicU64,
     pub(crate) dropped_capability: AtomicU64,
+    pub(crate) dropped_policy: AtomicU64,
     pub(crate) dropped_queue_full: AtomicU64,
     pub(crate) dropped_closed: AtomicU64,
     pub(crate) quic_connection_attempts: AtomicU64,
     pub(crate) quic_connection_failures: AtomicU64,
     pub(crate) tcp_connection_attempts: AtomicU64,
     pub(crate) tcp_connection_failures: AtomicU64,
+    pub(crate) transport_connections: AtomicU64,
+    pub(crate) transport_failures: AtomicU64,
+    pub(crate) malformed_control: AtomicU64,
+    pub(crate) control_authorization_failures: AtomicU64,
     pub(crate) tcp_packet_pool_misses: AtomicU64,
     pub(crate) queue_depth: AtomicU64,
+    pub(crate) queued_bytes: AtomicU64,
     pub(crate) queue_depth_peak: AtomicU64,
     pub(crate) controller_certificate_renewal_forced: AtomicU64,
     pub(crate) controller_certificate_renew_after_seconds: AtomicU64,
@@ -92,6 +98,8 @@ pub struct MetricsSnapshot {
     pub dropped_too_large: u64,
     /// Packets using a family not negotiated by both sessions.
     pub dropped_capability: u64,
+    /// Packets denied by the controller packet policy.
+    pub dropped_policy: u64,
     /// Full bounded outbound queues.
     pub dropped_queue_full: u64,
     /// Packets targeting closed sessions.
@@ -104,10 +112,20 @@ pub struct MetricsSnapshot {
     pub tcp_connection_attempts: u64,
     /// TLS/TCP fallback connection tasks refused or ending with an error.
     pub tcp_connection_failures: u64,
+    /// Authenticated transport connections accepted before relay registration.
+    pub transport_connections: u64,
+    /// Transport accepts rejected before relay registration.
+    pub transport_failures: u64,
+    /// Malformed control messages and registrations.
+    pub malformed_control: u64,
+    /// Credential and Hello identity rejections during relay control negotiation.
+    pub control_authorization_failures: u64,
     /// TLS/TCP packet records that could not reuse a prewarmed buffer.
     pub tcp_packet_pool_misses: u64,
     /// Packets queued or holding a real bounded channel-slot reservation.
     pub queue_depth: u64,
+    /// Framed bytes queued for outbound delivery.
+    pub queued_bytes: u64,
     /// Highest aggregate queued-or-channel-reserved count observed since start.
     pub queue_depth_peak: u64,
     /// One when the controller-accepted local relay certificate is due for renewal.
@@ -155,14 +173,20 @@ impl Metrics {
             dropped_destination: load(&self.dropped_destination),
             dropped_too_large: load(&self.dropped_too_large),
             dropped_capability: load(&self.dropped_capability),
+            dropped_policy: load(&self.dropped_policy),
             dropped_queue_full: load(&self.dropped_queue_full),
             dropped_closed: load(&self.dropped_closed),
             quic_connection_attempts: load(&self.quic_connection_attempts),
             quic_connection_failures: load(&self.quic_connection_failures),
             tcp_connection_attempts: load(&self.tcp_connection_attempts),
             tcp_connection_failures: load(&self.tcp_connection_failures),
+            transport_connections: load(&self.transport_connections),
+            transport_failures: load(&self.transport_failures),
+            malformed_control: load(&self.malformed_control),
+            control_authorization_failures: load(&self.control_authorization_failures),
             tcp_packet_pool_misses: load(&self.tcp_packet_pool_misses),
             queue_depth: load(&self.queue_depth),
+            queued_bytes: load(&self.queued_bytes),
             queue_depth_peak: load(&self.queue_depth_peak),
             controller_certificate_renewal_needed: u64::from(
                 renewal_forced != 0 || (renew_after != 0 && now_unix_seconds >= renew_after),
@@ -174,7 +198,27 @@ impl Metrics {
         }
     }
 
-    pub(crate) fn queue_enqueue_started(&self) -> u64 {
+    pub(crate) fn transport_result<T, E>(&self, result: Result<T, E>) -> Result<T, E> {
+        let counter = if result.is_ok() {
+            &self.transport_connections
+        } else {
+            &self.transport_failures
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        result
+    }
+
+    pub(crate) fn malformed_control(&self) {
+        self.malformed_control.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn authorization_failure(&self) {
+        self.control_authorization_failures
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn queue_enqueue_started(&self, bytes: usize) -> u64 {
+        self.queued_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         self.queue_depth.fetch_add(1, Ordering::AcqRel) + 1
     }
 
@@ -182,15 +226,9 @@ impl Metrics {
         self.queue_depth_peak.fetch_max(depth, Ordering::AcqRel);
     }
 
-    pub(crate) fn queue_removed(&self, count: u64) {
-        if count == 0 {
-            return;
-        }
-        let _ = self
-            .queue_depth
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| {
-                Some(depth.saturating_sub(count))
-            });
+    pub(crate) fn queue_removed(&self, bytes: usize) {
+        self.queued_bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+        self.queue_depth.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

@@ -437,7 +437,61 @@ fn render(snapshot: MetricsSnapshot) -> String {
         "TLS/TCP packet records that could not reuse a prewarmed buffer.",
         snapshot.tcp_packet_pool_misses,
     );
+    render_legacy_metrics(&mut output, snapshot);
     output
+}
+
+fn render_legacy_metrics(output: &mut String, snapshot: MetricsSnapshot) {
+    for (name, value) in [
+        (
+            "relay_bindings",
+            snapshot
+                .bindings_created
+                .saturating_sub(snapshot.bindings_released),
+        ),
+        ("relay_queued_packets", snapshot.queue_depth),
+        ("relay_queued_bytes", snapshot.queued_bytes),
+        (
+            "transport_connections_total",
+            snapshot.transport_connections,
+        ),
+        ("transport_failures_total", snapshot.transport_failures),
+        (
+            "malformed_input_total",
+            snapshot.dropped_malformed + snapshot.malformed_control,
+        ),
+        (
+            "authorization_failures_total",
+            snapshot.control_authorization_failures
+                + snapshot.dropped_unknown_handle
+                + snapshot.dropped_source
+                + snapshot.dropped_destination
+                + snapshot.dropped_capability,
+        ),
+        ("policy_drops_total", snapshot.dropped_policy),
+        ("forwarded_packets_total", snapshot.forwarded_packets),
+        ("forwarded_bytes_total", snapshot.forwarded_bytes),
+        ("throttled_packets_total", snapshot.throttled_packets),
+        ("throttled_bytes_total", snapshot.throttled_bytes),
+        ("limiter_saturated", snapshot.limiter_saturated),
+        ("queue_full_drops_total", snapshot.dropped_queue_full),
+        ("dropped_packets_total", snapshot.dropped_packets),
+        ("dropped_bytes_total", snapshot.dropped_bytes),
+        (
+            "controller_certificate_renew_after_unix_seconds",
+            snapshot.controller_certificate_renew_after_seconds,
+        ),
+        (
+            "controller_certificate_not_after_unix_seconds",
+            snapshot.controller_certificate_not_after_seconds,
+        ),
+        (
+            "controller_certificate_renewal_needed",
+            snapshot.controller_certificate_renewal_needed,
+        ),
+    ] {
+        let _ = writeln!(output, "laneway_{name} {value}");
+    }
 }
 
 fn counter(output: &mut String, suffix: &str, help: &str, value: u64) {
@@ -485,6 +539,8 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         metrics.forwarded_packets.store(7, Ordering::Release);
         metrics.queue_depth.store(2, Ordering::Release);
+        metrics.queued_bytes.store(44, Ordering::Release);
+        metrics.dropped_policy.store(1, Ordering::Release);
         metrics.queue_depth_peak.store(5, Ordering::Release);
         metrics
             .controller_certificate_renewal_forced
@@ -521,6 +577,13 @@ mod tests {
         let response = request(address, b"GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
         assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(response.contains("laneway_relay_forwarded_packets_total 7\n"));
+        assert!(response.contains("laneway_forwarded_packets_total 7\n"));
+        assert!(response.contains("laneway_relay_queued_packets 2\n"));
+        assert!(response.contains("laneway_relay_queued_bytes 44\n"));
+        assert!(response.contains("laneway_policy_drops_total 1\n"));
+        assert!(
+            response.contains("laneway_controller_certificate_not_after_unix_seconds 4000000000\n")
+        );
         assert!(response.contains("laneway_relay_allocator_allocations_total "));
         assert!(response.contains("laneway_relay_allocator_allocated_bytes_total "));
         assert!(response.contains("laneway_relay_queue_depth 2\n"));

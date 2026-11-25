@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+printf 'curl %s\n' "$*" >> "$LANEWAY_FIXTURE_LOG"
+case "$*" in *" --proto =https --proto-redir =https "*) ;; *) exit 1 ;; esac
+case "$*" in
+  *github.com/Doout/laneway/releases/latest\?*) printf '%s' "https://github.com/Doout/laneway/releases/tag/v$LANEWAY_FIXTURE_VERSION"; exit 0 ;;
+  *https://lane.example.test/.well-known/laneway/bootstrap.json)
+    case " $* " in *" --tlsv1.3 "*) ;; *) exit 1 ;; esac
+    [ -d /opt/laneway/generated/lifecycle/operator.lock ]
+    [ "$LANEWAY_FIXTURE_SCENARIO" != bad-public-https ] || exit 22
+    printf '{"network_id":"000102030405060708090a0b0c0d0e0f","artifacts":[{"url":"https://github.com/Doout/laneway/releases/download/v%s/laneway_linux_%s.tar.gz"}]}\n' "$LANEWAY_FIXTURE_VERSION" "$LANEWAY_FIXTURE_ARCH"
+    exit 0 ;;
+esac
+case "$*" in
+  *"https://github.com/Doout/laneway/releases/download/v$LANEWAY_FIXTURE_VERSION/"*' -o '*) ;;
+  *) exit 1 ;;
+esac
+while [ "$#" -gt 2 ]; do url=$1; shift; done
+[ "$1" = -o ]
+cp /var/tmp/fixture-assets/"${url##*/}" "$2"

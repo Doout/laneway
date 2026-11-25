@@ -6,9 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 description = "Native Linux Laneway node dataplane"
 
-[[bin]]
-name = "lanewayd-rs"
-path = "src/main.rs"
+[features]
+default = ["native"]
+native = ["dep:hex", "dep:reqwest", "dep:serde_json", "dep:sha2", "dep:tokio-tun", "dep:rustix", "dep:tracing-subscriber", "dep:wait-timeout", "dep:webpki"]
 
 [dependencies]
 anyhow.workspace = true
@@ -16,29 +16,37 @@ arc-swap.workspace = true
 bytes.workspace = true
 crossbeam-queue.workspace = true
 getrandom.workspace = true
-hex.workspace = true
+hex = { workspace = true, optional = true }
 humantime-serde.workspace = true
 ipnet.workspace = true
 laneway-protocol = { path = "../laneway-protocol" }
 prost.workspace = true
 quinn.workspace = true
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"], optional = true }
 rustls.workspace = true
-webpki = { package = "rustls-webpki", version = "0.103.13" }
+webpki = { package = "rustls-webpki", version = "0.103.13", optional = true }
 rustls-pemfile.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 tokio.workspace = true
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
-tokio-tun.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-wait-timeout.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+wait-timeout = { workspace = true, optional = true }
 x509-parser.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-tun = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { version = "1.1.4", features = ["fs", "net"], optional = true }
+
 [dev-dependencies]
+tracing-subscriber.workspace = true
+webpki = { package = "rustls-webpki", version = "0.103.13" }
+serde_json.workspace = true
 laneway-relay = { path = "../laneway-relay" }
 rcgen = "0.14.5"
 tempfile = "3.26.0"

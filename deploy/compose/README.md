@@ -8,7 +8,7 @@ the offline root CA key does not remain on the server.
 
 - Linux on AMD64 or ARM64
 - Docker Engine 26+ with Compose v2
-- `age`, `age-keygen`, `curl`, `getent`, `jq`, and `ss`
+- `age`, `age-keygen`, `awk`, `curl`, `getent`, `jq`, and `ss`
 - public DNS for the control-plane host
 - inbound TCP+UDP `8443`, UDP `4433`, and TCP `443`
 
@@ -33,6 +33,16 @@ sudo laneway control status
 
 The first command is fail-closed. The installer does not change host DNS,
 firewall rules, routes, interfaces, or sysctls.
+
+`laneway control init` holds the shared lifecycle lock while it validates and
+starts the stack. Before opening listeners or reporting healthy, the controller
+atomically creates or verifies the configured `[controller.initial_network]`
+row and binds it to the network and service identities authenticated from its
+certificate. After controller health succeeds, init verifies the exact network
+name and IPv4 pool through the controller API, registers or verifies the relay,
+then waits for relay health. It never races the controller by creating the same
+network through the post-start admin API. Configuration, certificate, `.env`,
+or durable identity drift fails closed without overwriting controller state.
 
 ## Administrator access
 
@@ -77,7 +87,7 @@ the static root bearer to a browser.
 ## Update
 
 ```sh
-sudo laneway control update
+sudo laneway update server
 ```
 
 The updater verifies the release, takes an encrypted backup and a root-only
@@ -104,6 +114,55 @@ Run the generated command within ten minutes. Its rate-limited URL is consumed
 by the first download; later requests return `404`. A one-shot container enrolls
 the digest-pinned scratch `lane-edge` image, then a clean runtime container starts
 without the setup token, bootstrap key, or temporary mount.
+
+## Native rootless client and Connector
+
+Install the signed `lanewayd` release as the account that will run it.
+Continue to use `laneway control` to administer the controller.
+Release assets cover Linux, macOS, and Windows on amd64 and arm64.
+The Linux binaries are statically linked with musl. The installation
+commands below use GitHub CLI and Cosign. Replace `vX.Y.Z`
+with a stable release tag that includes the rootless client.
+
+On Linux and macOS:
+
+```sh
+version=vX.Y.Z
+gh release download "$version" --repo Doout/laneway --pattern install-node.sh &&
+  gh attestation verify install-node.sh --repo Doout/laneway \
+    --signer-workflow Doout/laneway/.github/workflows/release.yml --source-ref "refs/tags/$version" &&
+  sh ./install-node.sh "$version"
+```
+
+Use `$HOME/.local/bin/lanewayd` or add that directory to your PATH.
+
+On Windows, from PowerShell 7:
+
+```powershell
+$version = 'vX.Y.Z'
+gh release download $version --repo Doout/laneway --pattern install-node.ps1
+if ($LASTEXITCODE -ne 0) { throw 'Download failed' }
+gh attestation verify install-node.ps1 --repo Doout/laneway `
+    --signer-workflow Doout/laneway/.github/workflows/release.yml --source-ref "refs/tags/$version"
+if ($LASTEXITCODE -ne 0) { throw 'Provenance verification failed' }
+.\install-node.ps1 -Version $version
+```
+
+Run `lanewayd.exe` from `%LOCALAPPDATA%\Laneway\bin`, or add
+that directory to your user PATH. Each installer verifies the executable
+against the checksum manifest signed by the release workflow at the selected
+tag before installing it.
+
+After installation, an operator can issue an invite:
+
+```sh
+sudo laneway control invite --name laptop --native --remembered
+sudo laneway control invite --name office --native --connector
+```
+
+Give each recipient their own single-use setup token through a private channel.
+On the target, run `laneway configure` and enter the token at its hidden prompt. First setup prints a password for the SOCKS5 username `local`. Run `laneway start` to use the authenticated proxy on `127.0.0.1:1080`. For a connector that only serves assigned routes, use `laneway start --no-proxy`. Apply route approvals
+on the controller with `laneway control route add` as for a Docker Connector.
 
 ## Backup and restore
 
@@ -135,6 +194,12 @@ created. Immediately rotate that bearer after every restore, then create and
 store a fresh encrypted bundle. If suspected credential compromise prompted a
 rotation, quarantine and retire every pre-rotation bundle under the applicable
 retention policy. Test this procedure before relying on the deployment.
+Restored databases that contain the durable controller binding still require
+the same certificate network and service identities. A release rollback may
+restore a legacy controller configuration without the new initial-network
+table; it also restores the protected pre-migration database, so the old image
+never receives an unknown config field and the candidate's management changes
+are discarded together.
 
 ## Prepare keys on another host
 

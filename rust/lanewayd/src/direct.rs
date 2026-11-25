@@ -140,7 +140,8 @@ impl DirectManager {
                     let controller_maximum = manager
                         .state
                         .candidate_exchange_authority()
-                        .map_or(usize::MAX, |policy| policy.max_candidates as usize);
+                        .map_or(usize::MAX, |policy| policy.max_candidates as usize)
+                        .min(manager.config.direct.max_candidates.unwrap_or(usize::MAX));
                     let Some((_permit, _inflight)) = reserve_candidate(
                         Arc::clone(&manager.candidate_slots),
                         Arc::clone(&manager.candidate_inflight),
@@ -312,7 +313,8 @@ impl DirectManager {
         let controller_ttl = self
             .state
             .candidate_exchange_authority()
-            .map_or(Duration::from_secs(1), |policy| policy.ttl);
+            .map_or(Duration::from_secs(1), |policy| policy.ttl)
+            .min(self.config.direct.candidate_ttl.unwrap_or(Duration::MAX));
         ensure!(
             start >= now.checked_sub(controller_ttl).unwrap_or(UNIX_EPOCH)
                 && start

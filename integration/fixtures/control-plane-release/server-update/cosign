@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+printf 'cosign %s\n' "$*" >> "$LANEWAY_FIXTURE_LOG"
+case "$*" in
+  'version --json') printf '%s\n' '{"gitVersion":"v3.1.3"}'; exit 0 ;;
+esac
+case " $* " in
+  *" --certificate-identity https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v$LANEWAY_FIXTURE_VERSION --certificate-oidc-issuer https://token.actions.githubusercontent.com "*|*' --certificate-identity https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v0.2.54 --certificate-oidc-issuer https://token.actions.githubusercontent.com '*) ;;
+  *) exit 1 ;;
+esac
+case "$1" in
+  verify-blob) [ "$LANEWAY_FIXTURE_SCENARIO" != bad-signature ] && [ "$2" = --bundle ] && cmp "$3" /var/tmp/fixture-assets/checksums.sigstore.json && cmp "${8}" /var/tmp/fixture-assets/checksums.txt ;;
+  verify) grep -Fx "$6" /var/tmp/fixture-assets/image-digests.txt ;;
+  *) exit 1 ;;
+esac

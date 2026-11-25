@@ -10,7 +10,7 @@ if [[ "$(id -u)" != "0" ]]; then
   exit 1
 fi
 
-for command in go ip nft sysctl; do
+for command in cargo go ip nft sysctl; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "ERROR: required command is missing: ${command}" >&2
     exit 1
@@ -38,10 +38,12 @@ trap cleanup EXIT INT TERM
   go test -c -o "${work_dir}/nethelper.test" ./internal/nethelper
   go build -o "${work_dir}/laneway" ./cmd/laneway
   go build -o "${work_dir}/lanewayd" ./cmd/laneway
-  go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
   go build -o "${work_dir}/laneway-controller" ./cmd/laneway-controller
   go build -o "${work_dir}/netprobe" ./integration/netprobe
 )
+
+cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p laneway-relay
+cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/laneway-relay"
 
 ip netns add "${namespace}"
 ip -n "${namespace}" link set lo up

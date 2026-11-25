@@ -17,6 +17,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"laneway.dev/laneway/internal/adminauth"
+	"laneway.dev/laneway/internal/identity"
 )
 
 func TestBackupAndFreshRestore(t *testing.T) {
@@ -78,6 +79,115 @@ func TestBackupAndFreshRestore(t *testing.T) {
 	}
 	if afterCount != 0 {
 		t.Fatalf("post-backup record count = %d, want 0", afterCount)
+	}
+}
+
+func TestBackupRestorePreservesControllerIdentityBinding(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	store, err := Open(ctx, filepath.Join(directory, "source.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured, authenticated := initialNetworkFixture()
+	if _, _, err := store.EnsureControllerInitialNetwork(ctx, configured, authenticated); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	backup := filepath.Join(directory, "backup.db")
+	if err := store.Backup(ctx, backup); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restoredPath := filepath.Join(directory, "restored.db")
+	if err := RestoreDatabase(ctx, backup, restoredPath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(ctx, restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	network, created, err := restored.EnsureControllerInitialNetwork(ctx, ControllerInitialNetwork{}, authenticated)
+	if err != nil || created || !initialNetworkMatches(network, configured) {
+		t.Fatalf("restored binding network=%+v created=%t err=%v", network, created, err)
+	}
+	drift := authenticated
+	drift.SubjectID = identity.ID{9}
+	if _, _, err := restored.EnsureControllerInitialNetwork(ctx, ControllerInitialNetwork{}, drift); !errors.Is(err, ErrConflict) {
+		t.Fatalf("restored service drift error=%v", err)
+	}
+}
+
+func TestRestoreRejectsTamperedControllerIdentityState(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		tamper string
+	}{
+		{
+			name: "weakened schema",
+			tamper: `PRAGMA writable_schema=ON;
+				UPDATE sqlite_schema SET sql=replace(sql,'BEFORE DELETE','AFTER DELETE')
+				WHERE type='trigger' AND name='controller_identity_state_undeletable';
+				PRAGMA writable_schema=OFF`,
+		},
+		{
+			name:   "missing binding audit",
+			tamper: `DELETE FROM audit_events WHERE action='controller.identity.bind'`,
+		},
+		{
+			name: "binding predates network",
+			tamper: `DROP TRIGGER controller_identity_state_immutable;
+				UPDATE controller_identity_state SET created_at=0;
+				CREATE TRIGGER controller_identity_state_immutable
+				    BEFORE UPDATE ON controller_identity_state
+				BEGIN
+				    SELECT RAISE(ABORT, 'controller identity binding is immutable');
+				END`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			directory := t.TempDir()
+			store, err := Open(ctx, filepath.Join(directory, "source.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			configured, authenticated := initialNetworkFixture()
+			if _, _, err := store.EnsureControllerInitialNetwork(ctx, configured, authenticated); err != nil {
+				store.Close()
+				t.Fatal(err)
+			}
+			source := filepath.Join(directory, "tampered.db")
+			if err := store.Backup(ctx, source); err != nil {
+				store.Close()
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(test.tamper); err != nil {
+				db.Close()
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(directory, "restored.db")
+			if err := RestoreDatabase(ctx, source, destination); err == nil {
+				t.Fatal("tampered controller identity backup restored")
+			}
+			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("tampered restore published destination: %v", err)
+			}
+		})
 	}
 }
 
@@ -308,7 +418,7 @@ func TestExactV8BackupAndRestoreUpgradePrivateCopy(t *testing.T) {
 			t.Fatalf("%s mutated: version=%d active=%d pending=%d", name, version, active, pending)
 		}
 	}
-	restored := filepath.Join(directory, "restored-v9.db")
+	restored := filepath.Join(directory, "restored-current.db")
 	if err := RestoreDatabase(ctx, backup, restored); err != nil {
 		t.Fatal(err)
 	}
@@ -332,8 +442,98 @@ func TestExactV8BackupAndRestoreUpgradePrivateCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 9 || sessions != 0 || pending != 0 || state.RecoveryGeneration != 2 {
+	if version != currentSchemaVersion || sessions != 0 || pending != 0 || state.RecoveryGeneration != 2 {
 		t.Fatalf("restored version=%d sessions=%d pending=%d state=%+v", version, sessions, pending, state)
+	}
+}
+
+func TestExactV9BackupRestoreAndInitialNetworkAdoption(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	source := filepath.Join(directory, "source-v9.db")
+	raw, err := sql.Open("sqlite", "file:"+source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA foreign_keys=ON; CREATE TABLE schema_versions(
+		version INTEGER PRIMARY KEY CHECK(version > 0), applied_at INTEGER NOT NULL) STRICT;` +
+		strings.Join(migrations[:9], "\n")); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	for version := 1; version <= 9; version++ {
+		if _, err := raw.Exec(`INSERT INTO schema_versions(version,applied_at) VALUES(?,?)`, version, version); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	configured, authenticated := initialNetworkFixture()
+	if _, err := raw.Exec(`INSERT INTO networks
+		(id,name,ipv4_address,ipv4_prefix_length,next_ipv4,configuration_epoch,created_at,ipv6_address,ipv6_prefix_length,next_ipv6)
+		VALUES(?,?,?,?,1,7,100,?,?,1)`, idBytes(configured.NetworkID), configured.Name,
+		configured.IPv4Pool.Addr().AsSlice(), configured.IPv4Pool.Bits(),
+		configured.IPv6Pool.Addr().AsSlice(), configured.IPv6Pool.Bits()); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	backup := filepath.Join(directory, "backup-v9.db")
+	if err := BackupDatabase(ctx, source, backup); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"source": source, "backup": backup} {
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var version, identityTables int
+		if err := db.QueryRow(`SELECT MAX(version) FROM schema_versions`).Scan(&version); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT count(*) FROM sqlite_schema
+			WHERE type='table' AND name='controller_identity_state'`).Scan(&identityTables); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		db.Close()
+		if version != 9 || identityTables != 0 {
+			t.Fatalf("%s mutated: version=%d identity tables=%d", name, version, identityTables)
+		}
+	}
+
+	restoredPath := filepath.Join(directory, "restored-v10.db")
+	if err := RestoreDatabase(ctx, backup, restoredPath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(ctx, restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if version, err := restored.SchemaVersion(ctx); err != nil || version != currentSchemaVersion {
+		t.Fatalf("restored schema version=%d err=%v", version, err)
+	}
+	var bindings int
+	if err := restored.db.QueryRowContext(ctx, `SELECT count(*) FROM controller_identity_state`).Scan(&bindings); err != nil {
+		t.Fatal(err)
+	}
+	if bindings != 0 {
+		t.Fatalf("pre-start restored binding count=%d", bindings)
+	}
+	network, created, err := restored.EnsureControllerInitialNetwork(ctx, configured, authenticated)
+	if err != nil || created || network.ConfigurationEpoch != 7 || !initialNetworkMatches(network, configured) {
+		t.Fatalf("restored v9 adoption network=%+v created=%t err=%v", network, created, err)
+	}
+	var networks int
+	if err := restored.db.QueryRowContext(ctx, `SELECT count(*) FROM networks`).Scan(&networks); err != nil {
+		t.Fatal(err)
+	}
+	if networks != 1 {
+		t.Fatalf("restored network rows=%d, want preserved 1", networks)
 	}
 }
 
@@ -450,7 +650,7 @@ func TestRestoreRejectsMalformedCurrentAdministratorScopeTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(directory, "restored.db")
-	if err := RestoreDatabase(ctx, validBackup, destination); err == nil || !strings.Contains(err.Error(), "canonical v9 definition") {
+	if err := RestoreDatabase(ctx, validBackup, destination); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("canonical v%d definition", currentSchemaVersion)) {
 		t.Fatalf("malformed current-schema restore error=%v, want canonical-schema rejection", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
@@ -509,7 +709,7 @@ func TestRestoreRejectsWeakenedCurrentAdministratorDDL(t *testing.T) {
 				t.Fatal(err)
 			}
 			destination := filepath.Join(directory, "restored.db")
-			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v9 definition") {
+			if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("canonical v%d definition", currentSchemaVersion)) {
 				t.Fatalf("weakened restore error=%v, want canonical-schema rejection", err)
 			}
 			if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
@@ -540,7 +740,7 @@ func TestRestoreRejectsUnexpectedTriggerThatMutatesAdministratorState(t *testing
 		t.Fatal(err)
 	}
 	destination := filepath.Join(directory, "restored.db")
-	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), "canonical v9 definition") {
+	if err := RestoreDatabase(ctx, source, destination); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("canonical v%d definition", currentSchemaVersion)) {
 		t.Fatalf("unexpected-trigger restore error=%v, want canonical-schema rejection", err)
 	}
 	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {

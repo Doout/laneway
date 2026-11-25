@@ -181,6 +181,11 @@ func runConfig(ctx context.Context, cfg config.Config, diagnostics string, optio
 		if controllerNetworkID != local.NetworkID {
 			return errors.New("configured controller network ID does not match the node certificate network")
 		}
+		if options.rewindCredentials != nil {
+			if err := options.rewindCredentials(); err != nil {
+				return err
+			}
+		}
 		client, err := controllerclient.New(controllerclient.Options{
 			Endpoint: cfg.Controller.Endpoint, QUICEndpoint: cfg.Controller.QUICEndpoint, QUICDialAddress: controllerQUICEndpoint.DialAddress, CAFile: cfg.TLS.CAFile,
 			CertificateFile: cfg.TLS.CertificateFile, PrivateKeyFile: cfg.TLS.PrivateKeyFile,

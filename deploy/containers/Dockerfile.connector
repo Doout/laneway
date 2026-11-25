@@ -1,4 +1,20 @@
 # syntax=docker/dockerfile:1.9@sha256:fe40cf4e92cd0c467be2cfc30657a680ae2398318afd50b0c80585784c604f28
+FROM rust:1.95-alpine@sha256:606fd313a0f49743ee2a7bd49a0914bab7deedb12791f3a846a34a4711db7ed2 AS rust-build-base
+ARG CARGO_BUILD_JOBS=4
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY rust/ ./rust/
+COPY api/proto/ ./api/proto/
+
+FROM rust-build-base AS build-cli
+ARG VERSION=dev
+RUN LANEWAY_CLI_RELEASE_VERSION="${VERSION}" CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-cli
+
+FROM rust-build-base AS build-healthcheck
+RUN CARGO_PROFILE_RELEASE_STRIP=symbols \
+    cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-healthcheck
+
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS build
 ARG BINARY=laneway
 ARG VERSION=dev
@@ -8,18 +24,16 @@ WORKDIR /src
 COPY go/go.mod go/go.sum ./
 RUN go mod download
 COPY go/ ./
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -tags laneway_compat -trimpath \
     -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway ./cmd/${BINARY}
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
+    -o /out/laneway-compat ./cmd/${BINARY}
 RUN mkdir -p /out/connector-state /out/connector-run && chown 65532:65532 /out/connector-state /out/connector-run
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/laneway /usr/local/bin/laneway
-COPY --from=build /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
+COPY --from=build-cli /src/rust/target/release/laneway /usr/local/bin/laneway
+COPY --from=build /out/laneway-compat /usr/local/bin/laneway-compat
+COPY --from=build-healthcheck /src/rust/target/release/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 COPY --from=build --chown=65532:65532 /out/connector-state /var/lib/laneway
 COPY --from=build --chown=65532:65532 /out/connector-run /run/laneway
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \

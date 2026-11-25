@@ -27,7 +27,7 @@ use crate::{
     metrics::Metrics,
     packet_pool::PacketPool,
     probe::ProbeSocket,
-    relay::{OutboundPacket, RelayClient},
+    relay::{OutboundPacket, PacketInjection, RelayClient},
     routing::{RoutingTable, packet_meta},
     state::State,
     tls,
@@ -42,6 +42,9 @@ pub struct Agent {
     boot: Id,
     state: Arc<State>,
     metrics: Arc<Metrics>,
+    filter: Option<crate::ConfigurationFilter>,
+    session_status: Option<Arc<dyn Fn(crate::SessionStatus) + Send + Sync>>,
+    session_network: Option<Arc<dyn crate::SessionNetworkOpener>>,
 }
 
 impl Agent {
@@ -51,6 +54,9 @@ impl Agent {
         config.validate()?;
         let (network, node) = config.ids()?;
         tls::validate_local(&config.tls, network, node)?;
+        if config.direct.enabled {
+            tls::direct_server_config(&config.tls, &config.relay)?;
+        }
         let routes = RoutingTable::compile(&config.routes)?;
         let boot = random_id()?;
         let controller_managed = config.controller.is_some();
@@ -65,7 +71,51 @@ impl Agent {
                 State::new(routes)
             }),
             metrics: Arc::new(Metrics::default()),
+            filter: None,
+            session_status: None,
+            session_network: None,
         })
+    }
+
+    /// Restricts controller-owned routes for a foreground user session.
+    pub fn with_configuration_filter(mut self, filter: crate::ConfigurationFilter) -> Result<Self> {
+        ensure!(
+            self.config.controller.is_some(),
+            "session route selection requires controller authority"
+        );
+        self.filter = Some(filter);
+        Ok(self)
+    }
+
+    /// Reports changes between active authenticated carriers in a foreground session.
+    pub fn with_session_status(
+        mut self,
+        report: impl Fn(crate::SessionStatus) + Send + Sync + 'static,
+    ) -> Self {
+        self.session_status = Some(Arc::new(report));
+        self
+    }
+
+    /// Adopts a split-tunnel TUN descriptor managed by a separate privilege endpoint.
+    pub fn with_session_network(
+        mut self,
+        opener: impl crate::SessionNetworkOpener + 'static,
+    ) -> Result<Self> {
+        ensure!(
+            self.config.controller.is_some() && self.config.tun.configure && self.filter.is_some(),
+            "external session networking requires filtered controller authority"
+        );
+        let forwarding = &self.config.forwarding;
+        ensure!(
+            !forwarding.subnet_router
+                && !forwarding.exit_gateway
+                && !forwarding.exit_client.enabled
+                && !forwarding.exit_client.authorized
+                && forwarding.owned_prefixes.is_empty(),
+            "external session networking supports split-tunnel clients only"
+        );
+        self.session_network = Some(Arc::new(opener));
+        Ok(self)
     }
 
     /// Returns the lock-free metric registry.
@@ -79,24 +129,46 @@ impl Agent {
     where
         F: Future<Output = ()>,
     {
+        #[cfg(target_os = "macos")]
+        {
+            ensure!(
+                self.session_network.is_some(),
+                "macOS host networking requires an external utun session"
+            );
+            let forwarding = &self.config.forwarding;
+            ensure!(
+                !forwarding.subnet_router
+                    && !forwarding.exit_gateway
+                    && !forwarding.exit_client.enabled
+                    && !forwarding.exit_client.authorized
+                    && forwarding.owned_prefixes.is_empty(),
+                "the macOS external utun session supports split tunnel clients only"
+            );
+        }
         let mut authority_base = (*self.config).clone();
         let certificate_presented_serial =
             hex::encode(tls::local_certificate_health(&authority_base.tls)?.serial);
         let exit_intent = Arc::new(ExitIntentStore::new(
             authority_base.exit_intent_path.clone(),
         ));
-        let intent_persisted = if authority_base.controller.is_some() {
-            let loaded = exit_intent
-                .load(&mut authority_base)
-                .context("load explicit exit selection")?;
-            authority_base
-                .validate()
-                .context("validate persisted exit selection")?;
-            loaded
-        } else {
-            false
+        let intent_persisted =
+            if authority_base.controller.is_some() && self.session_network.is_none() {
+                let loaded = exit_intent
+                    .load(&mut authority_base)
+                    .context("load explicit exit selection")?;
+                authority_base
+                    .validate()
+                    .context("validate persisted exit selection")?;
+                loaded
+            } else {
+                false
+            };
+        tokio::pin!(shutdown);
+        let bootstrap = tokio::select! {
+            biased;
+            () = &mut shutdown => return Ok(()),
+            result = self.controller_bootstrap() => result?,
         };
-        let bootstrap = self.controller_bootstrap().await?;
         if let Some((client, snapshot, _, _)) = &bootstrap {
             authority_base
                 .forwarding
@@ -119,10 +191,20 @@ impl Agent {
         let mut owned = self.config.tun.addresses.clone();
         owned.extend(self.config.forwarding.owned_prefixes.iter().copied());
         let owned = Arc::new(owned);
-        let server = tls::direct_server_config(&self.config.tls, &self.config.relay)?;
-        let (endpoint, probe) = ProbeSocket::bind(self.config.direct.listen, server)
-            .context("bind shared direct/relay UDP endpoint")?;
-        let direct_address = endpoint.local_addr()?;
+        let (endpoint, probe) = if self.config.direct.enabled {
+            let server = tls::direct_server_config(&self.config.tls, &self.config.relay)?;
+            let (endpoint, probe) = ProbeSocket::bind(self.config.direct.listen, server)
+                .context("bind shared direct/relay UDP endpoint")?;
+            (endpoint, Some(probe))
+        } else {
+            let endpoint = quinn::Endpoint::client("[::]:0".parse().expect("valid IPv6 endpoint"))
+                .or_else(|_| {
+                    quinn::Endpoint::client("0.0.0.0:0".parse().expect("valid IPv4 endpoint"))
+                })
+                .context("bind relay-only client UDP endpoint")?;
+            (endpoint, None)
+        };
+        let udp_address = endpoint.local_addr()?;
         let diagnostics = if let Some(address) = self.config.diagnostics.listen {
             let server = DiagnosticsServer::bind(address, Arc::clone(&self.metrics)).await?;
             info!(address = %server.local_addr()?, "Rust node diagnostics listening");
@@ -147,25 +229,48 @@ impl Agent {
             self.network,
             self.node,
             self.boot,
-            Arc::clone(&owned),
-            inject_tx.clone(),
-            candidate_tx,
+            PacketInjection::Native {
+                sender: inject_tx.clone(),
+                owned: Arc::clone(&owned),
+            },
+            self.config.direct.enabled.then_some(candidate_tx),
         );
-        let direct_manager = DirectManager::new(
-            endpoint.clone(),
-            Arc::clone(&self.config),
-            Arc::clone(&self.state),
-            Arc::clone(&self.metrics),
-            self.network,
-            self.node,
-            Arc::clone(&owned),
-            inject_tx,
-            candidate_rx,
-            probe,
-            Arc::clone(&kernel),
-            Arc::clone(&dynamic_bypasses),
-        )?;
-        let tun = TunDevice::open(&self.config.tun, &self.config.routes).await?;
+        let direct_manager = probe
+            .map(|probe| {
+                DirectManager::new(
+                    endpoint.clone(),
+                    Arc::clone(&self.config),
+                    Arc::clone(&self.state),
+                    Arc::clone(&self.metrics),
+                    self.network,
+                    self.node,
+                    Arc::clone(&owned),
+                    inject_tx,
+                    candidate_rx,
+                    probe,
+                    Arc::clone(&kernel),
+                    Arc::clone(&dynamic_bypasses),
+                )
+            })
+            .transpose()?;
+        let tun = if let Some(opener) = &self.session_network {
+            let network = opener
+                .open(
+                    &self.config.tun,
+                    &self.config.routes,
+                    &self.config.forwarding.exit_client.controller_bypass,
+                )
+                .await?;
+            TunDevice::adopt(&self.config.tun, network).await?
+        } else {
+            TunDevice::open(
+                &self.config.tun,
+                &self.config.routes,
+                &self.config.forwarding.ip_command,
+            )
+            .await?
+        };
+        let network_stopped = tun.helper().map(crate::SessionRoutes::stopped);
         let tun = Arc::new(Mutex::new(tun));
         let needs_kernel = self.config.forwarding.subnet_router
             || self.config.forwarding.exit_gateway
@@ -219,6 +324,9 @@ impl Agent {
         let intent_persisted = Arc::new(StdMutex::new(intent_persisted));
         let device = tun.lock().await.device();
         let mut tasks = JoinSet::new();
+        if let Some(stopped) = network_stopped {
+            tasks.spawn(stopped);
+        }
 
         if let Some((client, snapshot, authority, local_certificate)) = bootstrap {
             let applier = Arc::new(RuntimeApplier {
@@ -302,6 +410,7 @@ impl Agent {
                     ]);
                 }
             };
+            let runner = runner.with_filter(self.filter.clone());
             tasks.spawn(async move { runner.run().await });
         }
 
@@ -325,13 +434,17 @@ impl Agent {
         let api = local_api::Server::new(
             self.config.socket_path.clone(),
             Arc::new(move || snapshot_control.snapshot()),
-            self.config.controller.as_ref().map(|_| {
-                Arc::new(move |selection| {
-                    let control = Arc::clone(&exit_control);
-                    Box::pin(async move { control.set_exit(selection).await })
-                        as Pin<Box<dyn Future<Output = Result<()>> + Send>>
-                }) as Arc<_>
-            }),
+            self.config
+                .controller
+                .as_ref()
+                .filter(|_| self.session_network.is_none())
+                .map(|_| {
+                    Arc::new(move |selection| {
+                        let control = Arc::clone(&exit_control);
+                        Box::pin(async move { control.set_exit(selection).await })
+                            as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                    }) as Arc<_>
+                }),
         );
         tasks.spawn(async move { api.run().await });
 
@@ -343,14 +456,15 @@ impl Agent {
             node = %self.node,
             network = %self.network,
             tun = %self.config.tun.name,
-            direct = %direct_address,
+            udp = %udp_address,
+            direct_enabled = self.config.direct.enabled,
             "native Rust Laneway agent started"
         );
 
         {
             tasks.spawn(async move { relay_client.run(relay_rx).await });
         }
-        {
+        if let Some(direct_manager) = direct_manager {
             tasks.spawn(async move { direct_manager.run().await });
         }
         {
@@ -414,6 +528,12 @@ impl Agent {
             let metrics = Arc::clone(&self.metrics);
             tasks.spawn(async move { monitor_selected_exit(state, kernel, metrics).await });
         }
+        if let Some(report) = self.session_status.take() {
+            let state = Arc::clone(&self.state);
+            let metrics = Arc::clone(&self.metrics);
+            let node = self.node;
+            tasks.spawn(async move { report_session_status(state, metrics, node, report).await });
+        }
         {
             let device = Arc::clone(&device);
             let metrics = Arc::clone(&self.metrics);
@@ -441,7 +561,6 @@ impl Agent {
             });
         }
 
-        tokio::pin!(shutdown);
         let run_result = tokio::select! {
             _ = &mut shutdown => Ok(()),
             completed = tasks.join_next() => match completed {
@@ -450,6 +569,8 @@ impl Agent {
                 None => anyhow::bail!("all agent tasks stopped"),
             },
         };
+        // Let an in-flight route transaction commit or roll back before task cancellation.
+        let _network_update = control_lock.lock().await;
         endpoint.close(0_u32.into(), b"shutdown");
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
@@ -502,22 +623,77 @@ impl Agent {
         let PollResult::Modified(configuration) = client.poll(0).await? else {
             anyhow::bail!("controller returned 304 before initial node snapshot");
         };
-        let snapshot = Arc::new(
-            Snapshot::compile(*configuration, self.network, self.node, &local_certificate)?
-                .resolve_relays()
-                .await?,
-        );
+        let original = self.filter.as_ref().map(|_| (*configuration).clone());
+        let mut snapshot =
+            Snapshot::compile(*configuration, self.network, self.node, &local_certificate)?;
         ensure!(
             !snapshot.local_certificate_revoked,
             "local node certificate is revoked"
         );
-        validate_controller_relay(&self.config, &snapshot)?;
+        if let (Some(filter), Some(original)) = (&self.filter, original) {
+            snapshot.filter_session(filter(&original)?, self.node)?;
+        }
+        let snapshot = snapshot.resolve_relays().await?;
+        validate_controller_roles(&self.config, &snapshot, self.node)?;
         Ok(Some((
             client,
-            snapshot,
+            Arc::new(snapshot),
             Authority::new(),
             local_certificate,
         )))
+    }
+}
+
+async fn report_session_status(
+    state: Arc<State>,
+    metrics: Arc<Metrics>,
+    node: Id,
+    report: Arc<dyn Fn(crate::SessionStatus) + Send + Sync>,
+) -> Result<()> {
+    let mut ticker = interval(Duration::from_millis(250));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut previous = None;
+    loop {
+        ticker.tick().await;
+        let metrics = metrics.snapshot();
+        let snapshot = state
+            .authority_snapshot()
+            .filter(|snapshot| !snapshot.expired());
+        let path = if metrics.direct_active_paths != 0 {
+            Some("direct")
+        } else if metrics.quic_active != 0 {
+            Some("relay-quic")
+        } else if metrics.tcp_active != 0 {
+            Some("tcp-fallback")
+        } else {
+            None
+        };
+        let Some((path, snapshot)) = path.zip(snapshot) else {
+            previous = None;
+            continue;
+        };
+        if previous == Some((path, snapshot.epoch)) {
+            continue;
+        }
+        previous = Some((path, snapshot.epoch));
+        let mut owned_routes: Vec<_> = snapshot
+            .routes
+            .iter()
+            .filter(|route| route.kind == v1::RouteKind::Subnet)
+            .map(|route| route.destination)
+            .collect();
+        owned_routes.sort_unstable();
+        owned_routes.dedup();
+        report(crate::SessionStatus {
+            name: snapshot
+                .peers
+                .get(&node)
+                .map_or_else(String::new, |peer| peer.name.clone()),
+            overlays: snapshot.overlays.clone(),
+            owned_routes,
+            identity_lease_expires_at: snapshot.identity_lease_expires_at,
+            path,
+        });
     }
 }
 
@@ -654,10 +830,12 @@ impl RuntimeControl {
             } else {
                 true
             };
-        let local_name = authority
-            .as_ref()
-            .and_then(|snapshot| snapshot.peers.get(&self.node))
-            .map_or_else(String::new, |peer| peer.name.clone());
+        let local_name = base.identity.name.clone().unwrap_or_else(|| {
+            authority
+                .as_ref()
+                .and_then(|snapshot| snapshot.peers.get(&self.node))
+                .map_or_else(String::new, |peer| peer.name.clone())
+        });
         let selected_node_id = effective
             .forwarding
             .exit_client
@@ -688,7 +866,11 @@ impl RuntimeControl {
         let status = local_api::Status {
             running: true,
             actor: if serving_exit { "exit-node" } else { "node" }.to_owned(),
-            product_version: "1.0.0".to_owned(),
+            product_version: base
+                .identity
+                .product_version
+                .clone()
+                .unwrap_or_else(|| "1.0.0".to_owned()),
             control_version: "1.0".to_owned(),
             packet_version: 1,
             capabilities: capability_names(advertised_capabilities(&effective)),
@@ -699,10 +881,12 @@ impl RuntimeControl {
             overlay_addresses,
             selected_routes,
             interface: effective.tun.name.clone(),
-            relay: effective
-                .relay
-                .address
-                .map_or_else(String::new, |address| address.to_string()),
+            relay: effective.relay.display_address.clone().unwrap_or_else(|| {
+                effective
+                    .relay
+                    .address
+                    .map_or_else(String::new, |address| address.to_string())
+            }),
             mtu: effective.tun.mtu,
             metrics: local_api::ApiMetrics {
                 connections: values.connections_total,
@@ -897,7 +1081,11 @@ impl RuntimeControl {
                 .tun
                 .lock()
                 .await
-                .apply_controller(&snapshot.overlays, &next.routes)
+                .apply_controller(
+                    &snapshot.overlays,
+                    &next.routes,
+                    &next.forwarding.exit_client.controller_bypass,
+                )
                 .await
         {
             let rollback_result = reconcile_kernel(&self.kernel, &self.dynamic_bypasses, rollback);
@@ -960,7 +1148,7 @@ fn prepare_exit_base(
 fn advertised_capabilities(config: &Config) -> u64 {
     let mut capabilities =
         v1::Capability::LanewayRelayV1 as u64 | v1::Capability::LanewayQuicDatagramV1 as u64;
-    if config.controller.is_some() || !config.direct_peers.is_empty() {
+    if config.direct.enabled && (config.controller.is_some() || !config.direct_peers.is_empty()) {
         capabilities |= v1::Capability::LanewayDirectPeerV1 as u64;
     }
     if config.controller.is_some()
@@ -1052,7 +1240,7 @@ impl SnapshotApplier for RuntimeApplier {
                 "controller snapshot expired during application"
             );
             let base = self.base_config.load_full();
-            if let Err(error) = validate_controller_relay(&base, &snapshot) {
+            if let Err(error) = validate_controller_roles(&base, &snapshot, self.node) {
                 self.state.fail_close();
                 Metrics::set(&self.metrics.controller_candidate_exchange_enabled, false);
                 Metrics::set(&self.metrics.controller_certificate_renewal_forced, true);
@@ -1064,10 +1252,14 @@ impl SnapshotApplier for RuntimeApplier {
                     Arc::new(controller_disabled_config(&base)),
                 ) {
                     Metrics::increment(&self.metrics.exit_namespace_cleanup_failures_total);
-                    return Err(cleanup.context("fail close withdrawn relay authority"));
+                    return Err(cleanup.context("fail close invalid controller authority"));
                 }
                 if self.configure_tun {
-                    self.tun.lock().await.apply_controller(&[], &[]).await?;
+                    self.tun
+                        .lock()
+                        .await
+                        .apply_controller(&[], &[], &[])
+                        .await?;
                 }
                 return Err(error.context("controller withdrew configured relay authority"));
             }
@@ -1085,7 +1277,11 @@ impl SnapshotApplier for RuntimeApplier {
                     .tun
                     .lock()
                     .await
-                    .apply_controller(&snapshot.overlays, &routes)
+                    .apply_controller(
+                        &snapshot.overlays,
+                        &routes,
+                        &effective.forwarding.exit_client.controller_bypass,
+                    )
                     .await
             {
                 let rollback =
@@ -1104,7 +1300,7 @@ impl SnapshotApplier for RuntimeApplier {
                 &self.metrics.exit_nat_ready,
                 effective.forwarding.exit_gateway,
             );
-            publish_controller_metrics(&self.metrics, &snapshot);
+            publish_controller_metrics(&self.metrics, &snapshot, base.direct.enabled);
             self.state.publish_authority(snapshot);
             Ok(())
         })
@@ -1128,7 +1324,11 @@ impl SnapshotApplier for RuntimeApplier {
                 return Err(error.context("fail close controller-owned kernel state"));
             }
             if self.configure_tun {
-                self.tun.lock().await.apply_controller(&[], &[]).await?;
+                self.tun
+                    .lock()
+                    .await
+                    .apply_controller(&[], &[], &[])
+                    .await?;
             }
             Ok(())
         })
@@ -1144,7 +1344,11 @@ impl SnapshotApplier for RuntimeApplier {
                 !snapshot.expired(),
                 "controller renewed an expired snapshot"
             );
-            publish_controller_metrics(&self.metrics, &snapshot);
+            publish_controller_metrics(
+                &self.metrics,
+                &snapshot,
+                self.base_config.load().direct.enabled,
+            );
             self.state.publish_authority(snapshot);
             Ok(())
         })
@@ -1250,7 +1454,17 @@ fn controller_disabled_config(base: &Config) -> Config {
     disabled
 }
 
-fn validate_controller_relay(_config: &Config, snapshot: &Snapshot) -> Result<()> {
+fn validate_controller_roles(config: &Config, snapshot: &Snapshot, local: Id) -> Result<()> {
+    let forwarding = &config.forwarding;
+    ensure!(
+        !forwarding.require_controller_subnet_interface
+            || forwarding.controller_subnet_interface.is_some()
+            || !snapshot
+                .routes
+                .iter()
+                .any(|route| route.via == local && route.kind == v1::RouteKind::Subnet),
+        "approved local subnet route requires routing.output_interface"
+    );
     ensure!(
         snapshot
             .relays
@@ -1261,10 +1475,10 @@ fn validate_controller_relay(_config: &Config, snapshot: &Snapshot) -> Result<()
     Ok(())
 }
 
-fn publish_controller_metrics(metrics: &Metrics, snapshot: &Snapshot) {
+fn publish_controller_metrics(metrics: &Metrics, snapshot: &Snapshot, direct_enabled: bool) {
     Metrics::set(
         &metrics.controller_candidate_exchange_enabled,
-        snapshot.candidate_exchange.enabled,
+        direct_enabled && snapshot.candidate_exchange.enabled,
     );
     metrics.controller_certificate_renew_after_seconds.store(
         snapshot.certificate_renew_after,
@@ -1316,6 +1530,35 @@ fn controller_effective_config(base: &Config, snapshot: &Snapshot, local: Id) ->
     });
     effective.forwarding.subnet_router =
         base.forwarding.subnet_router && !effective.forwarding.subnet_routes.is_empty();
+
+    if let Some(interface) = effective.forwarding.controller_subnet_interface.take()
+        && subnet_capability
+    {
+        let routes = snapshot.routes.iter().filter_map(|route| {
+            if route.via != local || route.kind != v1::RouteKind::Subnet {
+                return None;
+            }
+            let mode = match route.mode {
+                v1::RouteAdvertisementMode::Nat => crate::config::ForwardMode::Nat,
+                v1::RouteAdvertisementMode::Routed => crate::config::ForwardMode::Routed,
+                v1::RouteAdvertisementMode::Unspecified => return None,
+            };
+            Some(crate::config::SubnetForwardConfig {
+                prefix: route.destination,
+                mode,
+                output_interface: interface.clone(),
+            })
+        });
+        effective.forwarding.subnet_routes.extend(routes);
+        effective.forwarding.owned_prefixes.extend(
+            effective
+                .forwarding
+                .subnet_routes
+                .iter()
+                .map(|route| route.prefix),
+        );
+        effective.forwarding.subnet_router = !effective.forwarding.subnet_routes.is_empty();
+    }
 
     let exit_capability =
         snapshot.enabled_capabilities & v1::Capability::LanewayExitNodeV1 as u64 != 0;
@@ -1636,11 +1879,35 @@ mod tests {
         assert!(!disabled.forwarding.exit_client.enabled);
         assert!(disabled.forwarding.exit_client.selected_node.is_none());
 
+        let mut legacy = base.clone();
+        legacy.forwarding = crate::config::ForwardingConfig {
+            require_controller_subnet_interface: true,
+            ..Default::default()
+        };
+        assert!(
+            validate_controller_roles(&legacy, &snapshot, local)
+                .unwrap_err()
+                .to_string()
+                .contains("requires routing.output_interface")
+        );
+        legacy.forwarding.controller_subnet_interface = Some("lan0".into());
+        let dynamic = controller_effective_config(&legacy, &snapshot, local);
+        assert_eq!(dynamic.forwarding.subnet_routes.len(), 1);
+        assert_eq!(dynamic.forwarding.subnet_routes[0].output_interface, "lan0");
+        assert_eq!(dynamic.forwarding.subnet_routes[0].mode, ForwardMode::Nat);
+        assert_eq!(
+            dynamic.forwarding.owned_prefixes,
+            ["192.168.50.0/24".parse::<IpNet>().unwrap()]
+        );
+
         let mut withdrawn = snapshot;
         withdrawn.enabled_capabilities = 0;
         withdrawn.routes.clear();
         let effective = controller_effective_config(&base, &withdrawn, local);
         assert!(!effective.forwarding.subnet_router);
+        let dynamic = controller_effective_config(&legacy, &withdrawn, local);
+        assert!(dynamic.forwarding.subnet_routes.is_empty());
+        assert!(dynamic.forwarding.owned_prefixes.is_empty());
         assert!(effective.forwarding.subnet_routes.is_empty());
         assert!(!effective.forwarding.exit_gateway);
         assert!(effective.forwarding.exit_gateway_sources.is_empty());

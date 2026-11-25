@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::{
@@ -22,16 +21,15 @@ use laneway_protocol::{
 };
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
+#[cfg(feature = "native")]
 use reqwest::{Certificate, Identity, StatusCode};
-use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, PrivateKeyDer},
-};
+use rustls::pki_types::CertificateDer;
 use tokio::sync::Mutex;
 
-use crate::tls::LocalCertificateHealth;
+use crate::tls::{self, LocalCertificateHealth};
 
 const MAX_RESPONSE: usize = 1 << 20;
+#[cfg(feature = "native")]
 const VALID_UNTIL_HEADER: &str = "X-Laneway-Configuration-Valid-Until";
 const MAX_PEERS: usize = 65_536;
 const MAX_ROUTES: usize = 65_536;
@@ -43,6 +41,7 @@ const RELAY_DNS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Fully pinned controller connection material for one node.
 #[derive(Clone, Debug)]
 pub(crate) struct ClientOptions {
+    #[cfg(feature = "native")]
     pub(crate) endpoint: String,
     pub(crate) quic_endpoint: Option<String>,
     pub(crate) server_name: String,
@@ -62,6 +61,7 @@ pub(crate) enum PollResult {
 }
 
 /// Strict HTTPS/protobuf controller snapshot client.
+#[cfg(feature = "native")]
 pub(crate) struct Client {
     endpoint: String,
     http: reqwest::Client,
@@ -70,7 +70,7 @@ pub(crate) struct Client {
     quic: Option<QuicControl>,
 }
 
-struct QuicControl {
+pub(crate) struct QuicControl {
     endpoint: Endpoint,
     addresses: Vec<SocketAddr>,
     server_name: String,
@@ -80,32 +80,25 @@ struct QuicControl {
     request_id: AtomicU64,
 }
 
+#[cfg(feature = "native")]
 impl Client {
     pub(crate) async fn new(options: ClientOptions) -> Result<Self> {
         ensure!(
             !options.timeout.is_zero() && options.timeout <= Duration::from_secs(300),
             "controller timeout must be in (0,5m]"
         );
-        let url = reqwest::Url::parse(&options.endpoint).context("parse controller endpoint")?;
-        ensure!(
-            url.scheme() == "https"
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-                && matches!(url.path(), "" | "/"),
-            "controller endpoint must be an HTTPS origin"
-        );
-        if !options.server_name.is_empty() {
-            ensure!(
-                url.host_str() == Some(options.server_name.as_str()),
-                "controller server_name must match endpoint host"
-            );
-        }
+        let url = validate_https_endpoint(&options.endpoint)?;
         let host = url
             .host_str()
-            .context("controller endpoint host is missing")?;
+            .context("controller endpoint host is missing")?
+            .trim_start_matches('[')
+            .trim_end_matches(']');
+        ensure!(
+            options.quic_endpoint.is_some()
+                || options.server_name.is_empty()
+                || host == options.server_name,
+            "HTTPS controller server_name must match endpoint host"
+        );
         let port = url
             .port_or_known_default()
             .context("controller endpoint port is unknown")?;
@@ -146,15 +139,8 @@ impl Client {
         let http = builder
             .build()
             .context("build node controller HTTP client")?;
-        let quic = if let Some(endpoint) = options.quic_endpoint.as_deref() {
-            Some(
-                QuicControl::new(
-                    endpoint,
-                    &options,
-                    expected_controller(options.network, options.service),
-                )
-                .await?,
-            )
+        let quic = if options.quic_endpoint.is_some() {
+            Some(QuicControl::new(&options).await?)
         } else {
             None
         };
@@ -264,12 +250,43 @@ fn expected_controller(network: Id, service: Id) -> AuthenticatedIdentity {
 }
 
 impl QuicControl {
-    async fn new(
-        address: &str,
+    pub(crate) async fn new(options: &ClientOptions) -> Result<Self> {
+        Self::prepare(options, None).await.map(|(client, _)| client)
+    }
+
+    pub(crate) async fn for_node(
         options: &ClientOptions,
-        expected: AuthenticatedIdentity,
-    ) -> Result<Self> {
+        node: Id,
+    ) -> Result<(Self, LocalCertificateHealth)> {
+        let (client, health) = Self::prepare(options, Some(node)).await?;
+        Ok((
+            client,
+            health.context("local node certificate health is missing")?,
+        ))
+    }
+
+    async fn prepare(
+        options: &ClientOptions,
+        node: Option<Id>,
+    ) -> Result<(Self, Option<LocalCertificateHealth>)> {
+        ensure!(
+            !options.timeout.is_zero() && options.timeout <= Duration::from_secs(300),
+            "controller timeout must be in (0,5m]"
+        );
+        let address = options
+            .quic_endpoint
+            .as_deref()
+            .context("controller QUIC endpoint is required")?;
         let (host, port) = split_host_port(address)?;
+        let pinned_name = (!options.server_name.is_empty())
+            .then(|| rustls::pki_types::ServerName::try_from(options.server_name.clone()))
+            .transpose()
+            .context("invalid controller QUIC TLS server name")?;
+        let dial_name = if pinned_name.is_some() {
+            options.server_name.clone()
+        } else {
+            host.clone()
+        };
         let mut addresses: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
             vec![SocketAddr::new(ip, port)]
         } else {
@@ -290,35 +307,22 @@ impl QuicControl {
             "controller QUIC endpoint resolved outside the bounded 1..=16 address set"
         );
 
-        let certificate_pem = bounded_read(&options.certificate, 4 << 20, "node certificate")?;
-        let mut cursor = std::io::Cursor::new(certificate_pem);
-        let certificates: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cursor)
-            .collect::<std::result::Result<_, _>>()
-            .context("parse node controller certificate")?;
-        ensure!(
-            !certificates.is_empty(),
-            "node controller certificate chain is empty"
-        );
-        let key_pem = bounded_read(&options.private_key, 1 << 20, "node private key")?;
-        let mut cursor = std::io::Cursor::new(key_pem);
-        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut cursor)
-            .context("parse node controller private key")?
-            .context("node controller private key is missing")?;
-        let ca_pem = bounded_read(&options.ca, 4 << 20, "controller CA")?;
-        let mut cursor = std::io::Cursor::new(ca_pem);
-        let roots_der: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cursor)
-            .collect::<std::result::Result<_, _>>()
-            .context("parse controller CA")?;
-        let mut roots = RootCertStore::empty();
-        let (accepted, rejected) = roots.add_parsable_certificates(roots_der);
-        ensure!(
-            accepted > 0 && rejected == 0,
-            "controller CA contains an invalid certificate"
-        );
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(certificates, key)
-            .context("load node QUIC controller identity")?;
+        let certificates = tls::load_certificates(&options.certificate)?;
+        let key = tls::load_private_key(&options.private_key)?;
+        let roots = tls::root_store(&options.ca)?;
+        let health = node
+            .map(|node| {
+                tls::validate_local_material(&certificates, &key, &roots, options.network, node)?;
+                tls::local_certificate_material_health(&certificates)
+            })
+            .transpose()?;
+        let mut crypto = crate::controller_tls::controller_client_tls(
+            roots,
+            pinned_name,
+            options.network,
+            options.service,
+            Some((certificates, key)),
+        )?;
         crypto.alpn_protocols = vec![b"laneway-control/1".to_vec()];
         crypto.enable_early_data = false;
         let crypto = QuicClientConfig::try_from(crypto).context("build controller QUIC TLS")?;
@@ -334,25 +338,47 @@ impl QuicControl {
             ))
             .keep_alive_interval(Some(Duration::from_secs(20)));
         client.transport_config(Arc::new(transport));
-        let bind = if addresses.iter().any(SocketAddr::is_ipv4) {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        };
-        let mut endpoint = Endpoint::client(bind.parse().expect("constant controller bind"))?;
+        let mut endpoint = Endpoint::client("[::]:0".parse().expect("constant IPv6 bind"))
+            .or_else(|_| Endpoint::client("0.0.0.0:0".parse().expect("constant IPv4 bind")))?;
         endpoint.set_default_client_config(client);
-        Ok(Self {
-            endpoint,
-            addresses,
-            server_name: options.server_name.clone(),
-            expected,
-            timeout: options.timeout,
-            connection: Mutex::new(None),
-            request_id: AtomicU64::new(0),
-        })
+        Ok((
+            Self {
+                endpoint,
+                addresses,
+                server_name: dial_name,
+                expected: expected_controller(options.network, options.service),
+                timeout: options.timeout,
+                connection: Mutex::new(None),
+                request_id: AtomicU64::new(0),
+            },
+            health,
+        ))
     }
 
-    async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
+    pub(crate) async fn renew(
+        &self,
+        request: laneway_protocol::v1::RenewalRequest,
+    ) -> Result<laneway_protocol::v1::RenewalResponse> {
+        use laneway_protocol::v1::{ControllerEnvelope, controller_envelope::Body};
+        let response = self
+            .exchange(ControllerEnvelope {
+                schema_version: 1,
+                request_id: self.next_request_id(),
+                body: Some(Body::RenewalRequest(request)),
+            })
+            .await?;
+        match response.body {
+            Some(Body::RenewalResponse(response)) => Ok(response),
+            Some(Body::Error(error)) => bail!(
+                "controller renewal error {:?}: {}",
+                error.code(),
+                error.detail
+            ),
+            _ => bail!("controller QUIC returned an unexpected renewal response"),
+        }
+    }
+
+    pub(crate) async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
         use laneway_protocol::v1::{ControllerEnvelope, controller_envelope};
         let envelope = ControllerEnvelope {
             schema_version: 1,
@@ -519,7 +545,24 @@ impl QuicControl {
     }
 }
 
-fn split_host_port(value: &str) -> Result<(String, u16)> {
+#[cfg(feature = "native")]
+pub(crate) fn validate_https_endpoint(endpoint: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(endpoint).context("parse controller endpoint")?;
+    ensure!(
+        url.scheme() == "https"
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.port() != Some(0)
+            && matches!(url.path(), "" | "/"),
+        "controller endpoint must be an HTTPS origin"
+    );
+    Ok(url)
+}
+
+pub(crate) fn split_host_port(value: &str) -> Result<(String, u16)> {
     if let Ok(address) = value.parse::<SocketAddr>() {
         return Ok((address.ip().to_string(), address.port()));
     }
@@ -570,6 +613,7 @@ pub(crate) struct Snapshot {
     pub(crate) local_certificate_revoked: bool,
     pub(crate) relays: HashMap<Id, RelayAuthority>,
     pub(crate) candidate_exchange: CandidateExchangeAuthority,
+    #[cfg(feature = "native")]
     pub(crate) authorized_exits: HashSet<Id>,
     pub(crate) certificate_renew_after: u64,
     pub(crate) certificate_not_after: u64,
@@ -584,7 +628,9 @@ pub(crate) struct RelayAuthority {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CandidateExchangeAuthority {
     pub(crate) enabled: bool,
+    #[cfg(feature = "native")]
     pub(crate) max_candidates: u32,
+    #[cfg(feature = "native")]
     pub(crate) ttl: Duration,
 }
 
@@ -666,7 +712,9 @@ impl Snapshot {
         );
         let candidate_exchange = CandidateExchangeAuthority {
             enabled: candidate.enabled,
+            #[cfg(feature = "native")]
             max_candidates: candidate.max_candidates,
+            #[cfg(feature = "native")]
             ttl: Duration::from_secs(u64::from(candidate.candidate_ttl_seconds)),
         };
         let route_snapshot = configuration
@@ -913,18 +961,35 @@ impl Snapshot {
             local_certificate_revoked,
             relays,
             candidate_exchange,
+            #[cfg(feature = "native")]
             authorized_exits,
             certificate_renew_after,
             certificate_not_after,
         })
     }
 
+    pub(crate) fn effective_deadline(&self) -> u64 {
+        let deadline = self.valid_until.min(self.certificate_not_after);
+        if self.identity_lease_expires_at == 0 {
+            return deadline;
+        }
+        deadline.min(self.identity_lease_expires_at)
+    }
+
     pub(crate) fn expired(&self) -> bool {
-        expired(self.valid_until)
+        expired(self.effective_deadline())
     }
 
     pub(crate) fn renew(&self, valid_until: u64) -> Result<Self> {
         ensure!(!expired(valid_until), "controller renewed an expired lease");
+        ensure!(
+            self.identity_lease_expires_at == 0 || valid_until <= self.identity_lease_expires_at,
+            "controller renewed the snapshot past the ephemeral identity lease"
+        );
+        ensure!(
+            !expired(self.certificate_not_after),
+            "local controller certificate has expired"
+        );
         ensure!(
             valid_until >= self.valid_until,
             "controller lease deadline moved backward"
@@ -1075,11 +1140,12 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
+#[cfg(feature = "native")]
 fn bounded_read(path: &std::path::Path, maximum: u64, label: &str) -> Result<Vec<u8>> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("stat {label} {}", path.display()))?;
-    ensure!(metadata.len() <= maximum, "{label} exceeds size limit");
-    fs::read(path).with_context(|| format!("read {label} {}", path.display()))
+    let file =
+        std::fs::File::open(path).with_context(|| format!("open {label} {}", path.display()))?;
+    laneway_protocol::read_bounded(file, maximum)
+        .with_context(|| format!("read {label} {}", path.display()))
 }
 
 fn parse_host_prefix(raw: Vec<u8>) -> Result<IpNet> {

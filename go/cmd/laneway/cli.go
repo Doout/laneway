@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"laneway.dev/laneway/internal/adminauth"
@@ -15,6 +16,14 @@ import (
 type commandHandler func([]string) error
 
 func executeCLI(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "_connect-preflight":
+			return runConnectSessionPreflight(args[1:])
+		case "_connect-session":
+			return runConnectSession(args[1:])
+		}
+	}
 	// Keep the historical single-dash spelling accepted by the old dispatcher.
 	if len(args) == 1 && args[0] == "-version" {
 		args[0] = "version"
@@ -51,7 +60,30 @@ func newRootCommand() *cobra.Command {
 	})
 	version.GroupID = "utility"
 	root.AddCommand(version)
+	configure := productCommand("configure [--system]", "Set up this node (userspace by default)", "  laneway configure\n  sudo laneway configure --system\n  sudo laneway configure server lane.example.com", runConfigure)
+	configure.Long = "Enter your native invitation at the prompt. First-time userspace setup creates a local proxy login. Use --state-dir PATH for a separate userspace identity or --system for host networking."
+	configure.AddCommand(productCommand("server [DOMAIN]", "Configure the Docker Compose control plane on this host", "  sudo laneway configure server lane.example.com", configureServer))
+	update := productCommand("update", "Update the detected local installation", "  laneway update\n  laneway update client\n  sudo laneway update server\n  sudo laneway update connector", func(args []string) error {
+		return runProductUpdate("", args)
+	})
+	update.Long = "Update the local installation. Select a target on a host with several roles. Run server and Docker connector updates on the Linux deployment host."
+	for _, target := range []struct{ name, summary string }{
+		{"client", "Update the installed client and node"},
+		{"server", "Update the managed Docker Compose control plane"},
+		{"connector [NAME]", "Update a managed Docker connector from its host"},
+	} {
+		name := strings.Fields(target.name)[0]
+		update.AddCommand(productCommand(target.name, target.summary, "", func(args []string) error {
+			return runProductUpdate(name, args)
+		}))
+	}
+	update.GroupID = "utility"
+	root.AddCommand(update)
+	start := productCommand("start [--system]", "Start this node (userspace by default)", "  laneway start\n  laneway start --no-proxy\n  sudo laneway start --system", runProductStart)
+	start.Long = "Start the foreground node. The local SOCKS5 proxy listens on 127.0.0.1:1080. Use --listen ADDRESS to change the loopback listener, --no-proxy to serve routes only, or --proxy-only to originate connections only. Use --state-dir PATH for a separate userspace identity."
 	for _, client := range []*cobra.Command{
+		configure, start,
+		productCommand("credential <add|list|remove>", "Manage local SOCKS5 credentials", "  laneway credential add laptop\n  laneway credential list\n  laneway credential remove laptop", runProductCredential),
 		command("login DOMAIN", "Save a renewable user login", runLogin),
 		command("connect [DOMAIN]", "Connect using a saved login", runConnect),
 		command("logout DOMAIN", "Remove a saved user login", runLogout),
@@ -74,6 +106,41 @@ func newRootCommand() *cobra.Command {
 	root.AddCommand(helper)
 	addPlatformCommands(root)
 	return root
+}
+
+// These entry points forward options to their owning implementation while
+// keeping help available before installation or host detection.
+func productCommand(use, summary, example string, handler commandHandler) *cobra.Command {
+	cmd := command(use, summary, handler)
+	cmd.Example = example
+	run := cmd.RunE
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+			return cmd.Help()
+		}
+		return run(cmd, args)
+	}
+	return cmd
+}
+
+func runProductUpdate(target string, args []string) error {
+	if target == "" && len(args) != 0 && (len(args) != 1 || args[0] != "--yes") {
+		return errors.New("usage: laneway update [client | server | connector [NAME]]")
+	}
+	if err := updateContainerHandoff(target); err != nil {
+		return err
+	}
+	if target == "" {
+		var err error
+		target, err = detectUpdateTarget()
+		if err != nil {
+			return err
+		}
+	}
+	if target == "client" {
+		return updateNativeClient(args)
+	}
+	return updateDeployment(target, args)
 }
 
 func command(use, summary string, handler commandHandler) *cobra.Command {

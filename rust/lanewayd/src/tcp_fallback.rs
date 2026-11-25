@@ -15,7 +15,7 @@ use tokio::{
 };
 use tokio_rustls::TlsConnector;
 
-use crate::{config::Config, packet_pool::PacketPool, tls};
+use crate::{config::Config, packet_pool::PacketPool, relay::TcpPacketPermit, tls};
 
 const MAX_CONTROL: usize = 1 << 20;
 const MAX_PACKET: usize = 5 + 1280;
@@ -23,6 +23,7 @@ const MAX_PACKET: usize = 5 + 1280;
 enum Record {
     Control(Vec<u8>),
     Packet(Bytes),
+    GuardedPacket(Bytes, TcpPacketPermit),
     Ping,
     Pong,
 }
@@ -42,6 +43,14 @@ impl Writer {
         self.send(Record::Packet(payload)).await
     }
 
+    pub(crate) fn guarded_packet(&self, payload: Bytes, permit: TcpPacketPermit) -> Result<bool> {
+        match self.tx.try_send(Record::GuardedPacket(payload, permit)) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => bail!("TCP fallback write queue closed"),
+        }
+    }
+
     async fn send(&self, record: Record) -> Result<()> {
         let mut done = self.done.clone();
         tokio::select! {
@@ -52,6 +61,7 @@ impl Writer {
 }
 
 pub(crate) struct Session {
+    pub(crate) certificate_serial: Vec<u8>,
     pub(crate) control: mpsc::Receiver<Vec<u8>>,
     pub(crate) packets: mpsc::Receiver<Bytes>,
     pub(crate) writer: Writer,
@@ -105,6 +115,8 @@ pub(crate) async fn connect(config: &Config, network: Id) -> Result<Session> {
         Id::from_str(&config.relay.service_id).context("relay.service_id")?,
     )?;
 
+    let certificate_serial = laneway_protocol::certificate_serial_from_der(leaf.as_ref())
+        .context("TCP fallback relay certificate serial")?;
     let (mut read, mut write) = tokio::io::split(stream);
     let (control_tx, control) = mpsc::channel(fallback.queue_depth);
     let (packet_tx, packets) = mpsc::channel(fallback.queue_depth);
@@ -131,6 +143,7 @@ pub(crate) async fn connect(config: &Config, network: Id) -> Result<Session> {
                     }
                     Record::Ping => pong.try_send(Record::Pong).context("write queue full")?,
                     Record::Pong => {}
+                    Record::GuardedPacket(..) => unreachable!("guards are local write state"),
                 }
             }
         }.await;
@@ -167,6 +180,7 @@ pub(crate) async fn connect(config: &Config, network: Id) -> Result<Session> {
         }
     });
     Ok(Session {
+        certificate_serial,
         control,
         packets,
         writer: Writer {
@@ -222,6 +236,12 @@ async fn write_record<W: AsyncWrite + Unpin>(write: &mut W, record: &Record) -> 
     let (kind, payload) = match record {
         Record::Control(value) => (TcpRecordKind::Control, value.as_slice()),
         Record::Packet(value) => (TcpRecordKind::Packet, value.as_ref()),
+        Record::GuardedPacket(value, permit) => {
+            if !permit.active() {
+                return Ok(());
+            }
+            (TcpRecordKind::Packet, value.as_ref())
+        }
         Record::Ping => (TcpRecordKind::Ping, &[][..]),
         Record::Pong => (TcpRecordKind::Pong, &[][..]),
     };

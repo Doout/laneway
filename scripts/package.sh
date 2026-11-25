@@ -35,19 +35,64 @@ if [ "$package_goos" = linux ]; then
 fi
 
 ldflags="-s -w -X laneway.dev/laneway/internal/buildinfo.Version=$version"
+native_dir=${PACKAGE_NATIVE_DIR:-}
 (
   cd "$project_dir/go"
+  if [ -z "$native_dir" ]; then
+    CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
+      go build -tags laneway_compat -trimpath -ldflags "$ldflags" -o "$package_dir/bin/laneway-compat" ./cmd/laneway
+  fi
   CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
-    go build -trimpath -ldflags "$ldflags" -o "$package_dir/bin/laneway" ./cmd/laneway
+    go build -trimpath -ldflags "$ldflags" -o "$staging_dir/$standalone" ./cmd/laneway
 	ln -s laneway "$package_dir/bin/lane"
 	if [ "$package_goos" = linux ]; then
-		for command in laneway-relay laneway-controller; do
-			CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
-				go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/$command" "./cmd/$command"
-		done
-		ln -s ../bin/laneway "$package_dir/sbin/lanewayd"
+		CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
+			go build -trimpath -ldflags "$ldflags" -o "$package_dir/sbin/laneway-controller" ./cmd/laneway-controller
 	fi
 )
+
+if [ -n "$native_dir" ]; then
+  platform=${package_goos}_${package_goarch}
+  install -m 0755 "$native_dir/laneway-native_$platform" "$package_dir/bin/laneway"
+  install -m 0755 "$native_dir/laneway-compat_$platform" "$package_dir/bin/laneway-compat"
+  if [ "$package_goos" = linux ]; then
+    install -m 0755 "$native_dir/lanewayd_$platform" "$package_dir/sbin/lanewayd"
+    install -m 0755 "$native_dir/laneway-relay" "$package_dir/sbin/laneway-relay"
+  else
+    install -m 0755 "$native_dir/lanewayd_$platform" "$package_dir/bin/lanewayd"
+  fi
+elif [ "$package_goos" = linux ]; then
+	docker buildx build --platform "linux/$package_goarch" \
+		--file "$project_dir/deploy/containers/Dockerfile" --target linux-package \
+		--build-arg "VERSION=$version" --output "type=local,dest=$package_dir/sbin" "$project_dir"
+	mv "$package_dir/sbin/laneway" "$package_dir/bin/laneway"
+else
+	mac_cli=${PACKAGE_MAC_CLI:-}
+	mac_node=${PACKAGE_MAC_NODE:-}
+	if [ -z "$mac_cli" ] && [ -z "$mac_node" ]; then
+		case "$package_goarch" in
+			amd64) target=x86_64-apple-darwin ;;
+			arm64) target=aarch64-apple-darwin ;;
+		esac
+		if [ "$(uname -s)" != Darwin ]; then
+			echo "Darwin packages built on Linux require PACKAGE_MAC_CLI and PACKAGE_MAC_NODE" >&2
+			exit 1
+		fi
+		LANEWAY_CLI_RELEASE_VERSION="$version" LANEWAY_NODE_RELEASE_VERSION="$version" \
+			MACOSX_DEPLOYMENT_TARGET=12.0 CARGO_PROFILE_RELEASE_STRIP=symbols \
+			cargo build --manifest-path "$project_dir/rust/Cargo.toml" \
+				--target-dir "$project_dir/rust/target" --target "$target" --locked --release \
+				-p laneway-cli -p lanewayd
+		mac_cli="$project_dir/rust/target/$target/release/laneway"
+		mac_node="$project_dir/rust/target/$target/release/lanewayd"
+	fi
+	if [ ! -f "$mac_cli" ] || [ ! -f "$mac_node" ]; then
+		echo "Darwin packages require both PACKAGE_MAC_CLI and PACKAGE_MAC_NODE" >&2
+		exit 1
+	fi
+	install -m 0755 "$mac_cli" "$package_dir/bin/laneway"
+	install -m 0755 "$mac_node" "$package_dir/bin/lanewayd"
+fi
 
 cp "$project_dir/README.md" "$package_dir/README.md"
 cp "$project_dir/LICENSE-MIT" "$project_dir/LICENSE-APACHE" "$package_dir/"
@@ -60,6 +105,7 @@ cp "$project_dir/deploy/examples/controller.toml" \
 	"$project_dir/deploy/examples/relay.toml" \
 	"$package_dir/examples/"
 cp "$project_dir/deploy/systemd/lanewayd.service" \
+  "$project_dir/deploy/systemd/lanewayd-rs.service" \
   "$project_dir/deploy/systemd/laneway-relay.service" \
   "$project_dir/deploy/systemd/laneway-controller.service" \
   "$package_dir/systemd/"
@@ -87,27 +133,39 @@ install -m 0644 "$project_dir"/deploy/compose/generated/config/*.example \
 	"$package_dir/deploy/compose/generated/config/"
 cp "$project_dir/integration/README.md" "$package_dir/integration/README.md"
 cp "$project_dir/scripts/setup-node.sh" "$package_dir/sbin/laneway-setup-node"
+cp "$project_dir/install.sh" "$package_dir/install-control-plane-release.sh"
 fi
 cp "$project_dir/SECURITY.md" "$package_dir/SECURITY.md"
 cp "$project_dir/scripts/install-package.sh" "$package_dir/install.sh"
 printf '%s\n' "$version" > "$package_dir/VERSION"
+if [ "$package_goos" = linux ]; then
+	printf '%s\n' laneway-control-upgrade-preflight-v1 > \
+		"$package_dir/CONTROL-PLANE-UPGRADE-PREFLIGHT"
+fi
 find "$package_dir" -type f -exec chmod 0644 {} +
 find "$package_dir" -type d -exec chmod 0755 {} +
-chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway"
+chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway" "$package_dir/bin/laneway-compat"
+if [ -f "$package_dir/bin/lanewayd" ]; then
+	chmod 0755 "$package_dir/bin/lanewayd"
+fi
 if [ "$package_goos" = linux ]; then
-	chmod 0755 "$package_dir"/sbin/* "$package_dir"/deploy/compose/*.sh \
+	chmod 0755 "$package_dir/install-control-plane-release.sh" \
+		"$package_dir"/sbin/* "$package_dir"/deploy/compose/*.sh \
 		"$package_dir"/deploy/compose/laneway-control \
 		"$package_dir"/deploy/containers/update-connector.sh
 fi
 
 tmp_archive="$staging_dir/$archive"
-tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
-  -C "$staging_dir" -cf - laneway | gzip -n > "$tmp_archive"
-mv "$tmp_archive" "$project_dir/dist/$archive"
-if [ "$package_goos" = darwin ]; then
-	cp "$package_dir/bin/laneway" "$project_dir/dist/$standalone"
-	chmod 0755 "$project_dir/dist/$standalone"
+archive_tar=tar
+if command -v gtar >/dev/null 2>&1; then
+	archive_tar=gtar
 fi
+"$archive_tar" --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+  -C "$staging_dir" -cf "$staging_dir/laneway.tar" laneway
+gzip -n -c "$staging_dir/laneway.tar" > "$tmp_archive"
+mv "$tmp_archive" "$project_dir/dist/$archive"
+# Longstanding standalone asset for clients that still use the Go command.
+install -m 0755 "$staging_dir/$standalone" "$project_dir/dist/$standalone"
 (
   cd "$project_dir/dist"
   sha256sum "$archive" > "$archive.sha256"

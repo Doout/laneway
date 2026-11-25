@@ -1,0 +1,188 @@
+name: Native Laneway node
+
+on:
+  workflow_call:
+    inputs:
+      upload:
+        description: Stage native executables for the signed release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Laneway node ${{ matrix.platform.asset }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-musl, asset: linux_amd64 }
+          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, asset: linux_arm64 }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, asset: darwin_amd64 }
+          - { runner: macos-15, target: aarch64-apple-darwin, asset: darwin_arm64 }
+          - { runner: windows-2022, target: x86_64-pc-windows-msvc, asset: windows_amd64, extension: .exe }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, asset: windows_arm64, extension: .exe }
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Linux archives use the same Rust compiler series as the source package build.
+      RUSTUP_TOOLCHAIN: ${{ startsWith(matrix.platform.asset, 'linux_') && '1.95' || 'stable' }}
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      TARGET: ${{ matrix.platform.target }}
+      ASSET: lanewayd_${{ matrix.platform.asset }}${{ matrix.platform.extension }}
+      CLIENT_ASSET: laneway-native_${{ matrix.platform.asset }}${{ matrix.platform.extension }}
+      COMPAT_ASSET: laneway-compat_${{ matrix.platform.asset }}${{ matrix.platform.extension }}
+      LEGACY_ASSET: laneway_${{ matrix.platform.asset }}${{ matrix.platform.extension }}
+      EXTENSION: ${{ matrix.platform.extension }}
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+      # Use the static MSVC runtime so a clean Windows host can run the executable.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Linux build and integration dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools iproute2 openssl
+          # Use musl-gcc for C dependencies while Rust selects its self-contained linker.
+          printf 'CC_%s=musl-gcc\n' "${TARGET//-/_}" >> "$GITHUB_ENV"
+      - name: Set up Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target "$TARGET"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: rust
+          shared-key: native-${{ matrix.platform.target }}
+          env-vars: MACOSX_DEPLOYMENT_TARGET
+          cache-bin: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Test on native target
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --locked -p lanewayd -p laneway-cli --target "$TARGET"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo test --manifest-path rust/Cargo.toml --locked -p laneway-cli --bin laneway-compat-windows --features windows-compat --target "$TARGET"
+          fi
+      - name: Build and smoke-test release executable
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            export LANEWAY_NODE_RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+            export LANEWAY_CLI_RELEASE_VERSION="$LANEWAY_NODE_RELEASE_VERSION"
+            export LANEWAY_RELAY_RELEASE_VERSION="$LANEWAY_NODE_RELEASE_VERSION"
+          fi
+          packages=(-p lanewayd -p laneway-cli)
+          if [ "$RUNNER_OS" = Linux ]; then
+            packages+=(-p laneway-relay)
+          fi
+          cargo build --manifest-path rust/Cargo.toml --locked --release "${packages[@]}" --target "$TARGET"
+          mkdir -p dist
+          cp "rust/target/$TARGET/release/lanewayd$EXTENSION" "dist/$ASSET"
+          cp "rust/target/$TARGET/release/laneway$EXTENSION" "dist/$CLIENT_ASSET"
+          "./dist/$ASSET" --help
+          "./dist/$CLIENT_ASSET" --help
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            "./dist/$ASSET" --version | grep -Fx "lanewayd $LANEWAY_NODE_RELEASE_VERSION"
+            "./dist/$CLIENT_ASSET" version | grep -Fx "$LANEWAY_NODE_RELEASE_VERSION"
+          fi
+      - name: Verify Linux executable is statically linked
+        if: runner.os == 'Linux'
+        run: |
+          for file in "$ASSET" "$CLIENT_ASSET"; do
+            program_headers=$(readelf --wide --program-headers "dist/$file")
+            dynamic_section=$(readelf --wide --dynamic "dist/$file")
+            if grep -Eq '[[:space:]]INTERP[[:space:]]' <<< "$program_headers" ||
+              grep -Fq '(NEEDED)' <<< "$dynamic_section"; then
+              echo "Expected a standalone static Linux executable: $file" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.x"
+          cache-dependency-path: go/go.sum
+      - name: Build and smoke-test the compatibility helper
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          case "$TARGET" in
+            aarch64-*) export GOARCH=arm64 ;;
+            x86_64-*) export GOARCH=amd64 ;;
+            *) exit 1 ;;
+          esac
+          version=$("./dist/$CLIENT_ASSET" version)
+          if [ "$RUNNER_OS" = Windows ]; then
+            LANEWAY_CLI_RELEASE_VERSION="$version" cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-cli --bin laneway-compat-windows --features windows-compat --target "$TARGET"
+            cp "rust/target/$TARGET/release/laneway-compat-windows.exe" "dist/$COMPAT_ASSET"
+          else
+            (cd go && go build -tags laneway_compat -trimpath -ldflags "-s -w -X laneway.dev/laneway/internal/buildinfo.Version=$version" -o "../dist/$COMPAT_ASSET" ./cmd/laneway)
+          fi
+          "./dist/$COMPAT_ASSET" version | grep -Fx "$version"
+          if "./dist/$COMPAT_ASSET" configure --help; then
+            echo "Compatibility helper exposes a public command" >&2
+            exit 1
+          fi
+          "./dist/$ASSET" --version | grep -Fx "lanewayd $version"
+          if [ "$RUNNER_OS" = Windows ]; then
+            (cd go && go build -trimpath -ldflags "-s -w -X laneway.dev/laneway/internal/buildinfo.Version=$version" -o "../dist/$LEGACY_ASSET" ./cmd/laneway)
+            "./dist/$LEGACY_ASSET" version | grep -Fx "$version"
+            "./dist/$LEGACY_ASSET" configure --help
+          fi
+      - name: Exercise the release utun helper with the Go client
+        if: runner.os == 'macOS'
+        run: |
+          stage=$(mktemp -d)
+          cp "dist/$CLIENT_ASSET" "$stage/laneway"
+          go -C go test -c -o "$stage/helper-client.test" ./internal/nethelper
+          sudo env LANEWAY_PRIVILEGED_TEST=1 LANEWAY_TEST_HELPER="$stage/laneway" \
+            "$stage/helper-client.test" -test.run '^TestDarwinNativeHelper$' -test.v
+      - name: Exercise TCP, UDP, and public HTTPS relay as an unprivileged user
+        if: runner.os == 'Linux'
+        run: |
+          bins=$(mktemp -d)
+          cp "dist/$ASSET" "$bins/lanewayd"
+          cp "rust/target/$TARGET/release/laneway-relay" "$bins/laneway-relay"
+          cp "dist/$CLIENT_ASSET" "$bins/laneway"
+          (cd go && go build -o "$bins/" ./cmd/laneway-controller)
+          python3 integration/rootless.py --bin-dir "$bins" --public-https --product-cli
+      - name: Test Windows triple installation and recovery
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./integration/node-install-windows.ps1 -Client "dist/$env:CLIENT_ASSET" -Daemon "dist/$env:ASSET" -Compat "dist/$env:COMPAT_ASSET"
+      - name: Check Windows executable runtime dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($asset in @($env:ASSET, $env:CLIENT_ASSET, $env:COMPAT_ASSET)) {
+            $dependencies = llvm-readobj --coff-imports "dist/$asset"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not inspect executable DLL dependencies' }
+            $libraries = $dependencies -match '^\s*Name: .+\.dll\s*$'
+            if (!$libraries) { throw 'No Windows DLL imports found' }
+            $libraries
+            if ($libraries -match '^\s*Name: (?:vcruntime|msvcp|concrt).*\.dll\s*$') {
+              throw 'The executable requires a separately installed Visual C++ runtime'
+            }
+          }
+      # Packaging consumes the tested relay without adding a standalone release asset.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.upload && runner.os == 'Linux'
+        with:
+          name: package-relay-${{ matrix.platform.asset }}
+          path: rust/target/${{ matrix.platform.target }}/release/laneway-relay
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: inputs.upload
+        with:
+          name: laneway-node-${{ matrix.platform.asset }}
+          path: |
+            dist/${{ env.ASSET }}
+            dist/${{ env.CLIENT_ASSET }}
+            dist/${{ env.COMPAT_ASSET }}
+            dist/laneway_windows_*.exe
+          if-no-files-found: error

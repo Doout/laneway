@@ -20,19 +20,32 @@ off the control-plane host. Laneway does not manage the host firewall.
 
 ```sh
 sudo laneway control status
-sudo laneway control update
+sudo laneway update server
 sudo laneway control backup
 ```
 
 `status` exits nonzero when a required service is unhealthy. `update` verifies
 the release, creates a backup, and retains the prior release for rollback.
 
+During init, the controller creates or verifies the certificate-bound immutable
+initial network before it opens listeners or becomes healthy. The locked init
+workflow then reads that exact network back, refuses `.env` name or pool drift,
+and registers or verifies the relay before waiting for relay health. Run this
+through `laneway control init`; do not invoke the packaged bootstrap helper in
+parallel with another lifecycle operation.
+
 Connector identities persist in named Docker volumes. Do not remove the volume
 during an upgrade. Update a Connector with:
 
 ```sh
-sudo laneway-update-connector laneway-connector-office
+sudo laneway update connector office
 ```
+
+For a native installation, `laneway update client` selects the client updater. Restart a running node to pick up the new binary. Bare `laneway update` detects the local installation. If there are several managed connectors or both a control plane and a connector, specify the target. Run Docker updates on the Docker host. A command issued inside a managed container reports the host command.
+
+During the first upgrade from an older two-file Unix user installation, the old updater installs a version-matched compatibility CLI and daemon. Run `laneway update client` once more to install the Rust CLI and its matching helper. Fresh installations get all three files in one step.
+
+On a Linux host with the system package installed, `sudo laneway configure server [DOMAIN]` runs the production control-plane installer or validates the existing deployment.
 
 ## Administrator lifecycle
 
@@ -271,6 +284,13 @@ After a crash, Laneway reclaims only exact state carrying its ownership markers.
 If startup refuses recovery, stop every Laneway process, inspect the conflicting
 objects, remove only confirmed Laneway residue, and restore the site's recorded
 baseline.
+
+Recovery preserves the controller's durable network and service identity
+binding, so restored state requires certificates with the same identities.
+Rollback restores both the legacy configuration and its protected
+pre-migration database snapshot. A legacy configuration may intentionally omit
+`[controller.initial_network]`; current preparation and upgrade migration always
+write and validate it before candidate startup.
 
 ### Stale control-plane lifecycle lock
 

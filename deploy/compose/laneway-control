@@ -1,5 +1,9 @@
 #!/bin/sh
 set -eu
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+IFS=$(printf ' \t\n_'); IFS=${IFS%_}
+export PATH
+unset ENV BASH_ENV CDPATH
 
 script_path=$0
 link_count=0
@@ -16,10 +20,14 @@ while [ -L "$script_path" ]; do
   esac
 done
 base_dir=$(CDPATH='' cd -- "$(dirname -- "$script_path")" && pwd)
+case "$base_dir" in *[!A-Za-z0-9_./-]*) echo "laneway-control: deployment directory contains an unsafe character" >&2; exit 1 ;; esac
 env_file=$base_dir/.env
 state_dir=$base_dir/generated/lifecycle
 lock_dir=$state_dir/operator.lock
 lock_held=false
+lock_borrowed=false
+lock_marker=
+lock_token=
 rollback_database_snapshot=
 rollback_database_sha256=
 rollback_database_restore_target=
@@ -38,7 +46,7 @@ usage: laneway-control <init|user-token|invite|route|status|administrator|update
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
-  invite --name NAME [--ephemeral|--remembered] [--docker --connector [--bootstrap]]
+  invite --name NAME [--ephemeral|--remembered] [--native [--connector] | --docker --connector [--bootstrap]]
   route add --connector NAME --to IP_OR_PREFIX [--allow USER] [--mode nat|routed] [--metric NUMBER]
   administrator bootstrap --username USERNAME
   administrator recover --username USERNAME
@@ -81,17 +89,104 @@ run_step() {
 }
 
 release_lock() {
-  [ "$lock_held" = false ] || [ ! -d "$lock_dir" ] || find "$lock_dir" -maxdepth 0 -delete 2>/dev/null || true
+  if [ "$lock_held" = true ] && [ "$lock_borrowed" = false ]; then
+    [ -z "$lock_marker" ] || [ ! -e "$lock_marker" ] || \
+      find "$lock_marker" -maxdepth 0 -delete 2>/dev/null || true
+    [ ! -d "$lock_dir" ] || find "$lock_dir" -maxdepth 0 -delete 2>/dev/null || true
+    unset LANEWAY_LIFECYCLE_LOCK_TOKEN LANEWAY_LIFECYCLE_LOCK_ROLE
+  fi
   lock_held=false
+  lock_borrowed=false
+  lock_marker=
+  lock_token=
 }
+
+validate_borrowed_lock() {
+  borrowed_token=$1
+  case "$borrowed_token" in
+    .handoff.*)
+      borrowed_suffix=${borrowed_token#.handoff.}
+      case "$borrowed_suffix" in ''|*[!A-Za-z0-9]*) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+  borrowed_marker=$lock_dir/$borrowed_token
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] && \
+    [ "$(stat -c '%a:%u:%g' "$state_dir")" = 700:0:0 ] && \
+    [ -d "$lock_dir" ] && [ ! -L "$lock_dir" ] && \
+    [ "$(stat -c '%a:%u:%g' "$lock_dir")" = 700:0:0 ] && \
+    [ -f "$borrowed_marker" ] && [ ! -L "$borrowed_marker" ] && \
+    [ "$(stat -c '%a:%u:%g:%h' "$borrowed_marker")" = 600:0:0:1 ] && \
+    [ "$(wc -l < "$borrowed_marker")" -eq 3 ] && \
+    [ "$(sed -n '1p' "$borrowed_marker")" = version=1 ] && \
+    [ "$(sed -n '2p' "$borrowed_marker")" = "deployment=$base_dir" ] && \
+    [ "$(sed -n '3p' "$borrowed_marker")" = "token=$borrowed_token" ] || return 1
+  lock_marker=$borrowed_marker
+  lock_token=$borrowed_token
+}
+
 acquire_lock() {
+  handoff_permission=${1:-owner-only}
+  token_present=false
+  role_present=false
+  [ "${LANEWAY_LIFECYCLE_LOCK_TOKEN+x}" != x ] || token_present=true
+  [ "${LANEWAY_LIFECYCLE_LOCK_ROLE+x}" != x ] || role_present=true
+  if [ "$token_present" = true ] || [ "$role_present" = true ]; then
+    if [ "$handoff_permission" != borrower ] || \
+      [ "$token_present" != true ] || [ "$role_present" != true ] || \
+      [ "${LANEWAY_LIFECYCLE_LOCK_ROLE:-}" != borrower ] || \
+      [ -z "${LANEWAY_LIFECYCLE_LOCK_TOKEN:-}" ] || \
+      ! validate_borrowed_lock "$LANEWAY_LIFECYCLE_LOCK_TOKEN"; then
+      die "lifecycle lock handoff is missing, malformed, or unauthorized"
+    fi
+    lock_held=true
+    lock_borrowed=true
+    trap release_lock EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    return
+  fi
+  generated_dir=$base_dir/generated
+  if [ -e "$generated_dir" ] || [ -L "$generated_dir" ]; then
+    if [ ! -d "$generated_dir" ] || [ -L "$generated_dir" ]; then
+      die "generated must be a real directory"
+    fi
+  else
+    mkdir "$generated_dir" 2>/dev/null || die "could not create the generated state directory"
+    chmod 0700 "$generated_dir" || die "could not protect the generated state directory"
+  fi
   if [ -e "$state_dir" ] || [ -L "$state_dir" ]; then
     if [ ! -d "$state_dir" ] || [ -L "$state_dir" ]; then
       die "generated/lifecycle must be a real directory"
     fi
+  else
+    mkdir "$state_dir" 2>/dev/null || die "could not create the lifecycle state directory"
+    chmod 0700 "$state_dir" || die "could not protect the lifecycle state directory"
   fi
-  install -d -m 0700 "$state_dir"
+  [ ! -L "$generated_dir" ] && [ -d "$generated_dir" ] && \
+    [ ! -L "$state_dir" ] && [ -d "$state_dir" ] || \
+    die "generated lifecycle state changed during lock acquisition"
   mkdir "$lock_dir" 2>/dev/null || die "another lifecycle operation is active (inspect generated/lifecycle/operator.lock if it is stale)"
+  chmod 0700 "$lock_dir" || {
+    find "$lock_dir" -maxdepth 0 -delete 2>/dev/null || true
+    die "could not protect the lifecycle operation lock"
+  }
+  lock_marker=$(mktemp "$lock_dir/.handoff.XXXXXX") || {
+    find "$lock_dir" -maxdepth 0 -delete 2>/dev/null || true
+    die "could not create the lifecycle lock handoff marker"
+  }
+  lock_token=${lock_marker##*/}
+  if ! chmod 0600 "$lock_marker" || ! {
+    printf '%s\n' version=1 "deployment=$base_dir" "token=$lock_token" > "$lock_marker"
+  }; then
+    find "$lock_marker" -maxdepth 0 -delete 2>/dev/null || true
+    find "$lock_dir" -maxdepth 0 -delete 2>/dev/null || true
+    die "could not protect the lifecycle lock handoff marker"
+  fi
+  LANEWAY_LIFECYCLE_LOCK_TOKEN=$lock_token
+  LANEWAY_LIFECYCLE_LOCK_ROLE=owner
+  export LANEWAY_LIFECYCLE_LOCK_TOKEN LANEWAY_LIFECYCLE_LOCK_ROLE
   lock_held=true
   trap release_lock EXIT
   trap 'exit 129' HUP
@@ -99,60 +194,369 @@ acquire_lock() {
   trap 'exit 143' TERM
 }
 
+reject_runtime_overrides() {
+  [ "${TAR_OPTIONS+x}" != x ] || \
+    die "TAR_OPTIONS is not allowed for control-plane lifecycle commands"
+  trust_override=$(env | sed -n \
+    -e 's/^\(COSIGN_[A-Za-z0-9_]*\)=.*/\1/p' \
+    -e 's/^\(SIGSTORE_[A-Za-z0-9_]*\)=.*/\1/p' \
+    -e 's/^\(TUF_[A-Za-z0-9_]*\)=.*/\1/p' | sed -n '1p')
+  [ -z "$trust_override" ] || die "$trust_override is not allowed for control-plane lifecycle commands"
+  if [ "${LANEWAY_REPOSITORY+x}" = x ] || [ "${LANEWAY_RELEASE_BASE_URL+x}" = x ] || \
+    [ "${LANEWAY_AUTHENTICATED_RELEASE_BASE_URL+x}" = x ] || \
+    [ "${LANEWAY_AUTHENTICATED_IMAGE_DIGESTS_FILE+x}" = x ] || \
+    [ "${LANEWAY_AUTHENTICATED_COSIGN_BIN+x}" = x ]; then
+    die "release source overrides are not allowed for control-plane lifecycle commands"
+  fi
+  if [ "${LANEWAY_COSIGN_BIN+x}" = x ] || [ "${LANEWAY_COMMAND+x}" = x ] || \
+    [ "${LANEWAY_CONTROL_COMMAND+x}" = x ]; then
+    die "executable path overrides are not allowed for control-plane lifecycle commands"
+  fi
+  if [ "${CURL_CA_BUNDLE+x}" = x ] || [ "${SSL_CERT_FILE+x}" = x ] || \
+    [ "${SSL_CERT_DIR+x}" = x ]; then
+    die "TLS trust path overrides are not allowed for control-plane lifecycle commands"
+  fi
+  for docker_override in DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_TLS DOCKER_CONFIG; do
+    case "$docker_override" in
+      DOCKER_HOST) docker_override_present=${DOCKER_HOST+x} ;;
+      DOCKER_CONTEXT) docker_override_present=${DOCKER_CONTEXT+x} ;;
+      DOCKER_TLS_VERIFY) docker_override_present=${DOCKER_TLS_VERIFY+x} ;;
+      DOCKER_CERT_PATH) docker_override_present=${DOCKER_CERT_PATH+x} ;;
+      DOCKER_TLS) docker_override_present=${DOCKER_TLS+x} ;;
+      DOCKER_CONFIG) docker_override_present=${DOCKER_CONFIG+x} ;;
+    esac
+    [ "$docker_override_present" != x ] || \
+      die "$docker_override is not allowed for control-plane lifecycle commands"
+  done
+  compose_override=$(env | sed -n 's/^\(COMPOSE_[A-Za-z0-9_]*\)=.*/\1/p' | sed -n '1p')
+  [ -z "$compose_override" ] || \
+    die "$compose_override is not allowed for control-plane lifecycle commands"
+  root_home=/root
+  if [ -e "$root_home" ] || [ -L "$root_home" ]; then
+    [ -d "$root_home" ] && [ ! -L "$root_home" ] && \
+      [ "$(stat -c '%u:%g' "$root_home")" = 0:0 ] && \
+      [ $((0$(stat -c '%a' "$root_home") & 0022)) -eq 0 ] || \
+      die "/root must be a root-owned real directory not writable by group or others"
+  else
+    [ "$(stat -c '%u:%g' /)" = 0:0 ] && [ $((0$(stat -c '%a' /) & 0022)) -eq 0 ] || \
+      die "the filesystem root must protect the absent /root Docker configuration parent"
+  fi
+  docker_config=/root/.docker
+  if [ -e "$docker_config" ] || [ -L "$docker_config" ]; then
+    [ -d "$docker_config" ] && [ ! -L "$docker_config" ] && \
+      [ "$(stat -c '%u:%g' "$docker_config")" = 0:0 ] && \
+      [ $((0$(stat -c '%a' "$docker_config") & 0022)) -eq 0 ] || \
+      die "/root/.docker must be a root-owned real directory not writable by group or others"
+  fi
+  DOCKER_CONFIG=$docker_config
+  HOME=/root
+  export DOCKER_CONFIG HOME
+}
+
+scrub_compose_interpolation_environment() {
+  unset LANEWAY_VERSION LANEWAY_INSTALL_PROFILE \
+    LANEWAY_CONTROLLER_IMAGE_DIGEST LANEWAY_RELAY_IMAGE_DIGEST \
+    LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_CONNECTOR_IMAGE_DIGEST \
+    LANEWAY_EXIT_NODE_IMAGE_DIGEST LANEWAY_BIND_ADDRESS \
+    LANEWAY_CONTROLLER_PORT LANEWAY_RELAY_QUIC_PORT LANEWAY_RELAY_TCP_PORT \
+    LANEWAY_EXIT_DIRECT_PORT LANEWAY_CONTROLLER_SERVER_NAME \
+    LANEWAY_NETWORK_ID LANEWAY_CONTROLLER_SERVICE_ID LANEWAY_RELAY_SERVICE_ID \
+    LANEWAY_NETWORK_NAME LANEWAY_IPV4_POOL LANEWAY_RELAY_PUBLIC_ENDPOINT \
+    LANEWAY_BACKUP_RECIPIENT
+  unset COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_PROFILES COMPOSE_ENV_FILES \
+    COMPOSE_PATH_SEPARATOR COMPOSE_DISABLE_ENV_FILE COMPOSE_CONVERT_WINDOWS_PATHS \
+    COMPOSE_IGNORE_ORPHANS COMPOSE_REMOVE_ORPHANS COMPOSE_PARALLEL_LIMIT \
+    COMPOSE_ANSI COMPOSE_STATUS_STDOUT COMPOSE_PROGRESS COMPOSE_MENU \
+    COMPOSE_EXPERIMENTAL COMPOSE_BAKE COMPOSE_BRIDGE_TRANSFORMATIONS
+  unset DOCKER_DEFAULT_PLATFORM
+}
+
 compose() {
-  docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
+  validate_env_syntax "$env_file"
+  docker --context default compose --project-name laneway --project-directory "$base_dir" \
+    --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
 }
 compose_with_env() {
   candidate=$1; shift
-  docker compose --project-directory "$base_dir" --env-file "$candidate" -f "$base_dir/compose.yaml" "$@"
+  validate_env_syntax "$candidate"
+  docker --context default compose --project-name laneway --project-directory "$base_dir" \
+    --env-file "$candidate" -f "$base_dir/compose.yaml" "$@"
 }
 compose_file_with_env() {
   candidate=$1; compose_file=$2; shift 2
-  docker compose --project-directory "$base_dir" --env-file "$candidate" -f "$compose_file" "$@"
+  validate_env_syntax "$candidate"
+  docker --context default compose --project-name laneway --project-directory "$base_dir" \
+    --env-file "$candidate" -f "$compose_file" "$@"
+}
+
+setting_mention_count() {
+  setting_file=$1
+  setting_key=$2
+  awk -v wanted="$setting_key" '
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      sub(/^export[[:space:]]+/, "", line)
+      if (substr(line, 1, length(wanted)) != wanted) next
+      rest = substr(line, length(wanted) + 1)
+      if (rest ~ /^[[:space:]]*=/ || rest ~ /^[[:space:]]*(#.*)?$/) mentions++
+    }
+    END { print mentions + 0 }
+  ' "$setting_file"
+}
+
+validate_env_syntax() {
+  syntax_file=$1
+  if [ ! -f "$syntax_file" ] || [ -L "$syntax_file" ]; then
+    die "release environment must be a regular, non-symlink file: $syntax_file"
+  fi
+  awk '
+    BEGIN {
+      allowed["LANEWAY_VERSION"] = 1
+      allowed["LANEWAY_INSTALL_PROFILE"] = 1
+      allowed["LANEWAY_CONTROLLER_IMAGE_DIGEST"] = 1
+      allowed["LANEWAY_RELAY_IMAGE_DIGEST"] = 1
+      allowed["LANEWAY_ADMIN_IMAGE_DIGEST"] = 1
+      allowed["LANEWAY_CONNECTOR_IMAGE_DIGEST"] = 1
+      allowed["LANEWAY_EXIT_NODE_IMAGE_DIGEST"] = 1
+      allowed["LANEWAY_BIND_ADDRESS"] = 1
+      allowed["LANEWAY_CONTROLLER_PORT"] = 1
+      allowed["LANEWAY_RELAY_QUIC_PORT"] = 1
+      allowed["LANEWAY_RELAY_TCP_PORT"] = 1
+      allowed["LANEWAY_EXIT_DIRECT_PORT"] = 1
+      allowed["LANEWAY_CONTROLLER_SERVER_NAME"] = 1
+      allowed["LANEWAY_NETWORK_ID"] = 1
+      allowed["LANEWAY_CONTROLLER_SERVICE_ID"] = 1
+      allowed["LANEWAY_RELAY_SERVICE_ID"] = 1
+      allowed["LANEWAY_NETWORK_NAME"] = 1
+      allowed["LANEWAY_IPV4_POOL"] = 1
+      allowed["LANEWAY_RELAY_PUBLIC_ENDPOINT"] = 1
+      allowed["LANEWAY_BACKUP_RECIPIENT"] = 1
+    }
+    $0 == "" || substr($0, 1, 1) == "#" { next }
+    {
+      separator = index($0, "=")
+      if (separator <= 1) exit 1
+      key = substr($0, 1, separator - 1)
+      value = substr($0, separator + 1)
+      if (!(key in allowed) || value == "" || value !~ /^[A-Za-z0-9._:\/+-]+$/ || seen[key]++) exit 1
+    }
+  ' "$syntax_file" || \
+    die "release environment contains a malformed, duplicate, empty, or unsupported setting: $syntax_file"
 }
 
 read_setting() {
   file=$1; key=$2
+  if [ ! -f "$file" ] || [ -L "$file" ]; then
+    die "release environment must be a regular, non-symlink file: $file"
+  fi
+  count=$(grep -c "^${key}=" "$file" || true)
+  mentions=$(setting_mention_count "$file" "$key")
+  [ "$mentions" -eq "$count" ] || die "malformed $key in $file"
   value=$(sed -n "s/^${key}=//p" "$file")
-  [ -n "$value" ] || die "missing $key in $file"
-  [ "$(printf '%s\n' "$value" | wc -l)" -eq 1 ] || die "duplicate $key in $file"
+  [ "$count" -eq 1 ] || die "missing or duplicate $key in $file"
+  [ -n "$value" ] || die "empty $key in $file"
   case "$value" in *[!A-Za-z0-9._:/+-]*) die "$key contains an unsafe character" ;; esac
   printf '%s' "$value"
 }
 
 optional_setting() {
   file=$1; key=$2
+  if [ ! -f "$file" ] || [ -L "$file" ]; then
+    die "release environment must be a regular, non-symlink file: $file"
+  fi
+  count=$(grep -c "^${key}=" "$file" || true)
+  mentions=$(setting_mention_count "$file" "$key")
+  [ "$mentions" -eq "$count" ] || die "malformed $key in $file"
+  case "$count" in
+    0) return 1 ;;
+    1) ;;
+    *) die "duplicate $key in $file" ;;
+  esac
   value=$(sed -n "s/^${key}=//p" "$file")
-  [ "$(printf '%s\n' "$value" | sed '/^$/d' | wc -l)" -le 1 ] || die "duplicate $key in $file"
-  [ -n "$value" ] || return 1
+  [ -n "$value" ] || die "empty $key in $file"
   case "$value" in *[!A-Za-z0-9._:/+-]*) die "$key contains an unsafe character" ;; esac
   printf '%s' "$value"
 }
 
-validate_release_env() {
+controller_port_setting() {
   file=$1
   if [ ! -f "$file" ] || [ -L "$file" ]; then
     die "release environment must be a regular, non-symlink file: $file"
   fi
+  count=$(grep -c '^LANEWAY_CONTROLLER_PORT=' "$file" || true)
+  mentions=$(setting_mention_count "$file" LANEWAY_CONTROLLER_PORT)
+  [ "$mentions" -eq "$count" ] || die "malformed LANEWAY_CONTROLLER_PORT in $file"
+  case "$count" in
+    0) value=8443 ;;
+    1) value=$(sed -n 's/^LANEWAY_CONTROLLER_PORT=//p' "$file") ;;
+    *) die "duplicate LANEWAY_CONTROLLER_PORT in $file" ;;
+  esac
+  case "$value" in ''|*[!0-9]*) die "LANEWAY_CONTROLLER_PORT must be a port from 1 through 65535" ;; esac
+  [ "$value" -ge 1 ] && [ "$value" -le 65535 ] || \
+    die "LANEWAY_CONTROLLER_PORT must be a port from 1 through 65535"
+  printf '%s' "$value"
+}
+
+required_port_setting() {
+  port_file=$1
+  port_key=$2
+  port_value=$(read_setting "$port_file" "$port_key")
+  case "$port_value" in
+    ''|*[!0-9]*) die "$port_key must be a port from 1 through 65535" ;;
+  esac
+  [ "$port_value" -ge 1 ] && [ "$port_value" -le 65535 ] || \
+    die "$port_key must be a port from 1 through 65535"
+  printf '%s' "$port_value"
+}
+
+validate_ipv4() {
+  printf '%s\n' "$1" | awk -F. '
+    NF != 4 { exit 1 }
+    {
+      for (octet_index = 1; octet_index <= 4; octet_index++) {
+        if ($octet_index !~ /^[0-9]+$/ || sprintf("%d", $octet_index + 0) != $octet_index ||
+            $octet_index < 0 || $octet_index > 255) exit 1
+      }
+    }
+  '
+}
+
+validate_ipv4_pool() {
+  printf '%s\n' "$1" | awk -F/ '
+    function overlaps(first, last, reserved_first, reserved_last) {
+      return first <= reserved_last && reserved_first <= last
+    }
+    NF != 2 { exit 1 }
+    $2 !~ /^[0-9]+$/ || sprintf("%d", $2 + 0) != $2 || $2 < 8 || $2 > 30 { exit 1 }
+    {
+      octet_count = split($1, octets, ".")
+      if (octet_count != 4) exit 1
+      for (octet_index = 1; octet_index <= 4; octet_index++) {
+        if (octets[octet_index] !~ /^[0-9]+$/ ||
+            sprintf("%d", octets[octet_index] + 0) != octets[octet_index] ||
+            octets[octet_index] < 0 || octets[octet_index] > 255) exit 1
+      }
+      address = ((octets[1] * 256 + octets[2]) * 256 + octets[3]) * 256 + octets[4]
+      block = 2 ^ (32 - $2)
+      if (address % block != 0) exit 1
+      last = address + block - 1
+      if (overlaps(address, last, 0, 0) ||
+          overlaps(address, last, 127 * 16777216, 127 * 16777216 + 16777215) ||
+          overlaps(address, last, 169 * 16777216 + 254 * 65536, 169 * 16777216 + 254 * 65536 + 65535) ||
+          overlaps(address, last, 224 * 16777216, 239 * 16777216 + 16777215)) exit 1
+    }
+  '
+}
+
+validate_managed_id() {
+  managed_id=$1
+  [ "${#managed_id}" -eq 32 ] || return 1
+  case "$managed_id" in *[!0-9a-f]*) return 1 ;; esac
+  [ "$managed_id" != 00000000000000000000000000000000 ]
+}
+
+validate_network_name() {
+  LC_ALL=C printf '%s\n' "$1" | LC_ALL=C awk '
+    length($0) < 1 || length($0) > 253 || $0 !~ /^[A-Za-z0-9._-]+$/ { exit 1 }
+  '
+}
+
+exit_node_image_repository() {
+  release_compose_file=$1
+  if [ ! -f "$release_compose_file" ] || [ -L "$release_compose_file" ]; then
+    die "release Compose file must be a regular, non-symlink file: $release_compose_file"
+  fi
+  zero_digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+  exit_image="ghcr.io/doout/laneway-exit-node:\${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@\${LANEWAY_EXIT_NODE_IMAGE_DIGEST:-$zero_digest}"
+  connector_image="ghcr.io/doout/laneway-connector:\${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@\${LANEWAY_EXIT_NODE_IMAGE_DIGEST:-$zero_digest}"
+  exit_repository=$(awk -v exit_image="$exit_image" -v connector_image="$connector_image" '
+    $0 == "  exit-node:" {
+      sections++
+      active = 1
+      next
+    }
+    active && $0 ~ /^  [A-Za-z0-9_-]+:[[:space:]]*(#.*)?$/ { active = 0 }
+    active && $0 ~ /^[[:space:]]+image:/ {
+      assignments++
+      line = $0
+      sub(/^[[:space:]]*image:[[:space:]]*/, "", line)
+      if (line == exit_image) repository = "ghcr.io/doout/laneway-exit-node"
+      else if (line == connector_image) repository = "ghcr.io/doout/laneway-connector"
+      else invalid++
+    }
+    END {
+      if (sections != 1 || assignments != 1 || invalid != 0 || repository == "") exit 1
+      print repository
+    }
+  ' "$release_compose_file") || \
+    die "release Compose file has no unique supported exit-node image contract"
+  printf '%s' "$exit_repository"
+}
+
+validate_release_env_values() {
+  file=$1
+  version_policy=${2:-release}
+  validate_env_syntax "$file"
   version=$(read_setting "$file" LANEWAY_VERSION)
-  printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || die "LANEWAY_VERSION must be semantic"
+  case "$version_policy:$version" in
+    development:dev) ;;
+    *)
+      printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || \
+        die "LANEWAY_VERSION must be semantic"
+      ;;
+  esac
+  profile=$(read_setting "$file" LANEWAY_INSTALL_PROFILE)
+  case "$profile" in quick|production) ;; *) die "LANEWAY_INSTALL_PROFILE must be quick or production" ;; esac
   for key in LANEWAY_CONTROLLER_IMAGE_DIGEST LANEWAY_RELAY_IMAGE_DIGEST LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_EXIT_NODE_IMAGE_DIGEST; do
     digest=$(read_setting "$file" "$key")
     printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "$key is not an immutable digest"
-    [ "$digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || die "$key is a placeholder"
+    if [ "$version" != dev ]; then
+      [ "$digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || \
+        die "$key is a placeholder"
+    fi
   done
   if connector_digest=$(optional_setting "$file" LANEWAY_CONNECTOR_IMAGE_DIGEST); then
     printf '%s\n' "$connector_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "LANEWAY_CONNECTOR_IMAGE_DIGEST is not an immutable digest"
-    [ "$connector_digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || die "LANEWAY_CONNECTOR_IMAGE_DIGEST is a placeholder"
+    if [ "$version" != dev ]; then
+      [ "$connector_digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || \
+        die "LANEWAY_CONNECTOR_IMAGE_DIGEST is a placeholder"
+    fi
   fi
-  for key in LANEWAY_NETWORK_ID LANEWAY_CONTROLLER_SERVICE_ID LANEWAY_RELAY_SERVICE_ID LANEWAY_CONTROLLER_SERVER_NAME LANEWAY_NETWORK_NAME LANEWAY_IPV4_POOL LANEWAY_RELAY_PUBLIC_ENDPOINT; do
-    read_setting "$file" "$key" >/dev/null
-  done
+  bind_address=$(read_setting "$file" LANEWAY_BIND_ADDRESS)
+  validate_ipv4 "$bind_address" || die "LANEWAY_BIND_ADDRESS must be a canonical IPv4 address"
+  read_setting "$file" LANEWAY_CONTROLLER_SERVER_NAME >/dev/null
+  network_id=$(read_setting "$file" LANEWAY_NETWORK_ID)
+  controller_id=$(read_setting "$file" LANEWAY_CONTROLLER_SERVICE_ID)
+  relay_id=$(read_setting "$file" LANEWAY_RELAY_SERVICE_ID)
+  if ! validate_managed_id "$network_id" || ! validate_managed_id "$controller_id" || \
+    ! validate_managed_id "$relay_id" || [ "$network_id" = "$controller_id" ] || \
+    [ "$network_id" = "$relay_id" ] || [ "$controller_id" = "$relay_id" ]; then
+    die "network, controller, and relay IDs must be distinct nonzero 32-character lowercase hex values"
+  fi
+  network_name=$(read_setting "$file" LANEWAY_NETWORK_NAME)
+  validate_network_name "$network_name" || \
+    die "LANEWAY_NETWORK_NAME must be 1 through 253 bytes of letters, numbers, dot, underscore, or dash"
+  ipv4_pool=$(read_setting "$file" LANEWAY_IPV4_POOL)
+  validate_ipv4_pool "$ipv4_pool" || \
+    die "LANEWAY_IPV4_POOL must be a canonical routable IPv4 /8 through /30"
+  read_setting "$file" LANEWAY_RELAY_PUBLIC_ENDPOINT >/dev/null
+  required_port_setting "$file" LANEWAY_RELAY_QUIC_PORT >/dev/null
+  required_port_setting "$file" LANEWAY_RELAY_TCP_PORT >/dev/null
+  required_port_setting "$file" LANEWAY_EXIT_DIRECT_PORT >/dev/null
   recipient=$(read_setting "$file" LANEWAY_BACKUP_RECIPIENT)
   printf '%s\n' "$recipient" | grep -Eq '^age1[0-9a-z]{58}$' || die "LANEWAY_BACKUP_RECIPIENT must be an age X25519 recipient"
+  controller_port_setting "$file" >/dev/null
+}
+
+validate_release_env_compatibility() {
+  file=$1
+  version_policy=${2:-release}
+  validate_release_env_values "$file" "$version_policy"
   if [ "$file" != "$env_file" ] && [ -f "$env_file" ]; then
+    validate_release_env_values "$env_file" release
     for key in \
-      LANEWAY_BIND_ADDRESS LANEWAY_CONTROLLER_PORT LANEWAY_RELAY_QUIC_PORT \
+      LANEWAY_BIND_ADDRESS LANEWAY_RELAY_QUIC_PORT \
       LANEWAY_RELAY_TCP_PORT LANEWAY_EXIT_DIRECT_PORT LANEWAY_CONTROLLER_SERVER_NAME \
       LANEWAY_NETWORK_ID LANEWAY_CONTROLLER_SERVICE_ID LANEWAY_RELAY_SERVICE_ID \
       LANEWAY_NETWORK_NAME LANEWAY_IPV4_POOL LANEWAY_RELAY_PUBLIC_ENDPOINT
@@ -161,30 +565,112 @@ validate_release_env() {
       candidate_value=$(read_setting "$file" "$key")
       [ "$candidate_value" = "$current" ] || die "$key cannot change during upgrade/rollback"
     done
+    current_controller_port=$(controller_port_setting "$env_file")
+    candidate_controller_port=$(controller_port_setting "$file")
+    [ "$candidate_controller_port" = "$current_controller_port" ] || \
+      die "LANEWAY_CONTROLLER_PORT cannot change during upgrade/rollback"
   fi
-  compose_with_env "$file" config --quiet
+}
+
+validate_release_compose() {
+  file=$1
+  release_compose_file=${2:-$base_dir/compose.yaml}
+  if [ "$release_compose_file" = "$base_dir/compose.yaml" ]; then
+    compose_with_env "$file" config --quiet
+  else
+    compose_file_with_env "$file" "$release_compose_file" config --quiet
+  fi
+}
+
+validate_release_env() {
+  file=$1
+  release_compose_file=${2:-$base_dir/compose.yaml}
+  version_policy=${3:-release}
+  validate_release_env_compatibility "$file" "$version_policy"
+  validate_release_compose "$file" "$release_compose_file"
+}
+
+validate_release_initial_network() {
+  inspection_config=$1
+  inspection_env=$2
+  inspection_operation=$3
+  if [ ! -f "$inspection_config" ] || [ -L "$inspection_config" ]; then
+    die "release controller configuration must be a regular, non-symlink file: $inspection_config"
+  fi
+  command -v jq >/dev/null 2>&1 || die "release configuration validation requires jq"
+  inspection_network_id=$(read_setting "$inspection_env" LANEWAY_NETWORK_ID)
+  inspection_network_name=$(read_setting "$inspection_env" LANEWAY_NETWORK_NAME)
+  inspection_ipv4_pool=$(read_setting "$inspection_env" LANEWAY_IPV4_POOL)
+  inspection_json=$(laneway_host config inspect-controller-initial-network -config "$inspection_config") || \
+    die "release controller configuration is invalid"
+  case "$inspection_operation" in
+    rollback)
+      # jq variables are bound below; the shell must preserve the dollar signs.
+      # shellcheck disable=SC2016
+      inspection_filter='
+        length == 1 and (.[0] |
+          type == "object" and
+          ((.configured == false and
+            ((has("bootstrap_network_id") | not) or .bootstrap_network_id == $network_id) and
+            ((keys - ["configured", "bootstrap_network_id"]) | length == 0)) or
+           (.configured == true and .network_id == $network_id and .name == $name and
+            .ipv4_pool == $ipv4_pool and
+            ((has("ipv6_pool") | not) or (.ipv6_pool | type == "string" and length > 0)) and
+            ((has("bootstrap_network_id") | not) or .bootstrap_network_id == $network_id) and
+            ((keys - ["configured", "network_id", "name", "ipv4_pool", "ipv6_pool",
+              "bootstrap_network_id"]) | length == 0))))
+      '
+      ;;
+    upgrade)
+      # jq variables are bound below; the shell must preserve the dollar signs.
+      # shellcheck disable=SC2016
+      inspection_filter='
+        length == 1 and (.[0] |
+          type == "object" and .configured == true and
+          .network_id == $network_id and .name == $name and .ipv4_pool == $ipv4_pool and
+          ((has("ipv6_pool") | not) or (.ipv6_pool | type == "string" and length > 0)) and
+          ((has("bootstrap_network_id") | not) or .bootstrap_network_id == $network_id) and
+          ((keys - ["configured", "network_id", "name", "ipv4_pool", "ipv6_pool",
+            "bootstrap_network_id"]) | length == 0))
+      '
+      ;;
+    *) die "unsupported release activation operation: $inspection_operation" ;;
+  esac
+  printf '%s\n' "$inspection_json" | jq -e -s \
+    --arg network_id "$inspection_network_id" --arg name "$inspection_network_name" \
+    --arg ipv4_pool "$inspection_ipv4_pool" "$inspection_filter" >/dev/null || \
+    die "release controller initial-network configuration does not match the candidate environment"
 }
 
 verify_release_images() {
   file=$1
+  release_compose_file=${2:-$base_dir/compose.yaml}
+  validate_release_env_values "$file" release
+  exit_repository=$(exit_node_image_repository "$release_compose_file")
+  connector_present=false
+  if optional_setting "$file" LANEWAY_CONNECTOR_IMAGE_DIGEST >/dev/null; then
+    connector_present=true
+    [ "$exit_repository" = ghcr.io/doout/laneway-exit-node ] || \
+      die "dedicated Connector releases require the exit-node image repository"
+  fi
   cosign_command=$(cosign_verifier) || return 1
   version=$(read_setting "$file" LANEWAY_VERSION) || return 1
   identity="https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v$version"
-  if optional_setting "$file" LANEWAY_CONNECTOR_IMAGE_DIGEST >/dev/null; then
+  if [ "$connector_present" = true ]; then
     set -- \
       "ghcr.io/doout/laneway-controller:LANEWAY_CONTROLLER_IMAGE_DIGEST" \
       "ghcr.io/doout/laneway-relay:LANEWAY_RELAY_IMAGE_DIGEST" \
       "ghcr.io/doout/laneway-admin:LANEWAY_ADMIN_IMAGE_DIGEST" \
       "ghcr.io/doout/lane-edge:LANEWAY_CONNECTOR_IMAGE_DIGEST" \
-      "ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+      "$exit_repository:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
   else
-    # Releases before the dedicated scratch Connector used one shared image for
-    # both Connector and Exit Node. Retain signed rollback across that boundary.
+    # Releases before the dedicated scratch Connector used the image selected by
+    # that release's preserved Compose file for both roles.
     set -- \
       "ghcr.io/doout/laneway-controller:LANEWAY_CONTROLLER_IMAGE_DIGEST" \
       "ghcr.io/doout/laneway-relay:LANEWAY_RELAY_IMAGE_DIGEST" \
       "ghcr.io/doout/laneway-admin:LANEWAY_ADMIN_IMAGE_DIGEST" \
-      "ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
+      "$exit_repository:LANEWAY_EXIT_NODE_IMAGE_DIGEST"
   fi
   for item
   do
@@ -195,20 +681,43 @@ verify_release_images() {
   done
 }
 
+validate_protected_executable() {
+  protected_executable=$1
+  [ -f "$protected_executable" ] && [ ! -L "$protected_executable" ] && \
+    [ -x "$protected_executable" ] && \
+    [ "$(stat -c '%u:%g:%h' "$protected_executable")" = 0:0:1 ] || return 1
+  protected_directory=$(dirname "$protected_executable")
+  protected_leaf=true
+  while :; do
+    [ -d "$protected_directory" ] && [ ! -L "$protected_directory" ] || return 1
+    protected_attributes=$(stat -c '%a:%u:%g' "$protected_directory") || return 1
+    protected_mode=${protected_attributes%%:*}
+    protected_owner=${protected_attributes#*:}
+    [ "$protected_owner" = 0:0 ] || return 1
+    if [ $((0$protected_mode & 0022)) -ne 0 ]; then
+      [ "$protected_leaf" = false ] && [ $((0$protected_mode & 01000)) -ne 0 ] || return 1
+    fi
+    [ "$protected_directory" != / ] || return 0
+    protected_directory=$(dirname "$protected_directory") || return 1
+    protected_leaf=false
+  done
+}
+
 cosign_verifier() {
-  cosign_command=
-  if [ -n "${LANEWAY_COSIGN_BIN+x}" ]; then
-    [ -n "$LANEWAY_COSIGN_BIN" ] && command -v "$LANEWAY_COSIGN_BIN" >/dev/null 2>&1 && cosign_command=$LANEWAY_COSIGN_BIN
-  elif [ -x /usr/local/libexec/laneway/cosign-v3.1.3 ]; then
-    cosign_command=/usr/local/libexec/laneway/cosign-v3.1.3
-  elif command -v cosign >/dev/null 2>&1; then
-    cosign_command=$(command -v cosign)
-  fi
-  [ -n "$cosign_command" ] || die "a compatible Cosign verifier is required"
+  cosign_command=/usr/local/libexec/laneway/cosign-v3.1.3
+  validate_protected_executable "$cosign_command" || \
+    die "the protected Cosign verifier is missing or unsafe"
+  cosign_version=$("$cosign_command" version --json 2>/dev/null | \
+    sed -n 's/.*"gitVersion":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+  [ "$cosign_version" = v3.1.3 ] || die "the protected Cosign verifier has an unexpected version"
   printf '%s' "$cosign_command"
 }
 
-backup_recovery() { "$base_dir/recovery.sh" backup "$1"; }
+run_lifecycle_helper() {
+  env -u DOCKER_CONFIG -u ENV -u BASH_ENV -u CDPATH -u IFS HOME=/root "$@"
+}
+
+backup_recovery() { run_lifecycle_helper "$base_dir/recovery.sh" backup "$1"; }
 
 remove_database_artifacts() {
   rollback_remove_base=$1
@@ -357,12 +866,12 @@ restore_release_database_snapshot() {
     echo "controller container still exists after removal" >&2
     return 1
   fi
-  if docker volume inspect "$rollback_controller_volume" >/dev/null 2>&1; then
-    if ! docker volume rm "$rollback_controller_volume"; then
+  if docker --context default volume inspect "$rollback_controller_volume" >/dev/null 2>&1; then
+    if ! docker --context default volume rm "$rollback_controller_volume"; then
       return 1
     fi
   fi
-  if docker volume inspect "$rollback_controller_volume" >/dev/null 2>&1; then
+  if docker --context default volume inspect "$rollback_controller_volume" >/dev/null 2>&1; then
     echo "controller state volume still exists after removal" >&2
     return 1
   fi
@@ -535,8 +1044,15 @@ publish_previous_release() {
 }
 
 admin() {
-  laneway_command=${LANEWAY_COMMAND:-/usr/local/bin/laneway}
-  case "$laneway_command" in /*) ;; *) die "LANEWAY_COMMAND must be absolute" ;; esac
+  laneway_command=/usr/local/bin/laneway
+  if [ ! -f "$laneway_command" ] || [ -L "$laneway_command" ] || [ ! -x "$laneway_command" ]; then
+    die "installed Laneway command is missing or unsafe: $laneway_command"
+  fi
+  "$laneway_command" "$@"
+}
+
+laneway_host() {
+  laneway_command=/usr/local/bin/laneway
   if [ ! -f "$laneway_command" ] || [ -L "$laneway_command" ] || [ ! -x "$laneway_command" ]; then
     die "installed Laneway command is missing or unsafe: $laneway_command"
   fi
@@ -545,7 +1061,7 @@ admin() {
 
 local_controller_endpoint() {
   bind_address=$(read_setting "$env_file" LANEWAY_BIND_ADDRESS)
-  controller_port=$(read_setting "$env_file" LANEWAY_CONTROLLER_PORT)
+  controller_port=$(controller_port_setting "$env_file")
   [ "$bind_address" != 0.0.0.0 ] || bind_address=127.0.0.1
   printf 'https://%s:%s' "$bind_address" "$controller_port"
 }
@@ -1157,7 +1673,7 @@ service_health() {
     [ "$required" = false ]
     return
   fi
-  health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container") || {
+  health=$(docker --context default inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container") || {
     echo "$service=inspect-failed"
     return 1
   }
@@ -1217,17 +1733,25 @@ run_status() {
 }
 
 connector_image_reference() {
+  release_compose_file=${1:-$base_dir/compose.yaml}
+  validate_env_syntax "$env_file"
   version=$(read_setting "$env_file" LANEWAY_VERSION)
-	if ! connector_digest=$(optional_setting "$env_file" LANEWAY_CONNECTOR_IMAGE_DIGEST); then
+  exit_repository=$(exit_node_image_repository "$release_compose_file")
+	if connector_digest=$(optional_setting "$env_file" LANEWAY_CONNECTOR_IMAGE_DIGEST); then
+    [ "$exit_repository" = ghcr.io/doout/laneway-exit-node ] || \
+      die "dedicated Connector releases require the exit-node image repository"
+    connector_repository=ghcr.io/doout/lane-edge
+  else
 		connector_digest=$(read_setting "$env_file" LANEWAY_EXIT_NODE_IMAGE_DIGEST)
+    connector_repository=$exit_repository
 	fi
-	printf 'ghcr.io/doout/lane-edge:%s@%s' "$version" "$connector_digest"
+	printf '%s:%s@%s' "$connector_repository" "$version" "$connector_digest"
 }
 
-connector_setup_token() {
+node_setup_token() {
   enrollment_token=$1; node_name=$2
   controller_name=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVER_NAME)
-  controller_port=$(read_setting "$env_file" LANEWAY_CONTROLLER_PORT)
+  controller_port=$(controller_port_setting "$env_file")
   network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
   controller_id=$(read_setting "$env_file" LANEWAY_CONTROLLER_SERVICE_ID)
   relay_endpoint=$(read_setting "$env_file" LANEWAY_RELAY_PUBLIC_ENDPOINT)
@@ -1247,10 +1771,10 @@ connector_setup_token() {
 
 emit_docker_connector_command() {
   enrollment_token=$1; node_name=$2
-	setup_token=$(connector_setup_token "$enrollment_token" "$node_name")
+	setup_token=$(node_setup_token "$enrollment_token" "$node_name")
 	image=$(connector_image_reference)
   cat <<EOF
-docker run -d \\
+docker --context default run -d \\
   --name 'laneway-connector-$node_name' \\
   --hostname 'laneway-connector-$node_name' \\
   --restart unless-stopped \\
@@ -1262,7 +1786,6 @@ docker run -d \\
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
   --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \\
   --volume 'laneway-connector-$node_name-state:/var/lib/laneway' \\
-  --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \\
   --health-interval 10s \\
   --health-timeout 3s \\
   --health-retries 6 \\
@@ -1275,29 +1798,80 @@ EOF
 render_docker_connector_bootstrap() {
 	node_name=$1; image=$2; envelope=$3; destination=$4
 	cat > "$destination" <<EOF
-#!/bin/bash
+#!/bin/bash -p
 set -euo pipefail
 umask 077
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+IFS=\$(printf ' \\t\\n_'); IFS=\${IFS%_}
+export PATH
+unset ENV BASH_ENV CDPATH
 
 die() { echo "lane-edge bootstrap: \$*" >&2; exit 1; }
 [ "\$#" -eq 1 ] || die "one decryption key argument is required"
+[[ \$EUID -eq 0 ]] || die "run Connector bootstrap as root"
 key=\$1
 shift
 [[ \$key =~ ^[A-Za-z0-9_-]{43}\$ ]] || die "the decryption key is invalid"
 command -v docker >/dev/null 2>&1 || die "Docker Engine is required"
 command -v find >/dev/null 2>&1 || die "find is required for protected cleanup"
-docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "Docker Engine is not running"
+command -v env >/dev/null 2>&1 || die "env is required for environment validation"
+command -v grep >/dev/null 2>&1 || die "grep is required for environment validation"
+command -v sed >/dev/null 2>&1 || die "sed is required for environment validation"
+command -v stat >/dev/null 2>&1 || die "stat is required for protected workspace validation"
+for docker_override in DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_TLS DOCKER_CONFIG; do
+  [[ ! -v \$docker_override ]] || die "\$docker_override is not allowed for Connector bootstrap"
+done
+for tls_override in CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR; do
+  [[ ! -v \$tls_override ]] || die "\$tls_override is not allowed for Connector bootstrap"
+done
+for release_override in LANEWAY_REPOSITORY LANEWAY_RELEASE_BASE_URL \
+  LANEWAY_AUTHENTICATED_RELEASE_BASE_URL LANEWAY_AUTHENTICATED_IMAGE_DIGESTS_FILE \
+  LANEWAY_AUTHENTICATED_COSIGN_BIN LANEWAY_COSIGN_BIN LANEWAY_COMMAND \
+  LANEWAY_CONTROL_COMMAND; do
+  [[ ! -v \$release_override ]] || die "\$release_override is not allowed for Connector bootstrap"
+done
+trust_override=\$(env | sed -n \\
+  -e 's/^\\(COSIGN_[A-Za-z0-9_]*\\)=.*/\\1/p' \\
+  -e 's/^\\(SIGSTORE_[A-Za-z0-9_]*\\)=.*/\\1/p' \\
+  -e 's/^\\(TUF_[A-Za-z0-9_]*\\)=.*/\\1/p' | sed -n '1p')
+[[ -z \$trust_override ]] || die "\$trust_override is not allowed for Connector bootstrap"
+unset DOCKER_DEFAULT_PLATFORM
+root_home=/root
+if [[ -e \$root_home || -L \$root_home ]]; then
+  [[ -d \$root_home && ! -L \$root_home ]] || die "/root must be a real directory"
+  [[ \$(stat -c '%u:%g' \$root_home) == 0:0 ]] || die "/root must be root-owned"
+  root_mode=\$(stat -c '%a' \$root_home)
+  (( (8#\$root_mode & 8#22) == 0 )) || die "/root must not be writable by group or others"
+else
+  [[ \$(stat -c '%u:%g' /) == 0:0 ]] || die "the filesystem root must be root-owned"
+  root_mode=\$(stat -c '%a' /)
+  (( (8#\$root_mode & 8#22) == 0 )) || \
+    die "the filesystem root must protect the absent /root Docker configuration parent"
+fi
+docker_config=/root/.docker
+if [[ -e \$docker_config || -L \$docker_config ]]; then
+  [[ -d \$docker_config && ! -L \$docker_config ]] || die "/root/.docker must be a real directory"
+  [[ \$(stat -c '%u:%g' \$docker_config) == 0:0 ]] || die "/root/.docker must be root-owned"
+  docker_config_mode=\$(stat -c '%a' \$docker_config)
+  (( (8#\$docker_config_mode & 8#22) == 0 )) || \
+    die "/root/.docker must not be writable by group or others"
+fi
+DOCKER_CONFIG=\$docker_config
+HOME=/root
+export DOCKER_CONFIG HOME
+temporary_parent=/var/tmp
+[[ -d \$temporary_parent && ! -L \$temporary_parent ]] || die "/var/tmp must be a real directory"
+[[ \$(stat -c '%a:%u:%g' \$temporary_parent) == 1777:0:0 ]] || \
+  die "/var/tmp must be root-owned with mode 1777"
+docker --context default version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "Docker Engine is not running"
 
 container_name='laneway-connector-$node_name'
 volume_name='laneway-connector-$node_name-state'
 image='$image'
-if docker container inspect "\$container_name" >/dev/null 2>&1; then
+if docker --context default container inspect "\$container_name" >/dev/null 2>&1; then
   die "container \$container_name already exists"
 fi
 
-temporary_parent=\${TMPDIR:-/tmp}
-case \$temporary_parent in /*) ;; *) die "TMPDIR must be absolute" ;; esac
-[ -d "\$temporary_parent" ] && [ ! -L "\$temporary_parent" ] || die "TMPDIR must be a real directory"
 bootstrap_dir=\$(mktemp -d "\$temporary_parent/lane-edge-bootstrap.XXXXXX")
 chmod 0700 "\$bootstrap_dir"
 cleanup() {
@@ -1309,8 +1883,8 @@ envelope_file=\$bootstrap_dir/envelope
 printf '%s\n' '$envelope' > "\$envelope_file"
 chmod 0644 "\$envelope_file"
 
-docker pull --quiet "\$image" >/dev/null
-printf '%s\n' "\$key" | docker run --rm -i \\
+docker --context default pull --quiet "\$image" >/dev/null
+printf '%s\n' "\$key" | docker --context default run --rm -i \\
   --user 65532:65532 \\
   --read-only \\
   --cap-drop ALL \\
@@ -1324,7 +1898,7 @@ unset key
 cleanup
 trap - EXIT HUP INT TERM
 
-docker run -d \\
+docker --context default run -d \\
   --name "\$container_name" \\
   --hostname "\$container_name" \\
   --restart unless-stopped \\
@@ -1336,7 +1910,6 @@ docker run -d \\
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700,uid=65532,gid=65532 \\
   --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,mode=0700,uid=65532,gid=65532 \\
   --volume "\$volume_name:/var/lib/laneway" \\
-  --health-cmd '/usr/local/bin/laneway-healthcheck -unix /run/laneway/lanewayd.sock' \\
   --health-interval 10s \\
   --health-timeout 3s \\
   --health-retries 6 \\
@@ -1348,7 +1921,7 @@ EOF
 
 emit_docker_connector_bootstrap() {
 	enrollment_token=$1; node_name=$2
-	setup_token=$(connector_setup_token "$enrollment_token" "$node_name")
+	setup_token=$(node_setup_token "$enrollment_token" "$node_name")
 	image=$(connector_image_reference)
 	expires_at=$(($(date +%s) + 600))
 	install -d -m 0700 "$state_dir"
@@ -1358,10 +1931,10 @@ emit_docker_connector_bootstrap() {
 	# Preserve the outer lifecycle lock cleanup while this nested protected
 	# workspace is live. Clearing these traps would strand operator.lock after a
 	# successful bootstrap or an injected bootstrap failure.
-	trap 'cleanup_bootstrap; release_lock' EXIT
-	trap 'cleanup_bootstrap; exit 129' HUP
-	trap 'cleanup_bootstrap; exit 130' INT
-	trap 'cleanup_bootstrap; exit 143' TERM
+	trap 'cleanup_bootstrap || echo "laneway-control: WARNING: protected Connector bootstrap cleanup failed" >&2; release_lock' EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
 	envelope_file=$bootstrap_dir/envelope
 	key=$(printf '%s\n' "$setup_token" | admin connector bootstrap-seal --out "$envelope_file" --expires-at "$expires_at")
 	unset setup_token enrollment_token
@@ -1390,7 +1963,7 @@ emit_docker_connector_bootstrap() {
 	public_port=$(read_setting "$env_file" LANEWAY_RELAY_TCP_PORT)
 	public_authority=$server_name
 	[ "$public_port" = 443 ] || public_authority=$server_name:$public_port
-	printf 'curl --fail --silent --show-error --proto '\''=https'\'' --tlsv1.3 '\''https://%s%s'\'' | sudo bash -s -- '\''%s'\''\n' \
+	printf '/usr/bin/curl --disable --fail --silent --show-error --proto '\''=https'\'' --proto-redir '\''=https'\'' --tlsv1.3 '\''https://%s%s'\'' | /usr/bin/sudo /usr/bin/env -u ENV -u BASH_ENV -u CDPATH -u IFS /bin/bash -p -s -- '\''%s'\''\n' \
 		"$public_authority" "$public_path" "$key"
 	printf 'One-time encrypted Connector bootstrap; expires in 10 minutes and is consumed by the first download.\n' >&2
 }
@@ -1398,8 +1971,8 @@ emit_docker_connector_bootstrap() {
 run_production_check() {
   [ "$#" -eq 0 ] || die "production-check accepts no arguments"
   [ "$(id -u)" -eq 0 ] || die "production-check must run as root"
-  "$base_dir/preflight.sh"
   validate_release_env "$env_file"
+  run_lifecycle_helper "$base_dir/preflight.sh"
   verify_release_images "$env_file"
   run_status
   recovery_dir=$base_dir/generated/recovery
@@ -1424,7 +1997,7 @@ run_production_check() {
 }
 
 run_invite() {
-  name=; class=durable; expires=10m; expires_set=false; session=; docker_install=false; exit_node=false; bootstrap_install=false
+  name=; class=durable; expires=10m; expires_set=false; session=; native_install=false; docker_install=false; exit_node=false; bootstrap_install=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --name) [ "$#" -ge 2 ] || die "--name requires a value"; name=$2; shift 2 ;;
@@ -1432,17 +2005,23 @@ run_invite() {
       --remembered) [ "$class" = durable ] || die "choose one class"; class=remembered; shift ;;
       --expires-in) [ "$#" -ge 2 ] || die "--expires-in requires a value"; expires=$2; expires_set=true; shift 2 ;;
       --session-lifetime) [ "$#" -ge 2 ] || die "--session-lifetime requires a value"; session=$2; shift 2 ;;
+      --native) native_install=true; shift ;;
       --docker) docker_install=true; shift ;;
       --connector) exit_node=true; shift ;;
 			--bootstrap) bootstrap_install=true; shift ;;
-      --exit-node|--exit) die "full Exit Nodes use the privileged exit-node deployment; use --connector for the unprivileged Docker Connector" ;;
+      --exit-node|--exit) die "full Exit Nodes use the privileged exit-node deployment; use --native --connector or --docker --connector for a rootless Connector" ;;
       *) die "unknown invite option: $1" ;;
     esac
   done
   case "$name" in ''|*[!A-Za-z0-9._-]*) die "invite requires a safe --name NAME" ;; esac
   [ "$class" = ephemeral ] || [ -z "$session" ] || die "--session-lifetime requires --ephemeral"
-  if [ "$docker_install" != "$exit_node" ]; then
-    die "--docker and --connector must be used together"
+  if [ "$native_install" = true ]; then
+    [ "$docker_install" = false ] && [ "$bootstrap_install" = false ] ||
+      die "--native cannot be combined with --docker or --bootstrap"
+    [ -f "$base_dir/generated/pki/ca.crt" ] && [ ! -L "$base_dir/generated/pki/ca.crt" ] ||
+      die "control-plane CA certificate is missing"
+  elif [ "$docker_install" != "$exit_node" ]; then
+    die "use --docker --connector or --native --connector for a Connector"
   fi
 	if [ "$bootstrap_install" = true ]; then
 		[ "$docker_install" = true ] || die "--bootstrap requires --docker --connector"
@@ -1462,21 +2041,35 @@ run_invite() {
   if [ "$class" = ephemeral ]; then
     set -- "$@" --session-lifetime "$session"
   fi
-  if [ "$docker_install" = true ]; then
-    result=$(admin "$@" --connector)
-    enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
-    [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
-		if [ "$bootstrap_install" = true ]; then
-			emit_docker_connector_bootstrap "$enrollment_token" "$name"
-		else
-			emit_docker_connector_command "$enrollment_token" "$name"
-		fi
-  else
+  if [ "$exit_node" = true ]; then
+    set -- "$@" --connector
+  fi
+  if [ "$native_install" = false ] && [ "$docker_install" = false ]; then
     admin "$@"
+    return
+  fi
+
+  result=$(admin "$@")
+  enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
+  case "$enrollment_token" in
+    ''|*[!A-Za-z0-9_-]*) die "controller returned no unique enrollment token" ;;
+  esac
+  if [ "$native_install" = true ]; then
+    setup_token=$(node_setup_token "$enrollment_token" "$name")
+    printf '%s\n' 'Install the signed Laneway client on the target device.' \
+      'Run laneway configure and paste the single-use setup token at the hidden prompt.' >&2
+    printf '%s\n' "$setup_token"
+  elif [ "$bootstrap_install" = true ]; then
+    emit_docker_connector_bootstrap "$enrollment_token" "$name"
+  else
+    emit_docker_connector_command "$enrollment_token" "$name"
   fi
 }
 
 run_user_token() {
+  for user_option in "$@"; do
+    [ "$user_option" != --native ] || die "use invite --remembered --native to issue a native setup token"
+  done
   result=$(run_invite --remembered "$@")
   enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
   [ -n "$enrollment_token" ] || die "controller returned no unique user login token"
@@ -1521,23 +2114,73 @@ run_route() {
 run_update() {
   [ "$#" -eq 0 ] || die "update accepts no arguments"
   [ "$(id -u)" -eq 0 ] || die "update must run as root"
-  for required_command in awk curl docker find grep install mktemp sed sha256sum tar uname wc; do
+  for required_command in awk curl docker find grep install jq mktemp readlink sed sha256sum tar uname wc; do
     command -v "$required_command" >/dev/null 2>&1 || die "update requires $required_command"
   done
-  docker compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
-  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "Docker Engine is not running"
   if [ ! -f "$base_dir/compose.yaml" ] || [ -L "$base_dir/compose.yaml" ] || \
     [ ! -f "$env_file" ] || [ -L "$env_file" ]; then
     die "this control plane is not a supported Docker Compose installation"
   fi
-  compose config --quiet || die "the Docker Compose installation is invalid"
+  for update_config in "$base_dir/generated/config/controller.toml" \
+    "$base_dir/generated/config/relay.toml"; do
+    if [ ! -f "$update_config" ] || [ -L "$update_config" ]; then
+      die "installed control-plane configuration is missing or unsafe: $update_config"
+    fi
+  done
+  update_system_command=/usr/local/sbin/laneway-control
+  if [ ! -L "$update_system_command" ]; then
+    die "installed control-plane command link is missing or unsafe: $update_system_command"
+  fi
+  update_system_target=$(readlink "$update_system_command")
+  case "$update_system_target" in
+    "$base_dir/laneway-control"|"$base_dir/lane") ;;
+    *) die "installed control-plane command link has an unexpected target: $update_system_target" ;;
+  esac
+  validate_release_env_values "$env_file" release
+  update_network_id=$(read_setting "$env_file" LANEWAY_NETWORK_ID)
+  update_network_name=$(read_setting "$env_file" LANEWAY_NETWORK_NAME)
+  update_ipv4_pool=$(read_setting "$env_file" LANEWAY_IPV4_POOL)
+  update_initial_network=$(laneway_host config inspect-controller-initial-network \
+    -config "$base_dir/generated/config/controller.toml") || \
+    die "installed controller configuration is invalid"
+  printf '%s\n' "$update_initial_network" | jq -e -s \
+    --arg network_id "$update_network_id" --arg name "$update_network_name" \
+    --arg ipv4_pool "$update_ipv4_pool" '
+      length == 1 and (.[0] |
+        type == "object" and
+        ((.configured == false and
+          ((has("bootstrap_network_id") | not) or .bootstrap_network_id == $network_id) and
+          ((keys - ["configured", "bootstrap_network_id"]) | length == 0)) or
+         (.configured == true and .network_id == $network_id and .name == $name and
+          .ipv4_pool == $ipv4_pool and
+          ((has("ipv6_pool") | not) or (.ipv6_pool | type == "string" and length > 0)) and
+          ((has("bootstrap_network_id") | not) or .bootstrap_network_id == $network_id) and
+          ((keys - ["configured", "network_id", "name", "ipv4_pool", "ipv6_pool",
+            "bootstrap_network_id"]) | length == 0))))
+    ' >/dev/null || die "installed controller initial-network configuration does not match .env"
+  laneway_host config validate -config "$base_dir/generated/config/relay.toml" >/dev/null || \
+    die "installed relay configuration is invalid"
+  validate_release_env "$env_file"
+  docker --context default compose version >/dev/null 2>&1 || die "Docker Compose v2 is required"
+  docker --context default version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "Docker Engine is not running"
 
   current_version=$(read_setting "$env_file" LANEWAY_VERSION)
   printf '%s\n' "$current_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
     die "the installed version is not a stable semantic release"
-  repository=${LANEWAY_REPOSITORY:-Doout/laneway}
-  case "$repository" in *[!A-Za-z0-9._/-]*|*/*/*|'') die "LANEWAY_REPOSITORY is invalid" ;; esac
-  latest_url=$(curl --fail --location --silent --show-error \
+  case "$(uname -m)" in
+    x86_64|amd64) architecture=amd64 ;;
+    aarch64|arm64) architecture=arm64 ;;
+    *) die "unsupported update architecture: $(uname -m)" ;;
+  esac
+  temporary_parent=/var/tmp
+  if [ ! -d "$temporary_parent" ] || [ -L "$temporary_parent" ] || \
+    [ "$(stat -c '%a:%u:%g' "$temporary_parent")" != 1777:0:0 ]; then
+    die "/var/tmp must be a root-owned real directory with mode 1777"
+  fi
+  cosign_command=$(cosign_verifier)
+  repository=Doout/laneway
+  latest_url=$(curl --disable --fail --location --silent --show-error \
+    --proto '=https' --proto-redir '=https' \
     --header 'Cache-Control: no-cache' --header 'Pragma: no-cache' --output /dev/null \
     --write-out '%{url_effective}' \
     "https://github.com/$repository/releases/latest?laneway_cache_bust=$(date +%s)") || \
@@ -1559,40 +2202,32 @@ run_update() {
     exit 1
   }' || die "latest release $latest_tag would downgrade installed v$current_version"
 
-  case "$(uname -m)" in
-    x86_64|amd64) architecture=amd64 ;;
-    aarch64|arm64) architecture=arm64 ;;
-    *) die "unsupported update architecture: $(uname -m)" ;;
-  esac
-  temporary_parent=${TMPDIR:-/var/tmp}
-  case "$temporary_parent" in /*) ;; *) die "TMPDIR must be absolute" ;; esac
-  if [ ! -d "$temporary_parent" ] || [ -L "$temporary_parent" ]; then
-    die "TMPDIR must be a real directory"
-  fi
   update_dir=$(mktemp -d "$temporary_parent/laneway-update.XXXXXX")
   cleanup_update() { [ ! -e "$update_dir" ] || find "$update_dir" -depth -delete; }
-  trap cleanup_update EXIT
+  trap 'cleanup_update || echo "laneway-control: WARNING: protected update cleanup failed" >&2; release_lock' EXIT
   trap 'exit 129' HUP
   trap 'exit 130' INT
   trap 'exit 143' TERM
   asset=laneway_linux_${architecture}.tar.gz
-  release_url=${LANEWAY_RELEASE_BASE_URL:-https://github.com/$repository/releases/download/$latest_tag}
+  release_url=https://github.com/$repository/releases/download/$latest_tag
   printf '\nLaneway control-plane update\n'
   printf '  Deployment: %s\n' "$base_dir"
   printf '  Version:    v%s -> %s\n\n' "$current_version" "$latest_tag"
-  for release_file in "$asset" bootstrap-artifacts.toml checksums.txt checksums.sigstore.json; do
-    curl --fail --location --silent --show-error "$release_url/$release_file" \
+  for release_file in "$asset" bootstrap-artifacts.toml image-digests.txt checksums.txt checksums.sigstore.json; do
+    curl --disable --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
+      "$release_url/$release_file" \
       -o "$update_dir/$release_file" || die "could not download $release_file for $latest_tag"
   done
-  cosign_command=$(cosign_verifier)
+  chmod 0600 "$update_dir/bootstrap-artifacts.toml" "$update_dir/image-digests.txt" \
+    "$update_dir/checksums.txt" "$update_dir/checksums.sigstore.json"
   "$cosign_command" verify-blob --bundle "$update_dir/checksums.sigstore.json" \
     --certificate-identity "https://github.com/$repository/.github/workflows/release.yml@refs/tags/$latest_tag" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     "$update_dir/checksums.txt" >/dev/null 2>&1 || die "release checksum signature verification failed"
   (
     cd "$update_dir"
-    grep -E "  (${asset}|bootstrap-artifacts\.toml)\$" checksums.txt > selected-checksums.txt
-    [ "$(wc -l < selected-checksums.txt)" -eq 2 ]
+    grep -E "  (${asset}|bootstrap-artifacts\.toml|image-digests\.txt)\$" checksums.txt > selected-checksums.txt
+    [ "$(wc -l < selected-checksums.txt)" -eq 3 ]
     sha256sum -c selected-checksums.txt >/dev/null
     tar -xzf "$asset"
   ) || die "release archive verification or extraction failed"
@@ -1605,22 +2240,44 @@ run_update() {
     die "verified package version does not match $latest_tag"
   fi
   if [ ! -f "$package_dir/install.sh" ] || [ -L "$package_dir/install.sh" ] || \
+    [ ! -f "$package_dir/bin/laneway" ] || [ -L "$package_dir/bin/laneway" ] || \
+    [ ! -x "$package_dir/bin/laneway" ] || \
     [ ! -f "$package_dir/deploy/compose/upgrade-control-plane.sh" ] || \
     [ -L "$package_dir/deploy/compose/upgrade-control-plane.sh" ]; then
     die "verified package is missing the Docker Compose updater"
   fi
+  preflight_marker=$package_dir/CONTROL-PLANE-UPGRADE-PREFLIGHT
+  [ -f "$preflight_marker" ] && [ ! -L "$preflight_marker" ] && \
+    [ "$(wc -l < "$preflight_marker")" -eq 1 ] && \
+    [ "$(sed -n '1p' "$preflight_marker")" = laneway-control-upgrade-preflight-v1 ] || \
+    die "verified release package lacks the required control-plane preflight contract"
 
-  acquire_lock
-  trap 'release_lock; cleanup_update' EXIT
-  run_step "Install control-plane tools" env PREFIX=/usr/local sh "$package_dir/install.sh" || \
+  run_step "Preflight verified control-plane update" env -u DOCKER_CONFIG \
+    -u ENV -u BASH_ENV -u CDPATH -u IFS \
+    HOME=/root PATH="$package_dir/bin:$PATH" LANEWAY_DEPLOY_DIR="$base_dir" \
+    LANEWAY_AUTHENTICATED_COSIGN_BIN="$cosign_command" \
+    LANEWAY_AUTHENTICATED_RELEASE_BASE_URL="$release_url" \
+    LANEWAY_AUTHENTICATED_IMAGE_DIGESTS_FILE="$update_dir/image-digests.txt" \
+    LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$update_dir/bootstrap-artifacts.toml" \
+    LANEWAY_LIFECYCLE_LOCK_TOKEN="$lock_token" LANEWAY_LIFECYCLE_LOCK_ROLE=observer \
+    LANEWAY_UPGRADE_PREFLIGHT_ONLY=true \
+    sh "$package_dir/deploy/compose/upgrade-control-plane.sh" || \
+    die "verified release package failed control-plane preflight"
+
+  run_step "Install control-plane tools" env -u ENV -u BASH_ENV -u CDPATH -u IFS \
+    PREFIX=/usr/local sh "$package_dir/install.sh" || \
     die "could not install the verified release package"
   bootstrap_manifest=$state_dir/bootstrap-artifacts-$latest_version.toml
+  image_digest_manifest=$state_dir/image-digests-$latest_version.txt
   install -m 0600 -o 0 -g 0 "$update_dir/bootstrap-artifacts.toml" "$bootstrap_manifest"
+  install -m 0600 -o 0 -g 0 "$update_dir/image-digests.txt" "$image_digest_manifest"
   cleanup_update
-  release_lock
-  trap - EXIT HUP INT TERM
-  exec env LANEWAY_DEPLOY_DIR="$base_dir" LANEWAY_COSIGN_BIN="$cosign_command" \
+  exec env -u DOCKER_CONFIG -u ENV -u BASH_ENV -u CDPATH -u IFS \
+    HOME=/root LANEWAY_DEPLOY_DIR="$base_dir" LANEWAY_AUTHENTICATED_COSIGN_BIN="$cosign_command" \
+    LANEWAY_AUTHENTICATED_RELEASE_BASE_URL="$release_url" \
+    LANEWAY_AUTHENTICATED_IMAGE_DIGESTS_FILE="$image_digest_manifest" \
     LANEWAY_BOOTSTRAP_ARTIFACTS_FILE="$bootstrap_manifest" \
+    LANEWAY_LIFECYCLE_LOCK_TOKEN="$lock_token" LANEWAY_LIFECYCLE_LOCK_ROLE=owner \
     sh /usr/local/share/laneway/deploy/compose/upgrade-control-plane.sh
 }
 
@@ -1678,6 +2335,8 @@ restart_quiesced_source() {
 
 activate_release() {
   candidate=$1; operation=$2; migration_dir=${3:-}
+  release_compose_file=$base_dir/compose.yaml
+  release_controller_file=$base_dir/generated/config/controller.toml
   if [ -n "$migration_dir" ]; then
     case "$migration_dir" in /*) ;; *) die "deployment migration directory must be absolute" ;; esac
     for path in compose.yaml controller.toml relay.toml; do
@@ -1685,9 +2344,18 @@ activate_release() {
         die "deployment migration file is missing or unsafe: $path"
       fi
     done
+    release_compose_file=$migration_dir/compose.yaml
+    release_controller_file=$migration_dir/controller.toml
   fi
-  run_step "Validate release configuration" validate_release_env "$candidate" || die "$operation configuration validation failed"
-  run_step "Verify signed container images" verify_release_images "$candidate" || die "$operation image verification failed"
+  run_step "Validate release environment" validate_release_env_compatibility "$candidate" || \
+    die "$operation configuration validation failed"
+  run_step "Validate release initial network" validate_release_initial_network \
+    "$release_controller_file" "$candidate" "$operation" || \
+    die "$operation initial-network validation failed"
+  run_step "Validate release Compose configuration" validate_release_compose \
+    "$candidate" "$release_compose_file" || die "$operation Compose configuration validation failed"
+  run_step "Verify signed container images" verify_release_images "$candidate" "$release_compose_file" || \
+    die "$operation image verification failed"
   if [ -n "$migration_dir" ]; then
     run_step "Pull release images" compose_file_with_env "$candidate" "$migration_dir/compose.yaml" pull || die "$operation image pull failed"
   else
@@ -1742,7 +2410,7 @@ activate_release() {
   startup_ok=true
   run_step "Install candidate release selection" install_release_selection "$candidate" "$migration_dir" || startup_ok=false
   if [ "$startup_ok" = true ]; then
-    run_step "Validate migrated deployment" "$base_dir/validate.sh" || startup_ok=false
+    run_step "Validate migrated deployment" run_lifecycle_helper "$base_dir/validate.sh" || startup_ok=false
   fi
   if [ "$startup_ok" = true ] && [ "$operation" = rollback ]; then
     if ! run_step "Restore rollback target database" restore_release_database_snapshot \
@@ -1812,58 +2480,76 @@ run_init() {
   case "${1:-}" in
     --dev)
       [ "$#" -eq 1 ] || die "init accepts only --dev"
-      "$base_dir/preflight.sh" --dev
-      "$base_dir/bootstrap.sh" --dev
+      validate_release_env "$env_file" "$base_dir/compose.yaml" development
+      run_lifecycle_helper "$base_dir/preflight.sh" --dev
+      run_lifecycle_helper "$base_dir/bootstrap.sh" --dev
       return
       ;;
     --issuer)
       [ "$#" -eq 2 ] || die "init --issuer requires one offline issuer directory"
-      "$base_dir/prepare.sh" "$2"
+      validate_release_env "$env_file"
+      run_lifecycle_helper "$base_dir/prepare.sh" "$2"
       ;;
-    '') [ "$#" -eq 0 ] || die "init accepts --issuer DIR or --dev" ;;
+    '')
+      [ "$#" -eq 0 ] || die "init accepts --issuer DIR or --dev"
+      validate_release_env "$env_file"
+      ;;
     *) die "init accepts --issuer DIR or --dev" ;;
   esac
-  "$base_dir/preflight.sh"
-  validate_release_env "$env_file"
+  run_lifecycle_helper "$base_dir/preflight.sh"
   profile=$(read_setting "$env_file" LANEWAY_INSTALL_PROFILE)
   case "$profile" in
-    production) verify_release_images "$env_file" ;;
-    quick)
-      if ! (verify_release_images "$env_file"); then
-        echo "laneway-control: WARNING: image signatures were not verified during quick install; run 'laneway control production-check' before production use" >&2
-      fi
-      ;;
+    production|quick) verify_release_images "$env_file" ;;
     *) die "LANEWAY_INSTALL_PROFILE must be quick or production" ;;
   esac
   compose pull
-  "$base_dir/bootstrap.sh"
+  run_lifecycle_helper "$base_dir/bootstrap.sh"
 }
 
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
+case "$command" in
+  help|-h|--help) ;;
+  *)
+    reject_runtime_overrides
+    scrub_compose_interpolation_environment
+    ;;
+esac
 case "$command" in
   init) acquire_lock; run_init "$@" ;;
   user-token|api-token) acquire_lock; run_user_token "$@" ;;
   invite) acquire_lock; run_invite "$@" ;;
   route) acquire_lock; run_route "$@" ;;
-  status) run_status "$@" ;;
+  status)
+    if [ "${LANEWAY_LIFECYCLE_LOCK_TOKEN+x}" = x ] || \
+      [ "${LANEWAY_LIFECYCLE_LOCK_ROLE+x}" = x ]; then
+      die "lifecycle lock handoff is not accepted by status"
+    fi
+    validate_release_env "$env_file"
+    run_status "$@"
+    ;;
   administrator)
     [ "$(id -u)" -eq 0 ] || die "administrator lifecycle commands must run as root"
     acquire_lock
     run_administrator "$@"
     ;;
-  update) run_update "$@" ;;
+  update) acquire_lock; run_update "$@" ;;
   production-check) acquire_lock; run_production_check "$@" ;;
-  backup) acquire_lock; [ "$#" -le 1 ] || die "backup accepts one name"; backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}" ;;
+  backup)
+    acquire_lock
+    [ "$#" -le 1 ] || die "backup accepts one name"
+    validate_release_env "$env_file"
+    backup_recovery "${1:-recovery-$(date -u +%Y%m%dT%H%M%SZ).age}"
+    ;;
   restore)
     acquire_lock
     if [ "$#" -ne 3 ] || [ "$2" != --identity ]; then
       die "restore requires BUNDLE.age --identity AGE_IDENTITY_FILE"
     fi
-    "$base_dir/recovery.sh" restore "$1" "$3"
+    run_lifecycle_helper "$base_dir/recovery.sh" restore "$1" "$3"
     ;;
   upgrade)
     [ "$(id -u)" -eq 0 ] || die "upgrade must run as root"
-    acquire_lock
+    acquire_lock borrower
     if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
       die "upgrade requires CANDIDATE.env and optionally MIGRATION_DIR"
     fi
@@ -1871,7 +2557,7 @@ case "$command" in
     ;;
   rollback)
     [ "$(id -u)" -eq 0 ] || die "rollback must run as root"
-    acquire_lock
+    acquire_lock borrower
     [ "$#" -eq 0 ] || die "rollback accepts no arguments"
     load_previous_release || die "no valid previous release generation is available"
     activate_release "$previous_release_env" rollback "$previous_release_files"

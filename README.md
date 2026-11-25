@@ -1,8 +1,23 @@
 # Laneway
 
-Laneway connects clients to Linux hosts and private networks through an
-encrypted IP overlay. Applications use normal IP addresses without a proxy.
-Direct QUIC is preferred; an authenticated relay provides fallback.
+Laneway connects clients to hosts and private networks through an encrypted IP
+overlay. A full node routes applications transparently and supports direct QUIC
+and relay fallback. The [`lanewayd` node](docs/rootless.md) runs by default as an
+ordinary user, serves approved TCP and UDP destinations, and offers a local
+authenticated SOCKS5 proxy over the relay.
+
+## Configure and start
+
+With the client installed and a native setup invitation from your administrator, run:
+
+```sh
+laneway configure
+laneway start
+```
+
+Paste the invitation at the prompt. The first setup prints a password for the local SOCKS5 proxy on `127.0.0.1:1080`. Repeat configuration keeps your identity and credentials. On Linux, use `sudo laneway configure --system` and `sudo laneway start --system` for host networking. [Installation and node setup](docs/rootless.md)
+
+Run `laneway update` to update the local installation. On a managed Docker host use `sudo laneway update server` for the control plane or `sudo laneway update connector office` for a named connector. [Updates and operations](docs/operations.md)
 
 ## Quick start
 

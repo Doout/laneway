@@ -42,6 +42,75 @@ describe('shipped live application authorization', () => {
     expect(screen.queryByText('foreign-node')).not.toBeInTheDocument()
   })
 
+  it.each([
+    {
+      page: 'nodes', path: '/nodes', permission: 'node.read', inventoryPath: '/nodes?', responseKey: 'nodes',
+      records: [
+        { node_id: '4'.repeat(32), network_id: networkId, name: 'healthy-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'durable' },
+        { node_id: '5'.repeat(32), network_id: networkId, name: 'expired-node', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'ephemeral', lease_expires_at_unix_seconds: 1 },
+      ],
+      visible: 'healthy-node', hidden: 'expired-node', filter: 'Active only',
+    },
+    {
+      page: 'user enrollments', path: '/users', permission: 'node.read', inventoryPath: '/nodes?', responseKey: 'nodes',
+      records: [
+        { node_id: '4'.repeat(32), network_id: networkId, name: 'active-user', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'remembered' },
+        { node_id: '5'.repeat(32), network_id: networkId, name: 'revoked-user', enabled_capabilities: 0, created_at_unix_seconds: 1_700_000_000, enrollment_class: 'remembered', revoked_at_unix_seconds: 1_700_000_100 },
+      ],
+      visible: 'active-user', hidden: 'revoked-user', filter: 'Active only',
+    },
+    {
+      page: 'routes', path: '/routes', permission: 'route.read', inventoryPath: '/routes?', responseKey: 'routes',
+      records: [
+        { route_id: '4'.repeat(32), network_id: networkId, node_id: '6'.repeat(32), prefix: '10.10.0.0/16', kind: 'subnet', mode: 'nat', metric: 100, state: 'approved', created_at_unix_seconds: 1_700_000_000 },
+        { route_id: '5'.repeat(32), network_id: networkId, node_id: '6'.repeat(32), prefix: '10.20.0.0/16', kind: 'subnet', mode: 'nat', metric: 100, state: 'withdrawn', created_at_unix_seconds: 1_700_000_000 },
+      ],
+      visible: '10.10.0.0/16', hidden: '10.20.0.0/16', filter: 'Current only',
+    },
+    {
+      page: 'access rules', path: '/access', permission: 'acl.read', inventoryPath: '/acl-rules?', responseKey: 'acl_rules',
+      records: [
+        { rule_id: '4'.repeat(32), network_id: networkId, priority: 10, action: 'accept', selector: {}, description: 'Enabled policy', enabled: true, configuration_epoch: 1 },
+        { rule_id: '5'.repeat(32), network_id: networkId, priority: 20, action: 'deny', selector: {}, description: 'Disabled policy', enabled: false, configuration_epoch: 1 },
+      ],
+      visible: 'Enabled policy', hidden: 'Disabled policy', filter: 'Enabled only',
+    },
+    {
+      page: 'relays', path: '/infrastructure', permission: 'relay.read', inventoryPath: '/relays?', responseKey: 'relays',
+      records: [
+        { relay_id: '4'.repeat(32), network_id: networkId, service_id: '6'.repeat(32), name: 'enabled-relay', endpoint: 'relay-one.example.test:443', enabled: true, created_at_unix_seconds: 1_700_000_000, configuration_epoch: 1 },
+        { relay_id: '5'.repeat(32), network_id: networkId, service_id: '7'.repeat(32), name: 'disabled-relay', endpoint: 'relay-two.example.test:443', enabled: false, created_at_unix_seconds: 1_700_000_000, configuration_epoch: 1 },
+      ],
+      visible: 'enabled-relay', hidden: 'disabled-relay', filter: 'Enabled relays only',
+    },
+    {
+      page: 'certificates', path: '/security', permission: 'certificate.read', inventoryPath: '/certificates?', responseKey: 'certificates',
+      records: [
+        { certificate_id: '4'.repeat(32), network_id: networkId, node_id: '6'.repeat(32), serial: 'valid-serial', not_before_unix_seconds: 1_700_000_000, not_after_unix_seconds: 4_000_000_000, created_at_unix_seconds: 1_700_000_000 },
+        { certificate_id: '5'.repeat(32), network_id: networkId, node_id: '7'.repeat(32), serial: 'expired-serial', not_before_unix_seconds: 1_600_000_000, not_after_unix_seconds: 1_700_000_000, created_at_unix_seconds: 1_600_000_000 },
+      ],
+      visible: 'valid-serial', hidden: 'expired-serial', filter: 'Valid only',
+    },
+  ])('shows current $page by default and reveals inactive records on request', async ({ path: initialPath, permission, inventoryPath, responseKey, records, visible, hidden, filter }) => {
+    vi.stubEnv('MODE', 'live')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list', permission])))
+      if (path.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [{ network_id: networkId, name: 'Scoped network', ipv4_pool: '100.64.0.0/24', configuration_epoch: 1, created_at_unix_seconds: 1_700_000_000 }] }))
+      if (path.includes(inventoryPath)) return Promise.resolve(managementResponse({ [responseKey]: records }))
+      throw new Error(`Unexpected request ${path}`)
+    }))
+
+    renderPath(initialPath)
+    expect(await screen.findByText(visible)).toBeVisible()
+    expect(screen.queryByText(hidden)).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Record visibility')).toHaveValue('current')
+    expect(screen.getByRole('option', { name: filter })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Record visibility'), { target: { value: 'all' } })
+    expect(await screen.findByText(hidden)).toBeVisible()
+  })
+
   it('shows an administrator-assigned route as approved without sending it through approval', async () => {
     vi.stubEnv('MODE', 'live')
     const nodeId = '4'.repeat(32)

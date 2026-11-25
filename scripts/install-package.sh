@@ -12,7 +12,7 @@ unitdir="$destination_root$prefix/lib/systemd/system"
 if [ "$(uname -s)" = Darwin ]; then
   [ -z "$destination_root" ] || { echo "DESTDIR is not supported by the macOS client installer" >&2; exit 1; }
   [ "$(id -u)" -eq 0 ] || { echo "run this installer with sudo" >&2; exit 1; }
-  "$script_dir/bin/laneway" configure --yes
+  "$script_dir/bin/laneway" configure --system --yes
   ln -sfn laneway "$bindir/lane"
   echo "Laneway $(cat "$script_dir/VERSION") macOS client installed."
   echo "Run as your normal user: laneway login DOMAIN"
@@ -69,15 +69,16 @@ fi
 install -d -m 0755 "$bindir" "$sbindir" "$sharedir/examples" \
 	"$sharedir/docs" "$sharedir/nftables" "$sharedir/spec" \
 	"$sharedir/deploy" "$sharedir/integration" "$unitdir"
+install -m 0755 "$script_dir/bin/laneway-compat" "$bindir/laneway-compat"
 install -m 0755 "$script_dir/bin/laneway" "$bindir/laneway"
 ln -sfn laneway "$bindir/lane"
-for command in laneway-relay laneway-controller; do
+for command in laneway-relay laneway-controller lanewayd; do
   install -m 0755 "$script_dir/sbin/$command" "$sbindir/$command"
 done
-ln -sfn ../bin/laneway "$sbindir/lanewayd"
 install -m 0755 "$script_dir/sbin/laneway-setup-node" "$sbindir/laneway-setup-node"
 install -m 0755 "$script_dir/deploy/containers/update-connector.sh" \
   "$sbindir/laneway-update-connector"
+install -m 0755 "$script_dir/install-control-plane-release.sh" "$sharedir/install-control-plane-release.sh"
 install -m 0644 "$script_dir"/examples/*.toml "$sharedir/examples/"
 install -m 0644 "$script_dir"/docs/*.md "$sharedir/docs/"
 install -m 0644 "$script_dir"/nftables/* "$sharedir/nftables/"

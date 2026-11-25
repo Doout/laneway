@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,15 @@ func TestWritePairExclusiveAndPermissions(t *testing.T) {
 	}
 }
 
+// Linux exposes these handlers through the reference CLI. Exercise their
+// argument handling directly on platforms where the public routes are absent.
+func referenceCommand(handler commandHandler) commandHandler {
+	if runtime.GOOS == "linux" {
+		return run
+	}
+	return func(args []string) error { return handler(args[1:]) }
+}
+
 func TestJoinTokenFileMustBeProtectedAndExclusive(t *testing.T) {
 	tokenPath := filepath.Join(t.TempDir(), "join.token")
 	if err := os.WriteFile(tokenPath, []byte("one-time-token\n"), 0o644); err != nil {
@@ -51,41 +61,46 @@ func TestJoinTokenFileMustBeProtectedAndExclusive(t *testing.T) {
 		"--controller-network-id", "000102030405060708090a0b0c0d0e0f",
 		"--controller-service-id", "101112131415161718191a1b1c1d1e1f", "--name", "node",
 	}
-	if err := run(arguments); err == nil || !strings.Contains(err.Error(), "must not be accessible") {
+	join := referenceCommand(runJoin)
+	if err := join(arguments); err == nil || !strings.Contains(err.Error(), "must not be accessible") {
 		t.Fatalf("unprotected token file error = %v", err)
 	}
 	if err := os.Chmod(tokenPath, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	withToken := append([]string{"join", "literal-token"}, arguments[1:]...)
-	if err := run(withToken); err == nil || !strings.Contains(err.Error(), "not both") {
+	if err := join(withToken); err == nil || !strings.Contains(err.Error(), "not both") {
 		t.Fatalf("token and token-file error = %v", err)
 	}
 }
 
 func TestNodeRunCommandSurface(t *testing.T) {
-	if err := run([]string{"node"}); err != nil {
-		t.Fatalf("node help: %v", err)
+	if runtime.GOOS == "linux" {
+		if err := run([]string{"node"}); err != nil {
+			t.Fatalf("node help: %v", err)
+		}
 	}
-	if err := run([]string{"node", "start"}); err == nil || !strings.Contains(err.Error(), "unknown node command") {
+	node := referenceCommand(runNode)
+	if err := node([]string{"node", "start"}); err == nil || !strings.Contains(err.Error(), "unknown node command") {
 		t.Fatalf("unknown node command error = %v", err)
 	}
-	if err := run([]string{"node", "run", "-version"}); err != nil {
+	if err := node([]string{"node", "run", "-version"}); err != nil {
 		t.Fatalf("node run version: %v", err)
 	}
-	if err := run([]string{"node", "run", "unexpected"}); err == nil || !strings.Contains(err.Error(), "unexpected node run argument") {
+	if err := node([]string{"node", "run", "unexpected"}); err == nil || !strings.Contains(err.Error(), "unexpected node run argument") {
 		t.Fatalf("unexpected node argument error = %v", err)
 	}
 }
 
 func TestPKICommands(t *testing.T) {
 	dir := t.TempDir()
-	if err := run([]string{"pki", "init", "--out-dir", dir, "--validity", "48h"}); err != nil {
+	issue := referenceCommand(runPKI)
+	if err := issue([]string{"pki", "init", "--out-dir", dir, "--validity", "48h"}); err != nil {
 		t.Fatal(err)
 	}
 	intermediateCert := filepath.Join(dir, "intermediate.crt")
 	intermediateKey := filepath.Join(dir, "intermediate.key")
-	if err := run([]string{
+	if err := issue([]string{
 		"pki", "intermediate",
 		"--ca-cert", filepath.Join(dir, "ca.crt"),
 		"--ca-key", filepath.Join(dir, "ca.key"),
@@ -95,17 +110,17 @@ func TestPKICommands(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{
+	if err := issue([]string{
 		"pki", "verify-authority", "--root", filepath.Join(dir, "ca.crt"),
 		"--issuer", intermediateCert, "--key", intermediateKey,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	otherRoot := filepath.Join(dir, "other-root")
-	if err := run([]string{"pki", "init", "--out-dir", otherRoot, "--validity", "48h"}); err != nil {
+	if err := issue([]string{"pki", "init", "--out-dir", otherRoot, "--validity", "48h"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{
+	if err := issue([]string{
 		"pki", "verify-authority", "--root", filepath.Join(otherRoot, "ca.crt"),
 		"--issuer", intermediateCert, "--key", intermediateKey,
 	}); err == nil || !strings.Contains(err.Error(), "not anchored") {
@@ -113,7 +128,7 @@ func TestPKICommands(t *testing.T) {
 	}
 	certPath := filepath.Join(dir, "node.crt")
 	keyPath := filepath.Join(dir, "node.key")
-	if err := run([]string{
+	if err := issue([]string{
 		"pki", "node",
 		"--ca-cert", intermediateCert,
 		"--ca-key", intermediateKey,
@@ -152,7 +167,7 @@ func TestPKICommands(t *testing.T) {
 	if _, _, err := pki.ParseAuthority(certificate, mustRead(t, keyPath)); err == nil {
 		t.Fatal("leaf accepted as an authority")
 	}
-	if err := run([]string{
+	if err := issue([]string{
 		"pki", "controller",
 		"--ca-cert", intermediateCert,
 		"--ca-key", intermediateKey,
@@ -172,16 +187,17 @@ func TestPKICommands(t *testing.T) {
 }
 
 func TestExitCommandValidation(t *testing.T) {
-	if err := run([]string{"exit", "use", "bad-id"}); err == nil {
+	exit := referenceCommand(runExit)
+	if err := exit([]string{"exit", "use", "bad-id"}); err == nil {
 		t.Fatal("invalid exit node ID accepted")
 	}
-	if err := run([]string{"exit", "disable", "unexpected"}); err == nil {
+	if err := exit([]string{"exit", "disable", "unexpected"}); err == nil {
 		t.Fatal("unexpected exit argument accepted")
 	}
-	if err := run([]string{"exit", "enable", "--family", "ipx"}); err == nil || !strings.Contains(err.Error(), "--family") {
+	if err := exit([]string{"exit", "enable", "--family", "ipx"}); err == nil || !strings.Contains(err.Error(), "--family") {
 		t.Fatalf("invalid exit family error = %v", err)
 	}
-	if err := run([]string{"exit", "enable", "--family", "ipv4"}); err == nil || !strings.Contains(err.Error(), "open configuration") {
+	if err := exit([]string{"exit", "enable", "--family", "ipv4", "--config", filepath.Join(t.TempDir(), "missing.toml")}); err == nil || !strings.Contains(err.Error(), "open configuration") {
 		t.Fatalf("valid exit enable was not parsed before connection validation: %v", err)
 	}
 }
@@ -263,7 +279,13 @@ func TestResolveExitSelectorExactUniqueName(t *testing.T) {
 
 func TestExitUseResolvesNameThenSubmitsNodeID(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "lanewayd.sock")
+	// Darwin's per-user temporary directory can exceed the Unix socket path limit.
+	socketDirectory, err := os.MkdirTemp("/tmp", "lw-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDirectory) })
+	socket := filepath.Join(socketDirectory, "local.sock")
 	configPath := filepath.Join(dir, "laneway.toml")
 	configuration := fmt.Sprintf(`
 mode = "node"
@@ -287,6 +309,7 @@ overlay_addresses = ["100.96.0.1/32"]
 	want := "101112131415161718191a1b1c1d1e1f"
 	selected := make(chan localapi.ExitSelection, 1)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan error, 1)
 	server := localapi.Server{
 		SocketPath: socket,
@@ -306,7 +329,11 @@ overlay_addresses = ["100.96.0.1/32"]
 		if time.Now().After(deadline) {
 			t.Fatal("local API socket did not start")
 		}
-		time.Sleep(5 * time.Millisecond)
+		select {
+		case err := <-done:
+			t.Fatalf("local API socket failed to start: %v", err)
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
 	missingConfig := filepath.Join(dir, "rust-node.toml")
 	if err := runLocal("up", []string{"--socket", socket, "--config", missingConfig, "--json"}); err != nil {

@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/sbin/lanewayd-rs --config /etc/laneway/node-rust.toml
+ExecStart=/usr/local/sbin/lanewayd run --system --config /etc/laneway/node-rust.toml
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=20s

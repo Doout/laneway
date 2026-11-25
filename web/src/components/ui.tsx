@@ -1,6 +1,6 @@
 import { cloneElement, isValidElement, useId, type ButtonHTMLAttributes, type FormEvent, type ReactElement, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { Ellipsis, Search } from 'lucide-react'
+import { ChevronRight, Ellipsis, Search } from 'lucide-react'
 import clsx from 'clsx'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'quiet' | 'danger'
@@ -65,7 +65,7 @@ export interface DataColumn<T> {
 }
 
 export function DataTable<T>({ columns, rows, rowKey, rowClassName, empty }: { columns: DataColumn<T>[]; rows: T[]; rowKey: (row: T) => string; rowClassName?: (row: T) => string | undefined; empty?: ReactNode }) {
-  if (!rows.length && empty) return <>{empty}</>
+  if (!rows.length && empty) return <div className="data-empty">{empty}</div>
   return <div className="table-wrap"><table className="data-table"><thead><tr>{columns.map(column => <th key={column.key} className={column.align === 'end' ? 'align-end' : undefined}>{column.label}</th>)}</tr></thead><tbody>{rows.map(row => <tr key={rowKey(row)} className={rowClassName?.(row)}>{columns.map(column => <td key={column.key} data-label={column.label} className={column.align === 'end' ? 'align-end' : undefined}>{column.render(row)}</td>)}</tr>)}</tbody></table></div>
 }
 
@@ -75,6 +75,18 @@ export function KebabButton({ label = 'Open row actions', onClick }: { label?: s
 
 export function Section({ title, meta, action, children }: { title: string; meta?: ReactNode; action?: ReactNode; children: ReactNode }) {
   return <section className="section"><div className="section__header"><div><h2>{title}</h2>{meta ? <div className="section__meta">{meta}</div> : null}</div>{action}</div>{children}</section>
+}
+
+export function RecordList({ rows }: { rows: Array<[string, ReactNode]> }) {
+  return <dl className="record-list">{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+}
+
+export function ResourceLink({ to, icon, title, meta, state }: { to: string; icon: ReactNode; title: ReactNode; meta?: ReactNode; state?: ReactNode }) {
+  return <Link className="resource-link" to={to}><span className="resource-link__icon" aria-hidden="true">{icon}</span><span className="resource-link__copy"><strong>{title}</strong>{meta ? <small>{meta}</small> : null}</span>{state ? <span className="resource-link__state">{state}</span> : null}<ChevronRight aria-hidden="true" size={17} /></Link>
+}
+
+export function ActionPanel({ children }: { children: ReactNode }) {
+  return <div className="action-panel">{children}</div>
 }
 
 export function DetailLayout({ identity, children }: { identity: ReactNode; children: ReactNode }) {

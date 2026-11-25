@@ -1,0 +1,17 @@
+[package]
+name = "laneway-healthcheck"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio.workspace = true
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+rcgen = "0.14.5"
+tempfile = "3.26.0"

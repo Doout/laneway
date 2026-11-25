@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -9,6 +11,11 @@ use tracing_subscriber::EnvFilter;
 static ALLOCATOR: laneway_relay::allocator::CountingAllocator =
     laneway_relay::allocator::CountingAllocator::new();
 
+const VERSION: &str = match option_env!("LANEWAY_RELAY_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -17,18 +24,20 @@ async fn main() -> Result<()> {
         )
         .init();
     let arguments = parse_args()?;
-    let config = Config::load(&arguments.config)?;
+    if arguments.version {
+        println!("{VERSION}");
+        return Ok(());
+    }
+    let mut config = Config::load(&arguments.config)?;
+    if let Some(diagnostics) = arguments.diagnostics {
+        config.relay.metrics_listen = diagnostics;
+        config.metrics_listen_addr()?;
+    }
     if arguments.check {
         println!("configuration is valid");
         return Ok(());
     }
     let server = Server::bind(config)?;
-    info!(
-        quic = %server.local_addr()?,
-        tcp_fallback = ?server.tcp_fallback_addr()?,
-        metrics = ?server.metrics_addr()?,
-        "laneway Rust relay listening"
-    );
     let metrics = server.metrics();
     server.serve_until(shutdown_signal()).await?;
     info!(snapshot = ?metrics.snapshot(), "laneway Rust relay stopped");
@@ -53,7 +62,9 @@ async fn shutdown_signal() {
 
 struct Arguments {
     config: PathBuf,
+    diagnostics: Option<String>,
     check: bool,
+    version: bool,
 }
 
 fn parse_args() -> Result<Arguments> {
@@ -63,20 +74,56 @@ fn parse_args() -> Result<Arguments> {
 fn parse_arguments(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Arguments> {
     let mut args = arguments.into_iter();
     let mut config = PathBuf::from("/etc/laneway/laneway.toml");
+    let mut diagnostics = None;
     let mut check = false;
+    let mut version = false;
     while let Some(argument) = args.next() {
+        if argument == "update" || argument == "configure" {
+            bail!(
+                "the deployment host manages this relay; on the host run sudo laneway {} server",
+                argument.to_string_lossy()
+            );
+        }
         if argument == "--config" || argument == "-config" {
             config = args.next().context("--config requires a path")?.into();
-        } else if argument == "-h" || argument == "--help" {
-            println!("laneway-relay [--config PATH] [--check-config]");
+        } else if let Some(value) = argument.to_str().and_then(|value| {
+            value
+                .strip_prefix("--config=")
+                .or_else(|| value.strip_prefix("-config="))
+        }) {
+            config = value.into();
+        } else if argument == "--diagnostics" || argument == "-diagnostics" {
+            diagnostics = Some(
+                args.next()
+                    .context("--diagnostics requires an address")?
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("--diagnostics address must be UTF-8"))?,
+            );
+        } else if let Some(value) = argument.to_str().and_then(|value| {
+            value
+                .strip_prefix("--diagnostics=")
+                .or_else(|| value.strip_prefix("-diagnostics="))
+        }) {
+            diagnostics = Some(value.into());
+        } else if argument == "-h" || argument == "--help" || argument == "-help" {
+            println!(
+                "laneway-relay [--config PATH] [--diagnostics ADDRESS] [--check-config] [--version]"
+            );
             std::process::exit(0);
-        } else if argument == "--check-config" {
+        } else if argument == "--version" || argument == "-version" {
+            version = true;
+        } else if argument == "--check-config" || argument == "-check-config" {
             check = true;
         } else {
             bail!("unknown argument {:?}", argument);
         }
     }
-    Ok(Arguments { config, check })
+    Ok(Arguments {
+        config,
+        diagnostics,
+        check,
+        version,
+    })
 }
 
 #[cfg(test)]
@@ -92,6 +139,21 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.config, PathBuf::from("/tmp/relay.toml"));
+        assert!(parsed.check);
+    }
+
+    #[test]
+    fn accepts_existing_relay_flags() {
+        let parsed = parse_arguments([
+            "-config=/tmp/relay.toml".into(),
+            "-diagnostics=localhost:6060".into(),
+            "-version".into(),
+            "-check-config".into(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.config, PathBuf::from("/tmp/relay.toml"));
+        assert_eq!(parsed.diagnostics.as_deref(), Some("localhost:6060"));
+        assert!(parsed.version);
         assert!(parsed.check);
     }
 }

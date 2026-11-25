@@ -1,18 +1,21 @@
 use std::{
     future::Future,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
 use bytes::Bytes;
 use laneway_protocol::{
     AuthenticatedIdentity, Id,
     v1::{Capability, Hello, RelayRegister, Welcome, control_envelope, relay_envelope},
 };
-use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
+use quinn::{Connection, Endpoint, EndpointConfig, RecvStream, SendStream, VarInt};
+use socket2::{Domain, Socket, Type};
 use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet, time::timeout};
+use tokio_rustls::{LazyConfigAcceptor, server::TlsStream};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -24,6 +27,8 @@ use crate::{
     controller::{Client as ControllerClient, State as ControllerState},
     diagnostics,
     packet_pool::PacketPool,
+    public_http::PublicHttp,
+    public_tls::{Acme, HTTP_ALPN, PublicTls},
     registry::{Registry, Session, SessionCapabilities, SessionChannels},
     tcp, tls,
 };
@@ -44,6 +49,15 @@ const RELAY_CAPABILITIES: u64 = Capability::LanewayRelayV1 as u64
     | Capability::LanewayIpv6V1 as u64
     | Capability::LanewayE2ePacketV1 as u64;
 const PROTOCOL_ERROR: u32 = 0x100;
+const MAX_PUBLIC_HANDSHAKES: usize = 64;
+const MAX_PUBLIC_HTTP_CONNECTIONS: usize = 64;
+
+struct PublicEndpoint {
+    tls: PublicTls,
+    http: PublicHttp,
+    handshakes: Arc<Semaphore>,
+    connections: Arc<Semaphore>,
+}
 
 struct Inner {
     authorizations: Arc<ControllerState>,
@@ -52,6 +66,7 @@ struct Inner {
     handshake_timeout: Duration,
     max_sessions: usize,
     tcp_tls: Option<Arc<rustls::ServerConfig>>,
+    public: Option<PublicEndpoint>,
     tcp_config: Option<TcpFallbackConfig>,
     tcp_packet_pool: Option<PacketPool>,
 }
@@ -62,7 +77,8 @@ pub struct Server {
     tcp_listener: Option<TcpListener>,
     inner: Arc<Inner>,
     metrics_interval: Duration,
-    controller: Option<ControllerClient>,
+    controller: Option<Arc<ControllerClient>>,
+    acme: Option<Acme>,
     diagnostics: Option<diagnostics::Server>,
 }
 
@@ -88,11 +104,11 @@ impl Server {
                     &config.tls.certificate_file,
                     Arc::clone(&metrics),
                 )?,
-                Some(ControllerClient::new(
+                Some(Arc::new(ControllerClient::new(
                     &config,
                     controller_config,
                     relay_identity.network_id,
-                )?),
+                )?)),
             )
         } else {
             (
@@ -101,16 +117,39 @@ impl Server {
             )
         };
         let server_config = tls::server_config(&config)?;
-        let endpoint = Endpoint::server(server_config, config.listen_addr()?)
-            .context("bind QUIC relay endpoint")?;
+        let quic_address = config.listen_addr()?;
+        let socket = bind_socket(
+            quic_address,
+            config.relay.listen.starts_with(':'),
+            Type::DGRAM,
+        )
+        .with_context(|| format!("bind QUIC relay endpoint {quic_address}"))?;
+        let runtime = quinn::default_runtime().context("no QUIC runtime available")?;
+        let endpoint = Endpoint::new(
+            EndpointConfig::default(),
+            Some(server_config),
+            socket.into(),
+            runtime,
+        )
+        .context("create QUIC relay endpoint")?;
         let tcp_address = config.tcp_fallback_addr()?;
         let tcp_listener = if let Some(address) = tcp_address {
-            let listener = std::net::TcpListener::bind(address)
+            let wildcard = config
+                .tcp_fallback
+                .as_ref()
+                .is_some_and(|tcp| tcp.listen.starts_with(':'));
+            let socket = bind_socket(address, wildcard, Type::STREAM)
                 .with_context(|| format!("bind TCP fallback endpoint {address}"))?;
-            listener
+            socket
+                .listen(1024)
+                .context("listen on TCP fallback socket")?;
+            socket
                 .set_nonblocking(true)
                 .context("make TCP fallback listener nonblocking")?;
-            Some(TcpListener::from_std(listener).context("create Tokio TCP fallback listener")?)
+            Some(
+                TcpListener::from_std(socket.into())
+                    .context("create Tokio TCP fallback listener")?,
+            )
         } else {
             None
         };
@@ -124,6 +163,23 @@ impl Server {
             .as_ref()
             .filter(|tcp| !tcp.listen.is_empty())
             .cloned();
+        let (public, acme) = match config
+            .public_https
+            .as_ref()
+            .filter(|public| !public.server_name.is_empty())
+        {
+            Some(config) => {
+                let (tls, acme) = PublicTls::new(config)?;
+                let public = PublicEndpoint {
+                    tls,
+                    http: PublicHttp::new(controller.clone()),
+                    handshakes: Arc::new(Semaphore::new(MAX_PUBLIC_HANDSHAKES)),
+                    connections: Arc::new(Semaphore::new(MAX_PUBLIC_HTTP_CONNECTIONS)),
+                };
+                (Some(public), Some(acme))
+            }
+            None => (None, None),
+        };
         let tcp_packet_pool = tcp_config
             .as_ref()
             .map(|tcp| PacketPool::prewarmed(tcp.queue_depth, MAX_PACKET_PAYLOAD as usize + 5));
@@ -153,11 +209,13 @@ impl Server {
                 handshake_timeout: config.relay.handshake_timeout,
                 max_sessions: config.relay.max_sessions,
                 tcp_tls,
+                public,
                 tcp_config,
                 tcp_packet_pool,
             }),
             metrics_interval: config.relay.metrics_interval,
             controller,
+            acme,
             diagnostics,
         })
     }
@@ -199,15 +257,29 @@ impl Server {
         let slots = Arc::new(Semaphore::new(self.inner.max_sessions));
         let mut tasks = JoinSet::new();
         let (stop, stopped) = tokio::sync::watch::channel(false);
+        tokio::pin!(shutdown);
+        if let Some(controller) = self.controller.as_ref() {
+            tokio::select! {
+                result = controller.initialize(&self.inner.authorizations) => result?,
+                _ = &mut shutdown => return Ok(()),
+            }
+        }
+        info!(
+            quic = %self.local_addr()?,
+            tcp_fallback = ?self.tcp_fallback_addr()?,
+            metrics = ?self.metrics_addr()?,
+            "laneway Rust relay listening",
+        );
         let mut diagnostics_task = self
             .diagnostics
             .map(|server| tokio::spawn(server.run(stopped.clone())));
-        if let Some(controller) = self.controller.as_ref() {
-            controller.initialize(&self.inner.authorizations).await?;
-        }
         let mut controller_task = self.controller.map(|controller| {
             let state = Arc::clone(&self.inner.authorizations);
             tokio::spawn(async move { controller.run(state).await })
+        });
+        let acme_task = self.acme.map(|mut acme| {
+            acme.prime();
+            tokio::spawn(acme.run())
         });
         let mut metrics_task = if self.metrics_interval.is_zero() {
             None
@@ -223,7 +295,6 @@ impl Server {
                 }
             }))
         };
-        tokio::pin!(shutdown);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
@@ -259,10 +330,27 @@ impl Server {
                         Ok(Some(value)) => value,
                         Ok(None) => continue,
                         Err(error) => {
+                            self.inner.metrics.transport_failures.fetch_add(1, Ordering::Relaxed);
                             warn!(%error, "TCP fallback accept failed");
                             continue;
                         }
                     };
+                    if let Some(public) = self.inner.public.as_ref() {
+                        let Ok(permit) = Arc::clone(&public.handshakes).try_acquire_owned() else {
+                            continue;
+                        };
+                        let inner = Arc::clone(&self.inner);
+                        let slots = Arc::clone(&slots);
+                        let shutdown = stopped.clone();
+                        tasks.spawn(async move {
+                            if let Err(error) = serve_multiplexed_tcp(
+                                inner, stream, peer, permit, slots, shutdown,
+                            ).await {
+                                debug!(%peer, %error, "multiplexed TCP connection ended");
+                            }
+                        });
+                        continue;
+                    }
                     self.inner.metrics.tcp_connection_attempts.fetch_add(1, Ordering::Relaxed);
                     let permit = match Arc::clone(&slots).try_acquire_owned() {
                         Ok(permit) => permit,
@@ -298,6 +386,10 @@ impl Server {
                 warn!(%error, "relay connection task panicked during shutdown");
             }
         }
+        if let Some(task) = acme_task {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = diagnostics_task.take() {
             task.await.context("relay diagnostics task panicked")??;
         }
@@ -313,11 +405,44 @@ impl Server {
     }
 }
 
+fn bind_socket(mut address: SocketAddr, wildcard: bool, kind: Type) -> std::io::Result<Socket> {
+    if wildcard {
+        let dual_stack = Socket::new(Domain::IPV6, kind, None).and_then(|socket| {
+            socket.set_only_v6(false)?;
+            Ok(socket)
+        });
+        if let Ok(socket) = dual_stack {
+            match bind_at(socket, address, kind) {
+                Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {}
+                result => return result,
+            }
+        }
+        address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, address.port()));
+    }
+    let socket = Socket::new(Domain::for_address(address), kind, None)?;
+    bind_at(socket, address, kind)
+}
+
+fn bind_at(socket: Socket, address: SocketAddr, kind: Type) -> std::io::Result<Socket> {
+    #[cfg(unix)]
+    if kind == Type::STREAM {
+        socket.set_reuse_address(true)?;
+    }
+    socket.bind(&address.into())?;
+    Ok(socket)
+}
+
 async fn serve_incoming(inner: Arc<Inner>, incoming: quinn::Incoming) -> Result<()> {
-    let connection = timeout(inner.handshake_timeout, incoming)
-        .await
-        .context("QUIC handshake timed out")?
-        .context("QUIC handshake failed")?;
+    let handshake = timeout(inner.handshake_timeout, incoming).await;
+    let connection = handshake
+        .context("QUIC handshake timed out")
+        .and_then(|result| result.context("QUIC handshake failed"))
+        .inspect_err(|_| {
+            inner
+                .metrics
+                .transport_failures
+                .fetch_add(1, Ordering::Relaxed);
+        })?;
     let result = serve_connection(Arc::clone(&inner), connection.clone()).await;
     if let Err(error) = &result {
         connection.close(
@@ -328,6 +453,110 @@ async fn serve_incoming(inner: Arc<Inner>, incoming: quinn::Incoming) -> Result<
         connection.close(VarInt::from_u32(0), b"session complete");
     }
     result
+}
+
+async fn serve_multiplexed_tcp(
+    inner: Arc<Inner>,
+    stream: tokio::net::TcpStream,
+    peer: SocketAddr,
+    handshake_permit: tokio::sync::OwnedSemaphorePermit,
+    slots: Arc<Semaphore>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    let public = inner
+        .public
+        .as_ref()
+        .context("public endpoint is unavailable")?;
+    let config = inner
+        .tcp_config
+        .as_ref()
+        .context("TCP fallback configuration is unavailable")?;
+    stream.set_nodelay(true).context("set TCP_NODELAY")?;
+    let mut fallback = false;
+    let handshake = async {
+        let hello = LazyConfigAcceptor::new(rustls::server::Acceptor::default(), stream)
+            .await
+            .context("read TLS ClientHello")?;
+        let client_hello = hello.client_hello();
+        fallback = client_hello
+            .alpn()
+            .is_some_and(|mut alpn| alpn.any(|protocol| protocol == tls::TCP_FALLBACK_ALPN));
+        let tls = if fallback {
+            inner
+                .metrics
+                .tcp_connection_attempts
+                .fetch_add(1, Ordering::Relaxed);
+            inner
+                .tcp_tls
+                .as_ref()
+                .context("TCP fallback TLS configuration is unavailable")?
+                .clone()
+        } else {
+            public.tls.select(&client_hello)?
+        };
+        hello
+            .into_stream(tls)
+            .await
+            .context("complete TLS handshake")
+    };
+    let handshake = tokio::select! {
+        result = timeout(config.handshake_timeout, handshake) => result.context("TLS handshake timed out").and_then(|result| result),
+        _ = wait_shutdown(&mut shutdown) => return Ok(()),
+    };
+    drop(handshake_permit);
+    if fallback {
+        let result = async {
+            let stream = handshake.inspect_err(|_| {
+                inner
+                    .metrics
+                    .transport_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            })?;
+            let _permit = slots
+                .try_acquire_owned()
+                .context("relay session limit reached")?;
+            let packet_pool = inner
+                .tcp_packet_pool
+                .as_ref()
+                .context("TCP fallback packet pool is unavailable")?
+                .clone();
+            let mut connection = inner.metrics.transport_result(tcp::established(
+                stream,
+                config,
+                packet_pool,
+                Arc::clone(&inner.metrics),
+            ))?;
+            if inner
+                .authorizations
+                .authorize_credential(&connection.identity, &connection.certificate_serial)
+                .is_some()
+            {
+                public.http.mark_authenticated(peer);
+            }
+            let result = serve_tcp_connection(Arc::clone(&inner), &mut connection, shutdown).await;
+            connection.shutdown("session complete").await;
+            result
+        }
+        .await;
+        if result.is_err() {
+            inner
+                .metrics
+                .tcp_connection_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        return result;
+    }
+    let stream: TlsStream<_> = handshake?;
+    if stream.get_ref().1.alpn_protocol() == Some(HTTP_ALPN) {
+        let _permit = Arc::clone(&public.connections)
+            .try_acquire_owned()
+            .context("public HTTP connection limit reached")?;
+        tokio::select! {
+            result = public.http.serve(stream, peer) => result?,
+            _ = wait_shutdown(&mut shutdown) => {}
+        }
+    }
+    Ok(())
 }
 
 async fn serve_tcp_incoming(
@@ -348,16 +577,17 @@ async fn serve_tcp_incoming(
         .as_ref()
         .context("TCP fallback packet pool is unavailable")?
         .clone();
-    let mut connection = tokio::select! {
+    let accepted = tokio::select! {
         result = tcp::accept(
             stream,
             Arc::clone(tls),
             config,
             packet_pool,
             Arc::clone(&inner.metrics),
-        ) => result?,
+        ) => result,
         _ = wait_shutdown(&mut shutdown) => bail!("relay shutting down"),
     };
+    let mut connection = inner.metrics.transport_result(accepted)?;
     let result = serve_tcp_connection(Arc::clone(&inner), &mut connection, shutdown).await;
     connection.shutdown("session complete").await;
     result
@@ -373,7 +603,10 @@ async fn serve_tcp_connection(
     let authorization = inner
         .authorizations
         .authorize_credential(&identity, &certificate_serial)
-        .context("authenticated node is not authorized by the active snapshot")?;
+        .ok_or_else(|| {
+            inner.metrics.authorization_failure();
+            anyhow::anyhow!("authenticated node is not authorized by the active snapshot")
+        })?;
     let handshake = timeout(
         inner
             .tcp_config
@@ -385,6 +618,7 @@ async fn serve_tcp_connection(
             &authorization,
             inner.authorizations.epoch(),
             connection,
+            &inner.metrics,
         ),
     )
     .await
@@ -407,7 +641,7 @@ async fn serve_tcp_connection(
         handshake.relay_reader,
         channels,
         shutdown,
-        Arc::clone(&inner.metrics),
+        &inner.metrics,
     )
     .await;
     inner.registry.unregister(&session);
@@ -419,6 +653,7 @@ async fn perform_tcp_handshake(
     authorization: &Authorization,
     configuration_epoch: u64,
     connection: &mut tcp::Parts,
+    metrics: &Metrics,
 ) -> Result<HandshakeResult> {
     let mut control_reader = ControlReader::new();
     let hello_payload = connection
@@ -426,12 +661,12 @@ async fn perform_tcp_handshake(
         .recv()
         .await
         .context("TCP fallback control queue closed before Hello")?;
-    let hello_envelope = control_reader.decode(&hello_payload)?;
-    let hello = match hello_envelope.body {
-        Some(control_envelope::Body::Hello(hello)) => hello,
-        _ => bail!("Hello must be the first control message"),
-    };
-    let negotiated_capabilities = validate_hello(
+    let hello_envelope = control_reader
+        .decode(&hello_payload)
+        .inspect_err(|_| metrics.malformed_control())?;
+    let hello = require_hello(hello_envelope, metrics)?;
+    let negotiated_capabilities = validate_peer_hello(
+        metrics,
         identity,
         &hello,
         REQUIRED_TCP_CAPABILITIES,
@@ -472,14 +707,12 @@ async fn perform_tcp_handshake(
         .recv()
         .await
         .context("TCP fallback control queue closed before RelayRegister")?;
-    let register_envelope = relay_reader.decode(&register_payload)?;
-    let register = match register_envelope.body {
-        Some(relay_envelope::Body::Register(register)) => register,
-        _ => bail!("RelayRegister must be the first relay message"),
-    };
-    validate_register(&session_id, &register)?;
+    let register_envelope = relay_reader
+        .decode(&register_payload)
+        .inspect_err(|_| metrics.malformed_control())?;
+    let requested_max_routes = require_register(register_envelope, &session_id, metrics)?;
     Ok(HandshakeResult {
-        requested_max_routes: register.requested_max_routes,
+        requested_max_routes,
         allow_ipv6: negotiated_capabilities & Capability::LanewayIpv6V1 as u64 != 0,
         allow_e2e: negotiated_capabilities & Capability::LanewayE2ePacketV1 as u64 != 0,
         direct_capable: false,
@@ -493,10 +726,10 @@ async fn run_tcp_session(
     mut relay_reader: RelayReader,
     channels: SessionChannels,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
-    metrics: Arc<Metrics>,
+    metrics: &Metrics,
 ) -> Result<()> {
     let session = Arc::clone(&channels.session);
-    let mut outbound = TrackedOutbound::new(channels.outbound, metrics);
+    let mut outbound = channels.outbound;
     let mut control_out = channels.control;
     let canceled = wait_canceled(channels.canceled);
     let unauthorized = wait_unauthorized(registry, Arc::clone(&session));
@@ -507,13 +740,10 @@ async fn run_tcp_session(
         tokio::select! {
             payload = connection.control.recv() => {
                 let payload = payload.context("TCP fallback control receive queue closed")?;
-                let envelope = relay_reader.decode(&payload)?;
-                match envelope.body {
-                    Some(relay_envelope::Body::RouteHandleRelease(release)) if release.route_handle != 0 => {
-                        registry.release(&session, release.route_handle)?;
-                    }
-                    _ => bail!("unexpected relay control message"),
-                }
+                let envelope = relay_reader.decode(&payload)
+                    .inspect_err(|_| metrics.malformed_control())?;
+                apply_control(registry, &session, envelope, false)
+                    .inspect_err(|_| metrics.malformed_control())?;
             }
             frame = connection.packets.recv() => {
                 let frame = frame.context("TCP fallback packet receive queue closed")?;
@@ -531,7 +761,7 @@ async fn run_tcp_session(
                 sequence = sequence.checked_add(1).context("relay sequence exhausted")?;
             }
             frame = outbound.recv() => {
-                connection.writer.packet(frame.context("relay packet queue closed")?).await?;
+                connection.writer.packet(frame.context("relay packet queue closed")?.into_bytes()).await?;
             }
             result = &mut canceled => return result,
             result = &mut unauthorized => return result,
@@ -553,17 +783,16 @@ async fn wait_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
 }
 
 async fn serve_connection(inner: Arc<Inner>, connection: Connection) -> Result<()> {
-    tls::validate_negotiation(&connection)?;
-    let identity = tls::peer_identity(&connection)?;
-    let certificate_serial = tls::peer_certificate_serial(&connection)?;
+    let accepted = accept_quic_transport(&connection, inner.handshake_timeout).await;
+    let (identity, certificate_serial, mut send, mut receive) =
+        inner.metrics.transport_result(accepted)?;
     let authorization = inner
         .authorizations
         .authorize_credential(&identity, &certificate_serial)
-        .context("authenticated node is not authorized by the active snapshot")?;
-    let (mut send, mut receive) = timeout(inner.handshake_timeout, connection.accept_bi())
-        .await
-        .context("control stream timed out")?
-        .context("accept control stream")?;
+        .ok_or_else(|| {
+            inner.metrics.authorization_failure();
+            anyhow::anyhow!("authenticated node is not authorized by the active snapshot")
+        })?;
     let handshake = timeout(
         inner.handshake_timeout,
         perform_handshake(
@@ -572,6 +801,7 @@ async fn serve_connection(inner: Arc<Inner>, connection: Connection) -> Result<(
             inner.authorizations.epoch(),
             &mut send,
             &mut receive,
+            &inner.metrics,
         ),
     )
     .await
@@ -603,6 +833,31 @@ async fn serve_connection(inner: Arc<Inner>, connection: Connection) -> Result<(
     result
 }
 
+async fn accept_quic_transport(
+    connection: &Connection,
+    deadline: Duration,
+) -> Result<(AuthenticatedIdentity, Vec<u8>, SendStream, RecvStream)> {
+    tls::validate_negotiation(connection)?;
+    let identity = tls::peer_identity(connection)?;
+    let serial = tls::peer_certificate_serial(connection)?;
+    let (send, receive) = timeout(deadline, async {
+        let (send, mut receive) = connection
+            .accept_bi()
+            .await
+            .context("accept control stream")?;
+        let mut preface = [0_u8; 4];
+        receive
+            .read_exact(&mut preface)
+            .await
+            .context("read control preface")?;
+        ensure!(preface == CONTROL_PREFACE, "invalid control stream preface");
+        Ok::<_, anyhow::Error>((send, receive))
+    })
+    .await
+    .context("control transport initialization timed out")??;
+    Ok((identity, serial, send, receive))
+}
+
 struct HandshakeResult {
     requested_max_routes: u32,
     allow_ipv6: bool,
@@ -617,22 +872,21 @@ async fn perform_handshake(
     configuration_epoch: u64,
     send: &mut SendStream,
     receive: &mut RecvStream,
+    metrics: &Metrics,
 ) -> Result<HandshakeResult> {
-    let mut preface = [0_u8; 4];
-    receive
-        .read_exact(&mut preface)
-        .await
-        .context("read control preface")?;
-    ensure!(preface == CONTROL_PREFACE, "invalid control stream preface");
-
     let mut control_reader = ControlReader::new();
-    let hello_envelope = control_reader.read(receive, MAX_CONTROL_PAYLOAD).await?;
-    let hello = match hello_envelope.body {
-        Some(control_envelope::Body::Hello(hello)) => hello,
-        _ => bail!("Hello must be the first control message"),
-    };
-    let negotiated_capabilities =
-        validate_hello(identity, &hello, REQUIRED_RELAY_CAPABILITIES, "relay QUIC")?;
+    let hello_envelope = control_reader
+        .read(receive, MAX_CONTROL_PAYLOAD)
+        .await
+        .inspect_err(|_| metrics.malformed_control())?;
+    let hello = require_hello(hello_envelope, metrics)?;
+    let negotiated_capabilities = validate_peer_hello(
+        metrics,
+        identity,
+        &hello,
+        REQUIRED_RELAY_CAPABILITIES,
+        "relay QUIC",
+    )?;
     let session_id = random_id()?;
     write_control(
         send,
@@ -661,18 +915,61 @@ async fn perform_handshake(
     .await?;
 
     let mut relay_reader = RelayReader::new();
-    let register_envelope = relay_reader.read(receive, MAX_CONTROL_PAYLOAD).await?;
-    let register = match register_envelope.body {
-        Some(relay_envelope::Body::Register(register)) => register,
-        _ => bail!("RelayRegister must be the first relay message"),
-    };
-    validate_register(&session_id, &register)?;
+    let register_envelope = relay_reader
+        .read(receive, MAX_CONTROL_PAYLOAD)
+        .await
+        .inspect_err(|_| metrics.malformed_control())?;
+    let requested_max_routes = require_register(register_envelope, &session_id, metrics)?;
     Ok(HandshakeResult {
-        requested_max_routes: register.requested_max_routes,
+        requested_max_routes,
         allow_ipv6: negotiated_capabilities & Capability::LanewayIpv6V1 as u64 != 0,
         allow_e2e: negotiated_capabilities & Capability::LanewayE2ePacketV1 as u64 != 0,
         direct_capable: negotiated_capabilities & Capability::LanewayDirectPeerV1 as u64 != 0,
         relay_reader,
+    })
+}
+
+fn require_hello(
+    envelope: laneway_protocol::v1::ControlEnvelope,
+    metrics: &Metrics,
+) -> Result<Hello> {
+    match envelope.body {
+        Some(control_envelope::Body::Hello(hello)) => Ok(hello),
+        _ => {
+            metrics.malformed_control();
+            bail!("Hello must be the first control message")
+        }
+    }
+}
+
+fn require_register(
+    envelope: laneway_protocol::v1::RelayEnvelope,
+    session_id: &Id,
+    metrics: &Metrics,
+) -> Result<u32> {
+    let Some(relay_envelope::Body::Register(register)) = envelope.body else {
+        metrics.malformed_control();
+        bail!("RelayRegister must be the first relay message");
+    };
+    validate_register(session_id, &register).inspect_err(|_| metrics.malformed_control())?;
+    Ok(register.requested_max_routes)
+}
+
+fn validate_peer_hello(
+    metrics: &Metrics,
+    identity: &AuthenticatedIdentity,
+    hello: &Hello,
+    required_capabilities: u64,
+    carrier: &str,
+) -> Result<u64> {
+    validate_hello(identity, hello, required_capabilities, carrier).inspect_err(|_| {
+        if hello.network_id.as_slice() != identity.network_id.as_bytes()
+            || hello.node_id.as_slice() != identity.subject_id.as_bytes()
+        {
+            metrics.authorization_failure();
+        } else {
+            metrics.malformed_control();
+        }
     })
 }
 
@@ -721,12 +1018,17 @@ async fn run_session(
 ) -> Result<()> {
     let session = Arc::clone(&channels.session);
     let control_writer = control_writer(send, channels.control);
-    let control_reader =
-        control_reader(&inner.registry, Arc::clone(&session), receive, relay_reader);
+    let control_reader = control_reader(
+        &inner.registry,
+        Arc::clone(&session),
+        receive,
+        relay_reader,
+        &inner.metrics,
+    );
     let packet_reader = packet_reader(&inner.registry, Arc::clone(&session), connection.clone());
     let packet_writer = packet_writer(
         connection.clone(),
-        TrackedOutbound::new(channels.outbound, Arc::clone(&inner.metrics)),
+        channels.outbound,
         Arc::clone(&inner.metrics),
     );
     let canceled = wait_canceled(channels.canceled);
@@ -788,20 +1090,32 @@ async fn control_reader(
     session: Arc<Session>,
     mut receive: RecvStream,
     mut reader: RelayReader,
+    metrics: &Metrics,
 ) -> Result<()> {
     loop {
-        let envelope = reader.read(&mut receive, MAX_CONTROL_PAYLOAD).await?;
-        match envelope.body {
-            Some(relay_envelope::Body::RouteHandleRelease(release))
-                if release.route_handle != 0 =>
-            {
-                registry.release(&session, release.route_handle)?;
-            }
-            Some(relay_envelope::Body::EndpointCandidate(candidate)) => {
-                registry.publish_candidate(&session, &candidate)?;
-            }
-            _ => bail!("unexpected relay control message"),
+        let envelope = reader
+            .read(&mut receive, MAX_CONTROL_PAYLOAD)
+            .await
+            .inspect_err(|_| metrics.malformed_control())?;
+        apply_control(registry, &session, envelope, true)
+            .inspect_err(|_| metrics.malformed_control())?;
+    }
+}
+
+fn apply_control(
+    registry: &Registry,
+    session: &Arc<Session>,
+    envelope: laneway_protocol::v1::RelayEnvelope,
+    allow_candidate: bool,
+) -> Result<()> {
+    match envelope.body {
+        Some(relay_envelope::Body::RouteHandleRelease(release)) if release.route_handle != 0 => {
+            registry.release(session, release.route_handle)
         }
+        Some(relay_envelope::Body::EndpointCandidate(candidate)) if allow_candidate => {
+            registry.publish_candidate(session, &candidate)
+        }
+        _ => bail!("unexpected relay control message"),
     }
 }
 
@@ -822,11 +1136,11 @@ async fn packet_reader(
 
 async fn packet_writer(
     connection: Connection,
-    mut outbound: TrackedOutbound,
+    mut outbound: tokio::sync::mpsc::Receiver<crate::registry::QueuedFrame>,
     metrics: Arc<Metrics>,
 ) -> Result<()> {
     while let Some(frame) = outbound.recv().await {
-        match connection.send_datagram_wait(frame).await {
+        match connection.send_datagram_wait(frame.into_bytes()).await {
             Ok(()) => {}
             // Quinn can report TooLarge transiently before path-MTU discovery
             // raises the usable DATAGRAM size. This is a packet drop, not a
@@ -840,31 +1154,6 @@ async fn packet_writer(
         }
     }
     bail!("packet writer closed")
-}
-
-struct TrackedOutbound {
-    receiver: tokio::sync::mpsc::Receiver<Bytes>,
-    metrics: Arc<Metrics>,
-}
-
-impl TrackedOutbound {
-    fn new(receiver: tokio::sync::mpsc::Receiver<Bytes>, metrics: Arc<Metrics>) -> Self {
-        Self { receiver, metrics }
-    }
-
-    async fn recv(&mut self) -> Option<Bytes> {
-        let frame = self.receiver.recv().await;
-        if frame.is_some() {
-            self.metrics.queue_removed(1);
-        }
-        frame
-    }
-}
-
-impl Drop for TrackedOutbound {
-    fn drop(&mut self) {
-        self.metrics.queue_removed(self.receiver.len() as u64);
-    }
 }
 
 fn datagram_error_is_packet_drop(error: &quinn::SendDatagramError) -> bool {
@@ -902,7 +1191,9 @@ fn safe_close_reason(error: &anyhow::Error) -> String {
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
-    use laneway_protocol::{PacketHeader, encode_packet, v1::ControlEnvelope};
+    use laneway_protocol::{
+        PacketHeader, decode_frame, encode_packet, encode_wireguard_packet, v1::ControlEnvelope,
+    };
     use quinn::crypto::rustls::QuicClientConfig;
     use rcgen::{
         BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -954,22 +1245,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tracked_outbound_decrements_on_receive_and_teardown() {
+    async fn queued_frames_update_packet_and_byte_gauges_on_delivery_and_teardown() {
+        use crate::registry::QueuedFrame;
         let metrics = Arc::new(Metrics::default());
-        let (sender, receiver) = tokio::sync::mpsc::channel(2);
-        for value in [1_u8, 2] {
-            let depth = metrics.queue_enqueue_started();
-            sender.send(Bytes::from(vec![value])).await.unwrap();
-            metrics.queue_enqueue_completed(depth);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        for value in [b"one".as_slice(), b"two!"] {
+            sender
+                .send(QueuedFrame::new(Bytes::from_static(value), &metrics))
+                .await
+                .unwrap();
         }
         assert_eq!(metrics.snapshot().queue_depth, 2);
         assert_eq!(metrics.snapshot().queue_depth_peak, 2);
+        assert_eq!(metrics.snapshot().queued_bytes, 7);
 
-        let mut outbound = TrackedOutbound::new(receiver, Arc::clone(&metrics));
-        assert!(outbound.recv().await.is_some());
+        assert_eq!(receiver.recv().await.unwrap().into_bytes(), &b"one"[..]);
         assert_eq!(metrics.snapshot().queue_depth, 1);
-        drop(outbound);
+        assert_eq!(metrics.snapshot().queued_bytes, 4);
+        drop(receiver);
         assert_eq!(metrics.snapshot().queue_depth, 0);
+        assert_eq!(metrics.snapshot().queued_bytes, 0);
     }
 
     struct TcpClientSession {
@@ -1418,7 +1713,9 @@ prefixes = ["100.96.0.2/32", "fd00::2/128"]
             let _ = stopped.await;
         }));
 
-        let capabilities = REQUIRED_TCP_CAPABILITIES | Capability::LanewayIpv6V1 as u64;
+        let capabilities = REQUIRED_TCP_CAPABILITIES
+            | Capability::LanewayIpv6V1 as u64
+            | Capability::LanewayE2ePacketV1 as u64;
         let mut first =
             connect_tcp_node(address, &fixture.ca, &fixture.first, 0x10, capabilities).await;
         let mut second =
@@ -1458,7 +1755,23 @@ prefixes = ["100.96.0.2/32", "fd00::2/128"]
             PacketHeader::decode(&received).unwrap().route_handle,
             second_handle
         );
-        assert_eq!(metrics.snapshot().forwarded_packets, 1);
+        let mut wireguard = [0; 148];
+        wireguard[0] = 1;
+        wireguard[4] = 42;
+        frame.clear();
+        encode_wireguard_packet(first_handle, &wireguard, &mut frame).unwrap();
+        write_tcp_record(&mut first.stream, 2, &frame).await;
+        let received = timeout(
+            Duration::from_secs(2),
+            read_tcp_record(&mut second.stream, 2),
+        )
+        .await
+        .unwrap();
+        let (header, payload) = decode_frame(&received).unwrap();
+        assert_eq!(header.route_handle, second_handle);
+        assert_eq!(header.flags, laneway_protocol::PACKET_FLAG_E2E_ENCRYPTED);
+        assert_eq!(payload, wireguard);
+        assert_eq!(metrics.snapshot().forwarded_packets, 2);
         assert_eq!(metrics.snapshot().tcp_connection_attempts, 2);
         assert_eq!(metrics.snapshot().tcp_packet_pool_misses, 0);
         assert_eq!(metrics.snapshot().queue_depth, 0);
@@ -1564,6 +1877,35 @@ prefixes = ["100.96.0.2/32", "fd00::2/128"]
 
         let _ = stop.send(());
         task.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn wildcard_tcp_and_udp_are_reachable_over_ipv4_and_available_ipv6() {
+        let wildcard = "[::]:0".parse().unwrap();
+        let tcp = bind_socket(wildcard, true, Type::STREAM).unwrap();
+        tcp.listen(4).unwrap();
+        let tcp_port = tcp.local_addr().unwrap().as_socket().unwrap().port();
+        let _ipv4 = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, tcp_port)).unwrap();
+        let _ = tcp.accept().unwrap();
+
+        let udp = bind_socket(wildcard, true, Type::DGRAM).unwrap();
+        let udp_port = udp.local_addr().unwrap().as_socket().unwrap().port();
+        let udp: std::net::UdpSocket = udp.into();
+        udp.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let ipv4 = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        ipv4.send_to(b"4", (Ipv4Addr::LOCALHOST, udp_port)).unwrap();
+        let mut data = [0_u8];
+        assert_eq!(udp.recv_from(&mut data).unwrap().0, 1);
+        assert_eq!(data, *b"4");
+
+        let v6 = std::net::Ipv6Addr::LOCALHOST;
+        if let Ok(ipv6) = std::net::UdpSocket::bind((v6, 0)) {
+            let _ipv6 = std::net::TcpStream::connect((v6, tcp_port)).unwrap();
+            let _ = tcp.accept().unwrap();
+            ipv6.send_to(b"6", (v6, udp_port)).unwrap();
+            assert_eq!(udp.recv_from(&mut data).unwrap().0, 1);
+            assert_eq!(data, *b"6");
+        }
     }
 
     #[test]

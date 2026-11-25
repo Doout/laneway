@@ -22,3 +22,11 @@ func TestLinuxRootRegistersAdministratorLifecycleCommands(t *testing.T) {
 		}
 	}
 }
+
+func TestLinuxRootRegistersControllerInitialNetworkInspector(t *testing.T) {
+	root := newRootCommand()
+	command, remaining, err := root.Find([]string{"config", "inspect-controller-initial-network"})
+	if err != nil || command.CommandPath() != "laneway config inspect-controller-initial-network" || len(remaining) != 0 {
+		t.Fatalf("config inspector: resolved=%q remaining=%q error=%v", command.CommandPath(), remaining, err)
+	}
+}

@@ -190,13 +190,12 @@ echo "==> building the real controller service fixture, product binaries, and Ru
 (
   cd "${repo_root}/go"
   go build -o "${work_dir}/laneway" ./cmd/laneway
-  go build -o "${work_dir}/lanewayd" ./cmd/laneway
-  go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
   go build -o "${work_dir}/netprobe" ./integration/netprobe
   go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller
 )
-cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs
-cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
+cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd -p laneway-relay
+cp "${repo_root}/rust/target/debug/lanewayd" "${work_dir}/lanewayd"
+cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/laneway-relay"
 
 network_id="21000000000000000000000000000001"
 controller_service="21000000000000000000000000000002"
@@ -401,9 +400,20 @@ quic_recovery_interval = "5s"
 listen = "0.0.0.0:4434"
 EOF
 
+ip netns exec "${rust_ns}" "${work_dir}/lanewayd" run --system \
+  --config "${work_dir}/rust.toml" --check-config
+if [[ -e "${work_dir}/rust.sock" ]]; then
+  echo "ERROR: system configuration check created a local API socket" >&2
+  exit 1
+fi
+if ip -n "${rust_ns}" link show lane0 >/dev/null 2>&1; then
+  echo "ERROR: system configuration check created lane0" >&2
+  exit 1
+fi
+
 echo "==> bootstrap is held before TUN creation, then the controller assignment is applied"
 start_process "${rust_ns}" "${work_dir}/rust.log" env RUST_LOG=info \
-  "${work_dir}/rust-node" --config "${work_dir}/rust.toml"
+  "${work_dir}/lanewayd" run --system --config "${work_dir}/rust.toml"
 rust_pid="${last_pid}"
 wait_log "${controller_pid}" "${work_dir}/controller.log" "holding initial node configuration request"
 if ip -n "${rust_ns}" link show lane0 >/dev/null 2>&1; then
@@ -426,10 +436,10 @@ if [[ "$(ip -n "${rust_ns}" -o -4 address show dev lane0 | wc -l)" != "1" ]]; th
 fi
 
 start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/laneway-relay" \
-  -config "${work_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+  --config "${work_dir}/relay.toml" --diagnostics 127.0.0.1:6060
 relay_pid="${last_pid}"
 wait_log "${relay_pid}" "${work_dir}/relay.log" "listening"
-start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/lanewayd" \
+start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/laneway" node run \
   -config "${work_dir}/gateway.toml" -diagnostics 127.0.0.1:6061
 gateway_pid="${last_pid}"
 wait_log "${gateway_pid}" "${work_dir}/gateway.log" "interface=lane0"

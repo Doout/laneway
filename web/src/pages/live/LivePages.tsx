@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { Ban, KeyRound, MonitorDot, Network, Plus, RadioTower, Route as RouteIcon, ShieldCheck, TriangleAlert, Users } from 'lucide-react'
-import { Button, Callout, DataTable, DetailLayout, EmptyState, EntityTitle, Field, FormStack, IdentityBlock, PageHeader, Section, Status, TokenBox, type DataColumn } from '../../components/ui'
+import { Ban, FileKey2, KeyRound, MonitorDot, Network, Plus, RadioTower, Route as RouteIcon, ShieldCheck, TriangleAlert, Users } from 'lucide-react'
+import { ActionPanel, Button, Callout, DataTable, DetailLayout, EmptyState, EntityTitle, Field, FilterSelect, FormStack, IdentityBlock, PageHeader, RecordList, ResourceLink, Section, Status, TokenBox, Toolbar, type DataColumn } from '../../components/ui'
 import { controllerOrigin, useControlPlane, type ControllerACLRule, type ControllerAuditEvent, type ControllerCertificate, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
 import { durableNodeEnrollmentCommand, userEnrollmentCommand } from '../../lib/enrollment-commands'
 
@@ -64,22 +64,40 @@ function Missing({ title, back }: { title: string; back: string }) {
   return <EmptyState icon={<TriangleAlert />} title={title} description="The controller inventory does not contain this record." action={<Button to={back} variant="primary">Back</Button>} />
 }
 
+type RecordVisibility = 'current' | 'all'
+
+function VisibilityToolbar({ value, onChange, currentLabel, visible, total }: {
+  value: RecordVisibility
+  onChange: (value: RecordVisibility) => void
+  currentLabel: string
+  visible: number
+  total: number
+}) {
+  return <Toolbar filters={<>
+    <FilterSelect label="Record visibility" value={value} onChange={(next) => onChange(next as RecordVisibility)}>
+      <option value="current">{currentLabel}</option>
+      <option value="all">All records</option>
+    </FilterSelect>
+    <span className="inventory-result-count" aria-live="polite">{visible} of {total} shown</span>
+  </>} />
+}
+
 export function LiveOverviewPage() {
   const { inventory, inventoryPending, inventoryError, hasPermission } = useControlPlane()
   const networkId = inventory?.network?.network_id
   const rows = [
-    ['Nodes', inventory?.nodes.length ?? 0, 'node.read'],
-    ['Routes', inventory?.routes.length ?? 0, 'route.read'],
-    ['Access rules', inventory?.aclRules.length ?? 0, 'acl.read'],
-    ['Relays', inventory?.relays.length ?? 0, 'relay.read'],
+    ['Nodes', inventory?.nodes.filter((node) => !liveNodeState(node).inactive).length ?? 0, 'node.read', MonitorDot],
+    ['Routes', inventory?.routes.filter((route) => liveRouteState(route).actionable).length ?? 0, 'route.read', RouteIcon],
+    ['Access rules', inventory?.aclRules.filter((rule) => rule.enabled).length ?? 0, 'acl.read', ShieldCheck],
+    ['Relays', inventory?.relays.filter((relay) => relay.enabled).length ?? 0, 'relay.read', RadioTower],
   ] as const
   return <>
-    <PageHeader title="Overview" description={inventory?.network?.name} />
+    <PageHeader title="Overview" description={inventory?.network ? `${inventory.network.name} network inventory` : 'Select a network to view its inventory'} />
     <ErrorMessage value={inventoryError} />
     {inventoryPending ? <p role="status">Refreshing inventory…</p> : null}
     {inventory && inventory.networks.length > 1 && !inventory.network ? <Callout>Select a network.</Callout> : null}
     {inventory ? <section className="overview-metrics" aria-label="Network inventory summary">
-      {rows.filter(([, , permission]) => Boolean(networkId && hasPermission(permission, networkId))).map(([label, count]) => <div key={label}><span><strong>{count}</strong>{label}</span></div>)}
+      {rows.filter(([, , permission]) => Boolean(networkId && hasPermission(permission, networkId))).map(([label, count, , Icon]) => <div key={label} className="overview-metric"><span className="overview-metric__icon"><Icon aria-hidden="true" size={19} /></span><span className="overview-metric__label">{label}</span><strong>{count}</strong><span className="overview-metric__meta">in this network</span></div>)}
     </section> : null}
   </>
 }
@@ -87,6 +105,9 @@ export function LiveOverviewPage() {
 export function LiveNodesPage() {
   const { inventory, hasPermission } = useControlPlane()
   const networkId = inventory?.network?.network_id
+  const records = inventory?.nodes ?? []
+  const [visibility, setVisibility] = useState<RecordVisibility>('current')
+  const visibleRecords = visibility === 'all' ? records : records.filter((node) => !liveNodeState(node).inactive)
   const columns: DataColumn<ControllerNode>[] = [
     { key: 'node', label: 'Node', render: (node) => <EntityTitle icon={<MonitorDot size={16} />} subtitle={node.node_id}>{node.name || node.node_id}</EntityTitle> },
     { key: 'class', label: 'Enrollment', render: (node) => node.enrollment_class },
@@ -95,8 +116,9 @@ export function LiveNodesPage() {
     { key: 'open', label: '', render: (node) => <Button to={`/nodes/${node.node_id}`} variant="quiet">View</Button> },
   ]
   return <>
-    <PageHeader title="Nodes" action={networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/nodes/new" variant="primary"><Plus size={16} />Add node</Button> : undefined} />
-    <DataTable columns={columns} rows={inventory?.nodes ?? []} rowKey={(node) => node.node_id} empty={<p>No nodes.</p>} />
+    <PageHeader title="Nodes" description="Enrolled devices and service identities" action={networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/nodes/new" variant="primary"><Plus size={16} />Add node</Button> : undefined} />
+    <VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Active only" visible={visibleRecords.length} total={records.length} />
+    <DataTable columns={columns} rows={visibleRecords} rowKey={(node) => node.node_id} empty={<p>No active nodes. Choose All records to view inactive nodes.</p>} />
   </>
 }
 
@@ -110,7 +132,7 @@ export function LiveNodeDetailPage() {
   return <>
     <PageHeader title="Node" action={<Button to="/nodes" variant="quiet">All nodes</Button>} />
     <DetailLayout identity={<IdentityBlock icon={<MonitorDot size={30} />} title={node.name || node.node_id} state={<Status tone={state.tone}>{state.label}</Status>} actions={canManage ? <><Button to={`/nodes/${node.node_id}/capabilities`}>Capabilities</Button><Button to={`/nodes/${node.node_id}/revoke`} variant="danger">Revoke</Button></> : undefined} metadata={[["Node ID", <code>{node.node_id}</code>], ["Network ID", <code>{node.network_id}</code>], ["Created", time(node.created_at_unix_seconds)]]} />}>
-      <Section title="Overlay addresses"><dl><div><dt>IPv4</dt><dd><code>{node.ipv4_address ?? 'Not assigned'}</code></dd></div><div><dt>IPv6</dt><dd><code>{node.ipv6_address ?? 'Not assigned'}</code></dd></div></dl></Section>
+      <Section title="Overlay addresses"><RecordList rows={[["IPv4", <code>{node.ipv4_address ?? 'Not assigned'}</code>], ["IPv6", <code>{node.ipv6_address ?? 'Not assigned'}</code>]]} /></Section>
       <Section title="Capabilities"><code>{node.enabled_capabilities}</code></Section>
     </DetailLayout>
   </>
@@ -156,7 +178,7 @@ function EnrollmentForm({ user }: { user: boolean }) {
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Token issuance failed.') } finally { setPending(false) }
   }
   return <>
-    <PageHeader title={user ? 'Issue user access' : 'Add node'} />
+    <PageHeader title={user ? 'Issue user access' : 'Add node'} description={user ? 'Create a single-use enrollment command for a person' : 'Create a single-use enrollment command for a durable node'} />
     <FormStack onSubmit={submit}>
       <Field label={user ? 'Requested node name' : 'Node name'}><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" /></Field>
       {user ? <><Field label="Enrollment"><select value={kind} onChange={(event) => setKind(event.target.value)}><option value="ephemeral">Ephemeral</option><option value="remembered">Remembered</option></select></Field><Field label="Lease duration (hours)"><input type="number" min="1" max="24" disabled={kind !== 'ephemeral'} value={hours} onChange={(event) => setHours(event.target.value)} /></Field></> : null}
@@ -201,7 +223,7 @@ export function LiveNodeCapabilitiesPage() {
   async function save() {
     try { await request(`/v1/admin/nodes/${activeNode.node_id}/capabilities`, { method: 'PUT', body: { enabled_capabilities: mask } }); await refresh(); navigate(`/nodes/${activeNode.node_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Update failed.') }
   }
-  return <><PageHeader title="Edit capabilities" /><Field label="Capability mask"><input type="number" min="0" value={mask} onChange={(event) => setMask(Number(event.target.value))} /></Field><ErrorMessage value={error} /><div className="button-row"><Button variant="primary" onClick={() => void save()}>Save</Button><Button to={`/nodes/${node.node_id}`} variant="quiet">Cancel</Button></div></>
+  return <><PageHeader title="Edit capabilities" description={node.name || node.node_id} /><ActionPanel><Field label="Capability mask"><input type="number" min="0" value={mask} onChange={(event) => setMask(Number(event.target.value))} /></Field><ErrorMessage value={error} /><div className="button-row"><Button variant="primary" onClick={() => void save()}>Save changes</Button><Button to={`/nodes/${node.node_id}`} variant="quiet">Cancel</Button></div></ActionPanel></>
 }
 
 export function LiveNodeRevokePage() {
@@ -217,13 +239,15 @@ export function LiveNodeRevokePage() {
   async function revoke() {
     try { await request(`/v1/admin/nodes/${activeNode.node_id}/revoke`, { method: 'POST', body: { reason: 'Revoked by administrator' } }); await refresh(); navigate(`/nodes/${activeNode.node_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Revocation failed.') }
   }
-  return <><PageHeader title={`Revoke ${node.name || node.node_id}`} /><Callout tone="danger">This action is permanent.</Callout><Field label={`Type ${node.name || node.node_id} to confirm`}><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field><ErrorMessage value={error} /><Button variant="danger" disabled={confirmation !== (node.name || node.node_id)} onClick={() => void revoke()}>Revoke node</Button></>
+  return <><PageHeader title={`Revoke ${node.name || node.node_id}`} description="Disconnect this identity and prevent it from reconnecting" /><ActionPanel><Callout tone="danger">This action is permanent.</Callout><Field label={`Type ${node.name || node.node_id} to confirm`}><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field><ErrorMessage value={error} /><Button variant="danger" disabled={confirmation !== (node.name || node.node_id)} onClick={() => void revoke()}>Revoke node</Button></ActionPanel></>
 }
 
 export function LiveUsersPage() {
   const { inventory, hasPermission } = useControlPlane()
   const records = (inventory?.nodes ?? []).filter((node) => node.enrollment_class !== 'durable')
   const networkId = inventory?.network?.network_id
+  const [visibility, setVisibility] = useState<RecordVisibility>('current')
+  const visibleRecords = visibility === 'all' ? records : records.filter((node) => !liveNodeState(node).inactive)
   const columns: DataColumn<ControllerNode>[] = [
     { key: 'user', label: 'User enrollment', render: (node) => <EntityTitle icon={<Users size={16} />} subtitle={node.node_id}>{node.name || node.node_id}</EntityTitle> },
     { key: 'class', label: 'Type', render: (node) => node.enrollment_class },
@@ -231,7 +255,7 @@ export function LiveUsersPage() {
     { key: 'state', label: 'State', render: (node) => { const state = liveNodeState(node); return <Status tone={state.tone}>{state.label}</Status> } },
     { key: 'open', label: '', render: (node) => <Button to={`/users/${node.node_id}`} variant="quiet">View</Button> },
   ]
-  return <><PageHeader title="Users" action={networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/users/new" variant="primary">Issue access</Button> : undefined} /><DataTable columns={columns} rows={records} rowKey={(node) => node.node_id} empty={<p>No user enrollments.</p>} /></>
+  return <><PageHeader title="Users" description="Temporary and remembered user enrollments" action={networkId && hasPermission('enrollment.issue', networkId) ? <Button to="/users/new" variant="primary">Issue access</Button> : undefined} /><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Active only" visible={visibleRecords.length} total={records.length} /><DataTable columns={columns} rows={visibleRecords} rowKey={(node) => node.node_id} empty={<p>No active user enrollments. Choose All records to view inactive enrollments.</p>} /></>
 }
 
 export function LiveUserDetailPage() {
@@ -240,12 +264,15 @@ export function LiveUserDetailPage() {
   const node = inventory?.nodes.find((candidate) => candidate.node_id === userId && candidate.enrollment_class !== 'durable')
   if (!node) return <Missing title="User enrollment not found" back="/users" />
   const state = liveNodeState(node)
-  return <><PageHeader title="User enrollment" action={<Button to="/users">All users</Button>} /><dl><div><dt>Name</dt><dd>{node.name || node.node_id}</dd></div><div><dt>Node ID</dt><dd><code>{node.node_id}</code></dd></div><div><dt>Enrollment</dt><dd>{node.enrollment_class}</dd></div><div><dt>State</dt><dd><Status tone={state.tone}>{state.label}</Status></dd></div><div><dt>Lease expires</dt><dd>{time(node.lease_expires_at_unix_seconds)}</dd></div></dl></>
+  return <><PageHeader title="User enrollment" action={<Button to="/users">All users</Button>} /><RecordList rows={[["Name", node.name || node.node_id], ["Node ID", <code>{node.node_id}</code>], ["Enrollment", node.enrollment_class], ["State", <Status tone={state.tone}>{state.label}</Status>], ["Lease expires", time(node.lease_expires_at_unix_seconds)]]} /></>
 }
 
 export function LiveRoutesPage() {
   const { inventory, hasPermission } = useControlPlane()
   const networkId = inventory?.network?.network_id
+  const records = inventory?.routes ?? []
+  const [visibility, setVisibility] = useState<RecordVisibility>('current')
+  const visibleRecords = visibility === 'all' ? records : records.filter((route) => liveRouteState(route).actionable)
   const columns: DataColumn<ControllerRoute>[] = [
     { key: 'prefix', label: 'Prefix', render: (route) => <code>{route.prefix}</code> },
     { key: 'node', label: 'Node ID', render: (route) => <code>{route.node_id}</code> },
@@ -253,7 +280,7 @@ export function LiveRoutesPage() {
     { key: 'state', label: 'State', render: (route) => { const state = liveRouteState(route); return <Status tone={state.tone}>{state.label}</Status> } },
     { key: 'open', label: '', render: (route) => <Button to={`/routes/${route.route_id}`} variant="quiet">View</Button> },
   ]
-  return <><PageHeader title="Routes" action={networkId && hasPermission('route.manage', networkId) ? <Button to="/routes/new" variant="primary"><RouteIcon size={16} />Assign route</Button> : undefined} /><DataTable columns={columns} rows={inventory?.routes ?? []} rowKey={(route) => route.route_id} empty={<p>No routes.</p>} /></>
+  return <><PageHeader title="Routes" description="Approved and advertised network prefixes" action={networkId && hasPermission('route.manage', networkId) ? <Button to="/routes/new" variant="primary"><RouteIcon size={16} />Assign route</Button> : undefined} /><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Current only" visible={visibleRecords.length} total={records.length} /><DataTable columns={columns} rows={visibleRecords} rowKey={(route) => route.route_id} empty={<p>No current routes. Choose All records to view expired, withdrawn, or rejected routes.</p>} /></>
 }
 
 export function LiveRouteDetailPage() {
@@ -266,7 +293,7 @@ export function LiveRouteDetailPage() {
   const state = liveRouteState(route)
   const canManage = hasPermission('route.manage', route.network_id) && state.actionable
   async function withdraw() { try { await request(`/v1/admin/routes/${activeRoute.route_id}/withdraw`, { method: 'POST' }); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Withdrawal failed.') } }
-  return <><PageHeader title={route.prefix} action={<div className="button-row">{canManage && route.state === 'advertised' ? <Button to={`/routes/${route.route_id}/approve`} variant="primary">Approve</Button> : null}<Button to="/routes">All routes</Button></div>} /><dl><div><dt>Route ID</dt><dd><code>{route.route_id}</code></dd></div><div><dt>Node ID</dt><dd><code>{route.node_id}</code></dd></div><div><dt>Mode</dt><dd>{liveRouteMode(route.mode)}</dd></div><div><dt>Metric</dt><dd>{route.metric}</dd></div><div><dt>State</dt><dd>{state.label}</dd></div></dl><ErrorMessage value={error} />{canManage ? <Button variant="danger" onClick={() => void withdraw()}>Withdraw route</Button> : null}</>
+  return <><PageHeader title={route.prefix} action={<div className="button-row">{canManage && route.state === 'advertised' ? <Button to={`/routes/${route.route_id}/approve`} variant="primary">Approve</Button> : null}<Button to="/routes">All routes</Button></div>} /><RecordList rows={[["Route ID", <code>{route.route_id}</code>], ["Node ID", <code>{route.node_id}</code>], ["Mode", liveRouteMode(route.mode)], ["Metric", route.metric], ["State", state.label]]} /><ErrorMessage value={error} />{canManage ? <Button variant="danger" onClick={() => void withdraw()}>Withdraw route</Button> : null}</>
 }
 
 export function LiveCreateRoutePage() {
@@ -283,7 +310,7 @@ export function LiveCreateRoutePage() {
     event.preventDefault(); if (!inventory?.network || !prefix || !nodeId) return setError('Enter a prefix and choose a node.')
     try { const assigned = await request<ControllerRoute>('/v1/admin/routes/assign', { method: 'POST', body: { network_id: inventory.network.network_id, node_id: nodeId, prefix: prefix.trim(), mode, metric: Number(metric) } }); await refresh(); navigate(`/routes/${assigned.route_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Route assignment failed.') }
   }
-  return <><PageHeader title="Assign route" /><FormStack onSubmit={submit}><Field label="Destination prefix"><input value={prefix} onChange={(event) => setPrefix(event.target.value)} /></Field><Field label="Forwarding node"><select value={nodeId} onChange={(event) => setNodeId(event.target.value)}>{eligibleNodes.map((node) => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</select></Field><Field label="Mode"><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="nat">NAT</option><option value="routed">Routed</option></select></Field><Field label="Metric"><input type="number" min="0" value={metric} onChange={(event) => setMetric(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Assign route</Button></FormStack></>
+  return <><PageHeader title="Assign route" description="Send a network prefix through an enrolled durable node" /><FormStack onSubmit={submit}><Field label="Destination prefix" hint="Use a canonical IPv4 or IPv6 CIDR prefix."><input placeholder="10.20.0.0/16" value={prefix} onChange={(event) => setPrefix(event.target.value)} /></Field><Field label="Forwarding node"><select value={nodeId} onChange={(event) => setNodeId(event.target.value)}>{eligibleNodes.map((node) => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</select></Field><Field label="Mode"><select value={mode} onChange={(event) => setMode(event.target.value)}><option value="nat">NAT</option><option value="routed">Routed</option></select></Field><Field label="Metric"><input type="number" min="0" value={metric} onChange={(event) => setMetric(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Assign route</Button></FormStack></>
 }
 
 export function LiveApproveRoutePage() {
@@ -297,12 +324,15 @@ export function LiveApproveRoutePage() {
   if (route.state !== 'advertised' || !liveRouteState(route).actionable) return <PageHeader title="Route is not actionable" action={<Button to={`/routes/${route.route_id}`}>View route</Button>} />
   const activeRoute = route
   async function approve() { try { await request(`/v1/admin/routes/${activeRoute.route_id}/approve`, { method: 'POST' }); await refresh(); navigate(`/routes/${activeRoute.route_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Approval failed.') } }
-  return <><PageHeader title="Approve route" /><dl><div><dt>Prefix</dt><dd><code>{route.prefix}</code></dd></div><div><dt>Node ID</dt><dd><code>{route.node_id}</code></dd></div></dl><Field label={`Type ${route.prefix} to confirm`}><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field><ErrorMessage value={error} /><Button variant="primary" disabled={confirmation !== route.prefix} onClick={() => void approve()}>Approve route</Button></>
+  return <><PageHeader title="Approve route" description="Confirm this node-advertised prefix" /><RecordList rows={[["Prefix", <code>{route.prefix}</code>], ["Node ID", <code>{route.node_id}</code>]]} /><ActionPanel><Field label={`Type ${route.prefix} to confirm`}><input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></Field><ErrorMessage value={error} /><Button variant="primary" disabled={confirmation !== route.prefix} onClick={() => void approve()}>Approve route</Button></ActionPanel></>
 }
 
 export function LiveAccessPage() {
   const { inventory, hasPermission } = useControlPlane()
   const networkId = inventory?.network?.network_id
+  const records = inventory?.aclRules ?? []
+  const [visibility, setVisibility] = useState<RecordVisibility>('current')
+  const visibleRecords = visibility === 'all' ? records : records.filter((rule) => rule.enabled)
   const columns: DataColumn<ControllerACLRule>[] = [
     { key: 'priority', label: 'Priority', render: (rule) => rule.priority },
     { key: 'rule', label: 'Rule', render: liveACLRuleLabel },
@@ -310,7 +340,7 @@ export function LiveAccessPage() {
     { key: 'state', label: 'State', render: (rule) => <Status tone={rule.enabled ? 'positive' : 'muted'}>{rule.enabled ? 'Enabled' : 'Disabled'}</Status> },
     { key: 'open', label: '', render: (rule) => <Button to={`/access/${rule.rule_id}`} variant="quiet">View</Button> },
   ]
-  return <><PageHeader title="Access rules" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/access/new" variant="primary"><ShieldCheck size={16} />New rule</Button> : undefined} /><DataTable columns={columns} rows={inventory?.aclRules ?? []} rowKey={(rule) => rule.rule_id} empty={<p>No access rules.</p>} /></>
+  return <><PageHeader title="Access rules" description="Traffic policy evaluated in priority order" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/access/new" variant="primary"><ShieldCheck size={16} />New rule</Button> : undefined} /><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Enabled only" visible={visibleRecords.length} total={records.length} /><DataTable columns={columns} rows={visibleRecords} rowKey={(rule) => rule.rule_id} empty={<p>No enabled access rules. Choose All records to view disabled rules.</p>} /></>
 }
 
 export function LiveAccessDetailPage() {
@@ -322,7 +352,7 @@ export function LiveAccessDetailPage() {
   const activeRule = rule
   const canManage = hasPermission('acl.manage', rule.network_id)
   async function toggle() { try { await request(`/v1/admin/acl-rules/${activeRule.rule_id}`, { method: 'PUT', body: { priority: activeRule.priority, action: activeRule.action, selector: activeRule.selector, description: activeRule.description, enabled: !activeRule.enabled } }); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Rule update failed.') } }
-  return <><PageHeader title={liveACLRuleLabel(rule)} action={<Button to="/access">All rules</Button>} /><dl><div><dt>Rule ID</dt><dd><code>{rule.rule_id}</code></dd></div><div><dt>Description</dt><dd>{rule.description || 'Not provided'}</dd></div><div><dt>Priority</dt><dd>{rule.priority}</dd></div><div><dt>Action</dt><dd>{rule.action}</dd></div><div><dt>Selector</dt><dd><pre>{JSON.stringify(rule.selector, null, 2)}</pre></dd></div></dl><ErrorMessage value={error} />{canManage ? <Button variant={rule.enabled ? 'danger' : 'primary'} onClick={() => void toggle()}>{rule.enabled ? 'Disable rule' : 'Enable rule'}</Button> : null}</>
+  return <><PageHeader title={liveACLRuleLabel(rule)} action={<Button to="/access">All rules</Button>} /><RecordList rows={[["Rule ID", <code>{rule.rule_id}</code>], ["Description", rule.description || 'Not provided'], ["Priority", rule.priority], ["Action", rule.action], ["Selector", <pre>{JSON.stringify(rule.selector, null, 2)}</pre>]]} /><ErrorMessage value={error} />{canManage ? <Button variant={rule.enabled ? 'danger' : 'primary'} onClick={() => void toggle()}>{rule.enabled ? 'Disable rule' : 'Enable rule'}</Button> : null}</>
 }
 
 export function LiveCreateAccessPage() {
@@ -337,13 +367,16 @@ export function LiveCreateAccessPage() {
     event.preventDefault(); if (!inventory?.network) return
     try { const parsed = JSON.parse(selector) as Record<string, unknown>; const created = await request<{ rule_id: string }>(`/v1/admin/networks/${inventory.network.network_id}/acl-rules`, { method: 'POST', body: { description: description.trim(), priority: Number(priority), action, selector: parsed } }); await refresh(); navigate(`/access/${created.rule_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Rule creation failed.') }
   }
-  return <><PageHeader title="Create access rule" /><FormStack onSubmit={submit}><Field label="Description"><input value={description} onChange={(event) => setDescription(event.target.value)} /></Field><Field label="Priority"><input type="number" min="0" value={priority} onChange={(event) => setPriority(event.target.value)} /></Field><Field label="Action"><select value={action} onChange={(event) => setAction(event.target.value)}><option value="accept">Accept</option><option value="deny">Deny</option></select></Field><Field label="Selector JSON"><textarea value={selector} onChange={(event) => setSelector(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Create rule</Button></FormStack></>
+  return <><PageHeader title="Create access rule" description="Define a selector, action, and evaluation priority" /><FormStack onSubmit={submit}><Field label="Description"><input placeholder="Allow application traffic" value={description} onChange={(event) => setDescription(event.target.value)} /></Field><Field label="Priority" hint="Lower numbers are evaluated first."><input type="number" min="0" value={priority} onChange={(event) => setPriority(event.target.value)} /></Field><Field label="Action"><select value={action} onChange={(event) => setAction(event.target.value)}><option value="accept">Accept</option><option value="deny">Deny</option></select></Field><Field label="Selector JSON" hint="Use the TrafficSelector fields accepted by the controller."><textarea spellCheck={false} value={selector} onChange={(event) => setSelector(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Create rule</Button></FormStack></>
 }
 
 export function LiveInfrastructurePage() {
   const { inventory, hasPermission } = useControlPlane()
   const network = inventory?.network
-  return <><PageHeader title="Infrastructure" action={network && hasPermission('relay.manage', network.network_id) ? <Button to="/infrastructure/relays/new" variant="primary"><RadioTower size={16} />Register relay</Button> : undefined} />{network ? <Section title="Network"><Button to={`/infrastructure/networks/${network.network_id}`} variant="quiet"><Network size={16} />{network.name}</Button></Section> : <p>No network.</p>}<Section title="Relays">{inventory?.relays.length ? inventory.relays.map((relay) => <div key={relay.relay_id}><Button to={`/infrastructure/relays/${relay.relay_id}`} variant="quiet">{relay.name}</Button><Status tone={relay.enabled ? 'positive' : 'muted'}>{relay.enabled ? 'Enabled' : 'Disabled'}</Status></div>) : <p>No relays.</p>}</Section></>
+  const records = inventory?.relays ?? []
+  const [visibility, setVisibility] = useState<RecordVisibility>('current')
+  const visibleRecords = visibility === 'all' ? records : records.filter((relay) => relay.enabled)
+  return <><PageHeader title="Infrastructure" description="Network address space and relay services" action={network && hasPermission('relay.manage', network.network_id) ? <Button to="/infrastructure/relays/new" variant="primary"><RadioTower size={16} />Register relay</Button> : undefined} /><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Enabled relays only" visible={visibleRecords.length} total={records.length} /><div className="infrastructure-grid"><Section title="Network">{network ? <ResourceLink to={`/infrastructure/networks/${network.network_id}`} icon={<Network size={19} />} title={network.name} meta={network.ipv4_pool} /> : <div className="inline-empty">No network.</div>}</Section><Section title="Relays" meta={records.length ? `${records.length} registered` : undefined}>{visibleRecords.length ? <div className="resource-list">{visibleRecords.map((relay) => <ResourceLink key={relay.relay_id} to={`/infrastructure/relays/${relay.relay_id}`} icon={<RadioTower size={19} />} title={relay.name} meta={relay.endpoint} state={<Status tone={relay.enabled ? 'positive' : 'muted'}>{relay.enabled ? 'Enabled' : 'Disabled'}</Status>} />)}</div> : <div className="inline-empty">No enabled relays. Choose All records to view disabled relays.</div>}</Section></div></>
 }
 
 export function LiveNetworkPage() {
@@ -354,7 +387,7 @@ export function LiveNetworkPage() {
   if (inventory?.network?.network_id !== network.network_id) {
     return <PageHeader title={network.name} description="Select this network before opening its resources." action={<Button variant="primary" onClick={() => selectNetwork(network.network_id)}>Select network</Button>} />
   }
-  return <><PageHeader title={network.name} action={<div className="button-row">{hasPermission('route.manage', network.network_id) ? <Button to="/routes/new">Add route</Button> : null}{hasPermission('enrollment.issue', network.network_id) ? <Button to="/nodes/new" variant="primary">Add node</Button> : null}</div>} /><dl><div><dt>Network ID</dt><dd><code>{network.network_id}</code></dd></div><div><dt>IPv4 pool</dt><dd><code>{network.ipv4_pool}</code></dd></div><div><dt>IPv6 pool</dt><dd><code>{network.ipv6_pool ?? 'Not configured'}</code></dd></div><div><dt>Configuration epoch</dt><dd>{network.configuration_epoch}</dd></div></dl></>
+  return <><PageHeader title={network.name} description="Network configuration and address allocation" action={<div className="button-row">{hasPermission('route.manage', network.network_id) ? <Button to="/routes/new">Add route</Button> : null}{hasPermission('enrollment.issue', network.network_id) ? <Button to="/nodes/new" variant="primary">Add node</Button> : null}</div>} /><RecordList rows={[["Network ID", <code>{network.network_id}</code>], ["IPv4 pool", <code>{network.ipv4_pool}</code>], ["IPv6 pool", <code>{network.ipv6_pool ?? 'Not configured'}</code>], ["Configuration epoch", network.configuration_epoch]]} /></>
 }
 
 export function LiveRelayPage() {
@@ -370,21 +403,24 @@ export function LiveRelayPage() {
       event.preventDefault(); if (!inventory?.network) return
       try { const created = await request<{ relay_id: string }>(`/v1/admin/networks/${inventory.network.network_id}/relays`, { method: 'POST', body: { service_id: serviceId.trim(), name: name.trim(), endpoint: endpoint.trim() } }); await refresh(); navigate(`/infrastructure/relays/${created.relay_id}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Relay registration failed.') }
     }
-    return <><PageHeader title="Register relay" /><FormStack onSubmit={register}><Field label="Relay name"><input value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="Advertised endpoint"><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} /></Field><Field label="Relay service ID"><input value={serviceId} onChange={(event) => setServiceId(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Register relay</Button></FormStack></>
+    return <><PageHeader title="Register relay" description="Add an authenticated relay endpoint to this network" /><FormStack onSubmit={register}><Field label="Relay name"><input placeholder="relay-east" value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label="Advertised endpoint"><input placeholder="relay.example.com:443" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} /></Field><Field label="Relay service ID"><input value={serviceId} onChange={(event) => setServiceId(event.target.value)} /></Field><ErrorMessage value={error} /><Button type="submit" variant="primary">Register relay</Button></FormStack></>
   }
   const relay = inventory?.relays.find((candidate) => candidate.relay_id === relayId)
   if (!relay) return <Missing title="Relay not found" back="/infrastructure" />
   const activeRelay = relay
   const canManage = hasPermission('relay.manage', relay.network_id)
   async function toggle() { try { if (activeRelay.enabled) await request(`/v1/admin/relays/${activeRelay.relay_id}/disable`, { method: 'POST' }); else await request(`/v1/admin/relays/${activeRelay.relay_id}`, { method: 'PUT', body: { name: activeRelay.name, endpoint: activeRelay.endpoint, enabled: true } }); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Relay update failed.') } }
-  return <><PageHeader title={relay.name} action={<Button to="/infrastructure">Infrastructure</Button>} /><dl><div><dt>Relay ID</dt><dd><code>{relay.relay_id}</code></dd></div><div><dt>Service ID</dt><dd><code>{relay.service_id}</code></dd></div><div><dt>Endpoint</dt><dd><code>{relay.endpoint}</code></dd></div><div><dt>State</dt><dd>{relay.enabled ? 'Enabled' : 'Disabled'}</dd></div></dl><ErrorMessage value={error} />{canManage ? <Button variant={relay.enabled ? 'danger' : 'primary'} onClick={() => void toggle()}>{relay.enabled ? 'Disable relay' : 'Enable relay'}</Button> : null}</>
+  return <><PageHeader title={relay.name} action={<Button to="/infrastructure">Infrastructure</Button>} /><RecordList rows={[["Relay ID", <code>{relay.relay_id}</code>], ["Service ID", <code>{relay.service_id}</code>], ["Endpoint", <code>{relay.endpoint}</code>], ["State", relay.enabled ? 'Enabled' : 'Disabled']]} /><ErrorMessage value={error} />{canManage ? <Button variant={relay.enabled ? 'danger' : 'primary'} onClick={() => void toggle()}>{relay.enabled ? 'Disable relay' : 'Enable relay'}</Button> : null}</>
 }
 
 export function LiveSecurityPage() {
   const { inventory, hasPermission, request, refresh } = useControlPlane()
   const [error, setError] = useState('')
+  const [visibility, setVisibility] = useState<RecordVisibility>('current')
+  const records = inventory?.certificates ?? []
+  const visibleRecords = visibility === 'all' ? records : records.filter((certificate) => liveCertificateState(certificate).label === 'Valid')
   async function revoke(networkId: string, serial: string) { const reason = window.prompt('Revocation reason'); if (!reason) return; try { await request(`/v1/admin/networks/${networkId}/certificates/${serial}/revoke`, { method: 'POST', body: { reason } }); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Certificate revocation failed.') } }
-  return <><PageHeader title="Security" /><ErrorMessage value={error} /><section aria-label="Certificate inventory">{inventory?.certificates.length ? inventory.certificates.map((certificate) => { const state = liveCertificateState(certificate); return <div key={certificate.certificate_id} className="section"><h2>{certificate.serial}</h2><dl><div><dt>Certificate ID</dt><dd><code>{certificate.certificate_id}</code></dd></div><div><dt>Node ID</dt><dd><code>{certificate.node_id}</code></dd></div><div><dt>Valid from</dt><dd>{time(certificate.not_before_unix_seconds)}</dd></div><div><dt>Valid until</dt><dd>{time(certificate.not_after_unix_seconds)}</dd></div></dl><Status tone={state.tone}>{state.label}</Status>{state.label !== 'Revoked' && hasPermission('certificate.revoke', certificate.network_id) ? <Button variant="danger" onClick={() => void revoke(certificate.network_id, certificate.serial)}><Ban size={16} />Revoke certificate</Button> : null}</div> }) : <p>No certificate records.</p>}</section></>
+  return <><PageHeader title="Security" description="Certificate validity and revocation controls" /><ErrorMessage value={error} /><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Valid only" visible={visibleRecords.length} total={records.length} /><section className="certificate-grid" aria-label="Certificate inventory">{visibleRecords.length ? visibleRecords.map((certificate) => { const state = liveCertificateState(certificate); return <article key={certificate.certificate_id} className="certificate-card"><header><span className="certificate-card__icon"><FileKey2 aria-hidden="true" size={20} /></span><div><span>Certificate serial</span><h2>{certificate.serial}</h2></div><Status tone={state.tone}>{state.label}</Status></header><RecordList rows={[["Certificate ID", <code>{certificate.certificate_id}</code>], ["Node ID", <code>{certificate.node_id}</code>], ["Valid from", time(certificate.not_before_unix_seconds)], ["Valid until", time(certificate.not_after_unix_seconds)]]} />{state.label !== 'Revoked' && hasPermission('certificate.revoke', certificate.network_id) ? <footer><Button variant="danger" onClick={() => void revoke(certificate.network_id, certificate.serial)}><Ban size={16} />Revoke certificate</Button></footer> : null}</article> }) : <div className="data-empty"><p>No valid certificates. Choose All records to view inactive certificates.</p></div>}</section></>
 }
 
 export function auditActor(event: Pick<ControllerAuditEvent, 'actor_kind' | 'actor_id'>) {
@@ -405,5 +441,5 @@ export function LiveAuditPage() {
     { key: 'action', label: 'Action', render: (event) => <code>{event.action}</code> },
     { key: 'target', label: 'Target', render: (event) => event.target_id ? <code>{event.target_id}</code> : event.target_type },
   ]
-  return <><PageHeader title="Audit events" /><DataTable columns={columns} rows={events} rowKey={(event) => event.event_id} empty={<p>No audit events.</p>} /></>
+  return <><PageHeader title="Audit events" description="Immutable administrator and controller activity" /><DataTable columns={columns} rows={events} rowKey={(event) => event.event_id} empty={<p>No audit events.</p>} /></>
 }

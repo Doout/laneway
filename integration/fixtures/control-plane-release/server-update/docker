@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+printf 'docker %s\n' "$*" >> "$LANEWAY_FIXTURE_LOG"
+[ "$1" = --context ] && [ "$2" = default ]
+shift 2
+arguments=$*
+case "$arguments" in
+  'version --format {{.Server.Version}}') printf '%s\n' 29.0.0; exit 0 ;;
+  'compose version') exec /usr/libexec/docker/cli-plugins/docker-compose version ;;
+  *' config --quiet'|*' config --format json')
+    if [ "$LANEWAY_FIXTURE_SCENARIO" = bad-preflight ]; then
+      case "$*" in *'candidate.env '*'/laneway/deploy/compose/compose.yaml'*) exit 1 ;; esac
+    fi
+    shift
+    exec /usr/libexec/docker/cli-plugins/docker-compose "$@"
+    ;;
+  'volume rm laneway-controller-state')
+    rm /opt/laneway/volume.exists /opt/laneway/database.state
+    exit 0 ;;
+  'volume inspect laneway-controller-state') [ -e /opt/laneway/volume.exists ]; exit ;;
+  *' ps --status running -q exit-node'|*' ps -a -q controller') exit 0 ;;
+  *' pull'|*' stop exit-node relay controller') exit 0 ;;
+  *' up -d --wait controller relay')
+    if grep -Fx "LANEWAY_VERSION=$LANEWAY_FIXTURE_VERSION" /opt/laneway/.env >/dev/null; then
+      printf 'fixture database after update\n' > /opt/laneway/database.state
+    fi
+    exit 0 ;;
+  *' rm -s -f controller') exit 0 ;;
+  *' run --rm --no-deps controller '*'-restore /backups/'*)
+    name=${arguments##* /backups/}; name=${name%% *}
+    [ ! -e /opt/laneway/database.state ]
+    cp /opt/laneway/generated/backups/"$name" /opt/laneway/database.state
+    : > /opt/laneway/volume.exists
+    exit 0 ;;
+  *' run --rm --no-deps controller '*'-backup /backups/'*)
+    name=${arguments##* /backups/}; name=${name%% *}
+    cp /opt/laneway/database.state /opt/laneway/generated/backups/"$name"
+    chmod 0600 /opt/laneway/generated/backups/"$name"
+    chown 65532:65532 /opt/laneway/generated/backups/"$name"
+    exit 0 ;;
+esac
+echo "unknown Docker call: $*" >&2
+exit 1

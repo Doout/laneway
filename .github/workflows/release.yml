@@ -27,17 +27,24 @@ jobs:
         run: |
           go test ./...
           go vet ./...
+      - name: Test Rust relay and healthcheck
+        run: |
+          rustup toolchain install 1.95 --profile minimal
+          cargo +1.95 test --manifest-path rust/Cargo.toml --locked -p laneway-relay -p laneway-healthcheck
       - name: Check scripts
-        run: shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
+        run: shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/control-plane-bootstrap.sh integration/release-contract.sh integration/control-plane-outer-installer.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
       - name: Check release tag and source
         run: |
           version=${GITHUB_REF_NAME#v}
           printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           test "$GITHUB_REF_TYPE" = tag
           ./integration/client-installer.sh
+          ./integration/native-installer.sh
           ./integration/connector-updater.sh
           ./integration/release-contract.sh
           ./integration/control-plane-prepare.sh
+          ./integration/control-plane-bootstrap.sh
+          sudo env PATH="$PATH" ./integration/control-plane-outer-installer.sh
           sudo env PATH="$PATH" ./integration/control-plane-install.sh
           sudo env PATH="$PATH" ./integration/control-plane-upgrade.sh
           ./integration/lane-workflows.sh
@@ -47,8 +54,8 @@ jobs:
 
   package:
     name: ${{ matrix.os }} ${{ matrix.arch }} package
-    needs: verify
-    runs-on: ubuntu-latest
+    needs: [verify, native-node]
+    runs-on: ${{ matrix.os == 'linux' && matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -62,11 +69,79 @@ jobs:
         with:
           go-version: "1.26.x"
           cache-dependency-path: go/go.sum
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: laneway-node-${{ matrix.os }}_${{ matrix.arch }}
+          path: package-node
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: matrix.os == 'linux'
+        with:
+          name: package-relay-linux_${{ matrix.arch }}
+          path: package-node
       - name: Build reproducible package
         env:
           PACKAGE_GOOS: ${{ matrix.os }}
           PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_NATIVE_DIR: ${{ github.workspace }}/package-node
         run: make package VERSION="${GITHUB_REF_NAME#v}"
+      - name: Verify packaged Rust executables
+        if: matrix.os == 'linux'
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          extracted=$(mktemp -d)
+          trap 'rm -rf -- "$extracted"' EXIT
+          tar -xzf "dist/laneway_linux_${PACKAGE_ARCH}.tar.gz" -C "$extracted"
+          mkdir -p "$extracted/installed/usr/local/bin" "$extracted/installed/usr/local/sbin"
+          : > "$extracted/installed/usr/local/bin/laneway"
+          ln -s ../bin/laneway "$extracted/installed/usr/local/sbin/lanewayd"
+          DESTDIR="$extracted/installed" "$extracted/laneway/install.sh"
+          installed="$extracted/installed/usr/local"
+          cli="$installed/bin/laneway"
+          compat="$installed/bin/laneway-compat"
+          legacy="dist/laneway_linux_${PACKAGE_ARCH}"
+          relay="$installed/sbin/laneway-relay"
+          node="$installed/sbin/lanewayd"
+          test "$("$relay" -version)" = "${GITHUB_REF_NAME#v}"
+          test "$("$cli" version)" = "${GITHUB_REF_NAME#v}"
+          test "$("$compat" version)" = "${GITHUB_REF_NAME#v}"
+          test "$("$cli" _network-helper-native --version)" = "${GITHUB_REF_NAME#v}"
+          test "$("$compat" _network-helper-bridge-version)" = "${GITHUB_REF_NAME#v}"
+          "$cli" _network-helper --help
+          test "$("$legacy" version)" = "${GITHUB_REF_NAME#v}"
+          "$legacy" configure --help
+          if "$compat" configure --help; then
+            echo "Packaged compatibility helper exposes a public command" >&2
+            exit 1
+          fi
+          test ! -L "$node"
+          test "$("$node" --version)" = "lanewayd ${GITHUB_REF_NAME#v}"
+          grep -Fx 'ExecStart=/usr/local/bin/laneway node run -config /etc/laneway/laneway.toml' \
+            "$installed/lib/systemd/system/lanewayd.service"
+          grep -Fx 'ExecStart=/usr/local/sbin/lanewayd run --system --config /etc/laneway/node-rust.toml' \
+            "$installed/lib/systemd/system/lanewayd-rs.service"
+          for config in relay.toml relay-controller.toml; do
+            "$relay" --check-config -config "$installed/share/laneway/examples/$config"
+          done
+          "$cli" pki init -out-dir "$extracted"
+          "$cli" pki node -ca-cert "$extracted/ca.crt" -ca-key "$extracted/ca.key" \
+            -network-id 000102030405060708090a0b0c0d0e0f -node-id 101112131415161718191a1b1c1d1e1f \
+            -out-cert "$extracted/node.crt" -out-key "$extracted/node.key"
+          sed "s|/etc/laneway/|$extracted/|g" "$installed/share/laneway/deploy/examples/node-rust.toml" \
+            > "$extracted/node.toml"
+          "$node" run --system --config "$extracted/node.toml" --check-config
+          for binary in "$cli" "$compat" "$legacy" "$relay" "$node"; do
+            program_headers=$(readelf --wide --program-headers "$binary")
+            dynamic_section=$(readelf --wide --dynamic "$binary")
+            if grep -Eq '[[:space:]]INTERP[[:space:]]' <<< "$program_headers" ||
+              grep -Fq '(NEEDED)' <<< "$dynamic_section"; then
+              echo "Expected a standalone static executable for $PACKAGE_ARCH: $binary" >&2
+              exit 1
+            fi
+          done
+      - name: Exercise server updates and rollback through the packaged CLI
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        run: ./integration/control-plane-update-command.sh dist/laneway_linux_amd64.tar.gz
       - name: Generate package SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -220,9 +295,14 @@ jobs:
             ${{ matrix.name }}.spdx.json
           if-no-files-found: error
 
+  native-node:
+    uses: ./.github/workflows/node.yml
+    with:
+      upload: true
+
   release:
     name: Publish signed GitHub release
-    needs: [package, image]
+    needs: [package, image, native-node]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -241,6 +321,8 @@ jobs:
         working-directory: dist
         run: |
           install -m 0755 ../install.sh install.sh
+          install -m 0755 ../scripts/install-node.sh install-node.sh
+          install -m 0644 ../scripts/install-node.ps1 install-node.ps1
           : > bootstrap-artifacts.toml
           for platform in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
             os=${platform%_*}
@@ -259,7 +341,7 @@ jobs:
           done
           LC_ALL=C sort -o image-digests.txt -- *.digest.txt
           rm -- *.digest.txt
-          LC_ALL=C sha256sum -- bootstrap-artifacts.toml image-digests.txt install.sh laneway_*.tar.gz laneway_darwin_amd64 laneway_darwin_arm64 *.spdx.json | sort -k2 > checksums.txt
+          LC_ALL=C sha256sum -- bootstrap-artifacts.toml image-digests.txt install.sh install-node.sh install-node.ps1 lanewayd_* laneway-native_* laneway-compat_* laneway_*.tar.gz laneway_linux_amd64 laneway_linux_arm64 laneway_darwin_amd64 laneway_darwin_arm64 laneway_windows_*.exe *.spdx.json | sort -k2 > checksums.txt
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
           cosign-release: v3.1.3
@@ -272,9 +354,17 @@ jobs:
           subject-path: |
             dist/bootstrap-artifacts.toml
             dist/install.sh
+            dist/install-node.sh
+            dist/install-node.ps1
+            dist/lanewayd_*
+            dist/laneway-native_*
+            dist/laneway-compat_*
             dist/laneway_*.tar.gz
+            dist/laneway_linux_amd64
+            dist/laneway_linux_arm64
             dist/laneway_darwin_amd64
             dist/laneway_darwin_arm64
+            dist/laneway_windows_*.exe
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}

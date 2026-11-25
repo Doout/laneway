@@ -376,7 +376,7 @@ node_id = "${node_a_id}"
 prefixes = ["100.96.0.1/32", "fd42:96::1/128"]
 EOF
 
-  start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+  start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" --config "${case_dir}/relay.toml" --diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
   wait_log "${relay_pid}" "${case_dir}/relay.log" "listening"
   start_process "${node_a}" "${case_dir}/a.log" "${work_dir}/lanewayd" -config "${case_dir}/a.toml" -diagnostics 127.0.0.1:6061
@@ -541,7 +541,7 @@ node_id = "${node_a_id}"
 prefixes = ["100.97.0.1/32", "fd42:97::1/128"]
 EOF
 
-  start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml"
+  start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" --config "${case_dir}/relay.toml"
   local relay_pid="${last_pid}"
   wait_log "${relay_pid}" "${case_dir}/relay.log" "listening"
   start_process "${client}" "${case_dir}/client.log" "${work_dir}/lanewayd" -config "${case_dir}/client.toml"
@@ -697,7 +697,7 @@ node_id = "${node_a_id}"
 prefixes = ["100.98.0.1/32"]
 EOF
 
-  start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+  start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" --config "${case_dir}/relay.toml" --diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
   wait_log "${relay_pid}" "${case_dir}/relay.log" "listening"
   start_process "${node_a}" "${case_dir}/a.log" "${work_dir}/lanewayd" -config "${case_dir}/a.toml" -diagnostics 127.0.0.1:6061
@@ -730,7 +730,7 @@ EOF
   fi
 
   local forwarded_before forwarded_after
-  forwarded_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  forwarded_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   echo "==> kernel packet crosses the promoted direct path through both simulated NATs"
   start_process "${node_b}" "${case_dir}/direct-server.log" "${work_dir}/netprobe" udp-server -listen 100.98.0.2:9301
   local server_pid="${last_pid}"
@@ -738,7 +738,7 @@ EOF
   ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target 100.98.0.2:9301 -message direct-nat -once -timeout 3s
   wait "${server_pid}"
   sleep 0.1
-  forwarded_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  forwarded_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   if [[ "${forwarded_after}" != "${forwarded_before}" ]]; then
     echo "ERROR: direct application packet traversed relay: before=${forwarded_before} after=${forwarded_after}" >&2
     return 1
@@ -1030,9 +1030,9 @@ EOF
     ip daddr 10.254.0.3 udp dport 41001 drop
 
   start_process "${relay}" "${case_dir}/relay.log" \
-    "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+    "${work_dir}/laneway-relay" --config "${case_dir}/relay.toml" --diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
-  wait_log "${relay_pid}" "${case_dir}/relay.log" "laneway-relay QUIC="
+  wait_log "${relay_pid}" "${case_dir}/relay.log" "laneway Rust relay listening"
   start_process "${node_a}" "${case_dir}/a.log" env \
     PATH="${case_dir}:${PATH}" LANEWAY_RESOLVE_STATE="${case_dir}/resolver-state" \
     "${work_dir}/lanewayd" -config "${case_dir}/a.toml" -diagnostics 127.0.0.1:6061
@@ -1108,12 +1108,12 @@ EOF
   wait_log "${server_pid}" "${case_dir}/direct4.log" "ready=udp-server"
   local relay_before relay_after
   relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9605" -message direct-wireguard4
   wait "${server_pid}"
   sleep 0.1
   relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: direct WireGuard application packet traversed the relay" >&2
     return 1
@@ -1226,14 +1226,14 @@ EOF
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/exit-direct.log" "ready=udp-server"
   relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client \
     -target 198.51.100.2:9702 -message wireguard-exit-direct
   wait "${server_pid}"
   grep -q 'remote=198.51.100.1:' "${case_dir}/exit-direct.log"
   sleep 0.1
   relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: direct Node-to-Exit application packet traversed the relay" >&2
     return 1
@@ -1503,7 +1503,7 @@ exec "$@"
 EOF
   chmod 700 "${case_dir}/connect-resolver-wrapper"
   start_process "${relay}" "${case_dir}/relay.log" \
-    "${work_dir}/laneway-relay" -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+    "${work_dir}/laneway-relay" --config "${case_dir}/relay.toml" --diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
   wait_log "${relay_pid}" "${case_dir}/relay.log" "listening"
   start_process "${node}" "${case_dir}/node.log" \
@@ -1579,13 +1579,13 @@ EOF
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/promoted-direct-traffic.log" "ready=udp-server"
   relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
     -target "${node_overlay}:9802" -message connect-promoted-direct -timeout 12s
   wait "${server_pid}"
   sleep 0.1
   relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: promoted foreground User application packet still traversed the relay" >&2
     return 1
@@ -1689,14 +1689,14 @@ EOF
   external_pid="${last_pid}"
   wait_log "${external_pid}" "${case_dir}/exit-direct-traffic.log" "ready=udp-server"
   relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
     -target 198.51.101.2:9832 -message connect-exit-direct -timeout 12s
   wait "${external_pid}"
   grep -q 'remote=198.51.101.1:' "${case_dir}/exit-direct-traffic.log"
   sleep 0.1
   relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
-    -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+    -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: promoted foreground Exit packet still traversed the relay" >&2
     return 1
@@ -1972,7 +1972,7 @@ EOF
   chmod 700 "${case_dir}/resolver-wrapper"
 
   start_process "${relay}" "${case_dir}/relay.log" "${work_dir}/laneway-relay" \
-    -config "${case_dir}/relay.toml" -diagnostics 127.0.0.1:6060
+    --config "${case_dir}/relay.toml" --diagnostics 127.0.0.1:6060
   local relay_pid="${last_pid}"
   wait_log "${relay_pid}" "${case_dir}/relay.log" "listening"
   start_process "${client}" "${case_dir}/client.log" env \

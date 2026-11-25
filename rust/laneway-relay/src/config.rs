@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     io::Read,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -59,12 +59,15 @@ pub struct Config {
     /// TLS credentials and trust anchor.
     pub tls: TlsConfig,
     /// QUIC relay bounds and liveness settings.
+    #[serde(default)]
     pub relay: RelayConfig,
     /// Optional TLS/TCP fallback listener and bounded-resource settings.
     #[serde(default)]
     pub tcp_fallback: Option<TcpFallbackConfig>,
     #[serde(default)]
     pub(crate) controller: Option<ControllerConfig>,
+    #[serde(default)]
+    pub(crate) public_https: Option<PublicHttpsConfig>,
     /// Statically authorized node identities and owned prefixes.
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
@@ -91,7 +94,8 @@ pub struct TlsConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelayConfig {
-    /// UDP address. Go-style `:4433` is accepted as `0.0.0.0:4433`.
+    /// UDP address. Go-style `:4433` binds all interfaces.
+    #[serde(default = "default_relay_listen")]
     pub listen: String,
     /// Per-session outbound packet queue depth.
     #[serde(default = "default_queue_depth")]
@@ -128,13 +132,39 @@ pub struct RelayConfig {
     pub candidate_republish_floor: Duration,
 }
 
+fn default_relay_listen() -> String {
+    ":4433".into()
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            listen: default_relay_listen(),
+            queue_depth: default_queue_depth(),
+            packet_rate_bits_per_second: 0,
+            packet_burst_bytes: 0,
+            max_sessions: default_max_sessions(),
+            max_routes: default_max_routes(),
+            handshake_timeout: default_handshake_timeout(),
+            idle_timeout: default_idle_timeout(),
+            metrics_interval: default_metrics_interval(),
+            metrics_listen: String::new(),
+            candidate_republish_floor: default_candidate_republish_floor(),
+        }
+    }
+}
+
 /// Stable-v1 TLS/TCP fallback listener and bounded-resource settings.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpFallbackConfig {
-    /// TCP address. Go-style `:443` is accepted as `0.0.0.0:443`.
+    /// TCP address. Go-style `:443` binds all interfaces.
     #[serde(default)]
     pub listen: String,
+    #[serde(default)]
+    address: String,
+    #[serde(default = "default_quic_probe_interval", with = "humantime_serde")]
+    quic_probe_interval: Duration,
     /// TLS, control-preface, and registration deadline.
     #[serde(default = "default_handshake_timeout", with = "humantime_serde")]
     pub handshake_timeout: Duration,
@@ -152,6 +182,10 @@ pub struct TcpFallbackConfig {
     pub queue_depth: usize,
 }
 
+fn default_quic_probe_interval() -> Duration {
+    Duration::from_secs(30)
+}
+
 /// One static mTLS identity authorization.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +194,9 @@ pub struct PeerConfig {
     pub network_id: String,
     /// Exact 128-bit node identifier in lowercase hex.
     pub node_id: String,
+    /// Optional operator-facing label.
+    #[serde(default, rename = "name")]
+    _name: String,
     /// Canonical source and destination prefixes owned by the node.
     pub prefixes: Vec<IpNet>,
 }
@@ -167,12 +204,15 @@ pub struct PeerConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ControllerConfig {
+    #[serde(default)]
     pub(crate) endpoint: String,
     #[serde(default)]
     pub(crate) quic_endpoint: Option<String>,
     #[serde(default)]
     pub(crate) allow_legacy_https: bool,
+    #[serde(default)]
     pub(crate) network_id: String,
+    #[serde(default)]
     pub(crate) service_id: String,
     #[serde(default)]
     pub(crate) server_name: String,
@@ -180,6 +220,31 @@ pub(crate) struct ControllerConfig {
     pub(crate) poll_interval: Duration,
     #[serde(default = "default_controller_timeout", with = "humantime_serde")]
     pub(crate) timeout: Duration,
+}
+
+impl ControllerConfig {
+    pub(crate) fn https_origin(&self) -> Result<reqwest::Url> {
+        let url = reqwest::Url::parse(&self.endpoint).context("parse controller.endpoint")?;
+        ensure!(
+            url.scheme() == "https"
+                && url.has_host()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.path() == "/"
+                && url.port() != Some(0),
+            "controller.endpoint must be an HTTPS origin"
+        );
+        Ok(url)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct PublicHttpsConfig {
+    pub(crate) server_name: String,
+    pub(crate) cache_dir: PathBuf,
 }
 
 fn default_controller_poll() -> Duration {
@@ -218,13 +283,7 @@ impl Config {
 
     /// Returns the normalized UDP listen address.
     pub fn listen_addr(&self) -> Result<SocketAddr> {
-        let value = if self.relay.listen.starts_with(':') {
-            format!("0.0.0.0{}", self.relay.listen)
-        } else {
-            self.relay.listen.clone()
-        };
-        value
-            .parse()
+        resolve_listen_address(&self.relay.listen)
             .with_context(|| format!("invalid relay.listen {:?}", self.relay.listen))
     }
 
@@ -236,13 +295,7 @@ impl Config {
         if tcp.listen.is_empty() {
             return Ok(None);
         }
-        let value = if tcp.listen.starts_with(':') {
-            format!("0.0.0.0{}", tcp.listen)
-        } else {
-            tcp.listen.clone()
-        };
-        value
-            .parse()
+        resolve_listen_address(&tcp.listen)
             .with_context(|| format!("invalid tcp_fallback.listen {:?}", tcp.listen))
             .map(Some)
     }
@@ -252,12 +305,22 @@ impl Config {
         if self.relay.metrics_listen.is_empty() {
             return Ok(None);
         }
-        let address: SocketAddr = self.relay.metrics_listen.parse().with_context(|| {
-            format!(
-                "invalid relay.metrics_listen {:?}",
-                self.relay.metrics_listen
-            )
-        })?;
+        let address: SocketAddr =
+            if let Some((host, port)) = self.relay.metrics_listen.rsplit_once(':') {
+                if host.eq_ignore_ascii_case("localhost") {
+                    format!("127.0.0.1:{port}").parse()
+                } else {
+                    self.relay.metrics_listen.parse()
+                }
+            } else {
+                self.relay.metrics_listen.parse()
+            }
+            .with_context(|| {
+                format!(
+                    "invalid relay.metrics_listen {:?}",
+                    self.relay.metrics_listen
+                )
+            })?;
         ensure!(
             address.ip().is_loopback(),
             "relay.metrics_listen must use a loopback IP address"
@@ -280,7 +343,8 @@ impl Config {
             let mut overlay_addresses = Vec::new();
             for prefix in &peer.prefixes {
                 ensure!(
-                    prefix.trunc() == *prefix,
+                    prefix.trunc() == *prefix
+                        && !matches!(prefix.addr(), IpAddr::V6(ip) if ip.to_ipv4_mapped().is_some()),
                     "peers[{index}] prefix {prefix} is not canonical"
                 );
                 if prefix.prefix_len() == prefix.max_prefix_len() {
@@ -309,8 +373,28 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         ensure!(self.mode == "relay", "mode must be \"relay\"");
+        ensure!(
+            self.state_dir
+                .as_ref()
+                .is_none_or(|path| !path.as_os_str().is_empty())
+                && self
+                    .socket_path
+                    .as_ref()
+                    .is_none_or(|path| !path.as_os_str().is_empty()),
+            "state_dir and socket_path must be nonempty when specified"
+        );
+        ensure!(
+            [
+                &self.tls.certificate_file,
+                &self.tls.private_key_file,
+                &self.tls.ca_file
+            ]
+            .iter()
+            .all(|path| !path.as_os_str().is_empty()),
+            "tls.certificate, tls.private_key, and tls.ca are required"
+        );
         ensure!(!self.relay.listen.is_empty(), "relay.listen is required");
-        self.listen_addr()?;
+        validate_listen_address(&self.relay.listen).context("invalid relay.listen")?;
         self.metrics_listen_addr()?;
         ensure!(
             (1..=65_536).contains(&self.relay.queue_depth),
@@ -345,45 +429,45 @@ impl Config {
             .as_ref()
             .is_some_and(|controller| !controller.endpoint.is_empty());
         ensure!(
-            controller_enabled || !self.peers.is_empty(),
-            "static peers or a controller endpoint are required"
+            controller_enabled == self.peers.is_empty(),
+            "configure either static peers or a controller endpoint"
         );
         if let Some(controller) = self
             .controller
             .as_ref()
             .filter(|value| !value.endpoint.is_empty())
         {
+            controller.https_origin()?;
+            let quic = controller
+                .quic_endpoint
+                .as_deref()
+                .filter(|value| !value.is_empty());
             ensure!(
-                controller.endpoint.starts_with("https://"),
-                "controller.endpoint must use https"
-            );
-            ensure!(
-                controller.quic_endpoint.is_some() || controller.allow_legacy_https,
+                quic.is_some() || controller.allow_legacy_https,
                 "controller.quic_endpoint is required unless legacy HTTPS is explicitly enabled"
             );
             Id::from_str(&controller.network_id).context("controller.network_id")?;
             Id::from_str(&controller.service_id).context("controller.service_id")?;
             ensure!(
-                !controller.poll_interval.is_zero()
-                    && controller.poll_interval <= Duration::from_secs(300),
-                "controller.poll_interval must be in (0,5m]"
+                !controller.poll_interval.is_zero(),
+                "controller.poll_interval must be positive"
             );
             ensure!(
                 !controller.timeout.is_zero() && controller.timeout <= Duration::from_secs(300),
                 "controller.timeout must be in (0,5m]"
             );
-            if let Some(endpoint) = &controller.quic_endpoint {
-                ensure!(
-                    endpoint.parse::<SocketAddr>().is_ok()
-                        || endpoint.rsplit_once(':').is_some_and(|(host, port)| {
-                            !host.is_empty() && port.parse::<u16>().is_ok_and(|value| value != 0)
-                        }),
-                    "controller.quic_endpoint must be host:port"
-                );
+            if let Some(endpoint) = quic {
+                crate::controller::split_host_port(endpoint)?;
             }
         }
-        self.tcp_fallback_addr()?;
         if let Some(tcp) = &self.tcp_fallback {
+            if !tcp.listen.is_empty() {
+                validate_listen_address(&tcp.listen).context("invalid tcp_fallback.listen")?;
+            }
+            ensure!(
+                tcp.address.is_empty(),
+                "tcp_fallback.address is only valid in node mode"
+            );
             ensure!(
                 !tcp.handshake_timeout.is_zero()
                     && !tcp.write_timeout.is_zero()
@@ -396,13 +480,98 @@ impl Config {
                 (1..=4096).contains(&tcp.queue_depth),
                 "tcp_fallback.queue_depth must be between 1 and 4096"
             );
+            ensure!(
+                (Duration::from_secs(1)..=Duration::from_secs(300))
+                    .contains(&tcp.quic_probe_interval),
+                "tcp_fallback.quic_probe_interval must be in [1s,5m]"
+            );
         }
-        let _ = (&self.state_dir, &self.socket_path);
+        if let Some(public) = &self.public_https {
+            public.validate(
+                controller_enabled,
+                self.tcp_fallback
+                    .as_ref()
+                    .is_some_and(|tcp| !tcp.listen.is_empty()),
+            )?;
+        }
         let _ = (
             &self.tls.server_name,
             self.controller.as_ref().map(|c| &c.server_name),
         );
         self.authorizations()?;
+        Ok(())
+    }
+}
+
+fn resolve_listen_address(value: &str) -> Result<SocketAddr> {
+    if let Some(port) = value.strip_prefix(':') {
+        return Ok(SocketAddr::from((
+            std::net::Ipv6Addr::UNSPECIFIED,
+            port.parse::<u16>()?,
+        )));
+    }
+    value
+        .to_socket_addrs()?
+        .next()
+        .context("listen host resolved to no addresses")
+}
+
+fn validate_listen_address(value: &str) -> Result<()> {
+    if let Some(port) = value.strip_prefix(':') {
+        port.parse::<u16>()
+            .context("invalid wildcard listen port")?;
+    } else if value.parse::<SocketAddr>().is_err() {
+        let (host, port) = value.rsplit_once(':').context("expected a host and port")?;
+        ensure!(
+            !host.is_empty()
+                && !host.contains([':', '[', ']'])
+                && !host.chars().any(char::is_whitespace),
+            "invalid listen host"
+        );
+        port.parse::<u16>().context("invalid listen port")?;
+    }
+    Ok(())
+}
+
+impl PublicHttpsConfig {
+    fn validate(&self, controller_enabled: bool, tcp_enabled: bool) -> Result<()> {
+        let cache = self.cache_dir.as_os_str();
+        ensure!(
+            self.server_name.is_empty() == cache.is_empty(),
+            "public_https requires server_name and cache_dir together"
+        );
+        if self.server_name.is_empty() {
+            return Ok(());
+        }
+        ensure!(
+            controller_enabled && tcp_enabled,
+            "public_https requires tcp_fallback.listen and controller.endpoint"
+        );
+        ensure!(
+            self.server_name.len() <= 253
+                && self.server_name.parse::<IpAddr>().is_err()
+                && self.server_name.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+                }),
+            "public_https.server_name must be a canonical lowercase DNS name"
+        );
+        ensure!(
+            self.cache_dir.is_absolute()
+                && self.cache_dir.components().all(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::RootDir | std::path::Component::Normal(_)
+                    )
+                })
+                && self.cache_dir.components().collect::<PathBuf>().as_os_str() == cache,
+            "public_https.cache_dir must be a clean absolute path"
+        );
         Ok(())
     }
 }
@@ -428,6 +597,39 @@ mod tests {
     }
 
     #[test]
+    fn validates_existing_public_and_static_config_forms() {
+        let controller = include_str!("../../../deploy/examples/relay-controller.toml");
+        let with_public = format!(
+            "{controller}\n[public_https]\nserver_name = \"relay.example.com\"\ncache_dir = \"/var/lib/laneway-public\"\n"
+        );
+        let public: Config = toml::from_str(&with_public).unwrap();
+        public.validate().unwrap();
+        let public_without_tcp =
+            toml::from_str::<Config>(&with_public.replace("listen = \":443\"", "listen = \"\""))
+                .unwrap();
+        assert!(public_without_tcp.validate().is_err());
+
+        let static_source = r#"
+mode = "relay"
+[tls]
+certificate = "relay.crt"
+private_key = "relay.key"
+ca = "ca.crt"
+[tcp_fallback]
+address = ""
+quic_probe_interval = "2s"
+[[peers]]
+name = "workstation"
+network_id = "000102030405060708090a0b0c0d0e0f"
+node_id = "101112131415161718191a1b1c1d1e1f"
+prefixes = ["100.96.0.1/32"]
+"#;
+        let static_config: Config = toml::from_str(static_source).unwrap();
+        static_config.validate().unwrap();
+        assert_eq!(static_config.relay.listen, ":4433");
+    }
+
+    #[test]
     fn normalizes_go_style_listen_and_builds_authorization() {
         let config: Config = toml::from_str(
             r#"
@@ -450,10 +652,7 @@ prefixes = ["100.96.0.1/32", "10.0.0.0/24"]
             config.relay.candidate_republish_floor,
             Duration::from_secs(5)
         );
-        assert_eq!(
-            config.listen_addr().unwrap(),
-            "0.0.0.0:4433".parse().unwrap()
-        );
+        assert_eq!(config.listen_addr().unwrap(), "[::]:4433".parse().unwrap());
         let auth = config.authorizations().unwrap();
         let value = auth.values().next().unwrap();
         assert_eq!(
@@ -558,7 +757,7 @@ prefixes = ["100.96.0.1/32"]
         config.validate().unwrap();
         assert_eq!(
             config.tcp_fallback_addr().unwrap(),
-            Some("0.0.0.0:443".parse().unwrap())
+            Some("[::]:443".parse().unwrap())
         );
         let tcp = config.tcp_fallback.unwrap();
         assert_eq!(tcp.write_timeout, Duration::from_secs(4));
@@ -610,6 +809,12 @@ prefixes = ["100.96.0.1/32"]
         assert_eq!(
             config.metrics_listen_addr().unwrap(),
             Some("127.0.0.1:9090".parse().unwrap())
+        );
+        let mut localhost = config.clone();
+        localhost.relay.metrics_listen = "localhost:9090".to_owned();
+        assert_eq!(
+            localhost.metrics_listen_addr().unwrap(),
+            config.metrics_listen_addr().unwrap()
         );
 
         let non_loopback = source.replace("127.0.0.1:9090", "0.0.0.0:9090");

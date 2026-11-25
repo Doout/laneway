@@ -1,5 +1,5 @@
 [workspace]
-members = ["laneway-bench", "laneway-protocol", "laneway-relay", "lanewayd"]
+members = ["laneway-bench", "laneway-cli", "laneway-config", "laneway-controller", "laneway-healthcheck", "laneway-private", "laneway-protocol", "laneway-relay", "node-cli", "lanewayd"]
 resolver = "3"
 
 [workspace.package]

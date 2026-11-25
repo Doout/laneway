@@ -104,7 +104,7 @@ fn default_controller_poll_interval() -> Duration {
 fn default_controller_timeout() -> Duration {
     Duration::from_secs(10)
 }
-fn default_socket_path() -> PathBuf {
+pub(crate) fn default_socket_path() -> PathBuf {
     PathBuf::from("/run/laneway/lanewayd.sock")
 }
 fn default_exit_intent_path() -> PathBuf {
@@ -174,7 +174,7 @@ pub struct ControllerConfig {
     /// Authenticated snapshots use QUIC; HTTPS remains enrollment-only.
     #[serde(default)]
     pub quic_endpoint: Option<String>,
-    /// TLS DNS name; it must exactly equal the endpoint host.
+    /// TLS name verified on the controller QUIC connection.
     pub server_name: String,
     /// Exact controller service ID pinned from its SPIFFE URI SAN.
     pub service_id: String,
@@ -186,6 +186,10 @@ pub struct ControllerConfig {
     pub timeout: Duration,
 }
 
+fn default_direct_enabled() -> bool {
+    true
+}
+
 fn default_direct_listen() -> SocketAddr {
     "0.0.0.0:0".parse().expect("constant socket address")
 }
@@ -194,6 +198,9 @@ fn default_direct_listen() -> SocketAddr {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectConfig {
+    /// Enable the authenticated direct-peer listener and candidate exchange.
+    #[serde(default = "default_direct_enabled")]
+    pub enabled: bool,
     /// Local UDP address. Port zero asks the OS for an ephemeral shared port.
     #[serde(default = "default_direct_listen")]
     pub listen: SocketAddr,
@@ -212,6 +219,12 @@ pub struct DirectConfig {
         with = "humantime_serde"
     )]
     pub candidate_refresh_interval: Duration,
+    /// Optional local ceiling on active candidates per peer.
+    #[serde(default)]
+    pub max_candidates: Option<usize>,
+    /// Optional local ceiling on controller candidate lifetime.
+    #[serde(default, with = "humantime_serde")]
+    pub candidate_ttl: Option<Duration>,
     /// Permit loopback candidates in isolated local deployments.
     #[serde(default)]
     pub allow_loopback: bool,
@@ -223,11 +236,14 @@ pub struct DirectConfig {
 impl Default for DirectConfig {
     fn default() -> Self {
         Self {
+            enabled: default_direct_enabled(),
             listen: default_direct_listen(),
             probe_interval: default_probe_interval(),
             probe_timeout: default_probe_timeout(),
             probe_attempts: default_probe_attempts(),
             candidate_refresh_interval: default_candidate_refresh_interval(),
+            max_candidates: None,
+            candidate_ttl: None,
             allow_loopback: false,
             allow_link_local: false,
         }
@@ -238,6 +254,12 @@ impl Default for DirectConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentityConfig {
+    /// Optional local display label from an existing persistent node service.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional version reported by an owning persistent CLI.
+    #[serde(default)]
+    pub product_version: Option<String>,
     /// Lowercase 32-character network identifier.
     pub network_id: String,
     /// Lowercase 32-character node identifier.
@@ -280,6 +302,9 @@ pub struct RelayConfig {
     /// Relay UDP socket address.
     #[serde(default)]
     pub address: Option<SocketAddr>,
+    /// Optional original hostname and port for persistent service status.
+    #[serde(default)]
+    pub display_address: Option<String>,
     /// TLS DNS name for WebPKI verification.
     pub server_name: String,
     /// Exact relay service identifier from its SPIFFE certificate.
@@ -475,6 +500,14 @@ impl Default for ExitClientConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForwardingConfig {
+    /// Allow only controller-approved local subnet advertisements through
+    /// this named interface, without requiring a duplicated static permit.
+    #[serde(default)]
+    pub controller_subnet_interface: Option<String>,
+    /// Reject a controller-approved local subnet when no output interface is
+    /// configured, preserving persistent-node role admission.
+    #[serde(default)]
+    pub require_controller_subnet_interface: bool,
     /// Enables transactional private-subnet forwarding.
     #[serde(default)]
     pub subnet_router: bool,
@@ -529,6 +562,8 @@ pub struct ForwardingConfig {
 impl Default for ForwardingConfig {
     fn default() -> Self {
         Self {
+            controller_subnet_interface: None,
+            require_controller_subnet_interface: false,
             subnet_router: false,
             exit_gateway: false,
             owned_prefixes: Vec::new(),
@@ -553,15 +588,12 @@ impl Config {
     /// Reads a bounded TOML file and fully validates it before opening devices.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        let metadata =
-            fs::metadata(path).with_context(|| format!("stat configuration {}", path.display()))?;
-        ensure!(
-            metadata.len() <= MAX_CONFIG_BYTES,
-            "configuration exceeds {MAX_CONFIG_BYTES} bytes"
-        );
-        let source = fs::read_to_string(path)
+        let file = fs::File::open(path)
+            .with_context(|| format!("open configuration {}", path.display()))?;
+        let bytes = laneway_protocol::read_bounded(file, MAX_CONFIG_BYTES)
             .with_context(|| format!("read configuration {}", path.display()))?;
-        let config: Self = toml::from_str(&source).context("decode configuration")?;
+        let source = std::str::from_utf8(&bytes).context("configuration is not UTF-8")?;
+        let config: Self = toml::from_str(source).context("decode configuration")?;
         config.validate()?;
         Ok(config)
     }
@@ -632,15 +664,19 @@ impl Config {
                     && controller.timeout <= Duration::from_secs(300),
                 "controller HTTPS enrollment origin, QUIC endpoint, server_name, and timing bounds are invalid"
             );
-            if let Some(endpoint) = &controller.quic_endpoint {
-                ensure!(
-                    endpoint.parse::<SocketAddr>().is_ok()
-                        || endpoint.rsplit_once(':').is_some_and(|(host, port)| {
-                            !host.is_empty() && port.parse::<u16>().is_ok_and(|value| value != 0)
-                        }),
-                    "controller.quic_endpoint must be host:port"
-                );
-            }
+            #[cfg(feature = "native")]
+            crate::controller::validate_https_endpoint(&controller.endpoint)?;
+            rustls::pki_types::ServerName::try_from(controller.server_name.as_str())
+                .context("invalid controller.server_name")?;
+            let (host, port) = crate::controller::split_host_port(
+                controller
+                    .quic_endpoint
+                    .as_deref()
+                    .context("controller.quic_endpoint is required")?,
+            )?;
+            ensure!(port != 0, "controller.quic_endpoint port must be nonzero");
+            rustls::pki_types::ServerName::try_from(host)
+                .context("invalid controller.quic_endpoint host")?;
             Id::from_str(&controller.service_id).context("controller.service_id")?;
         }
         let carries_ipv6 = self
@@ -660,13 +696,13 @@ impl Config {
                 "TUN prefix {address} is not canonical"
             );
         }
-        ensure!(
-            !self.relay.server_name.is_empty(),
-            "relay.server_name is required"
-        );
+        rustls::pki_types::ServerName::try_from(self.relay.server_name.as_str())
+            .context("invalid relay.server_name")?;
         Id::from_str(&self.relay.service_id).context("relay.service_id")?;
         ensure!(
-            self.relay.address.is_some() || self.tcp_fallback.is_some(),
+            self.controller.is_some()
+                || self.relay.address.is_some()
+                || self.tcp_fallback.is_some(),
             "at least one relay carrier must be configured"
         );
         if let Some(address) = self.relay.address {
@@ -719,6 +755,14 @@ impl Config {
         }
         ensure!(
             (1..=8).contains(&self.direct.probe_attempts)
+                && self
+                    .direct
+                    .max_candidates
+                    .is_none_or(|maximum| (1..=32).contains(&maximum))
+                && self
+                    .direct
+                    .candidate_ttl
+                    .is_none_or(|ttl| !ttl.is_zero() && ttl <= Duration::from_secs(600))
                 && !self.direct.probe_interval.is_zero()
                 && self.direct.probe_interval <= Duration::from_secs(1)
                 && !self.direct.probe_timeout.is_zero()
@@ -760,6 +804,10 @@ impl Config {
                 );
             }
         }
+        ensure!(
+            self.direct.enabled || self.direct_peers.is_empty(),
+            "direct_peers requires enabled direct connectivity"
+        );
         let mut direct = HashSet::new();
         for (index, peer) in self.direct_peers.iter().enumerate() {
             let id = Id::from_str(&peer.node_id)
@@ -778,6 +826,17 @@ impl Config {
             );
         }
         let forwarding = &self.forwarding;
+        if let Some(interface) = &forwarding.controller_subnet_interface {
+            ensure!(
+                self.controller.is_some()
+                    && forwarding.subnet_routes.is_empty()
+                    && forwarding.owned_prefixes.is_empty()
+                    && !forwarding.subnet_router
+                    && safe_interface(interface)
+                    && interface != &self.tun.name,
+                "controller_subnet_interface requires controller authority and a distinct native interface"
+            );
+        }
         ensure!(
             (1..=16_384).contains(&forwarding.max_rules)
                 && !forwarding.shutdown_timeout.is_zero()

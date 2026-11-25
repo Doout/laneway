@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -17,10 +17,16 @@ use laneway_protocol::{
 };
 use prost::Message;
 use quinn::{Endpoint, TransportConfig, VarInt, crypto::rustls::QuicClientConfig};
-use reqwest::{Certificate, Identity, StatusCode};
+use reqwest::{StatusCode, Url};
 use rustls::{
-    RootCertStore,
-    pki_types::{CertificateDer, PrivateKeyDer},
+    CertificateError, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
+    client::{
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        verify_server_cert_signed_by_trust_anchor, verify_server_name,
+    },
+    crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature},
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    server::ParsedCertificate,
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::sleep;
@@ -308,19 +314,16 @@ impl State {
 }
 
 pub(crate) struct Client {
-    endpoint: String,
+    origin: Url,
     poll_interval: Duration,
     http: reqwest::Client,
-    expected_controller: AuthenticatedIdentity,
     quic: Option<QuicControl>,
 }
 
 struct QuicControl {
     client_config: quinn::ClientConfig,
-    host: String,
-    port: u16,
+    address: SocketAddr,
     server_name: String,
-    expected: AuthenticatedIdentity,
     timeout: Duration,
     connection: AsyncMutex<Option<(Endpoint, quinn::Connection)>>,
     request_id: std::sync::atomic::AtomicU64,
@@ -336,30 +339,7 @@ impl Client {
                 == network,
             "controller.network_id differs from relay certificate network"
         );
-        let mut identity_pem = fs::read(&config.tls.certificate_file)
-            .context("read relay certificate for controller")?;
-        identity_pem.extend_from_slice(
-            &fs::read(&config.tls.private_key_file).context("read relay key for controller")?,
-        );
-        let root = fs::read(&config.tls.ca_file).context("read controller CA")?;
-        let url = reqwest::Url::parse(&controller.endpoint).context("parse controller endpoint")?;
-        if !controller.server_name.is_empty() {
-            ensure!(
-                url.host_str() == Some(controller.server_name.as_str()),
-                "Rust relay requires controller.server_name to match endpoint host"
-            );
-        }
-        let http = reqwest::Client::builder()
-            .https_only(true)
-            .identity(Identity::from_pem(&identity_pem).context("load relay controller identity")?)
-            .add_root_certificate(Certificate::from_pem(&root).context("load controller CA")?)
-            .min_tls_version(reqwest::tls::Version::TLS_1_3)
-            .max_tls_version(reqwest::tls::Version::TLS_1_3)
-            .timeout(Duration::from_secs(15))
-            .tls_info(true)
-            .build()
-            .context("build controller HTTP client")?;
-        let expected_controller = AuthenticatedIdentity {
+        let expected = AuthenticatedIdentity {
             network_id: network,
             role: Role::Controller,
             subject_id: controller
@@ -367,29 +347,71 @@ impl Client {
                 .parse()
                 .context("controller.service_id")?,
         };
+        let mut origin = controller.https_origin()?;
+        let host = origin
+            .host_str()
+            .context("controller endpoint is missing a host")?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_owned();
+        let port = origin
+            .port_or_known_default()
+            .context("controller HTTPS port")?;
+        let address = pin_address(&host, port).context("pin controller HTTPS endpoint")?;
+        let server_name = if controller.server_name.is_empty() {
+            None
+        } else {
+            Some(
+                ServerName::try_from(controller.server_name.clone())
+                    .context("invalid controller.server_name")?,
+            )
+        };
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(ServerName::DnsName(name)) = &server_name
+            && name.as_ref() != host.as_str()
+        {
+            let authority = origin.host_str().context("controller HTTPS host")?;
+            let authority = match origin.port() {
+                Some(port) => format!("{authority}:{port}"),
+                None => authority.to_owned(),
+            };
+            headers.insert(reqwest::header::HOST, authority.parse()?);
+            origin
+                .set_host(Some(name.as_ref()))
+                .context("set controller HTTPS TLS name")?;
+        }
+        let sni_is_ip = matches!(server_name, Some(ServerName::IpAddress(_)));
+        let mut crypto = controller_tls(config, expected, server_name)?;
+        if sni_is_ip {
+            crypto.enable_sni = false;
+        }
+        let http = reqwest::Client::builder()
+            .https_only(true)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .default_headers(headers)
+            .resolve(origin.host_str().context("controller HTTPS host")?, address)
+            .use_preconfigured_tls(crypto.clone())
+            .timeout(controller.timeout)
+            .build()
+            .context("build controller HTTP client")?;
         let quic = controller
             .quic_endpoint
             .as_deref()
+            .filter(|endpoint| !endpoint.is_empty())
             .map(|endpoint| {
                 QuicControl::new(
                     endpoint,
-                    controller.server_name.clone(),
-                    expected_controller,
+                    &controller.server_name,
                     controller.timeout,
-                    &config.tls.certificate_file,
-                    &config.tls.private_key_file,
-                    &config.tls.ca_file,
+                    crypto,
                 )
             })
             .transpose()?;
         Ok(Self {
-            endpoint: format!(
-                "{}/v1/relay/configuration",
-                controller.endpoint.trim_end_matches('/')
-            ),
+            origin,
             poll_interval: controller.poll_interval,
             http,
-            expected_controller,
             quic,
         })
     }
@@ -410,6 +432,43 @@ impl Client {
         }
     }
 
+    pub(crate) async fn bootstrap_get(&self, path: &str, limit: usize) -> Result<bytes::Bytes> {
+        let url = self
+            .origin
+            .join(path)
+            .context("build controller bootstrap URL")?;
+        let mut response = self
+            .http
+            .get(url)
+            .send()
+            .await
+            .context("fetch controller bootstrap")?;
+        ensure!(
+            response.status() == StatusCode::OK,
+            "controller bootstrap returned {}",
+            response.status()
+        );
+        ensure!(
+            response
+                .content_length()
+                .is_none_or(|size| size <= limit as u64),
+            "controller bootstrap response exceeds limit"
+        );
+        let mut body = bytes::BytesMut::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("read controller bootstrap")?
+        {
+            ensure!(
+                chunk.len() <= limit - body.len(),
+                "controller bootstrap response exceeds limit"
+            );
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body.freeze())
+    }
+
     pub(crate) async fn initialize(&self, state: &State) -> Result<()> {
         self.poll(state).await
     }
@@ -424,22 +483,12 @@ impl Client {
         .encode_to_vec();
         let mut response = self
             .http
-            .post(&self.endpoint)
+            .post(self.origin.join("/v1/relay/configuration")?)
             .header("content-type", "application/x-protobuf")
             .body(body)
             .send()
             .await
             .context("request relay configuration")?;
-        let peer = response
-            .extensions()
-            .get::<reqwest::tls::TlsInfo>()
-            .and_then(reqwest::tls::TlsInfo::peer_certificate)
-            .context("controller TLS peer certificate is unavailable")?;
-        ensure!(
-            identity_from_certificate_der(peer).context("controller SPIFFE identity")?
-                == self.expected_controller,
-            "controller SPIFFE identity differs from configured network/service ID"
-        );
         if response.status() == StatusCode::NOT_MODIFIED {
             let deadline = response
                 .headers()
@@ -485,32 +534,18 @@ impl Client {
 
 impl QuicControl {
     fn new(
-        address: &str,
-        server_name: String,
-        expected: AuthenticatedIdentity,
+        endpoint: &str,
+        server_name: &str,
         timeout: Duration,
-        certificate: &PathBuf,
-        private_key: &PathBuf,
-        ca: &PathBuf,
+        mut crypto: rustls::ClientConfig,
     ) -> Result<Self> {
-        let (host, port) = split_host_port(address)?;
-        let certificates = read_certificates(certificate, 4 << 20, "relay controller certificate")?;
-        ensure!(
-            !certificates.is_empty(),
-            "relay controller certificate chain is empty"
-        );
-        let key = read_private_key(private_key, 1 << 20, "relay controller private key")?;
-        let roots_der = read_certificates(ca, 4 << 20, "controller CA")?;
-        let mut roots = RootCertStore::empty();
-        let (accepted, rejected) = roots.add_parsable_certificates(roots_der);
-        ensure!(
-            accepted > 0 && rejected == 0,
-            "controller CA contains an invalid certificate"
-        );
-        let mut crypto = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_client_auth_cert(certificates, key)
-            .context("load relay QUIC controller identity")?;
+        let (host, port) = split_host_port(endpoint)?;
+        let address = pin_address(&host, port).context("pin controller QUIC endpoint")?;
+        let server_name = if server_name.is_empty() {
+            host
+        } else {
+            server_name.to_owned()
+        };
         crypto.alpn_protocols = vec![b"laneway-control/1".to_vec()];
         crypto.enable_early_data = false;
         let crypto =
@@ -529,10 +564,8 @@ impl QuicControl {
         client.transport_config(Arc::new(transport));
         Ok(Self {
             client_config: client,
-            host,
-            port,
+            address,
             server_name,
-            expected,
             timeout,
             connection: AsyncMutex::new(None),
             request_id: std::sync::atomic::AtomicU64::new(0),
@@ -609,73 +642,20 @@ impl QuicControl {
         const MAX_QUIC_CONTROL: usize = 1 << 20;
         let mut connection = self.connection.lock().await;
         if connection.is_none() {
-            let mut addresses: Vec<SocketAddr> = if let Ok(ip) = self.host.parse::<IpAddr>() {
-                vec![SocketAddr::new(ip, self.port)]
+            let bind: SocketAddr = if self.address.is_ipv6() {
+                "[::]:0".parse().expect("constant controller bind")
             } else {
-                tokio::time::timeout(
-                    self.timeout,
-                    tokio::net::lookup_host((self.host.as_str(), self.port)),
-                )
-                .await
-                .context("controller QUIC DNS resolution timed out")?
-                .context("resolve controller QUIC endpoint")?
-                .take(17)
-                .collect()
+                "0.0.0.0:0".parse().expect("constant controller bind")
             };
-            addresses.sort_unstable();
-            addresses.dedup();
-            ensure!(
-                !addresses.is_empty() && addresses.len() <= 16,
-                "controller QUIC endpoint resolved outside bounded address set"
-            );
-            let mut last = None;
-            for address in addresses {
-                let bind: SocketAddr = if address.is_ipv6() {
-                    "[::]:0".parse().expect("constant controller bind")
-                } else {
-                    "0.0.0.0:0".parse().expect("constant controller bind")
-                };
-                let mut endpoint = Endpoint::client(bind)?;
-                endpoint.set_default_client_config(self.client_config.clone());
-                let connecting = match endpoint.connect(address, &self.server_name) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        last = Some(anyhow::Error::from(error));
-                        continue;
-                    }
-                };
-                match tokio::time::timeout(self.timeout, connecting).await {
-                    Ok(Ok(value)) => {
-                        let identity = value
-                            .peer_identity()
-                            .context("controller QUIC peer certificate is unavailable")?;
-                        let chain = identity
-                            .downcast::<Vec<CertificateDer<'static>>>()
-                            .map_err(|_| {
-                                anyhow::anyhow!("unexpected controller QUIC peer identity type")
-                            })?;
-                        let leaf = chain
-                            .first()
-                            .context("controller QUIC certificate chain is empty")?;
-                        ensure!(
-                            identity_from_certificate_der(leaf.as_ref())
-                                .context("controller QUIC SPIFFE identity")?
-                                == self.expected,
-                            "controller QUIC SPIFFE identity differs from configured network/service ID"
-                        );
-                        *connection = Some((endpoint, value));
-                        break;
-                    }
-                    Ok(Err(error)) => last = Some(anyhow::Error::from(error)),
-                    Err(error) => last = Some(anyhow::Error::from(error)),
-                }
-            }
-            if connection.is_none() {
-                return Err(last.unwrap_or_else(|| {
-                    anyhow::anyhow!("controller QUIC has no resolved address")
-                }))
-                .context("connect controller QUIC");
-            }
+            let mut endpoint = Endpoint::client(bind)?;
+            endpoint.set_default_client_config(self.client_config.clone());
+            let connecting = endpoint
+                .connect(self.address, &self.server_name)
+                .context("connect pinned controller QUIC endpoint")?;
+            let active = tokio::time::timeout(self.timeout, connecting)
+                .await
+                .context("controller QUIC handshake timed out")??;
+            *connection = Some((endpoint, active));
         }
         let active = connection.as_ref().expect("connection installed").1.clone();
         let result = tokio::time::timeout(self.timeout, async {
@@ -732,8 +712,117 @@ impl QuicControl {
     }
 }
 
-fn split_host_port(value: &str) -> Result<(String, u16)> {
+fn controller_tls(
+    config: &Config,
+    expected: AuthenticatedIdentity,
+    server_name: Option<ServerName<'static>>,
+) -> Result<rustls::ClientConfig> {
+    let certificates = read_certificates(
+        &config.tls.certificate_file,
+        4 << 20,
+        "relay controller certificate",
+    )?;
+    let key = read_private_key(
+        &config.tls.private_key_file,
+        1 << 20,
+        "relay controller private key",
+    )?;
+    let certificates_ca = read_certificates(&config.tls.ca_file, 4 << 20, "controller CA")?;
+    let mut roots = RootCertStore::empty();
+    let (accepted, rejected) = roots.add_parsable_certificates(certificates_ca);
+    ensure!(
+        accepted > 0 && rejected == 0,
+        "controller CA contains an invalid certificate"
+    );
+    let provider = rustls::crypto::ring::default_provider();
+    let verifier = ControllerVerifier {
+        roots,
+        expected,
+        server_name,
+        algorithms: provider.signature_verification_algorithms,
+    };
+    rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_client_auth_cert(certificates, key)
+        .context("load relay controller TLS identity")
+}
+
+#[derive(Debug)]
+struct ControllerVerifier {
+    roots: RootCertStore,
+    expected: AuthenticatedIdentity,
+    server_name: Option<ServerName<'static>>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for ControllerVerifier {
+    fn verify_server_cert(
+        &self,
+        leaf: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        _connection_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, TlsError> {
+        let certificate = ParsedCertificate::try_from(leaf)?;
+        verify_server_cert_signed_by_trust_anchor(
+            &certificate,
+            &self.roots,
+            intermediates,
+            now,
+            self.algorithms.all,
+        )?;
+        if let Some(name) = &self.server_name {
+            verify_server_name(&certificate, name)?;
+        }
+        let identity = identity_from_certificate_der(leaf.as_ref())
+            .map_err(|_| CertificateError::BadEncoding)?;
+        if identity != self.expected {
+            return Err(CertificateError::ApplicationVerificationFailure.into());
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls12_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, TlsError> {
+        verify_tls13_signature(message, certificate, signature, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
+fn pin_address(host: &str, port: u16) -> Result<SocketAddr> {
+    (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("resolve controller host {host}"))?
+        .map(|address| SocketAddr::new(address.ip().to_canonical(), port))
+        .find(|address| {
+            let ip = address.ip();
+            !ip.is_unspecified() && !ip.is_multicast() && ip != Ipv4Addr::BROADCAST
+        })
+        .with_context(|| format!("controller host {host} resolved to no usable address"))
+}
+
+pub(crate) fn split_host_port(value: &str) -> Result<(String, u16)> {
     if let Ok(address) = value.parse::<SocketAddr>() {
+        ensure!(address.port() != 0, "controller QUIC endpoint port is zero");
         return Ok((address.ip().to_string(), address.port()));
     }
     let (host, port) = value
@@ -743,7 +832,7 @@ fn split_host_port(value: &str) -> Result<(String, u16)> {
         .parse::<u16>()
         .context("controller QUIC endpoint port")?;
     ensure!(
-        !host.is_empty() && port != 0,
+        !host.is_empty() && !host.contains([':', '[', ']']) && port != 0,
         "controller QUIC endpoint must be host:port"
     );
     Ok((host.to_owned(), port))
@@ -761,16 +850,15 @@ fn read_certificates(
 }
 
 fn bounded_read(path: &PathBuf, maximum: usize, label: &str) -> Result<Vec<u8>> {
-    let metadata = fs::metadata(path).with_context(|| format!("stat {label}"))?;
+    let file = fs::File::open(path).with_context(|| format!("open {label}"))?;
+    let metadata = file.metadata().with_context(|| format!("stat {label}"))?;
     ensure!(
         metadata.is_file() && metadata.len() <= maximum as u64,
         "{label} exceeds limit or is not a regular file"
     );
-    let bytes = fs::read(path).with_context(|| format!("read {label}"))?;
-    ensure!(
-        !bytes.is_empty() && bytes.len() <= maximum,
-        "{label} is empty or exceeds limit"
-    );
+    let bytes = laneway_protocol::read_bounded(file, maximum as u64)
+        .with_context(|| format!("read {label}"))?;
+    ensure!(!bytes.is_empty(), "{label} is empty");
     Ok(bytes)
 }
 
@@ -967,6 +1055,65 @@ mod tests {
     use laneway_protocol::v1::{
         IpProtocol, PolicyAction, PolicyRule, PortRange, RelayPeerAuthorization, TrafficSelector,
     };
+    use rcgen::{
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, SanType,
+    };
+
+    #[test]
+    fn accepts_only_pinned_controller_chain_name_and_identity() {
+        let network = Id::new([1; 16]).unwrap();
+        let service = Id::new([2; 16]).unwrap();
+        let mut ca = CertificateParams::new(Vec::new()).unwrap();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca_key = KeyPair::generate().unwrap();
+        let ca_cert = ca.self_signed(&ca_key).unwrap();
+        let issuer = rcgen::Issuer::new(ca, ca_key);
+        let mut leaf = CertificateParams::new(vec!["controller.example".to_owned()]).unwrap();
+        leaf.extended_key_usages
+            .push(ExtendedKeyUsagePurpose::ServerAuth);
+        leaf.subject_alt_names.push(SanType::URI(
+            format!("spiffe://laneway/network/{network}/controller/{service}")
+                .try_into()
+                .unwrap(),
+        ));
+        let leaf = leaf
+            .signed_by(&KeyPair::generate().unwrap(), &issuer)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(ca_cert.der().clone()).unwrap();
+        let transport_name = ServerName::try_from("127.0.0.1").unwrap();
+        let mut verifier = ControllerVerifier {
+            roots,
+            expected: AuthenticatedIdentity {
+                network_id: network,
+                role: Role::Controller,
+                subject_id: service,
+            },
+            server_name: Some(ServerName::try_from("controller.example").unwrap()),
+            algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        };
+        let verify = |verifier: &ControllerVerifier| {
+            verifier.verify_server_cert(leaf.der(), &[], &transport_name, &[], UnixTime::now())
+        };
+        assert!(verify(&verifier).is_ok());
+        verifier.server_name = Some(ServerName::try_from("other.example").unwrap());
+        assert!(verify(&verifier).is_err());
+        verifier.server_name = None;
+        assert!(verify(&verifier).is_ok());
+        verifier.expected.subject_id = Id::new([3; 16]).unwrap();
+        assert!(verify(&verifier).is_err());
+    }
+
+    #[test]
+    fn pins_usable_numeric_addresses_and_canonicalizes_mapped_ipv4() {
+        assert_eq!(
+            pin_address("::ffff:127.0.0.1", 8443).unwrap(),
+            "127.0.0.1:8443".parse().unwrap(),
+        );
+        for host in ["0.0.0.0", "::", "224.0.0.1", "255.255.255.255"] {
+            assert!(pin_address(host, 8443).is_err(), "{host}");
+        }
+    }
 
     fn prefix(address: [u8; 4], prefix_length: u32) -> IpPrefix {
         IpPrefix {

@@ -15,7 +15,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -26,14 +28,139 @@ const checksumManifestLimit = 1 << 20
 var stableTagPattern = regexp.MustCompile("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")
 
 type Client struct {
-	baseURL    string
-	repository string
-	httpClient *http.Client
+	baseURL        string
+	repository     string
+	httpClient     *http.Client
+	locateVerifier func() (string, error)
 }
 
 type Release struct {
 	Tag    string
 	SHA256 string
+}
+
+// Asset identifies a release payload and its private staging destination.
+type Asset struct {
+	Name        string
+	Destination string
+	MaxBytes    int64
+}
+
+// DownloadLatestSigned resolves the tag once and authenticates its manifest
+// before downloading any payload. The caller owns the staging directory.
+func (c *Client) DownloadLatestSigned(ctx context.Context, assets ...Asset) (string, error) {
+	return c.downloadLatestSigned(ctx, "", assets)
+}
+
+// StageLatestSigned retains the authenticated manifest and bundle alongside
+// the downloaded assets for another local installer process to reverify.
+func (c *Client) StageLatestSigned(ctx context.Context, stage string, assets ...Asset) (string, error) {
+	if stage == "" {
+		return "", errors.New("release update: staging directory is required")
+	}
+	return c.downloadLatestSigned(ctx, stage, assets)
+}
+
+func (c *Client) downloadLatestSigned(ctx context.Context, stage string, assets []Asset) (string, error) {
+	if len(assets) == 0 {
+		return "", errors.New("release update: no assets requested")
+	}
+	for _, asset := range assets {
+		if !validAssetName(asset.Name) || asset.MaxBytes <= 0 {
+			return "", errors.New("release update: invalid asset name or download limit")
+		}
+	}
+	tag, err := c.latestTag(ctx)
+	if err != nil {
+		return "", err
+	}
+	manifest, err := c.downloadBytes(ctx, c.assetURL(tag, "checksums.txt"), checksumManifestLimit)
+	if err != nil {
+		return "", fmt.Errorf("release update: download checksum manifest: %w", err)
+	}
+	bundle, err := c.downloadBytes(ctx, c.assetURL(tag, "checksums.sigstore.json"), checksumManifestLimit)
+	if err != nil {
+		return "", fmt.Errorf("release update: download release signature: %w", err)
+	}
+	if err := c.verifySignature(ctx, tag, manifest, bundle); err != nil {
+		return "", err
+	}
+	if stage != "" {
+		for _, metadata := range []struct {
+			name    string
+			content []byte
+		}{{"checksums.txt", manifest}, {"checksums.sigstore.json", bundle}} {
+			file, err := os.OpenFile(filepath.Join(stage, metadata.name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				return "", err
+			}
+			_, writeErr := file.Write(metadata.content)
+			if err := errors.Join(writeErr, file.Close()); err != nil {
+				return "", err
+			}
+		}
+	}
+	for _, asset := range assets {
+		if _, err := c.downloadVerifiedAsset(ctx, tag, manifest, asset); err != nil {
+			return "", err
+		}
+	}
+	return tag, nil
+}
+
+func (c *Client) verifySignature(ctx context.Context, tag string, manifest, bundle []byte) error {
+	locate := c.locateVerifier
+	if locate == nil {
+		locate = cosignPath
+	}
+	verifier, err := locate()
+	if err != nil {
+		return fmt.Errorf("release update: cosign is required: %w", err)
+	}
+	tempBase := ""
+	if os.Geteuid() == 0 {
+		tempBase = "/tmp"
+	}
+	work, err := os.MkdirTemp(tempBase, "laneway-update-signature-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+	manifestPath := filepath.Join(work, "checksums.txt")
+	bundlePath := filepath.Join(work, "checksums.sigstore.json")
+	if err := os.WriteFile(manifestPath, manifest, 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(bundlePath, bundle, 0o600); err != nil {
+		return err
+	}
+	verify := exec.CommandContext(ctx, verifier, "verify-blob", "--bundle", bundlePath,
+		"--certificate-identity", "https://github.com/"+c.repository+"/.github/workflows/release.yml@refs/tags/"+tag,
+		"--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", manifestPath)
+	if verify.Err != nil {
+		return fmt.Errorf("release update: cosign is required: %w", verify.Err)
+	}
+	verify.Env = []string{}
+	for _, variable := range os.Environ() {
+		name, _, _ := strings.Cut(variable, "=")
+		name = strings.ToUpper(name)
+		if os.Geteuid() == 0 &&
+			(name == "HOME" || name == "XDG_CACHE_HOME" || name == "XDG_CONFIG_HOME" || name == "TMPDIR" || name == "PATH") {
+			continue
+		}
+		if !strings.HasPrefix(name, "COSIGN_") && !strings.HasPrefix(name, "SIGSTORE_") &&
+			!strings.HasPrefix(name, "TUF_") {
+			verify.Env = append(verify.Env, variable)
+		}
+	}
+	if os.Geteuid() == 0 {
+		verify.Env = append(verify.Env, "HOME="+work, "XDG_CACHE_HOME="+work, "XDG_CONFIG_HOME="+work, "TMPDIR="+work,
+			"PATH=/usr/bin:/bin:/usr/sbin:/sbin")
+	}
+	if output, err := verify.CombinedOutput(); err != nil {
+		return fmt.Errorf("release update: release signature verification failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func NewGitHubClient(repository string) *Client {
@@ -82,16 +209,20 @@ func (c *Client) DownloadLatest(ctx context.Context, asset, destination string, 
 	if err != nil {
 		return Release{}, fmt.Errorf("release update: download checksum manifest: %w", err)
 	}
-	expected, err := checksumForAsset(manifest, asset)
+	return c.downloadVerifiedAsset(ctx, tag, manifest, Asset{Name: asset, Destination: destination, MaxBytes: maxBytes})
+}
+
+func (c *Client) downloadVerifiedAsset(ctx context.Context, tag string, manifest []byte, asset Asset) (Release, error) {
+	expected, err := checksumForAsset(manifest, asset.Name)
 	if err != nil {
 		return Release{}, err
 	}
-	actual, err := c.downloadFile(ctx, c.assetURL(tag, asset), destination, maxBytes)
+	actual, err := c.downloadFile(ctx, c.assetURL(tag, asset.Name), asset.Destination, asset.MaxBytes)
 	if err != nil {
-		return Release{}, fmt.Errorf("release update: download client: %w", err)
+		return Release{}, fmt.Errorf("release update: download %s: %w", asset.Name, err)
 	}
 	if !bytes.Equal(actual, expected) {
-		_ = os.Remove(destination)
+		_ = os.Remove(asset.Destination)
 		return Release{}, errors.New("release update: downloaded client failed checksum verification")
 	}
 	return Release{Tag: tag, SHA256: hex.EncodeToString(actual)}, nil

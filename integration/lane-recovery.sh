@@ -57,7 +57,17 @@ case " $* " in
     ;;
 esac
 EOF
-chmod 0755 "$fake_bin/docker"
+cat > "$fake_bin/laneway" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$#" -eq 4 ]
+[ "$1" = config ]
+[ "$2" = inspect-controller-initial-network ]
+[ "$3" = -config ]
+[ -f "$4" ] && [ ! -L "$4" ]
+printf '%s\n' '{"configured":false}'
+EOF
+chmod 0755 "$fake_bin/docker" "$fake_bin/laneway"
 
 install_runtime() {
   destination=$1
@@ -87,6 +97,11 @@ LANEWAY_RELAY_IMAGE_DIGEST=sha256:2222222222222222222222222222222222222222222222
 LANEWAY_ADMIN_IMAGE_DIGEST=sha256:3333333333333333333333333333333333333333333333333333333333333333
 LANEWAY_CONNECTOR_IMAGE_DIGEST=sha256:5555555555555555555555555555555555555555555555555555555555555555
 LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:4444444444444444444444444444444444444444444444444444444444444444
+LANEWAY_BIND_ADDRESS=0.0.0.0
+LANEWAY_CONTROLLER_PORT=8443
+LANEWAY_RELAY_QUIC_PORT=4433
+LANEWAY_RELAY_TCP_PORT=443
+LANEWAY_EXIT_DIRECT_PORT=4434
 LANEWAY_CONTROLLER_SERVER_NAME=lane.example.test
 LANEWAY_NETWORK_ID=11111111111111111111111111111111
 LANEWAY_CONTROLLER_SERVICE_ID=22222222222222222222222222222222
@@ -104,6 +119,8 @@ for relative in \
   printf '%s\n' "$relative" > "$source_dir/$relative"
   chmod 0444 "$source_dir/$relative"
 done
+printf '%s\n' 'mode = "controller"' > "$source_dir/generated/config/controller.toml"
+chmod 0444 "$source_dir/generated/config/controller.toml"
 for relative in \
   generated/pki/intermediate.key generated/pki/controller.key generated/pki/relay.key \
   generated/pki/exit-node.key generated/secrets/admin.token; do

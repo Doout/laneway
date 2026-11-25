@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -52,6 +53,8 @@ func main() {
 	}
 	var err error
 	switch {
+	case fs.Arg(0) == "update" || fs.Arg(0) == "configure":
+		err = fmt.Errorf("the deployment host manages this controller; on the host run sudo laneway %s server", fs.Arg(0))
 	case fs.NArg() != 0:
 		err = fmt.Errorf("unexpected positional arguments: %s", strings.Join(fs.Args(), " "))
 	case *backup != "" && *restore != "":
@@ -168,9 +171,30 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	if err != nil {
 		return err
 	}
-	tlsConfig, err := controllerTLSConfig(cfg.TLS, caPEM)
+	validationNow := time.Now()
+	if err := verifyControllerIssuer(ca, issuerChain, caPEM, validationNow); err != nil {
+		return err
+	}
+	tlsConfig, controllerIdentity, err := controllerTLSConfigAt(cfg.TLS, caPEM, validationNow)
 	if err != nil {
 		return err
+	}
+	initialNetwork, err := configuredControllerInitialNetwork(cfg.Controller.InitialNetwork)
+	if err != nil {
+		return err
+	}
+	if !initialNetwork.NetworkID.IsZero() && initialNetwork.NetworkID != controllerIdentity.NetworkID {
+		return errors.New("controller initial network does not match the verified controller certificate network identity")
+	}
+	var bootstrapNetworkID identity.NetworkID
+	if cfg.Bootstrap.NetworkID != "" {
+		bootstrapNetworkID, err = identity.ParseNetworkID(cfg.Bootstrap.NetworkID)
+		if err != nil {
+			return fmt.Errorf("parse bootstrap network ID: %w", err)
+		}
+		if bootstrapNetworkID != controllerIdentity.NetworkID {
+			return errors.New("bootstrap network does not match the verified controller certificate network identity")
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -179,6 +203,10 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 		return err
 	}
 	defer store.Close()
+	ensuredInitialNetwork, _, err := store.EnsureControllerInitialNetwork(ctx, initialNetwork, controllerIdentity)
+	if err != nil {
+		return fmt.Errorf("ensure controller initial network: %w", err)
+	}
 	authState, err := store.AdministratorAuthState(ctx)
 	if err != nil {
 		return fmt.Errorf("read administrator authentication state: %w", err)
@@ -198,20 +226,14 @@ func run(path, diagnostics, consoleDir, consoleCertificate, consolePrivateKey, c
 	var bootstrapListener net.Listener
 	var bootstrapServeErr <-chan error
 	var bootstrapHandler http.Handler
-	if cfg.Bootstrap.NetworkID != "" {
-		networkID, parseErr := identity.ParseNetworkID(cfg.Bootstrap.NetworkID)
-		if parseErr != nil {
-			return parseErr
-		}
-		if _, lookupErr := store.Network(ctx, networkID); lookupErr != nil {
+	if !bootstrapNetworkID.IsZero() {
+		networkID := bootstrapNetworkID
+		if !ensuredInitialNetwork.ID.IsZero() {
+			if ensuredInitialNetwork.ID != networkID {
+				return errors.New("bootstrap network does not match the durable controller network identity")
+			}
+		} else if _, lookupErr := store.Network(ctx, networkID); lookupErr != nil {
 			return fmt.Errorf("bootstrap network: %w", lookupErr)
-		}
-		controllerIdentity, identityErr := identity.AuthenticatedIdentityFromCertificate(tlsConfig.Certificates[0].Leaf)
-		if identityErr != nil {
-			return identityErr
-		}
-		if controllerIdentity.NetworkID != networkID {
-			return errors.New("bootstrap network does not match the controller certificate network identity")
 		}
 		artifacts := make([]bootstrap.Artifact, 0, len(cfg.Bootstrap.Artifacts))
 		for _, artifact := range cfg.Bootstrap.Artifacts {
@@ -485,33 +507,107 @@ func allowsServerAuthentication(usages []x509.ExtKeyUsage) bool {
 	return false
 }
 
-func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, error) {
+func controllerTLSConfig(cfg config.TLS, caPEM []byte) (*tls.Config, identity.AuthenticatedIdentity, error) {
+	return controllerTLSConfigAt(cfg, caPEM, time.Now())
+}
+
+func controllerTLSConfigAt(cfg config.TLS, caPEM []byte, now time.Time) (*tls.Config, identity.AuthenticatedIdentity, error) {
 	certificate, err := tls.LoadX509KeyPair(cfg.CertificateFile, cfg.PrivateKeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("load controller certificate and key: %w", err)
+		return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("load controller certificate and key: %w", err)
 	}
 	if len(certificate.Certificate) == 0 {
-		return nil, errors.New("controller certificate chain is empty")
+		return nil, identity.AuthenticatedIdentity{}, errors.New("controller certificate chain is empty")
 	}
 	certificate.Leaf, err = x509.ParseCertificate(certificate.Certificate[0])
 	if err != nil {
-		return nil, fmt.Errorf("parse controller certificate: %w", err)
+		return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("parse controller certificate: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, identity.AuthenticatedIdentity{}, errors.New("CA file contains no valid certificates")
+	}
+	intermediates := x509.NewCertPool()
+	for index, raw := range certificate.Certificate[1:] {
+		parsed, parseErr := x509.ParseCertificate(raw)
+		if parseErr != nil {
+			return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("parse controller certificate chain entry %d: %w", index+1, parseErr)
+		}
+		intermediates.AddCert(parsed)
+	}
+	if _, err := certificate.Leaf.Verify(x509.VerifyOptions{
+		Roots: roots, Intermediates: intermediates, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return nil, identity.AuthenticatedIdentity{}, fmt.Errorf("verify controller certificate chain: %w", err)
 	}
 	authenticated, err := identity.AuthenticatedIdentityFromCertificate(certificate.Leaf)
 	if err != nil {
-		return nil, err
+		return nil, identity.AuthenticatedIdentity{}, err
 	}
 	if err := authenticated.RequireRole(identity.IdentityRoleController); err != nil {
-		return nil, err
-	}
-	clientCAs := x509.NewCertPool()
-	if !clientCAs.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("CA file contains no valid certificates")
+		return nil, identity.AuthenticatedIdentity{}, err
 	}
 	return &tls.Config{
-		Certificates: []tls.Certificate{certificate}, ClientCAs: clientCAs,
+		Certificates: []tls.Certificate{certificate}, ClientCAs: roots,
 		MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13,
+	}, authenticated, nil
+}
+
+func configuredControllerInitialNetwork(value config.ControllerInitialNetwork) (controller.ControllerInitialNetwork, error) {
+	if value.NetworkID == "" && value.Name == "" && value.IPv4Pool == "" && value.IPv6Pool == "" {
+		return controller.ControllerInitialNetwork{}, nil
+	}
+	networkID, err := identity.ParseNetworkID(value.NetworkID)
+	if err != nil {
+		return controller.ControllerInitialNetwork{}, fmt.Errorf("parse controller initial network ID: %w", err)
+	}
+	ipv4Pool, err := netip.ParsePrefix(value.IPv4Pool)
+	if err != nil {
+		return controller.ControllerInitialNetwork{}, fmt.Errorf("parse controller initial IPv4 pool: %w", err)
+	}
+	var ipv6Pool netip.Prefix
+	if value.IPv6Pool != "" {
+		ipv6Pool, err = netip.ParsePrefix(value.IPv6Pool)
+		if err != nil {
+			return controller.ControllerInitialNetwork{}, fmt.Errorf("parse controller initial IPv6 pool: %w", err)
+		}
+	}
+	return controller.ControllerInitialNetwork{
+		NetworkID: networkID, Name: value.Name, IPv4Pool: ipv4Pool, IPv6Pool: ipv6Pool,
 	}, nil
+}
+
+func verifyControllerIssuer(issuer *x509.Certificate, chain []*x509.Certificate, rootPEM []byte, now time.Time) error {
+	roots, err := pki.ParseCertificatesPEM(rootPEM)
+	if err != nil || len(roots) != 1 {
+		return errors.New("controller CA file must contain exactly one certificate")
+	}
+	root := roots[0]
+	if !root.IsCA || root.CheckSignatureFrom(root) != nil {
+		return errors.New("controller CA certificate is not a self-signed root")
+	}
+	if issuer == nil || len(chain) == 0 {
+		return errors.New("controller issuer chain is empty")
+	}
+	if (len(chain) == 1 && !issuer.Equal(root)) || (len(chain) > 1 && !chain[len(chain)-1].Equal(root)) {
+		return errors.New("controller issuer chain is not anchored by tls.ca")
+	}
+	rootPool := x509.NewCertPool()
+	rootPool.AddCert(root)
+	intermediates := x509.NewCertPool()
+	for _, certificate := range chain[1:] {
+		if !certificate.Equal(root) {
+			intermediates.AddCert(certificate)
+		}
+	}
+	if _, err := issuer.Verify(x509.VerifyOptions{
+		Roots: rootPool, Intermediates: intermediates, CurrentTime: now,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
+	}); err != nil {
+		return fmt.Errorf("verify controller issuing authority: %w", err)
+	}
+	return nil
 }
 
 type adminBearerCredential struct {

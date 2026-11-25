@@ -11,6 +11,38 @@ use x509_parser::{extensions::GeneralName, prelude::*};
 
 pub mod policy;
 
+/// Reads one complete object up to the caller's size limit. The limit is
+/// enforced on bytes read, including when the source length is unknown or changes.
+pub fn read_bounded(reader: impl io::Read, limit: u64) -> io::Result<Vec<u8>> {
+    use io::Read;
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input exceeds size limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod read_limit_tests {
+    use super::*;
+    #[test]
+    fn exact_limit_is_accepted_and_only_one_extra_byte_is_consumed() {
+        assert_eq!(read_bounded(&b"abc"[..], 3).unwrap(), b"abc");
+        let mut input = &b"abcde"[..];
+        assert_eq!(
+            read_bounded(&mut input, 3).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(input, b"e");
+    }
+}
+
 /// Generated `laneway.v1` Protobuf messages.
 #[allow(missing_docs)]
 pub mod v1 {

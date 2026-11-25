@@ -14,9 +14,17 @@ BENCHMARK_SMOKE_QUEUE ?= 256
 
 build:
 	cd go && go build ./...
+	LANEWAY_CLI_RELEASE_VERSION="$(VERSION)" LANEWAY_NODE_RELEASE_VERSION="$(VERSION)" LANEWAY_RELAY_RELEASE_VERSION="$(VERSION)" cargo build --manifest-path rust/Cargo.toml --target-dir rust/target --locked -p laneway-cli -p lanewayd -p laneway-relay -p laneway-healthcheck
+ifeq ($(OS),Windows_NT)
+	LANEWAY_CLI_RELEASE_VERSION="$(VERSION)" cargo build --manifest-path rust/Cargo.toml --target-dir rust/target --locked -p laneway-cli --bin laneway-compat-windows --features windows-compat
+	cp rust/target/debug/laneway-compat-windows.exe rust/target/debug/laneway-compat.exe
+else
+	cd go && go build -tags laneway_compat -trimpath -ldflags "-X laneway.dev/laneway/internal/buildinfo.Version=$(VERSION)" -o "../rust/target/debug/laneway-compat$$(go env GOEXE)" ./cmd/laneway
+endif
 
 # Create a self-contained Linux or macOS release archive in dist/. Linux
-# packages include services; macOS installation selects the foreground client.
+# packages include services and use Docker Buildx for the static Rust executables.
+# macOS installation selects the foreground client. Archiving uses GNU tar.
 package:
 	VERSION="$(VERSION)" PACKAGE_GOOS="$(PACKAGE_GOOS)" PACKAGE_GOARCH="$(PACKAGE_GOARCH)" ./scripts/package.sh
 
