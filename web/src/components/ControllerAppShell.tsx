@@ -1,4 +1,4 @@
-import { AppWindow, LayoutDashboard, LogOut, Network, RadioTower, RefreshCw, RotateCw, Route, ScrollText, ShieldCheck, Users } from 'lucide-react'
+import { AppWindow, LayoutDashboard, LogOut, Network, Plug, RadioTower, RefreshCw, RotateCw, Route, ScrollText, ShieldCheck, Users } from 'lucide-react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { useEffect, useState } from 'react'
@@ -14,13 +14,14 @@ const navigation: Array<{ group: 'Workspace' | 'Network' | 'Operations'; label: 
   { group: 'Network', label: 'Access', to: '/access', icon: ShieldCheck, permission: 'acl.read' },
   { group: 'Operations', label: 'Infrastructure', to: '/infrastructure', icon: Network, permission: 'network.list' },
   { group: 'Operations', label: 'Applications', to: '/applications', icon: AppWindow, permission: 'application.read' },
+  { group: 'Operations', label: 'Twingate', to: '/integrations/twingate', icon: Plug, permission: 'integration.manage' },
   { group: 'Operations', label: 'Security', to: '/security', icon: RadioTower, permission: 'certificate.read' },
   { group: 'Operations', label: 'Audit', to: '/audit', icon: ScrollText, permission: 'audit.read' },
 ]
 
 const pathLabels: Record<string, string> = {
   overview: 'Overview', networks: 'Networks', nodes: 'Nodes', users: 'Users', teams: 'Teams', routes: 'Routes', infrastructure: 'Infrastructure',
-  access: 'Access', applications: 'Applications', consent: 'Review application', install: 'Connect application', security: 'Security', audit: 'Audit', new: 'New', approve: 'Approve', revoke: 'Revoke', capabilities: 'Capabilities',
+  access: 'Access', twingate: 'Twingate', applications: 'Applications', consent: 'Review application', install: 'Connect application', security: 'Security', audit: 'Audit', new: 'New', approve: 'Approve', revoke: 'Revoke', capabilities: 'Capabilities',
 }
 
 function breadcrumbLabel(pathname: string) {
