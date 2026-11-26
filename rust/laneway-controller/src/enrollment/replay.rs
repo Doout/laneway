@@ -131,6 +131,12 @@ pub(super) fn recover(
         receipt.response_sha256 == response_digest(&response),
         EnrollError::Used
     );
+    let still_live: bool = tx.query_row(
+        "SELECT unixepoch() < ?",
+        [grant.expires.min(not_after)],
+        |row| row.get(0),
+    )?;
+    ensure!(still_live, EnrollError::Used);
     Ok(response)
 }
 

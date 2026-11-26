@@ -311,7 +311,7 @@ def interrupted_enrollment(call, cli, flags, invite, state, database, env, fault
     assert exchanges and all(request == exchanges[0] for request in exchanges), (
         "the controller did not send a consistent committed enrollment response"
     )
-    assert exchanges[0][0] == 200, f"upstream enrollment returned HTTP {exchanges[0][0]}"
+    assert exchanges[0][0] == 201, f"upstream enrollment returned HTTP {exchanges[0][0]}"
     committed = enrollment_rows(database)
     assert all(before <= after and len(after - before) == 1
                for before, after in zip(baseline, committed)), "the initial attempt did not commit one enrollment"
