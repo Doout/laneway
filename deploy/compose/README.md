@@ -96,9 +96,16 @@ unavailable on Rust.
 sudo laneway-control invite --name office --docker --connector
 ```
 
+New releases publish `lane-edge`, `laneway-controller`, `laneway-relay`,
+`laneway-node`, and `laneway-exit-node` under `ghcr.io/doout`. The current
+deployment tools still verify older releases that use the original `-rust`
+repositories. Before upgrading an older deployment to the first release with
+the new names, update the Compose deployment tooling or Connector updater from
+the verified package. Older verifiers expect the suffixed repositories.
+
 Run the generated command within ten minutes. Its rate-limited URL is consumed
 by the first download; later requests return `404`. A one-shot container enrolls
-the digest-pinned `lane-edge-rust` image, then a clean runtime container starts
+the digest-pinned `lane-edge` image, then a clean runtime container starts
 without the setup token, bootstrap key, or temporary mount. On the Connector
 host, update it with `sudo laneway-update-connector laneway-connector-office`.
 

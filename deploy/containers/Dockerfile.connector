@@ -50,6 +50,7 @@ ENTRYPOINT ["/usr/local/bin/laneway"]
 CMD ["connector", "run"]
 
 FROM scratch AS rust-connector
+LABEL io.laneway.connector-runtime="rust"
 COPY --from=rust-installer /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=rust-installer /out/laneway /usr/local/bin/laneway
 COPY --from=node-binary /lanewayd-rs /usr/local/bin/lanewayd-rs

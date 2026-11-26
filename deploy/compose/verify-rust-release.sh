@@ -89,13 +89,20 @@ verified_digest() {
   printf '%s\n' "$digest"
 }
 
+# The signed canonical inventory includes the standalone node image. Older
+# inventories use suffixed names, even when they also list legacy Go images.
+suffix=-rust
+if [ "$mode" = publish ] || grep -q '^ghcr.io/doout/laneway-node@' "$work/image-digests.txt"; then
+  suffix=
+fi
+
 # Do not publish partial settings when any member fails.
-set -- laneway-controller-rust laneway-relay-rust laneway-exit-node-rust
+set -- laneway-controller$suffix laneway-relay$suffix laneway-exit-node$suffix
 case "$mode" in
-  install|publish) set -- "$@" laneway-admin lane-edge-rust ;;
+  install|publish) set -- "$@" laneway-admin lane-edge$suffix ;;
 esac
 if [ "$mode" = publish ]; then
-  set -- "$@" laneway-node-rust
+  set -- "$@" laneway-node$suffix
   # Each entry above must exist exactly once. No other runtime or duplicate
   # reference may be included in a newly published release.
   [ "$(awk 'END { print NR }' "$work/image-digests.txt")" -eq "$#" ] ||
@@ -119,11 +126,12 @@ done
 [ "$failed" -eq 0 ] || die "release image verification failed"
 
 printf 'LANEWAY_RUST_VERSION=%s\nLANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=%s\nLANEWAY_RUST_RELAY_IMAGE_DIGEST=%s\nLANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=%s\n' \
-  "${tag#v}" "$(cat "$work/laneway-controller-rust.digest")" "$(cat "$work/laneway-relay-rust.digest")" \
-  "$(cat "$work/laneway-exit-node-rust.digest")"
+  "${tag#v}" "$(cat "$work/laneway-controller$suffix.digest")" "$(cat "$work/laneway-relay$suffix.digest")" \
+  "$(cat "$work/laneway-exit-node$suffix.digest")"
 case "$mode" in install|publish)
   printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\nLANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=%s\n' \
-    "$(cat "$work/laneway-admin.digest")" "$(cat "$work/lane-edge-rust.digest")"
+    "$(cat "$work/laneway-admin.digest")" "$(cat "$work/lane-edge$suffix.digest")"
   ;;
 esac
+printf 'LANEWAY_RUST_IMAGE_SUFFIX=%s\n' "$suffix"
 if [ "$mode" = prepare ]; then cat "$work/bootstrap-artifacts.toml"; fi

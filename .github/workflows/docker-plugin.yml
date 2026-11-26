@@ -3,8 +3,6 @@ name: Docker network plugin
 on:
   pull_request:
     paths:
-      - "go/internal/dockerplugin/**"
-      - "go/cmd/laneway-docker-plugin/**"
       - "rust/laneway-docker-plugin/**"
       - "rust/Cargo.*"
       - "testvectors/docker-plugin/**"
@@ -15,8 +13,6 @@ on:
   push:
     branches: [main]
     paths:
-      - "go/internal/dockerplugin/**"
-      - "go/cmd/laneway-docker-plugin/**"
       - "rust/laneway-docker-plugin/**"
       - "rust/Cargo.*"
       - "testvectors/docker-plugin/**"
@@ -30,17 +26,6 @@ permissions:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
-      - run: ./integration/docker-plugin.sh
-      - run: go vet ./internal/dockerplugin ./cmd/laneway-docker-plugin
-        working-directory: go
-  rust-driver:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +39,7 @@ jobs:
         include:
           - {runner: ubuntu-24.04, arch: amd64}
           - {runner: ubuntu-24.04-arm, arch: arm64}
-    name: Fresh Rust plugin (${{ matrix.arch }})
+    name: Fresh plugin (${{ matrix.arch }})
     steps:
       - uses: actions/checkout@v4
       - run: sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-plugin.sh

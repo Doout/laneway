@@ -174,13 +174,17 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn detects_listener_shutdown() {
-        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = listener.local_addr().unwrap();
+    async fn detects_whether_the_socket_is_listening() {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind((Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let address = socket.local_addr().unwrap();
         let parsed = || target(["-tcp".into(), address.to_string()].into_iter()).unwrap();
+
+        // Keep the port reserved throughout the test so another socket cannot
+        // take it between the readiness checks.
+        assert!(probe(parsed(), Duration::from_millis(100)).await.is_err());
+        let _listener = socket.listen(1).unwrap();
         probe(parsed(), Duration::from_secs(1)).await.unwrap();
-        drop(listener);
-        assert!(probe(parsed(), Duration::from_secs(1)).await.is_err());
     }
 
     #[test]

@@ -180,6 +180,15 @@ optional_setting() {
   printf '%s' "$value"
 }
 
+rust_image_suffix() {
+  suffix=$(sed -n 's/^LANEWAY_RUST_IMAGE_SUFFIX=/suffix:/p' "$1")
+  case "$suffix" in
+    '') printf '%s' -rust ;;
+    suffix:|suffix:-rust) printf '%s' "${suffix#suffix:}" ;;
+    *) die "invalid LANEWAY_RUST_IMAGE_SUFFIX" ;;
+  esac
+}
+
 validate_release_env() {
   file=$1
   if [ ! -f "$file" ] || [ -L "$file" ]; then
@@ -1012,7 +1021,8 @@ require_rust_root_token_controller() (
   printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || return 1
   printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || return 1
   [ "$digest" != sha256:0000000000000000000000000000000000000000000000000000000000000000 ] || return 1
-  expected=ghcr.io/doout/laneway-controller-rust:$version@$digest
+  suffix=$(rust_image_suffix "$env_file") || return 1
+  expected=ghcr.io/doout/laneway-controller$suffix:$version@$digest
   token_source=$base_dir/generated/secrets/admin.token
   plan=$(compose --profile tools config --format json) || return 1
   printf '%s\n' "$plan" | jq -e --arg image "$expected" --arg token "$token_source" '
@@ -1332,7 +1342,8 @@ connector_image_reference() {
     version=$(read_setting "$env_file" LANEWAY_RUST_VERSION) || return 1
     connector_digest=$(read_setting "$env_file" LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST) || return 1
     printf '%s\n' "$connector_digest" | grep -Eq '^sha256:[0-9a-f]{64}$' || die "invalid Rust connector image digest"
-    printf 'ghcr.io/doout/lane-edge-rust:%s@%s' "$version" "$connector_digest"
+    suffix=$(rust_image_suffix "$env_file") || return 1
+    printf 'ghcr.io/doout/lane-edge%s:%s@%s' "$suffix" "$version" "$connector_digest"
     return
   fi
 	if ! connector_digest=$(optional_setting "$env_file" LANEWAY_CONNECTOR_IMAGE_DIGEST); then
@@ -1727,10 +1738,11 @@ rust_update_preflight() (
   relay_digest=$(read_setting "$settings" LANEWAY_RUST_RELAY_IMAGE_DIGEST)
   exit_digest=$(read_setting "$settings" LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST)
   admin_digest=$(read_setting "$settings" LANEWAY_ADMIN_IMAGE_DIGEST)
+  suffix=$(rust_image_suffix "$settings") || return 1
   jq -e --arg volume "$selected_volume" \
-    --arg controller "ghcr.io/doout/laneway-controller-rust:$version@$controller_digest" \
-    --arg relay "ghcr.io/doout/laneway-relay-rust:$version@$relay_digest" \
-    --arg exit "ghcr.io/doout/laneway-exit-node-rust:$version@$exit_digest" \
+    --arg controller "ghcr.io/doout/laneway-controller$suffix:$version@$controller_digest" \
+    --arg relay "ghcr.io/doout/laneway-relay$suffix:$version@$relay_digest" \
+    --arg exit "ghcr.io/doout/laneway-exit-node$suffix:$version@$exit_digest" \
     --arg admin "ghcr.io/doout/laneway-admin:$version@$admin_digest" '
       .services.controller.image == $controller and .services.relay.image == $relay and
       .services["exit-node"].image == $exit and .services.admin.image == $admin and
