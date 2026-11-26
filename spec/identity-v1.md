@@ -84,9 +84,9 @@ enrollment state rather than trusting that request.
 
 An enrollment token authorizes one issuance. The controller stores only a hash
 and consumes each token once. While the invitation remains valid, a durable
-node or Connector without Exit capability may repeat the exact enrollment request, including the same signed
-CSR and explicit network, enrollment class, and WireGuard bindings, to retrieve
-the original response. The controller MUST check that the original certificate,
+node or Connector without Exit capability may repeat the exact enrollment
+request, including the same signed CSR and explicit network, enrollment class,
+and WireGuard bindings, to retrieve the original response. The controller MUST check that the original certificate,
 node, and bindings remain valid and authorized. Retrieval leaves the identity,
 certificate, and token consumption unchanged.
 
