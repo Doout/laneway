@@ -142,6 +142,7 @@ done
 for value in 'generated/lifecycle' 'image-digests.txt' 'LANEWAY_BOOTSTRAP_ARTIFACTS_FILE' 'laneway-control upgrade' 'host networking remain unchanged'; do
   require "$value" "$upgrader"
 done
+require "grep -q '^ghcr.io/doout/laneway-node@'" "$repo_dir/deploy/compose/upgrade-control-plane.sh"
 for value in '.env.example' 'install-control-plane.sh' 'prepare-control-plane.sh' 'upgrade-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
   require "$value" "$package_workflow"
 done
