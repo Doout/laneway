@@ -7,7 +7,7 @@ mod system;
 use std::{
     fs::{self, File},
     os::{
-        fd::{AsFd, BorrowedFd},
+        fd::{AsFd, BorrowedFd, OwnedFd},
         unix::fs::MetadataExt,
     },
     path::Path,
@@ -25,7 +25,7 @@ const STATE: &str = "/run/laneway-network-helper";
 
 /// Starts the Linux helper using only its inherited endpoint and protected
 /// namespace state.
-pub fn serve(control: BorrowedFd<'_>) -> Result<()> {
+pub fn serve(control: OwnedFd) -> Result<()> {
     ensure!(
         laneway_private::is_root(),
         "Linux network helper must run as root"

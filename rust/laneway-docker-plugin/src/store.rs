@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{Network, Result, conflict, model::overlaps};
 
 pub(crate) type Networks = BTreeMap<String, Network>;
+const MAX_JOURNAL_BYTES: usize = 16 << 20;
 
 #[derive(Deserialize, Serialize)]
 struct Disk {
@@ -66,7 +67,7 @@ impl Store {
                 io::Error::last_os_error()
             )));
         }
-        let networks = match read_private::<Disk>(path, 16 << 20) {
+        let networks = match read_private::<Disk>(path, MAX_JOURNAL_BYTES as u64) {
             Ok(disk) if disk.version == 1 => disk.networks,
             Ok(_) => return Err(conflict("unsupported ownership journal version")),
             Err(crate::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -104,11 +105,7 @@ impl Store {
             version: 1,
             networks: next.clone(),
         })?;
-        if body.len() > 16 << 20 {
-            return Err(conflict("ownership journal exceeds its size limit"));
-        }
-        stage.write_all(&body)?;
-        stage.write_all(b"\n")?;
+        write_journal(&mut stage, &body)?;
         stage.as_file().sync_all()?;
         stage.persist(&self.path).map_err(|error| error.error)?;
         self.networks = next;
@@ -117,6 +114,16 @@ impl Store {
         directory.sync_all()?;
         Ok(())
     }
+}
+
+fn write_journal(writer: &mut impl Write, body: &[u8]) -> Result<()> {
+    // Reserve one byte for the newline written after the JSON body.
+    if body.len() >= MAX_JOURNAL_BYTES {
+        return Err(conflict("ownership journal exceeds its size limit"));
+    }
+    writer.write_all(body)?;
+    writer.write_all(b"\n")?;
+    Ok(())
 }
 
 use std::os::unix::fs::DirBuilderExt;
@@ -176,4 +183,28 @@ fn validate(networks: &Networks) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn journal_limit_includes_the_final_newline() {
+        let mut stage = tempfile::NamedTempFile::new().unwrap();
+        let mut body = br#"{"version":1,"networks":{}}"#.to_vec();
+        body.resize(MAX_JOURNAL_BYTES - 1, b' ');
+        write_journal(&mut stage, &body).unwrap();
+        assert_eq!(
+            stage.as_file().metadata().unwrap().len(),
+            MAX_JOURNAL_BYTES as u64
+        );
+        let parsed: Disk = read_private(stage.path(), MAX_JOURNAL_BYTES as u64).unwrap();
+        assert_eq!(parsed.version, 1);
+
+        body.push(b' ');
+        let mut next = Vec::new();
+        assert!(write_journal(&mut next, &body).is_err());
+        assert!(next.is_empty());
+    }
 }

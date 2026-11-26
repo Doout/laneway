@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 crossbeam-queue.workspace = true
+fastrand = "2"
 ipnet.workspace = true
 laneway-protocol = { path = "../laneway-protocol" }
 laneway-relay = { path = "../laneway-relay" }

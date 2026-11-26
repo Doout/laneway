@@ -88,9 +88,10 @@ fn main() -> Result<()> {
     let consumer_delivered = Arc::clone(&delivered);
     let consumer_bytes = Arc::clone(&delivered_bytes);
     let mode = options.mode;
+    let mut samples = Vec::with_capacity(MAX_LATENCY_SAMPLES);
     let consumer = thread::spawn(move || {
         let mut relay_forwarder = relay_forwarder;
-        let mut samples = Vec::with_capacity(MAX_LATENCY_SAMPLES);
+        let mut rng = fastrand::Rng::with_seed(1);
         let mut framed = [0_u8; MAX_PACKET + 5];
         while !consumer_stop.load(Ordering::Acquire) || !consumer_queue.is_empty() {
             let Some(mut frame) = consumer_queue.pop() else {
@@ -105,11 +106,11 @@ fn main() -> Result<()> {
                     .is_some_and(|forwarder| forwarder.forward(&frame.bytes[..frame.length])),
             };
             if valid {
-                consumer_delivered.fetch_add(1, Ordering::Relaxed);
+                let seen = consumer_delivered.fetch_add(1, Ordering::Relaxed) + 1;
                 consumer_bytes.fetch_add(frame.payload_length as u64, Ordering::Relaxed);
-                if samples.len() < MAX_LATENCY_SAMPLES {
-                    samples.push(frame.sent.elapsed().as_nanos() as u64);
-                }
+                record_latency(&mut samples, seen, &mut rng, || {
+                    frame.sent.elapsed().as_nanos() as u64
+                });
             }
         }
         samples
@@ -191,6 +192,24 @@ fn main() -> Result<()> {
         }))?
     );
     Ok(())
+}
+
+// Reservoir sampling gives each delivered packet the same chance of being
+// retained, without allocating or reading the clock for discarded samples.
+fn record_latency(
+    samples: &mut Vec<u64>,
+    seen: u64,
+    rng: &mut fastrand::Rng,
+    latency: impl FnOnce() -> u64,
+) {
+    if samples.len() < samples.capacity() {
+        samples.push(latency());
+    } else {
+        let slot = rng.u64(..seen);
+        if slot < samples.len() as u64 {
+            samples[slot as usize] = latency();
+        }
+    }
 }
 
 fn options() -> Result<Options> {
@@ -325,4 +344,21 @@ fn rss_bytes() -> Result<u64> {
         .context("VmRSS value missing")?
         .parse::<u64>()?;
     Ok(kib * 1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_reservoir_includes_late_packets_without_growing() {
+        let mut samples = Vec::with_capacity(64);
+        let mut rng = fastrand::Rng::with_seed(1);
+        for seen in 1..=4096 {
+            record_latency(&mut samples, seen, &mut rng, || seen);
+        }
+        assert_eq!(samples.len(), 64);
+        assert!(samples.iter().any(|&seen| seen > 3072));
+        assert!(samples.iter().any(|&seen| seen <= 1024));
+    }
 }

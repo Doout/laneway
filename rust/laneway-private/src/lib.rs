@@ -176,7 +176,7 @@ mod platform {
         unsafe { libc::geteuid() == 0 }
     }
 
-    #[derive(PartialEq, Eq)]
+    #[derive(Clone, PartialEq, Eq)]
     pub struct StateStamp {
         device: u64,
         inode: u64,
@@ -314,7 +314,7 @@ mod platform {
     use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    #[derive(PartialEq, Eq)]
+    #[derive(Clone, PartialEq, Eq)]
     pub struct StateStamp {
         volume: u64,
         id: [u8; 16],

@@ -66,6 +66,7 @@ mod linux {
         enroll::clean_staged_tls(state)?;
         let mut identity = Identity::load(state)
             .context("load system node identity; configure with laneway configure --system")?;
+        enroll::discard_completed_enrollment(state);
         if check {
             let tls = identity.tls_files()?;
             Agent::new(managed_config(state, &identity, &tls)?)?;

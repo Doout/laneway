@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -225,6 +225,7 @@ struct Snapshot {
 struct State {
     path: PathBuf,
     snapshot: RwLock<Snapshot>,
+    reload: Mutex<()>,
     authentication_slots: Arc<Semaphore>,
 }
 
@@ -239,6 +240,7 @@ impl Verifier {
             state: Arc::new(State {
                 path,
                 snapshot: RwLock::new(Snapshot::default()),
+                reload: Mutex::new(()),
                 authentication_slots: Arc::new(Semaphore::new(AUTHENTICATION_CONCURRENCY)),
             }),
         };
@@ -248,12 +250,31 @@ impl Verifier {
 
     /// Apply the current credential file. An invalid file invalidates existing sessions.
     pub fn reload(&self) -> Result<()> {
-        let mut snapshot = self
+        self.reload_with(private::read_if_changed)
+    }
+
+    fn reload_with(
+        &self,
+        read: impl FnOnce(
+            &Path,
+            Option<&private::StateStamp>,
+        ) -> io::Result<Option<(private::StateStamp, Vec<u8>)>>,
+    ) -> Result<()> {
+        // A reload can outlive its transport epoch. Serialize observation and
+        // publication so concurrent reloads cannot publish an older snapshot.
+        let _reload = self
+            .state
+            .reload
+            .lock()
+            .expect("credential reload lock poisoned");
+        let previous_stamp = self
             .state
             .snapshot
-            .write()
-            .expect("credential lock poisoned");
-        let checked = private::read_if_changed(&self.state.path, snapshot.stamp.as_ref());
+            .read()
+            .expect("credential lock poisoned")
+            .stamp
+            .clone();
+        let checked = read(&self.state.path, previous_stamp.as_ref());
         let mut stamp = None;
         let database = match checked {
             Ok(None) => return Ok(()),
@@ -267,6 +288,11 @@ impl Verifier {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Database::default()),
             Err(err) => Err(err).context("reading proxy credentials"),
         };
+        let mut snapshot = self
+            .state
+            .snapshot
+            .write()
+            .expect("credential lock poisoned");
         let mut replacement = BTreeMap::new();
         if let Ok(database) = &database {
             for (name, hash) in &database.credentials {
@@ -442,6 +468,52 @@ mod tests {
         verifier.reload().unwrap();
         assert!(session.is_cancelled());
         assert!(verifier.verify("generated", &generated).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn reload_serializes_publication_without_blocking_authentication() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("state");
+        private::ensure_directory(&directory).unwrap();
+        let path = directory.join("proxy.json");
+        let original = add_generated(&path, "user").unwrap();
+        let verifier = Verifier::open(path.clone()).unwrap();
+        let session = verifier.verify("user", &original).await.unwrap();
+
+        private::write(&path, b"invalid").unwrap();
+        let (observed, observation) = tokio::sync::oneshot::channel();
+        let (resume, stalled) = std::sync::mpsc::channel();
+        let previous = verifier.clone();
+        let first = tokio::task::spawn_blocking(move || {
+            previous.reload_with(|path, stamp| {
+                let result = private::read_if_changed(path, stamp);
+                observed.send(()).unwrap();
+                stalled
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                result
+            })
+        });
+        observation.await.unwrap();
+        assert!(verifier.state.snapshot.try_read().is_ok());
+        assert!(verifier.verify("user", &original).await.is_some());
+
+        private::write(&path, br#"{"version":1,"credentials":{}}"#).unwrap();
+        let replacement = add_generated(&path, "user").unwrap();
+        let concurrent = verifier.clone();
+        let revoked = session.clone();
+        let second = tokio::task::spawn_blocking(move || {
+            concurrent.reload_with(|path, stamp| {
+                assert!(revoked.is_cancelled());
+                private::read_if_changed(path, stamp)
+            })
+        });
+        resume.send(()).unwrap();
+        assert!(first.await.unwrap().is_err());
+        second.await.unwrap().unwrap();
+        assert!(session.is_cancelled());
+        assert!(verifier.verify("user", &original).await.is_none());
+        assert!(verifier.verify("user", &replacement).await.is_some());
     }
 
     #[cfg(unix)]

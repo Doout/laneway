@@ -535,10 +535,16 @@ async fn prune_topology(state: super::http::State) {
             continue;
         };
         let database = state.database.clone();
-        let _ = tokio::task::spawn_blocking(move || {
+        // The timer bounds repeated diagnostics to one per cleanup interval.
+        match tokio::task::spawn_blocking(move || {
             let _permit = permit;
             laneway_controller::SessionStore::open(&database)?.prune_topology()
         })
-        .await;
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => eprintln!("Topology cleanup failed: {err:#}"),
+            Err(err) => eprintln!("Topology cleanup worker failed: {err}"),
+        }
     }
 }

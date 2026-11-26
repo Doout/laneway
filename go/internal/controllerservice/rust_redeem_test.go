@@ -204,6 +204,9 @@ func testRustRedemption(t *testing.T, f fixture, client *http.Client, rustURL, g
 		t.Fatal(err)
 	}
 	router := check(node, 201)
+	if replayed := check(node, 201); !proto.Equal(router, replayed) {
+		t.Fatal("retry changed the Connector enrollment")
+	}
 	transport := client.Transport.(*http.Transport).Clone()
 	transport.TLSClientConfig.Certificates = []tls.Certificate{{Certificate: router.CertificateChain.CertificatesDer, PrivateKey: nodeKey}}
 	mtls := &http.Client{Transport: transport, Timeout: 5 * time.Second}
@@ -241,4 +244,26 @@ func testRustRedemption(t *testing.T, f fixture, client *http.Client, rustURL, g
 	if !(a == 201 && b == 409 || a == 409 && b == 201) {
 		t.Fatalf("Go/Rust race: %d, %d", a, b)
 	}
+	retry := newInvite("native-retry", controller.EnrollmentClassDurable, durable, 0)
+	original := check(retry, 201)
+	if replayed := check(retry, 201); !proto.Equal(original, replayed) {
+		t.Fatal("retry did not return the originally committed enrollment")
+	}
+	changed := proto.CloneOf(retry)
+	changed.Pkcs10CsrDer = csrDER(t, "")
+	check(changed, 409)
+	changed = proto.CloneOf(retry)
+	changed.WireguardPublicKey = testWireGuardPublicKey(t)
+	check(changed, 409)
+	if _, err := db.Exec("UPDATE certificates SET revoked_at=unixepoch() WHERE node_id=?", original.NodeId); err != nil {
+		t.Fatal(err)
+	}
+	check(retry, 409)
+	expired := newInvite("native-expired-retry", controller.EnrollmentClassDurable, durable, 0)
+	expiredNode := check(expired, 201)
+	if _, err := db.Exec("UPDATE enrollment_tokens SET created_at=unixepoch()-2,expires_at=unixepoch()-1 WHERE consumed_by=?", expiredNode.NodeId); err != nil {
+		t.Fatal(err)
+	}
+	check(expired, 409)
+
 }

@@ -12,5 +12,8 @@ rustls.workspace = true
 rustls-pemfile.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.26.0"

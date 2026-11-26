@@ -1,5 +1,5 @@
 //! Userspace TCP and UDP over the relay's IP packets.
-use std::collections::{HashMap, hash_map::RandomState};
+use std::collections::{HashMap, HashSet, hash_map::RandomState};
 use std::future::{Future, pending};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
@@ -271,6 +271,7 @@ struct Engine {
     tcp_admissions: HashMap<FlowKey, TcpAdmission>,
     udp: HashMap<FlowKey, UdpBridge>,
     udp_sockets: HashMap<SocketAddr, SocketHandle>,
+    active_udp_locals: HashSet<SocketAddr>,
     accepted: mpsc::Sender<Inbound>,
     start: Instant,
     next_port: u16,
@@ -323,6 +324,7 @@ impl Engine {
             tcp_admissions: HashMap::new(),
             udp: HashMap::new(),
             udp_sockets: HashMap::new(),
+            active_udp_locals: HashSet::new(),
             accepted,
             start: Instant::now(),
             next_port: EPHEMERAL_BASE + (seed as u16 % EPHEMERAL_COUNT as u16),
@@ -660,6 +662,7 @@ impl Engine {
             }
             keep
         });
+        self.active_udp_locals.clear();
         self.udp.retain(|key, flow| {
             if flow.inbound.is_closed() || now.duration_since(flow.last_activity) >= UDP_IDLE {
                 return false;
@@ -677,6 +680,7 @@ impl Engine {
                     flow.last_activity = now;
                 }
             }
+            self.active_udp_locals.insert(key.local);
             true
         });
         self.iface
@@ -692,7 +696,7 @@ impl Engine {
             false
         });
         self.udp_sockets.retain(|local, handle| {
-            if self.udp.keys().any(|key| key.local == *local) {
+            if self.active_udp_locals.contains(local) {
                 return true;
             }
             self.sockets.remove(*handle);
@@ -1139,11 +1143,24 @@ mod tests {
         let dropped = engine
             .allocate("100.64.0.3:53".parse().unwrap(), true)
             .unwrap();
+        let sibling = FlowKey {
+            local: expired.local,
+            remote: "100.64.0.4:53".parse().unwrap(),
+        };
         let _expired = engine.add_udp(expired).unwrap();
         let dropped_flow = engine.add_udp(dropped).unwrap();
+        let remaining_flow = engine.add_udp(sibling).unwrap();
+        let shared_socket = engine.udp_sockets[&sibling.local];
         assert!(engine.deadline(false).is_some());
         engine.udp.get_mut(&expired).unwrap().last_activity -= UDP_IDLE;
         drop(dropped_flow);
+        engine.service(Waker::noop());
+        assert_eq!(engine.udp.len(), 1);
+        assert_eq!(engine.udp_sockets.len(), 1);
+        assert_eq!(engine.udp_sockets[&sibling.local], shared_socket);
+        assert!(engine.deadline(false).is_some());
+
+        drop(remaining_flow);
         engine.service(Waker::noop());
         assert!(engine.udp.is_empty());
         assert!(engine.udp_sockets.is_empty());

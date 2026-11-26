@@ -1,6 +1,10 @@
 //! Command-line adapter for the inherited privileged helper channel.
 
-use std::{ffi::OsString, os::fd::BorrowedFd};
+use std::{
+    ffi::OsString,
+    io,
+    os::fd::{FromRawFd, OwnedFd, RawFd},
+};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
@@ -45,22 +49,36 @@ fn parse(args: &[OsString]) -> Result<Invocation> {
         .ok_or_else(|| anyhow!("invalid privileged helper invocation"))
 }
 
-pub fn run(args: &[OsString], serve: impl FnOnce(BorrowedFd<'_>) -> Result<()>) -> Result<()> {
+pub fn run(args: &[OsString], serve: impl FnOnce(OwnedFd) -> Result<()>) -> Result<()> {
     match parse(args)? {
         Invocation::Help => eprintln!("{USAGE}"),
         Invocation::Serve(raw) => {
             ensure!(crate::is_root(), "the network helper requires root");
-            // SAFETY: F_GETFD accepts any integer, returning EBADF for a closed descriptor.
-            if unsafe { libc::fcntl(raw, libc::F_GETFD) } == -1 {
-                return Err(std::io::Error::last_os_error())
-                    .context("inspect inherited control descriptor");
-            }
-            // SAFETY: The descriptor is open and this startup path has not spawned
-            // threads. This function borrows it only while the helper serves.
-            serve(unsafe { BorrowedFd::borrow_raw(raw) })?;
+            serve(duplicate_inherited(raw)?)?;
         }
     }
     Ok(())
+}
+
+fn duplicate_inherited(raw: RawFd) -> Result<OwnedFd> {
+    // SAFETY: F_DUPFD_CLOEXEC accepts integer arguments and atomically
+    // allocates a fresh close-on-exec descriptor on success.
+    let duplicate = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicate < 0 {
+        return Err(io::Error::last_os_error()).context("duplicate helper control descriptor");
+    }
+    // SAFETY: The kernel returned a new descriptor owned by this call.
+    let duplicate = unsafe { OwnedFd::from_raw_fd(duplicate) };
+
+    // The launching process supplied the original descriptor. Leave it open,
+    // but ensure helper child processes do not inherit it.
+    // SAFETY: F_GETFD and F_SETFD only take integer arguments.
+    let flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(raw, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error())
+            .context("protect inherited helper control descriptor");
+    }
+    Ok(duplicate)
 }
 
 #[cfg(test)]
@@ -69,6 +87,50 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn owns_only_a_close_on_exec_duplicate() {
+        use std::{
+            io::{Read, Write},
+            os::{fd::AsRawFd, unix::net::UnixStream},
+        };
+
+        let (original, mut peer) = UnixStream::pair().unwrap();
+        let raw = original.as_raw_fd();
+        // SAFETY: The live socket has only integer descriptor flags.
+        assert_eq!(unsafe { libc::fcntl(raw, libc::F_SETFD, 0) }, 0);
+        let duplicate = duplicate_inherited(raw).unwrap();
+        assert_ne!(duplicate.as_raw_fd(), raw);
+        let flags = |fd| {
+            // SAFETY: F_GETFD accepts an integer and has no pointer arguments.
+            unsafe { libc::fcntl(fd, libc::F_GETFD) }
+        };
+        assert_eq!(flags(raw), libc::FD_CLOEXEC);
+        assert_eq!(flags(duplicate.as_raw_fd()), libc::FD_CLOEXEC);
+
+        // Dropping the duplicate leaves the original socket usable.
+        drop(duplicate);
+        (&original).write_all(b"a").unwrap();
+        let mut bytes = [0];
+        peer.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"a");
+
+        // The duplicate is usable even after the original closes.
+        let mut duplicate = UnixStream::from(duplicate_inherited(raw).unwrap());
+        drop(original);
+        duplicate.write_all(b"b").unwrap();
+        peer.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"b");
+    }
+
+    #[test]
+    fn rejects_invalid_inherited_descriptor() {
+        let error = duplicate_inherited(-1).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().raw_os_error(),
+            Some(libc::EBADF)
+        );
     }
 
     #[test]

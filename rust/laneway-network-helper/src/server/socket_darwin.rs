@@ -2,7 +2,7 @@ use std::{
     io::{IoSlice, IoSliceMut},
     mem::{MaybeUninit, size_of},
     os::{
-        fd::{AsRawFd, BorrowedFd},
+        fd::{AsRawFd, BorrowedFd, OwnedFd},
         unix::net::UnixStream,
     },
     time::{Duration, Instant},
@@ -28,8 +28,8 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) struct Channel(UnixStream);
 
 impl Channel {
-    pub(super) fn open(inherited: BorrowedFd<'_>) -> Result<Self> {
-        let stream = UnixStream::from(inherited.try_clone_to_owned()?);
+    pub(super) fn open(socket: OwnedFd) -> Result<Self> {
+        let stream = UnixStream::from(socket);
         ensure!(
             sockopt::socket_type(&stream)? == SocketType::STREAM
                 && stream.local_addr()?.is_unnamed()
@@ -54,9 +54,6 @@ impl Channel {
             length as usize == size_of::<libc::pid_t>() && peer_pid > 0,
             "network helper peer has no process identity"
         );
-        // Keep both the original and its private duplicate out of
-        // the ifconfig and route child processes.
-        fcntl_setfd(inherited, FdFlags::CLOEXEC)?;
         sockopt::set_socket_nosigpipe(&stream, true)?;
         Ok(Self(stream))
     }
@@ -201,17 +198,17 @@ mod tests {
         let temporary = tempfile::tempdir_in("/tmp").unwrap();
         let socket = temporary.path().join("s");
         let listener = UnixListener::bind(&socket).unwrap();
-        assert!(Channel::open(listener.as_fd()).is_err());
+        assert!(Channel::open(listener.try_clone().unwrap().into()).is_err());
         let client = UnixStream::connect(&socket).unwrap();
         let (server, _) = listener.accept().unwrap();
-        assert!(Channel::open(client.as_fd()).is_err());
-        assert!(Channel::open(server.as_fd()).is_err());
+        assert!(Channel::open(client.into()).is_err());
+        assert!(Channel::open(server.into()).is_err());
     }
 
     #[test]
     fn rejects_oversized_partial_and_descriptor_requests() {
         let (mut peer, inherited) = UnixStream::pair().unwrap();
-        let channel = Channel::open(inherited.as_fd()).unwrap();
+        let channel = Channel::open(inherited.into()).unwrap();
         let mut bytes = Box::new([0; MAX_MESSAGE]);
         peer.write_all(&((MAX_MESSAGE + 1) as u32).to_be_bytes())
             .unwrap();
@@ -224,7 +221,7 @@ mod tests {
         );
 
         let (mut peer, inherited) = UnixStream::pair().unwrap();
-        let channel = Channel::open(inherited.as_fd()).unwrap();
+        let channel = Channel::open(inherited.into()).unwrap();
         peer.write_all(&[0, 0]).unwrap();
         drop(peer);
         assert!(
@@ -236,7 +233,7 @@ mod tests {
         );
 
         let (peer, inherited) = UnixStream::pair().unwrap();
-        let channel = Channel::open(inherited.as_fd()).unwrap();
+        let channel = Channel::open(inherited.into()).unwrap();
         let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
         let rights = [peer.as_fd()];
         let mut ancillary = SendAncillaryBuffer::new(&mut space);

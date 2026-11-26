@@ -10,6 +10,7 @@ pub(crate) mod policy_preview;
 pub(crate) mod private_dns;
 pub mod relay_configuration;
 pub mod renewal;
+mod replay;
 pub mod revocation;
 pub(crate) mod snapshot_policy;
 
@@ -80,6 +81,7 @@ struct Grant {
     network: [u8; 16],
     expires: i64,
     consumed: Option<i64>,
+    consumed_by: Option<[u8; 16]>,
     class: String,
     lifetime: Option<i64>,
     name: Option<String>,
@@ -159,6 +161,10 @@ impl SessionStore {
                 "wireguard_public_key requires authenticated expected_network_id and expected_enrollment_class"
             )
         );
+        // Exact recovery requires explicit network, durable enrollment
+        // class and WireGuard bindings.
+        let request_digest = (key.is_some() && expected_class == EnrollmentClass::DurableNode)
+            .then(|| replay::request_digest(&req));
         ensure!(secret.len() == 43, EnrollError::Invalid);
         let raw = Zeroizing::new(
             URL_SAFE_NO_PAD
@@ -180,16 +186,25 @@ impl SessionStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_snapshot(&tx)?;
         let now: i64 = tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?;
-        let grant=tx.query_row("SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities,user_id FROM enrollment_tokens WHERE token_hash=?",[hash],|r| Ok(Grant{id:r.get(0)?,network:r.get(1)?,expires:r.get(2)?,consumed:r.get(3)?,class:r.get(4)?,lifetime:r.get(5)?,name:r.get(6)?,caps:r.get(7)?,user:r.get(8)?})).optional()?.ok_or(EnrollError::Invalid)?;
-        ensure!(grant.consumed.is_none(), EnrollError::Used);
+        let grant=tx.query_row("SELECT id,network_id,expires_at,consumed_at,enrollment_class,session_lifetime_seconds,requested_name,enabled_capabilities,user_id,consumed_by FROM enrollment_tokens WHERE token_hash=?",[hash],|r| Ok(Grant{id:r.get(0)?,network:r.get(1)?,expires:r.get(2)?,consumed:r.get(3)?,class:r.get(4)?,lifetime:r.get(5)?,name:r.get(6)?,caps:r.get(7)?,user:r.get(8)?,consumed_by:r.get(9)?})).optional()?.ok_or(EnrollError::Invalid)?;
+        if let Some(consumed_at) = grant.consumed {
+            let response = replay::recover(&tx, &grant, consumed_at, now, request_digest, issuer)?;
+            ensure!(!cancelled(), "enrollment cancelled");
+            tx.commit()?;
+            return Ok(response);
+        }
         ensure!(now < grant.expires, EnrollError::Expired);
         let net = Id::new(grant.network)?;
         ensure!(expected_net.is_none_or(|v| v == net), EnrollError::Network);
-        let mut name = req.requested_name;
-        if let Some(bound) = grant.name {
-            ensure!(name.is_empty() || name == bound, EnrollError::Name);
-            name = bound;
-        }
+        let name = if let Some(bound) = grant.name.as_deref() {
+            ensure!(
+                req.requested_name.is_empty() || req.requested_name == bound,
+                EnrollError::Name
+            );
+            bound
+        } else {
+            &req.requested_name
+        };
         ensure!(
             !name.is_empty() && name.len() <= 253 && name.trim() == name && !name.contains('\0'),
             EnrollError::Malformed("invalid request")
@@ -251,15 +266,6 @@ impl SessionStore {
         if let Some(t) = lease {
             details["lease_expires_at"] = json!(t);
         }
-        audit(
-            &tx,
-            net,
-            Some(node),
-            "node.enroll",
-            ("node", node),
-            details,
-            now,
-        )?;
         if generation != 0 {
             audit(
                 &tx,
@@ -272,10 +278,10 @@ impl SessionStore {
             )?;
         }
         let cert = issuer.issue(&csr, net, node, now, lease)?;
+        let serial = (request_digest.is_some() && replay::eligible(&grant))
+            .then(|| hex::encode(&cert.serial));
         let chain = record_certificate(&tx, net, node, issuer, cert, now)?;
-        ensure!(!cancelled(), "enrollment cancelled");
-        tx.commit()?;
-        Ok(EnrollmentResponse {
+        let response = EnrollmentResponse {
             network_id: net.as_bytes().to_vec(),
             node_id: node.as_bytes().to_vec(),
             certificate_chain: Some(chain),
@@ -290,6 +296,22 @@ impl SessionStore {
             lease_expires_at_unix_seconds: lease.unwrap_or(0) as u64,
             wireguard_public_key: req.wireguard_public_key,
             ephemeral_exit_lease_generation: generation,
-        })
+        };
+        if let Some((request_digest, serial)) = request_digest.zip(serial) {
+            details["retry_receipt"] =
+                replay::receipt_json(&grant, request_digest, serial, &response);
+        }
+        audit(
+            &tx,
+            net,
+            Some(node),
+            "node.enroll",
+            ("node", node),
+            details,
+            now,
+        )?;
+        ensure!(!cancelled(), "enrollment cancelled");
+        tx.commit()?;
+        Ok(response)
     }
 }

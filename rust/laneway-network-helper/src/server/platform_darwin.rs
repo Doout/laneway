@@ -17,7 +17,7 @@ use rustix::io::{FdFlags, fcntl_setfd};
 use super::{Backend, Change, RoutePlan, Session, Setup, security::syscall};
 
 /// Runs the Darwin helper using an inherited private Unix stream.
-pub fn serve_darwin(control: BorrowedFd<'_>) -> Result<()> {
+pub fn serve_darwin(control: OwnedFd) -> Result<()> {
     ensure!(crate::is_root(), "network helper requires root");
     super::serve_inherited(control, Darwin)
 }
@@ -502,8 +502,7 @@ mod tests {
                 .unwrap();
             let actions = Arc::new(Mutex::new(Vec::new()));
             let fake = Fake(packet, actions.clone());
-            let channel = super::super::socket::Channel::open(inherited.as_fd()).unwrap();
-            drop(inherited);
+            let channel = super::super::socket::Channel::open(inherited.into()).unwrap();
             let server = thread::spawn(move || super::super::serve(channel, fake, || Ok(())));
             let mut client = control;
             client
