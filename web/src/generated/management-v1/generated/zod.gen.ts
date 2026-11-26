@@ -514,6 +514,7 @@ export const zPermission = z.enum([
     'application_installation.read',
     'application_installation.manage',
     'principal.manage',
+    'integration.manage',
     'session.manage_others',
     'service_principal.manage',
     'recovery.manage',
