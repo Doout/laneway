@@ -27,6 +27,7 @@ const DOCKER: &str = "/usr/bin/docker";
 const MAX_OUTPUT: usize = 1 << 20;
 const STATE_MOUNT: &str = "/var/lib/laneway";
 const LABEL: &str = "io.laneway.managed-update";
+const RUNTIME_LABEL: &str = "io.laneway.connector-runtime";
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Deserialize)]
@@ -498,9 +499,9 @@ fn profile(row: &Value, id: &str, name: &str) -> Result<Profile> {
     let tmpfs = [mount("/tmp")?, mount("/run/laneway")?];
     let labels = config["Labels"].is_null()
         || config["Labels"].as_object().is_some_and(|labels| {
-            labels
-                .keys()
-                .all(|l| l == LABEL || l.starts_with("org.opencontainers.image."))
+            labels.keys().all(|l| {
+                l == LABEL || l == RUNTIME_LABEL || l.starts_with("org.opencontainers.image.")
+            })
         });
     let network_membership = if network.starts_with("container:") {
         empty(&row["NetworkSettings"]["Networks"])
@@ -513,7 +514,9 @@ fn profile(row: &Value, id: &str, name: &str) -> Result<Profile> {
         row["Id"] == id
             && row["Name"] == format!("/{name}")
             && row["State"]["Running"] == true
-            && config["Image"].as_str().is_some_and(official_rust_image)
+            && config["Image"]
+                .as_str()
+                .is_some_and(|image| official_rust_image(image, &config["Labels"][RUNTIME_LABEL]))
             && config["User"] == "65532:65532"
             && config["Entrypoint"] == serde_json::json!(["/usr/local/bin/laneway"])
             && config["Cmd"] == serde_json::json!(["connector", "run"])
@@ -582,14 +585,14 @@ fn profile(row: &Value, id: &str, name: &str) -> Result<Profile> {
     })
 }
 
-fn official_rust_image(value: &str) -> bool {
-    [
-        super::release::CONNECTOR_IMAGE,
-        super::release::LEGACY_CONNECTOR_IMAGE,
-    ]
-    .iter()
-    .filter_map(|repository| value.strip_prefix(repository))
-    .any(|suffix| suffix.starts_with(':') || suffix.starts_with("@sha256:"))
+fn official_rust_image(value: &str, runtime: &Value) -> bool {
+    let in_repository = |repository| {
+        value
+            .strip_prefix(repository)
+            .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with("@sha256:"))
+    };
+    in_repository(super::release::LEGACY_CONNECTOR_IMAGE)
+        || (runtime == "rust" && in_repository(super::release::CONNECTOR_IMAGE))
 }
 
 async fn pull(docker: &impl Docker, image: &str, volume: &str) -> Result<()> {

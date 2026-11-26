@@ -37,6 +37,11 @@ fn inspection_rejects_a_different_runtime_and_unsupported_profiles() {
     assert!(is_standard_running(&fixture, NAME));
     assert_eq!(accepted.volume, VOLUME);
     assert_eq!(accepted.hostname, "connector-lab");
+    let mut canonical = fixture.clone();
+    canonical["Config"]["Image"] = json!(IMAGE);
+    canonical["Config"]["Labels"][RUNTIME_LABEL] = json!("rust");
+    assert!(profile(&canonical, OLD, NAME).is_ok());
+    assert!(is_standard_running(&canonical, NAME));
     for (pointer, input) in [
         ("/Config/Image", json!("ghcr.io/doout/lane-edge:1.2.3")),
         ("/Mounts/0/Name", json!("another-connector-state")),

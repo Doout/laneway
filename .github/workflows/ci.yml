@@ -248,6 +248,7 @@ jobs:
           docker build --file deploy/containers/Dockerfile.connector \
             --target rust-connector --build-arg VERSION=ci --tag lane-edge:ci .
           test "$(docker run --rm --network none lane-edge:ci version)" = ci
+          test "$(docker image inspect --format '{{index .Config.Labels "io.laneway.connector-runtime"}}' lane-edge:ci)" = rust
           if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then
             echo "the Rust connector image unexpectedly contains a runnable shell" >&2
             exit 1
