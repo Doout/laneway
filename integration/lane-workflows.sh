@@ -257,6 +257,63 @@ if grep -F '<--profile> <tools>' "$log" >/dev/null; then
   exit 1
 fi
 
+native_token=$test_dir/native-setup-token
+native_instructions=$test_dir/native-instructions
+"$compose_dir/laneway-control" invite --name native-laptop --native --expires-in 15m > "$native_token" 2> "$native_instructions"
+[ "$(wc -l < "$native_token")" -eq 1 ]
+grep -Ex 'st1\.[A-Za-z0-9+/]+=*' "$native_token" >/dev/null
+sed 's/^st1\.//' "$native_token" | base64 -d > "$test_dir/native-decoded"
+native_ca=$(base64 < "$compose_dir/generated/pki/ca.crt" | tr -d '\n')
+printf '%s\n' native-laptop single_use_secret https://lane.example.test:8443 lane.example.test:8443 lane.example.test \
+  11111111111111111111111111111111 22222222222222222222222222222222 lane.example.test:4433 \
+  33333333333333333333333333333333 "$native_ca" > "$test_dir/native-expected"
+cmp "$test_dir/native-expected" "$test_dir/native-decoded"
+grep -F 'laneway configure' "$native_instructions" >/dev/null
+if grep -E 'single_use_secret|st1\.' "$native_instructions" >/dev/null; then
+  echo "native invitation leaked into its instructions" >&2
+  exit 1
+fi
+native_call=$(grep -F '<--requested-name> <native-laptop>' "$log")
+printf '%s\n' "$native_call" | grep -F '<--class> <durable>' >/dev/null
+printf '%s\n' "$native_call" | grep -F '<--expires-in> <15m>' >/dev/null
+printf '%s\n' "$native_call" | grep -F "<--admin-token-file> <$compose_dir/generated/secrets/admin.token>" >/dev/null
+if printf '%s\n' "$native_call" | grep -E '<--connector>|<--exit-node>' >/dev/null; then
+  echo "native device invitation unexpectedly granted a capability" >&2
+  exit 1
+fi
+
+"$compose_dir/laneway-control" invite --name native-egress --native --connector > "$native_token" 2> "$native_instructions"
+grep -Ex 'st1\.[A-Za-z0-9+/]+=*' "$native_token" >/dev/null
+native_call=$(grep -F '<--requested-name> <native-egress>' "$log")
+printf '%s\n' "$native_call" | grep -F '<--connector>' >/dev/null
+if printf '%s\n' "$native_call" | grep -F '<--exit-node>' >/dev/null; then
+  echo "native Connector invitation unexpectedly granted Exit capability" >&2
+  exit 1
+fi
+
+reject_native_invite() {
+  if "$compose_dir/laneway-control" invite --name rejected-native --native "$@" > "$native_token" 2> "$native_instructions"; then
+    echo "native invitation accepted invalid options or metadata" >&2
+    exit 1
+  fi
+  [ ! -s "$native_token" ]
+  if grep -F '<--requested-name> <rejected-native>' "$log" >/dev/null; then
+    echo "invalid native invocation reached enrollment token issuance" >&2
+    exit 1
+  fi
+}
+reject_native_invite --remembered
+reject_native_invite --ephemeral
+reject_native_invite --docker --connector
+reject_native_invite --bootstrap
+reject_native_invite --shared-host-exit
+native_ca_file=$compose_dir/generated/pki/ca.crt
+mv "$native_ca_file" "$native_ca_file.saved"
+reject_native_invite
+dd if=/dev/zero of="$native_ca_file" bs=1024 count=64 2>/dev/null
+reject_native_invite
+mv "$native_ca_file.saved" "$native_ca_file"
+
 shared_exit_token=$test_dir/shared-exit-token
 shared_exit_instructions=$test_dir/shared-exit-instructions
 "$compose_dir/laneway-control" invite --name borrowed-egress --shared-host-exit > "$shared_exit_token" 2> "$shared_exit_instructions"
@@ -435,7 +492,7 @@ cat > "$fake_bin/curl" <<'EOF'
 set -eu
 case " $* " in
   *"releases/latest"*)
-    printf '%s' "https://github.com/Doout/laneway/releases/tag/${LANE_TEST_LATEST_TAG:-v1.1.0}"
+    printf '%s' "${LANE_TEST_LATEST_ORIGIN:-https://github.com/Doout/laneway}/releases/tag/${LANE_TEST_LATEST_TAG:-v1.1.0}"
     exit 0
     ;;
 esac
@@ -468,6 +525,18 @@ if grep -E 'update-env|verify-blob' "$log" >/dev/null; then
   echo "already-current update performed package work" >&2
   exit 1
 fi
+if rejected=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_LATEST_ORIGIN=http://fixture.invalid "$compose_dir/laneway-control" update 2>&1); then
+  echo "update accepted a latest release from an untrusted origin" >&2
+  exit 1
+fi
+printf '%s\n' "$rejected" | grep -F 'latest redirected outside the release tag path' >/dev/null
+if rejected=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_LATEST_TAG=v0.9.9 "$compose_dir/laneway-control" update 2>&1); then
+  echo "update accepted a downgrade" >&2
+  exit 1
+fi
+printf '%s\n' "$rejected" | grep -F 'would downgrade installed v1.0.0' >/dev/null
 : > "$log"
 update_output=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
   LANE_TEST_UPDATE_ASSETS="$update_assets" LANEWAY_COSIGN_BIN="$fake_bin/cosign" \

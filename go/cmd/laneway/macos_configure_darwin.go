@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"crypto/sha256"
 	"debug/macho"
 	"encoding/binary"
@@ -16,13 +15,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
-	"time"
-
-	"github.com/Doout/laneway/go/internal/buildinfo"
-	"github.com/Doout/laneway/go/internal/releaseupdate"
 )
 
 const (
@@ -169,60 +163,31 @@ func macRustConfigurationStatus(source string) error {
 	return nil
 }
 
-func runMacUpdate(args []string) error {
-	fs := flag.NewFlagSet("update", flag.ContinueOnError)
-	yes := fs.Bool("yes", false, "install the verified update without the confirmation prompt")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return errors.New("usage: laneway update [--yes]")
-	}
+func installSystemClientUpdate(_, _, candidate, rustCandidate, version string, yes bool) error {
 	if os.Geteuid() == 0 {
-		return errors.New("run 'laneway update' as your normal macOS user; the verified package will request sudo to install")
-	}
-	work, err := os.MkdirTemp("", "laneway-macos-update-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(work)
-	archive := filepath.Join(work, "client.tar.gz")
-	client := releaseupdate.NewGitHubClient("Doout/laneway")
-	defer client.Close()
-	downloadCtx, downloadCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer downloadCancel()
-	verify, err := client.MacManifestVerifier(downloadCtx, work, runtime.GOARCH)
-	if err != nil {
-		return err
-	}
-	release, err := client.DownloadLatest(downloadCtx, "laneway_darwin_"+runtime.GOARCH+".tar.gz", archive, 2*macBinaryLimit, verify)
-	if err != nil {
-		return err
-	}
-	if comparison, comparable := compareStableVersions(buildinfo.Version, strings.TrimPrefix(release.Tag, "v")); comparable && comparison > 0 {
-		return fmt.Errorf("latest stable release %s would downgrade installed v%s", release.Tag, buildinfo.Version)
-	}
-	expectedVersion := strings.TrimPrefix(release.Tag, "v")
-	candidate, rustCandidate, err := releaseupdate.ExtractMacClient(archive, work, expectedVersion, macBinaryLimit)
-	if err != nil {
-		return fmt.Errorf("extract the verified macOS Rust package: %w", err)
+		return errors.New("run 'laneway update client' as your normal macOS user; the verified package will request sudo to install")
 	}
 	if err := inspectMacRustCandidate(rustCandidate, runtime.GOARCH); err != nil {
 		return err
 	}
-	for _, executable := range []struct{ path, flag string }{{candidate, "version"}, {rustCandidate, "--version"}} {
-		checkCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		output, err := exec.CommandContext(checkCtx, executable.path, executable.flag).Output()
-		cancel()
-		if err != nil || strings.TrimSpace(string(output)) != expectedVersion {
-			return fmt.Errorf("downloaded %s must match release %s", filepath.Base(executable.path), release.Tag)
+	if !yes {
+		approved, err := confirmMacConfiguration()
+		if err != nil {
+			return err
+		}
+		if !approved {
+			return errors.New("update cancelled")
 		}
 	}
-	configureArgs := []string{"configure"}
-	if *yes {
-		configureArgs = append(configureArgs, "--yes")
+	if installed, err := updateExecutableVersion(macClientPath, "version"); err == nil {
+		if err := preventClientDowngrade(installed, version); err != nil {
+			return err
+		}
+	} else if _, statErr := os.Lstat(macClientPath); !os.IsNotExist(statErr) {
+		return fmt.Errorf("read installed system client version: %w", err)
 	}
-	process := exec.Command(candidate, configureArgs...)
+	// --yes selects the system path on both legacy and current candidates.
+	process := exec.Command(candidate, "configure", "--yes")
 	process.Stdin, process.Stdout, process.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := process.Run(); err != nil {
 		return fmt.Errorf("install verified macOS update: %w", err)
@@ -233,43 +198,7 @@ func runMacUpdate(args []string) error {
 	if err := macRustConfigurationStatus(rustCandidate); err != nil {
 		return fmt.Errorf("verify updated Rust runtime: %w", err)
 	}
-	fmt.Printf("updated CLI and Rust runtime to %s sha256=%s\n", release.Tag, release.SHA256)
 	return nil
-}
-
-func compareStableVersions(left, right string) (int, bool) {
-	parse := func(value string) ([3]uint64, bool) {
-		var result [3]uint64
-		parts := strings.Split(value, ".")
-		if len(parts) != len(result) {
-			return result, false
-		}
-		for index, part := range parts {
-			if part == "" || (len(part) > 1 && part[0] == '0') {
-				return result, false
-			}
-			number, err := strconv.ParseUint(part, 10, 64)
-			if err != nil {
-				return result, false
-			}
-			result[index] = number
-		}
-		return result, true
-	}
-	leftParts, leftOK := parse(left)
-	rightParts, rightOK := parse(right)
-	if !leftOK || !rightOK {
-		return 0, false
-	}
-	for index := range leftParts {
-		if leftParts[index] < rightParts[index] {
-			return -1, true
-		}
-		if leftParts[index] > rightParts[index] {
-			return 1, true
-		}
-	}
-	return 0, true
 }
 
 func currentExecutable() (string, error) {

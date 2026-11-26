@@ -1,0 +1,21 @@
+[package]
+name = "laneway-network-helper"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Privileged tunnel setup for Laneway on Linux and macOS"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+anyhow.workspace = true
+ipnet.workspace = true
+libc = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3.26"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+laneway-private = { path = "../laneway-private" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { version = "1.1.4", features = ["event", "fs", "net"] }

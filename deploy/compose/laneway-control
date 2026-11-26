@@ -42,6 +42,7 @@ usage: laneway-control [--rust] <init|user-token|invite|route|status|readiness|a
 
   init [--issuer OFFLINE_BUNDLE | --dev]
   user-token --name NAME [--expires-in 10m]
+  invite --name NAME --native [--connector] [--expires-in 10m]
   invite --name NAME [--ephemeral|--remembered] [--docker --connector [--bootstrap] | --shared-host-exit]
   route add --connector NAME --to IP_OR_PREFIX [--allow USER] [--mode nat|routed] [--metric NUMBER]
   administrator bootstrap --username USERNAME
@@ -1349,10 +1350,11 @@ connector_setup_token() {
   relay_endpoint=$(read_setting "$env_file" LANEWAY_RELAY_PUBLIC_ENDPOINT)
   relay_id=$(read_setting "$env_file" LANEWAY_RELAY_SERVICE_ID)
   ca_file=$base_dir/generated/pki/ca.crt
-  if [ ! -f "$ca_file" ] || [ -L "$ca_file" ]; then
-    die "control-plane CA certificate is missing"
+  if [ ! -f "$ca_file" ] || [ -L "$ca_file" ] || [ ! -s "$ca_file" ]; then
+    die "control-plane CA certificate is missing or empty"
   fi
-  ca_b64=$(base64 "$ca_file" | awk '{printf "%s", $0}')
+  ca_b64=$(base64 < "$ca_file") || die "cannot read the control-plane CA certificate"
+  ca_b64=$(printf '%s' "$ca_b64" | tr -d '\n')
   setup_payload=$({
     printf '%s\n' "$node_name" "$enrollment_token" "https://$controller_name:$controller_port" \
       "$controller_name:$controller_port" "$controller_name" "$network_id" "$controller_id" \
@@ -1538,7 +1540,7 @@ run_production_check() {
 }
 
 run_invite() {
-  name=; class=durable; expires=10m; expires_set=false; session=; docker_install=false; exit_node=false; bootstrap_install=false; shared_host_exit=false
+  name=; class=durable; expires=10m; expires_set=false; session=; native_install=false; docker_install=false; exit_node=false; bootstrap_install=false; shared_host_exit=false
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --name) [ "$#" -ge 2 ] || die "--name requires a value"; name=$2; shift 2 ;;
@@ -1546,6 +1548,7 @@ run_invite() {
       --remembered) [ "$class" = durable ] || die "choose one class"; class=remembered; shift ;;
       --expires-in) [ "$#" -ge 2 ] || die "--expires-in requires a value"; expires=$2; expires_set=true; shift 2 ;;
       --session-lifetime) [ "$#" -ge 2 ] || die "--session-lifetime requires a value"; session=$2; shift 2 ;;
+      --native) native_install=true; shift ;;
       --docker) docker_install=true; shift ;;
       --connector) exit_node=true; shift ;;
 			--bootstrap) bootstrap_install=true; shift ;;
@@ -1555,8 +1558,18 @@ run_invite() {
     esac
   done
   case "$name" in ''|*[!A-Za-z0-9._-]*) die "invite requires a safe --name NAME" ;; esac
-  if [ "$docker_install" != "$exit_node" ]; then
-    die "--docker and --connector must be used together"
+  if [ "$native_install" = true ]; then
+    if [ "$docker_install" = true ] || [ "$bootstrap_install" = true ] || [ "$shared_host_exit" = true ]; then
+      die "--native cannot be combined with --docker, --bootstrap, or --shared-host-exit"
+    fi
+    [ "$class" = durable ] || die "--native emits a durable setup token; use login or connect for other enrollment classes"
+    [ -z "$session" ] || die "--session-lifetime requires an ephemeral invite"
+    # Check the public endpoint, relay settings, and CA before creating a token.
+    # The placeholder has the same length as a real controller enrollment code.
+    setup_preview=$(connector_setup_token AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "$name")
+    [ "${#setup_preview}" -le 65536 ] || die "control-plane metadata exceeds the native setup token size limit"
+  elif [ "$docker_install" != "$exit_node" ]; then
+    die "use --native --connector or --docker --connector for a Connector"
   fi
   # Activate the durable identity separately; the serving Rust container
   # must not carry an enrollment secret or bootstrap mount.
@@ -1603,7 +1616,21 @@ run_invite() {
     printf '%s\n' "$enrollment_token"
     return
   fi
-  if [ "$docker_install" = true ]; then
+  if [ "$native_install" = true ]; then
+    if [ "$exit_node" = true ]; then
+      set -- "$@" --connector
+    fi
+    result=$(admin "$@")
+    enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
+    case "$enrollment_token" in
+      ''|*[!A-Za-z0-9_-]*) die "controller returned no unique enrollment token" ;;
+    esac
+    setup_token=$(connector_setup_token "$enrollment_token" "$name")
+    [ "${#setup_token}" -le 65536 ] || die "control-plane metadata exceeds the native setup token size limit"
+    printf '%s\n' 'Install the signed Laneway client on the target device.' \
+      'Run laneway configure and paste the single-use setup token at the hidden prompt.' >&2
+    printf '%s\n' "$setup_token"
+  elif [ "$docker_install" = true ]; then
     result=$(admin "$@" --connector)
     enrollment_token=$(printf '%s\n' "$result" | sed -n 's/^[[:space:]]*"enrollment_token":[[:space:]]*"\([A-Za-z0-9_-]*\)"[,]*$/\1/p')
     [ -n "$enrollment_token" ] || die "controller returned no unique enrollment token"
@@ -1906,12 +1933,15 @@ run_update() {
     die "the installed version is not a stable semantic release"
   repository=${LANEWAY_REPOSITORY:-Doout/laneway}
   case "$repository" in *[!A-Za-z0-9._/-]*|*/*/*|'') die "LANEWAY_REPOSITORY is invalid" ;; esac
-  latest_url=$(curl --fail --location --silent --show-error \
+  latest_url=$(curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error \
+    --connect-timeout 10 --max-time 30 \
     --header 'Cache-Control: no-cache' --header 'Pragma: no-cache' --output /dev/null \
     --write-out '%{url_effective}' \
     "https://github.com/$repository/releases/latest?laneway_cache_bust=$(date +%s)") || \
     die "could not resolve the latest stable release"
-  latest_tag=${latest_url##*/}
+  latest_prefix=https://github.com/$repository/releases/tag/
+  case "$latest_url" in "$latest_prefix"*) ;; *) die "GitHub latest redirected outside the release tag path" ;; esac
+  latest_tag=${latest_url#"$latest_prefix"}
   printf '%s\n' "$latest_tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || \
     die "GitHub latest did not resolve to a stable semantic release"
   latest_version=${latest_tag#v}
@@ -1922,8 +1952,10 @@ run_update() {
   awk -v candidate="$latest_version" -v current="$current_version" 'BEGIN {
     split(candidate, c, "."); split(current, p, ".")
     for (i=1; i<=3; i++) {
-      if ((c[i]+0) > (p[i]+0)) exit 0
-      if ((c[i]+0) < (p[i]+0)) exit 1
+      if (length(c[i]) > length(p[i])) exit 0
+      if (length(c[i]) < length(p[i])) exit 1
+      if (("v" c[i]) > ("v" p[i])) exit 0
+      if (("v" c[i]) < ("v" p[i])) exit 1
     }
     exit 1
   }' || die "latest release $latest_tag would downgrade installed v$current_version"
@@ -1950,7 +1982,8 @@ run_update() {
   printf '  Deployment: %s\n' "$base_dir"
   printf '  Version:    v%s -> %s\n\n' "$current_version" "$latest_tag"
   for release_file in "$asset" bootstrap-artifacts.toml checksums.txt checksums.sigstore.json; do
-    curl --fail --location --silent --show-error "$release_url/$release_file" \
+    curl --disable --proto '=https' --proto-redir '=https' --fail --location --silent --show-error \
+      --connect-timeout 10 --max-time 180 "$release_url/$release_file" \
       -o "$update_dir/$release_file" || die "could not download $release_file for $latest_tag"
   done
   cosign_command=$(cosign_verifier)

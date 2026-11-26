@@ -221,21 +221,6 @@ func OpenTUN(ctx context.Context, config TUNConfig) (TUNDevice, error) {
 	return openTUN(ctx, config, linuxTUNBackend{ip: config.IPCommand, runner: config.Runner})
 }
 
-// DuplicateTUNFile returns a close-on-exec duplicate of a Linux TUN file
-// descriptor. It is intentionally narrow: callers can transfer packet I/O to
-// an unprivileged process without exposing the privileged configuration API.
-func DuplicateTUNFile(device TUNDevice) (*os.File, error) {
-	tun, ok := device.(*linuxTUN)
-	if !ok {
-		return nil, fmt.Errorf("platform: TUN device cannot be transferred")
-	}
-	fd, err := unix.FcntlInt(tun.file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("platform: duplicate TUN descriptor: %w", err)
-	}
-	return os.NewFile(uintptr(fd), tun.name), nil
-}
-
 // AdoptTUNFile wraps an already attached and configured TUN descriptor. The
 // receiver owns file. Closing it never mutates addresses or routes; those are
 // owned and restored by the privileged process that transferred the file.

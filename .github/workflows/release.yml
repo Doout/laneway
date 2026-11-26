@@ -31,7 +31,7 @@ jobs:
       - name: Check scripts
         run: |
           python3 -m unittest discover -s deploy/compose -p 'test_*.py'
-          shellcheck integration/rust-release-macos*.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh integration/rust-release-systemd.sh
+          shellcheck integration/rust-release-macos*.sh integration/rust-release-install.sh integration/rust-release-fleet-update.sh integration/rust-release-systemd.sh integration/rust-release-rootless.sh
           shellcheck install.sh scripts/*.sh deploy/containers/*.sh deploy/compose/*.sh deploy/compose/laneway-control deploy/ephemeral-exit/*.sh integration/administrator-lifecycle.sh integration/client-installer.sh integration/connector-upgrade.sh integration/connector-updater.sh integration/release-contract.sh integration/control-plane-install.sh integration/control-plane-prepare.sh integration/control-plane-upgrade.sh integration/lane-workflows.sh integration/lane-prepare.sh integration/lane-recovery.sh
           sh integration/rust-compose-release.sh
           sh integration/rust-go-runtime-guard.sh
@@ -158,6 +158,11 @@ jobs:
         with:
           name: release-fixture-${{ matrix.arch }}
           path: ${{ runner.temp }}
+      - name: Test installed rootless CLI and helper from the release archive
+        if: matrix.check == 'systemd'
+        env:
+          PACKAGE_GOARCH: ${{ matrix.arch }}
+        run: sh integration/rust-release-rootless.sh --linux-archive "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
       - name: Prepare the isolated systemd runner
         run: |
           packages=(binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps)

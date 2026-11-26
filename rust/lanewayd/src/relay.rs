@@ -62,6 +62,7 @@ pub(crate) struct OutboundPacket {
     /// Complete IP packet or opaque WireGuard UDP datagram.
     packet: PooledPacket,
     wireguard_key: Option<[u8; 32]>,
+    generation: Option<Arc<()>>,
 }
 
 impl OutboundPacket {
@@ -72,6 +73,7 @@ impl OutboundPacket {
             peer,
             packet: PooledPacket::unpooled(packet),
             wireguard_key: None,
+            generation: None,
         }
     }
 
@@ -82,9 +84,15 @@ impl OutboundPacket {
                 peer,
                 packet,
                 wireguard_key: None,
+                generation: None,
             },
             miss,
         )
+    }
+
+    pub(crate) fn with_generation(mut self, generation: Arc<()>) -> Self {
+        self.generation = Some(generation);
+        self
     }
 
     pub(crate) fn wireguard(datagram: WireGuardDatagram, pool: &PacketPool) -> (Self, bool) {
@@ -94,6 +102,7 @@ impl OutboundPacket {
                 peer: datagram.peer(),
                 packet,
                 wireguard_key: Some(datagram.peer_key()),
+                generation: None,
             },
             miss,
         )
@@ -118,16 +127,36 @@ pub struct RelayClient {
     network: Id,
     node: Id,
     boot: Id,
-    owned: Arc<Vec<ipnet::IpNet>>,
-    inject: mpsc::Sender<InboundPacket>,
-    candidates: mpsc::Sender<EndpointCandidate>,
+    plane: PacketPlane,
     wireguard: Option<WireGuardPlane>,
     relay_cursor: AtomicUsize,
+}
+
+enum PacketPlane {
+    Native {
+        owned: Arc<Vec<ipnet::IpNet>>,
+        inject: mpsc::Sender<InboundPacket>,
+        candidates: mpsc::Sender<EndpointCandidate>,
+    },
+    Rootless(mpsc::Sender<crate::rootless::AuthorizedPacket>),
 }
 
 struct WireGuardPlane {
     local_key: [u8; 32],
     receive: mpsc::Sender<WireGuardDatagram>,
+}
+
+#[derive(Clone, Copy)]
+struct RelayTarget {
+    service: Id,
+    address: std::net::SocketAddr,
+    tcp: bool,
+}
+
+impl RelayTarget {
+    fn authorized_by(self, view: &crate::rootless::PacketAuthority) -> bool {
+        view.allows_relay(self.service, self.address, self.tcp)
+    }
 }
 
 struct QuicSession {
@@ -173,12 +202,43 @@ impl RelayClient {
             network,
             node,
             boot,
-            owned,
-            inject,
-            candidates,
+            plane: PacketPlane::Native {
+                owned,
+                inject,
+                candidates,
+            },
             wireguard: None,
             relay_cursor: AtomicUsize::new(0),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn rootless(
+        endpoint: Endpoint,
+        config: Arc<Config>,
+        state: Arc<State>,
+        metrics: Arc<Metrics>,
+        network: Id,
+        node: Id,
+        boot: Id,
+        inject: mpsc::Sender<crate::rootless::AuthorizedPacket>,
+    ) -> Self {
+        Self {
+            endpoint,
+            config,
+            state,
+            metrics,
+            network,
+            node,
+            boot,
+            plane: PacketPlane::Rootless(inject),
+            wireguard: None,
+            relay_cursor: AtomicUsize::new(0),
+        }
+    }
+
+    fn is_rootless(&self) -> bool {
+        matches!(self.plane, PacketPlane::Rootless(_))
     }
 
     pub(crate) fn require_wireguard(
@@ -192,7 +252,12 @@ impl RelayClient {
 
     fn carrier_capabilities(&self, required: u64) -> (u64, u64) {
         let offered = hello_capabilities_for(&self.config, required);
-        if self.wireguard.is_some() {
+        if self.is_rootless() {
+            let supported = Capability::LanewaySubnetRouterV1 as u64
+                | Capability::LanewayIpv6V1 as u64
+                | Capability::LanewayTcpFallbackV1 as u64;
+            (required | (offered & supported), required)
+        } else if self.wireguard.is_some() {
             (
                 (offered & !(Capability::LanewayDirectPeerV1 as u64)) | E2E,
                 required | E2E,
@@ -338,6 +403,7 @@ impl RelayClient {
             &self.config,
             self.network,
             self.wireguard.is_some(),
+            self.is_rootless(),
             |address| self.state.relay_authorized_ip(service, address.ip()),
         )
         .await?;
@@ -418,11 +484,35 @@ impl RelayClient {
         for offset in 0..targets.len() {
             let (service, address) = targets[(start + offset) % targets.len()];
             let attempt = async {
-                let client =
-                    tls::client_config(&self.config.tls, &self.config.relay, tls::RELAY_ALPN)?;
+                let (client, server_name) = if self.is_rootless() {
+                    let view = self
+                        .state
+                        .rootless_authority()
+                        .context("relay authority is unavailable")?;
+                    let target = view
+                        .snapshot
+                        .relays
+                        .get(&service)
+                        .filter(|target| target.resolved.contains(&address))
+                        .context("relay target is no longer authorized")?;
+                    let (name, _) = crate::controller::split_host_port(&target.endpoint)?;
+                    let client = tls::rootless_relay_client(
+                        &self.config.tls,
+                        &self.config.relay,
+                        &name,
+                        self.network,
+                        service,
+                    )?;
+                    (client, name)
+                } else {
+                    (
+                        tls::client_config(&self.config.tls, &self.config.relay, tls::RELAY_ALPN)?,
+                        self.config.relay.server_name.clone(),
+                    )
+                };
                 let connecting = self
                     .endpoint
-                    .connect_with(client, address, &self.config.relay.server_name)
+                    .connect_with(client, address, &server_name)
                     .context("start relay QUIC connection")?;
                 let connection = timeout(self.config.relay.handshake_timeout, connecting)
                     .await
@@ -454,6 +544,11 @@ impl RelayClient {
         mut session: QuicSession,
         outbound: &mut mpsc::Receiver<OutboundPacket>,
     ) -> Result<()> {
+        let target = RelayTarget {
+            service: session.relay_service,
+            address: session.relay_address,
+            tcp: false,
+        };
         let refresh = self.config.direct.candidate_refresh_interval;
         let mut candidate_refresh = interval_at(Instant::now() + refresh, refresh);
         let authority_cadence = Duration::from_millis(250);
@@ -466,11 +561,11 @@ impl RelayClient {
                         outbound.max_capacity().saturating_sub(outbound.capacity()),
                     );
                     let packet = packet.context("outbound packet queue closed")?;
-                    self.send_packet(&session.connection, packet, session.negotiated)?;
+                    self.send_packet(&session.connection, packet, session.negotiated, target)?;
                 }
                 frame = session.connection.read_datagram() => {
                     let frame = frame.context("read relay datagram")?;
-                    self.receive_packet(frame, session.negotiated).await;
+                    self.receive_packet(frame, session.negotiated, Some(target)).await;
                 }
                 envelope = read_message::<_, RelayEnvelope>(&mut session.receive, MAX_CONTROL_PAYLOAD) => {
                     let envelope = envelope?;
@@ -506,6 +601,11 @@ impl RelayClient {
         mut session: TcpSession,
         outbound: &mut mpsc::Receiver<OutboundPacket>,
     ) -> Result<QuicSession> {
+        let target = RelayTarget {
+            service: session.relay_service,
+            address: session.connection.remote,
+            tcp: true,
+        };
         let cadence = self.config.relay.quic_recovery_interval;
         let mut retries = interval_at(Instant::now() + cadence, cadence);
         let authority_cadence = Duration::from_millis(250);
@@ -520,12 +620,12 @@ impl RelayClient {
                         self.metrics.set_outbound_queue_depth(
                             outbound.max_capacity().saturating_sub(outbound.capacity()),
                         );
-                        if let Some(frame) = self.frame_packet(packet.context("outbound packet queue closed")?, session.negotiated)? {
+                        if let Some(frame) = self.frame_packet(packet.context("outbound packet queue closed")?, session.negotiated, Some(target))? {
                             session.connection.writer.packet(Bytes::from_owner(frame)).await?;
                         }
                     }
                     frame = session.connection.packets.recv() => {
-                        self.receive_packet(frame.context("TCP fallback packet queue closed")?, session.negotiated).await;
+                        self.receive_packet(frame.context("TCP fallback packet queue closed")?, session.negotiated, Some(target)).await;
                     }
                     payload = session.connection.control.recv() => {
                         let envelope: RelayEnvelope = decode_message(&payload.context("TCP fallback control queue closed")?)?;
@@ -624,8 +724,10 @@ impl RelayClient {
         connection: &Connection,
         outbound: OutboundPacket,
         negotiated_capabilities: u64,
+        target: RelayTarget,
     ) -> Result<()> {
-        let Some(frame) = self.frame_packet(outbound, negotiated_capabilities)? else {
+        let Some(frame) = self.frame_packet(outbound, negotiated_capabilities, Some(target))?
+        else {
             return Ok(());
         };
         if self.wireguard.is_some()
@@ -646,6 +748,7 @@ impl RelayClient {
         &self,
         outbound: OutboundPacket,
         negotiated_capabilities: u64,
+        target: Option<RelayTarget>,
     ) -> Result<Option<PooledPacket>> {
         if let Some(wireguard) = &self.wireguard {
             let live_key =
@@ -660,6 +763,25 @@ impl RelayClient {
             }
             return self.frame_for_handle(outbound, PACKET_FLAG_E2E_ENCRYPTED);
         }
+        let PacketPlane::Native { owned, .. } = &self.plane else {
+            let Some(view) = self.state.rootless_authority() else {
+                return Ok(None);
+            };
+            let valid = target.is_some_and(|target| target.authorized_by(&view))
+                && outbound
+                    .generation
+                    .as_ref()
+                    .is_some_and(|generation| Arc::ptr_eq(generation, &view.generation))
+                && crate::rootless::rootless_packet_meta(&outbound.packet).is_some_and(|meta| {
+                    view.outbound_peer(self.node, meta, &outbound.packet, negotiated_capabilities)
+                        == Some(outbound.peer)
+                });
+            if !valid {
+                Metrics::increment(&self.metrics.auth_drops);
+                return Ok(None);
+            }
+            return self.frame_for_handle(outbound, 0);
+        };
         if outbound.wireguard_key.is_some() {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
@@ -675,7 +797,7 @@ impl RelayClient {
             Metrics::increment(&self.metrics.invalid_drops);
             return Ok(None);
         }
-        let forwards_exit = !self.state.owns(&self.owned, meta.source);
+        let forwards_exit = !self.state.owns(owned, meta.source);
         let routes = self.state.routes.load();
         if (forwards_exit
             && !(self.state.gateway_allows(meta.destination)
@@ -728,7 +850,12 @@ impl RelayClient {
         Ok(Some(frame))
     }
 
-    async fn receive_packet(&self, frame: Bytes, negotiated_capabilities: u64) {
+    async fn receive_packet(
+        &self,
+        frame: Bytes,
+        negotiated_capabilities: u64,
+        target: Option<RelayTarget>,
+    ) {
         if let Some(wireguard) = &self.wireguard {
             self.receive_wireguard(wireguard, frame, negotiated_capabilities);
             return;
@@ -747,6 +874,39 @@ impl RelayClient {
             Metrics::increment(&self.metrics.invalid_drops);
             return;
         };
+        let (owned, inject) = match &self.plane {
+            PacketPlane::Native { owned, inject, .. } => (owned, inject),
+            PacketPlane::Rootless(inject) => {
+                let Some(view) = self.state.rootless_authority() else {
+                    return;
+                };
+                if !target.is_some_and(|target| target.authorized_by(&view))
+                    || header.flags & PACKET_FLAG_E2E_ENCRYPTED != 0
+                    || !crate::rootless::rootless_packet_meta(packet).is_some_and(|meta| {
+                        view.allows_inbound(peer, self.node, meta, packet, negotiated_capabilities)
+                    })
+                {
+                    Metrics::increment(&self.metrics.auth_drops);
+                    return;
+                }
+                let bytes = frame.slice(frame.len() - packet.len()..);
+                if inject
+                    .try_send(crate::rootless::AuthorizedPacket {
+                        bytes,
+                        generation: Arc::clone(&view.generation),
+                        peer,
+                        capabilities: negotiated_capabilities,
+                    })
+                    .is_err()
+                {
+                    Metrics::increment(&self.metrics.queue_drops);
+                }
+                self.metrics.set_inject_queue_depth(
+                    inject.max_capacity().saturating_sub(inject.capacity()),
+                );
+                return;
+            }
+        };
         let Ok(meta) = packet_meta(packet) else {
             Metrics::increment(&self.metrics.invalid_drops);
             Metrics::increment(&self.metrics.malformed_drops);
@@ -758,7 +918,7 @@ impl RelayClient {
             return;
         }
         let routes = self.state.routes.load();
-        let forwards_exit = !self.state.owns(&self.owned, meta.destination);
+        let forwards_exit = !self.state.owns(owned, meta.destination);
         if !packet_capabilities_allow(
             &self.config,
             &routes,
@@ -779,7 +939,7 @@ impl RelayClient {
             return;
         }
         let payload_offset = frame.len() - packet.len();
-        let sent = self.inject.try_send(InboundPacket {
+        let sent = inject.try_send(InboundPacket {
             peer,
             direct_serial: None,
             bytes: frame.slice(payload_offset..),
@@ -789,10 +949,7 @@ impl RelayClient {
         {
             topology.received(peer, None);
         }
-        let depth = self
-            .inject
-            .max_capacity()
-            .saturating_sub(self.inject.capacity());
+        let depth = inject.max_capacity().saturating_sub(inject.capacity());
         self.metrics.set_inject_queue_depth(depth);
         if sent.is_err() {
             Metrics::increment(&self.metrics.queue_drops);
@@ -849,7 +1006,7 @@ impl RelayClient {
                 } else {
                     local_packet_limit(binding.max_packet_payload, self.config.tun.mtu)?
                 };
-                let known_peer = if self.wireguard.is_some() {
+                let known_peer = if self.wireguard.is_some() || self.is_rootless() {
                     self.state
                         .authority_snapshot()
                         .is_some_and(|snapshot| snapshot.peers.contains_key(&peer))
@@ -879,8 +1036,10 @@ impl RelayClient {
                     negotiated_capabilities & Capability::LanewayDirectPeerV1 as u64 != 0,
                     "relay sent endpoint candidate without direct-path negotiation"
                 );
-                if self.state.candidate_exchange_enabled() {
-                    self.candidates
+                if self.state.candidate_exchange_enabled()
+                    && let PacketPlane::Native { candidates, .. } = &self.plane
+                {
+                    candidates
                         .try_send(candidate)
                         .context("direct candidate queue is full or closed")?;
                 }
@@ -1216,7 +1375,7 @@ mod tests {
         let raw = ipv4([100, 96, 0, 2], [100, 96, 0, 1]);
         assert!(
             client
-                .frame_packet(OutboundPacket::new(peer, raw.clone()), offered)
+                .frame_packet(OutboundPacket::new(peer, raw.clone()), offered, None)
                 .unwrap()
                 .is_none()
         );
@@ -1231,7 +1390,9 @@ mod tests {
             &mut plaintext,
         )
         .unwrap();
-        client.receive_packet(Bytes::from(plaintext), offered).await;
+        client
+            .receive_packet(Bytes::from(plaintext), offered, None)
+            .await;
         assert!(raw_rx.try_recv().is_err());
         assert!(encrypted_rx.try_recv().is_err());
 
@@ -1248,16 +1409,19 @@ mod tests {
         };
         assert!(
             client
-                .frame_packet(packet(), REQUIRED_CAPABILITIES)
+                .frame_packet(packet(), REQUIRED_CAPABILITIES, None)
                 .unwrap()
                 .is_none()
         );
-        let framed = client.frame_packet(packet(), offered).unwrap().unwrap();
+        let framed = client
+            .frame_packet(packet(), offered, None)
+            .unwrap()
+            .unwrap();
         let (header, payload) = decode_frame(&framed).unwrap();
         assert_eq!(header.flags, PACKET_FLAG_E2E_ENCRYPTED);
         assert_eq!(payload, ciphertext);
         client
-            .receive_packet(Bytes::from_owner(framed), offered)
+            .receive_packet(Bytes::from_owner(framed), offered, None)
             .await;
         let delivered = encrypted_rx.try_recv().unwrap();
         assert_eq!(delivered.peer(), peer);
@@ -1270,9 +1434,19 @@ mod tests {
         rotated.policy.as_mut().unwrap().configuration_epoch = 8;
         rotated.peers[1].wireguard_public_key.fill(3);
         state.publish_authority(compile(rotated));
-        assert!(client.frame_packet(packet(), offered).unwrap().is_none());
+        assert!(
+            client
+                .frame_packet(packet(), offered, None)
+                .unwrap()
+                .is_none()
+        );
         state.fail_close();
-        assert!(client.frame_packet(packet(), offered).unwrap().is_none());
+        assert!(
+            client
+                .frame_packet(packet(), offered, None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

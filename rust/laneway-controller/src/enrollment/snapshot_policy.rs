@@ -11,7 +11,8 @@ use laneway_protocol::{
 use prost::Message;
 use rusqlite::Transaction;
 use serde::{Deserialize, Deserializer, de::Error as _};
-use serde_json::{Value, json};
+use serde_json::{Value, json, value::RawValue};
+use std::borrow::Cow;
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -25,7 +26,7 @@ struct Selector {
     #[serde(alias = "destinationPrefixes")]
     destination_prefixes: Option<Vec<Prefix>>,
     #[serde(alias = "ipProtocol")]
-    ip_protocol: Value,
+    ip_protocol: Option<Box<RawValue>>,
     #[serde(alias = "destinationPorts")]
     destination_ports: Option<Vec<Range>>,
 }
@@ -35,32 +36,96 @@ struct Selector {
 struct Prefix {
     address: String,
     #[serde(default, alias = "prefixLength")]
-    prefix_length: Value,
+    prefix_length: Option<Box<RawValue>>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Range {
-    first: Value,
-    last: Value,
+    first: Option<Box<RawValue>>,
+    last: Option<Box<RawValue>>,
 }
 
-fn number(v: &Value) -> Result<u32> {
-    match v {
-        Value::Null => Ok(0),
-        Value::String(v) => Ok(v.parse()?),
-        v => Ok(v.as_u64().context("invalid ACL number")?.try_into()?),
+fn number(value: Option<&RawValue>) -> Result<u32> {
+    let Some(raw) = value.map(RawValue::get) else {
+        return Ok(0);
+    };
+    let text;
+    let raw = if raw.starts_with('"') {
+        text = serde_json::from_str::<String>(raw)?;
+        text.as_str()
+    } else {
+        raw
+    };
+    signed_integer(raw)
+        .and_then(|number| u32::try_from(number).ok())
+        .context("invalid selector unsigned integer")
+}
+
+// Protobuf JSON accepts integral exponents and decimals, but never rounds a
+// fraction to an integer. Work on the token text to preserve that boundary.
+fn signed_integer(raw: &str) -> Option<i64> {
+    let (negative, raw) = raw
+        .strip_prefix('-')
+        .map_or((false, raw), |text| (true, text));
+    let (mantissa, exponent) = raw.split_once(['e', 'E']).unwrap_or((raw, "0"));
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let decimal = mantissa.contains('.');
+    let exponent_digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+    if whole.is_empty()
+        || (whole.len() > 1 && whole.starts_with('0'))
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || (decimal && fraction.is_empty())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || exponent_digits.is_empty()
+        || !exponent_digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
     }
+    let whole = whole.trim_start_matches('0');
+    let fraction = fraction.trim_end_matches('0');
+    if whole.is_empty() && fraction.is_empty() {
+        return Some(0);
+    }
+    let exponent: i32 = exponent.parse().ok()?;
+    let mut normalized = String::with_capacity(21);
+    if negative {
+        normalized.push('-');
+    }
+    if exponent >= 0 {
+        let exponent = exponent as usize;
+        if fraction.len() > exponent || whole.len().checked_add(exponent)? > 20 {
+            return None;
+        }
+        normalized.push_str(whole);
+        normalized.push_str(fraction);
+        normalized.extend(std::iter::repeat_n('0', exponent - fraction.len()));
+    } else {
+        if !fraction.is_empty() {
+            return None;
+        }
+        let end = whole.len().checked_sub(exponent.unsigned_abs() as usize)?;
+        if end > 20 || !whole.as_bytes()[end..].iter().all(|byte| *byte == b'0') {
+            return None;
+        }
+        normalized.push_str(&whole[..end]);
+    }
+    normalized.parse().ok()
 }
 
 fn bytes(v: &str) -> Result<Vec<u8>> {
+    let v = if v.contains(['\r', '\n']) {
+        Cow::Owned(v.replace(['\r', '\n'], ""))
+    } else {
+        Cow::Borrowed(v)
+    };
     for engine in [
         b64::STANDARD,
         b64::STANDARD_NO_PAD,
         b64::URL_SAFE,
         b64::URL_SAFE_NO_PAD,
     ] {
-        if let Ok(raw) = engine.decode(v) {
+        if let Ok(raw) = engine.decode(v.as_bytes()) {
             return Ok(raw);
         }
     }
@@ -79,7 +144,7 @@ fn prefixes(v: Option<Vec<Prefix>>) -> Result<Vec<IpPrefix>> {
         .map(|p| {
             Ok(IpPrefix {
                 address: bytes(&p.address)?,
-                prefix_length: number(&p.prefix_length)?,
+                prefix_length: number(p.prefix_length.as_deref())?,
             })
         })
         .collect()
@@ -105,9 +170,15 @@ impl<'de> Deserialize<'de> for AclSelector {
 }
 
 fn selector_from_fields(v: Selector) -> Result<TrafficSelector> {
-    let ip_protocol = match v.ip_protocol {
-        Value::String(v) => IpProtocol::from_str_name(&v).context("unknown ACL protocol")? as i32,
-        v => i32::try_from(number(&v)?)?,
+    let ip_protocol = match v.ip_protocol.as_deref().map(RawValue::get) {
+        Some(raw) if raw.starts_with('"') => {
+            let name = serde_json::from_str::<String>(raw)?;
+            IpProtocol::from_str_name(&name).context("unknown ACL protocol")? as i32
+        }
+        Some(raw) => signed_integer(raw)
+            .and_then(|number| i32::try_from(number).ok())
+            .context("invalid ACL protocol number")?,
+        None => 0,
     };
     Ok(TrafficSelector {
         source_node_ids: ids(v.source_node_ids)?,
@@ -121,8 +192,8 @@ fn selector_from_fields(v: Selector) -> Result<TrafficSelector> {
             .into_iter()
             .map(|r| {
                 Ok(PortRange {
-                    first: number(&r.first)?,
-                    last: number(&r.last)?,
+                    first: number(r.first.as_deref())?,
+                    last: number(r.last.as_deref())?,
                 })
             })
             .collect::<Result<_>>()?,
@@ -236,4 +307,55 @@ pub(crate) fn compile(tx: &Transaction<'_>, net: Id, epoch: u64) -> Result<Polic
     }
     CompiledPolicy::compile(policy.clone(), net, epoch)?;
     Ok(policy)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_exact_protojson_integers() {
+        let selector = parse(
+            r#"{"ipProtocol":"IP_PROTOCOL_TCP","sourcePrefixes":[{"address":"CgA\nAAA==","prefixLength":8.0}],"destinationPorts":[{"first":"4.43e2","last":4430e-1}]}"#,
+        )
+        .unwrap();
+        assert_eq!(selector.ip_protocol, IpProtocol::Tcp as i32);
+        assert_eq!(
+            parse(r#"{"ipProtocol":6e0}"#).unwrap().ip_protocol,
+            selector.ip_protocol
+        );
+        assert_eq!(selector.source_prefixes[0].address, [10, 0, 0, 0]);
+        assert_eq!(selector.source_prefixes[0].prefix_length, 8);
+        assert_eq!(
+            selector.destination_ports,
+            [PortRange {
+                first: 443,
+                last: 443
+            }]
+        );
+    }
+
+    #[test]
+    fn defaults_do_not_publish_incomplete_port_ranges() {
+        for raw in [
+            r#"{"ipProtocol":"IP_PROTOCOL_TCP","destinationPorts":[{"first":443}]}"#,
+            r#"{"ipProtocol":"IP_PROTOCOL_TCP","destinationPorts":[{"first":443,"last":null}]}"#,
+        ] {
+            let selector = parse(raw).unwrap();
+            assert_eq!(selector.destination_ports[0].last, 0);
+            assert!(AclSelector(selector).canonical_management_json().is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_rounded_overflow_and_duplicate_acl_fields() {
+        for raw in [
+            r#"{"destinationPorts":[{"first":443.000000000000000001}]}"#,
+            r#"{"destinationPorts":[{"first":"4.4300000000000001e2"}]}"#,
+            r#"{"destinationPorts":[{"first":4294967296}]}"#,
+            r#"{"ipProtocol":"IP_PROTOCOL_TCP","ip_protocol":"IP_PROTOCOL_UDP"}"#,
+        ] {
+            assert!(parse(raw).is_err(), "{raw}");
+        }
+    }
 }

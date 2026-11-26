@@ -75,6 +75,7 @@ ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$versio
 cp "$project_dir/README.md" "$package_dir/README.md"
 cp "$project_dir/LICENSE-MIT" "$project_dir/LICENSE-APACHE" "$package_dir/"
 cp "$project_dir/docs/operations.md" "$package_dir/docs/operations.md"
+cp "$project_dir/docs/rootless.md" "$package_dir/docs/rootless.md"
 cp "$project_dir/docs/ephemeral-shared-host-exit.md" "$package_dir/docs/ephemeral-shared-host-exit.md"
 if [ "$package_goos" = linux ]; then
 cp "$project_dir/deploy/examples/controller.toml" \

@@ -11,6 +11,7 @@ mod codec;
 mod config;
 mod connector;
 mod controller;
+mod controller_tls;
 mod diagnostics;
 mod direct;
 mod dns;
@@ -27,6 +28,7 @@ mod private_dns;
 mod probe;
 mod relay;
 mod renewal;
+pub mod rootless;
 mod routing;
 mod state;
 mod status_report;
@@ -64,3 +66,7 @@ fn product_version() -> &'static str {
         })
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
+
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod deployment_update;

@@ -193,18 +193,15 @@ async fn request(
             let mut store = SessionStore::open(&db)?;
             let cancelled = || cancel.is_closed() || conn.close_reason().is_some();
             match (peer, operation) {
-                (ControlPeer::Node(peer), Body::RenewalRequest(req)) => {
-                    store.node_control_admission(&peer)?;
-                    store
-                        .renew_certificate(
-                            &peer,
-                            req,
-                            issuer.as_deref().context("node issuer unavailable")?,
-                            RenewalTransport::Quic { holds_exit_claim },
-                            cancelled,
-                        )
-                        .map(Body::RenewalResponse)
-                }
+                (ControlPeer::Node(peer), Body::RenewalRequest(req)) => store
+                    .renew_certificate(
+                        &peer,
+                        req,
+                        issuer.as_deref().context("node issuer unavailable")?,
+                        RenewalTransport::Quic { holds_exit_claim },
+                        cancelled,
+                    )
+                    .map(Body::RenewalResponse),
                 (ControlPeer::Node(peer), Body::ConfigurationRequest(req)) => {
                     let snapshot = store.node_configuration(
                         &peer,

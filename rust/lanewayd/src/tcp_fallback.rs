@@ -73,6 +73,7 @@ pub(crate) async fn connect(
     config: &Config,
     network: Id,
     wireguard: bool,
+    pin_identity: bool,
     permitted: impl Fn(SocketAddr) -> bool,
 ) -> Result<Session> {
     let fallback = config
@@ -91,9 +92,21 @@ pub(crate) async fn connect(
     raw.set_nodelay(true).context("set TCP_NODELAY")?;
     let server_name = ServerName::try_from(config.relay.server_name.clone())
         .context("invalid relay.server_name")?;
+    let service = Id::from_str(&config.relay.service_id).context("relay.service_id")?;
+    let crypto = if pin_identity {
+        Arc::new(tls::rootless_relay_tls(
+            &config.tls,
+            &config.relay.server_name,
+            network,
+            service,
+            tls::TCP_FALLBACK_ALPN,
+        )?)
+    } else {
+        tls::tcp_client_config(&config.tls)?
+    };
     let stream = timeout(
         fallback.handshake_timeout,
-        TlsConnector::from(tls::tcp_client_config(&config.tls)?).connect(server_name, raw),
+        TlsConnector::from(crypto).connect(server_name, raw),
     )
     .await
     .context("TCP fallback TLS handshake timed out")?
@@ -108,11 +121,7 @@ pub(crate) async fn connect(
         .peer_certificates()
         .and_then(|certificates| certificates.first())
         .context("TCP fallback relay sent no certificate")?;
-    tls::validate_relay_certificate(
-        leaf.as_ref(),
-        network,
-        Id::from_str(&config.relay.service_id).context("relay.service_id")?,
-    )?;
+    tls::validate_relay_certificate(leaf.as_ref(), network, service)?;
 
     let (mut read, mut write) = tokio::io::split(stream);
     let (control_tx, control) = mpsc::channel(fallback.queue_depth);

@@ -28,7 +28,7 @@ func TestMacOSCLIContainsOnlyUserClientCommands(t *testing.T) {
 		names = append(names, item.Name())
 	}
 	sort.Strings(names)
-	want := []string{"_network-helper", "bootstrap", "configure", "connect", "login", "logout", "update", "version"}
+	want := []string{"_network-helper", "bootstrap", "configure", "connect", "credential", "login", "logout", "start", "update", "version"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("macOS commands = %v, want %v", names, want)
 	}
