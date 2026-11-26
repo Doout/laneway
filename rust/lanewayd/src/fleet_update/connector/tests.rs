@@ -34,6 +34,7 @@ fn inspect_fixture() -> Value {
 fn inspection_rejects_a_different_runtime_and_unsupported_profiles() {
     let fixture = inspect_fixture();
     let accepted = profile(&fixture, OLD, NAME).unwrap();
+    assert!(is_standard_running(&fixture, NAME));
     assert_eq!(accepted.volume, VOLUME);
     assert_eq!(accepted.hostname, "connector-lab");
     for (pointer, input) in [
@@ -50,6 +51,7 @@ fn inspection_rejects_a_different_runtime_and_unsupported_profiles() {
         let mut changed = fixture.clone();
         *changed.pointer_mut(pointer).unwrap() = input;
         assert!(profile(&changed, OLD, NAME).is_err(), "{pointer}");
+        assert!(!is_standard_running(&changed, NAME), "{pointer}");
     }
     assert!(profile(&fixture, NEW, NAME).is_err());
     assert!(!valid_name("laneway-connector-x/state"));

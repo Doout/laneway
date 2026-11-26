@@ -492,7 +492,7 @@ cat > "$fake_bin/curl" <<'EOF'
 set -eu
 case " $* " in
   *"releases/latest"*)
-    printf '%s' "https://github.com/Doout/laneway/releases/tag/${LANE_TEST_LATEST_TAG:-v1.1.0}"
+    printf '%s' "${LANE_TEST_LATEST_ORIGIN:-https://github.com/Doout/laneway}/releases/tag/${LANE_TEST_LATEST_TAG:-v1.1.0}"
     exit 0
     ;;
 esac
@@ -525,6 +525,18 @@ if grep -E 'update-env|verify-blob' "$log" >/dev/null; then
   echo "already-current update performed package work" >&2
   exit 1
 fi
+if sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_LATEST_ORIGIN=http://fixture.invalid "$compose_dir/laneway-control" update > "$test_dir/update-rejected" 2>&1; then
+  echo "update accepted a latest release from an untrusted origin" >&2
+  exit 1
+fi
+grep -F 'latest redirected outside the release tag path' "$test_dir/update-rejected" >/dev/null
+if sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_LATEST_TAG=v0.9.9 "$compose_dir/laneway-control" update > "$test_dir/update-rejected" 2>&1; then
+  echo "update accepted a downgrade" >&2
+  exit 1
+fi
+grep -F 'would downgrade installed v1.0.0' "$test_dir/update-rejected" >/dev/null
 : > "$log"
 update_output=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
   LANE_TEST_UPDATE_ASSETS="$update_assets" LANEWAY_COSIGN_BIN="$fake_bin/cosign" \

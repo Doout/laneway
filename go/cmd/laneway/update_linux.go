@@ -71,14 +71,10 @@ func checkSystemUpdateScope(rootless bool) error {
 	if err := protectedRootlessRuntime("/usr/local/bin/laneway"); err != nil {
 		return err
 	}
-	target, err := detectUpdateTarget()
-	if err != nil {
+	if err := protectedRootlessRuntime(deploymentUpdateRuntime); err != nil {
 		return err
 	}
-	if target != "client" {
-		return fmt.Errorf("this managed host requires 'laneway update %s'", target)
-	}
-	return nil
+	return runHostUpdate(exec.Command(deploymentUpdateRuntime, "_deployment-update", "client-check"))
 }
 
 func unixOwner(info fs.FileInfo) uint32 {

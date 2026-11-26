@@ -1,3 +1,5 @@
+//! Linux host discovery and routing for the product update command.
+
 use std::{
     env,
     ffi::OsString,
@@ -33,6 +35,7 @@ impl Target {
     }
 }
 
+/// Detect a deployment on the host or dispatch to a protected host updater.
 pub fn run(args: &[OsString]) -> Result<()> {
     let (operation, args) = args
         .split_first()
@@ -40,11 +43,13 @@ pub fn run(args: &[OsString]) -> Result<()> {
     let operation = operation
         .to_str()
         .context("invalid deployment update operation")?;
-    match operation {
-        "detect" if args.is_empty() => (),
-        "server" | "connector" => (),
-        _ => bail!("expected deployment update detection, server, or connector"),
-    }
+    let target = match operation {
+        "client-check" if args.is_empty() => Some(Target::Client),
+        "detect" if args.is_empty() => None,
+        "server" => Some(Target::Server),
+        "connector" => Some(Target::Connector),
+        _ => bail!("expected deployment update detection, client-check, server, or connector"),
+    };
     if running_in_container() {
         return Err(container_error(operation));
     }
@@ -52,14 +57,12 @@ pub fn run(args: &[OsString]) -> Result<()> {
         .enable_all()
         .build()?
         .block_on(async {
-            match operation {
-                "detect" => {
+            match target {
+                None => {
                     println!("{}", detect_update_target().await?.name());
                     Ok(())
                 }
-                "server" => update_deployment(Target::Server, args).await,
-                "connector" => update_deployment(Target::Connector, args).await,
-                _ => unreachable!(),
+                Some(target) => update_deployment(target, args).await,
             }
         })
 }
@@ -70,6 +73,7 @@ fn container_error(operation: &str) -> anyhow::Error {
         ("server", _) => "sudo laneway update server".to_owned(),
         ("connector", Some(name)) => format!("sudo laneway update connector {name}"),
         ("connector", None) => "sudo laneway update connector laneway-connector-NAME".to_owned(),
+        ("client-check", _) => "sudo laneway update client".to_owned(),
         _ => "sudo laneway update".to_owned(),
     };
     anyhow::anyhow!("this container is managed by its deployment; on the host run: {command}")
@@ -80,16 +84,7 @@ fn validate_server_args(args: &[OsString]) -> Result<()> {
         [] => true,
         [tag] => tag
             .to_str()
-            .and_then(|tag| tag.strip_prefix('v'))
-            .is_some_and(|version| {
-                let parts = version.split('.');
-                parts.clone().count() == 3
-                    && parts.into_iter().all(|part| {
-                        !part.is_empty()
-                            && (part == "0" || !part.starts_with('0'))
-                            && part.bytes().all(|byte| byte.is_ascii_digit())
-                    })
-            }),
+            .is_some_and(laneway_protocol::fleet_updates::valid_version),
         _ => false,
     };
     ensure!(valid, "usage: laneway update server [vMAJOR.MINOR.PATCH]");
@@ -157,9 +152,16 @@ fn classify_container(
     {
         return ("server", None);
     }
-    let connector = matches!(binary, Some("laneway" | "laneway-compat" | "lanewayd"))
-        && first == "connector"
-        && second == "run";
+    let connector = matches!(
+        (binary, first, second),
+        (Some("laneway" | "laneway-compat"), "connector", "run")
+            | (Some("lanewayd" | "lanewayd-rs"), "--connector-state", _)
+            | (
+                Some("lanewayd" | "lanewayd-rs"),
+                "_rootless",
+                "connector-run"
+            )
+    );
     if connector || connector_state {
         return (
             "connector",
@@ -196,7 +198,13 @@ fn select_update_target(server: bool, connectors: Result<Vec<String>>) -> Result
 async fn update_deployment(target: Target, args: &[OsString]) -> Result<()> {
     let uid = effective_uid()?;
     match target {
-        Target::Client => unreachable!("client update uses the native updater"),
+        Target::Client => {
+            ensure!(
+                uid == 0,
+                "on the client host run: sudo laneway update client"
+            );
+            Ok(())
+        }
         Target::Server => {
             validate_server_args(args)?;
             ensure!(
@@ -360,6 +368,7 @@ fn run_helper(command: &mut Command) -> Result<()> {
         .env("PATH", TRUSTED_PATH)
         .env("HOME", "/root")
         .env("LANG", "C")
+        .current_dir("/")
         .status()
         .with_context(|| format!("run {}", command.get_program().to_string_lossy()))?;
     ensure!(
@@ -484,6 +493,16 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn server_accepts_an_optional_exact_stable_tag() {
+        assert!(validate_server_args(&[]).is_ok());
+        assert!(validate_server_args(&["v0.3.42".into()]).is_ok());
+        for tag in ["--help", "latest", "0.3.42", "v0.03.42", "v0.3.42-rc1"] {
+            assert!(validate_server_args(&[tag.into()]).is_err());
+        }
+        assert!(validate_server_args(&["v0.3.42".into(), "--help".into()]).is_err());
     }
 
     #[test]

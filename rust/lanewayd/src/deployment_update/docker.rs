@@ -1,6 +1,7 @@
 use std::{
     fmt, fs, io,
     os::unix::fs::{FileTypeExt, MetadataExt},
+    path::Path,
     time::Duration,
 };
 
@@ -33,6 +34,7 @@ pub(super) async fn local_managed_connectors(name: Option<&str>) -> Result<Vec<S
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(Unavailable(err.to_string()).into()),
     };
+    super::protected_parents(Path::new(DOCKER_SOCKET))?;
     ensure!(
         socket.file_type().is_socket() && socket.uid() == 0,
         "unsafe local Docker socket {DOCKER_SOCKET}"
@@ -45,11 +47,17 @@ pub(super) async fn local_managed_connectors(name: Option<&str>) -> Result<Vec<S
         .timeout(Duration::from_secs(3))
         .build()
         .context("initialize local Docker client")?;
+    tokio::time::timeout(Duration::from_secs(12), discover(&client, name))
+        .await
+        .context("local Docker inspection timed out")?
+}
+
+async fn discover(client: &Client, name: Option<&str>) -> Result<Vec<String>> {
     let names = if let Some(name) = name {
         ensure!(valid_name(name), "invalid standard Connector name");
         vec![name.to_owned()]
     } else {
-        let listed = get_json(&client, LIST)
+        let listed = get_json(client, LIST)
             .await?
             .context("local Docker Engine does not expose the container list")?;
         listed_names(&listed)?
@@ -57,13 +65,10 @@ pub(super) async fn local_managed_connectors(name: Option<&str>) -> Result<Vec<S
     let mut managed = Vec::new();
     for name in names {
         let path = format!("/containers/{name}/json");
-        if let Some(row) = get_json(&client, &path).await?
+        if let Some(row) = get_json(client, &path).await?
             && is_standard_running(&row, &name)
         {
             managed.push(name);
-        }
-        if managed.len() == 2 {
-            break;
         }
     }
     Ok(managed)

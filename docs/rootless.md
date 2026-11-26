@@ -20,7 +20,7 @@ Run Laneway in your regular user account on Linux or macOS to give selected appl
 
 On first configuration, Laneway displays the username `local` and its generated password once. Save the password and configure the application to use SOCKS5 at `127.0.0.1:1080` with that username and password. Keep `laneway start` running while applications use the proxy. The proxy endpoint supports TCP CONNECT and UDP ASSOCIATE when the application's SOCKS5 implementation supports those operations.
 
-Private destinations still require an approved route and an ACL that permits this node's traffic. Ask the operator for the destination's private IP and port. A browser or other application may also need its own settings for name resolution.
+The userspace client carries traffic through an authenticated relay. Private destinations require an approved route and an ACL that permits this node's traffic. Ask the operator for the destination's private IP and port. A browser or other application may also need its own settings for name resolution.
 
 ## State and credentials
 
@@ -37,6 +37,12 @@ laneway credential remove app
 Adding a credential generates a password displayed once. Keep it in the application's credential store. To supply your own password, use `laneway credential add app --password-stdin` and provide it over standard input. Removing a credential disables its corresponding SOCKS5 sessions.
 
 Use `--state-dir DIRECTORY` on the configure, start, and credential commands to select a separate enrolled identity and credential set. Use `laneway start --listen 127.0.0.1:PORT` when port 1080 is already in use. Use `laneway start --proxy-only` to prevent the instance from forwarding other nodes' traffic to a locally assigned route.
+
+## Update or use system networking
+
+Run `laneway update client` from the installed CLI to update the per-user CLI and its matching runtime from a signed release. Existing credential and enrollment files stay in the state directory.
+
+For a Linux system tunnel, install the system package using `sh install.sh --system`. Then run `sudo laneway configure --system` with a native invitation and `sudo laneway start --system`. An existing service configuration can be selected with `--config PATH`.
 
 ## Run the Linux integration test
 

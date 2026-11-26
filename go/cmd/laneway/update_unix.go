@@ -152,7 +152,9 @@ func installedUpdateVerifier() string {
 func updateExecutableVersion(path, argument string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, argument).Output()
+	command := exec.CommandContext(ctx, path, argument)
+	command.Env = []string{"PATH=/usr/bin:/bin", "LANG=C"}
+	out, err := command.Output()
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -221,6 +223,10 @@ func installUserClientUpdate(bin, candidate, daemon, version string) (result err
 		if err := copyUpdateBinary(entry.source, entry.dest); err != nil {
 			return err
 		}
+	}
+	// Keep the same recovery marker as the shared shell installer.
+	if err := os.WriteFile(filepath.Join(lock, "publishing"), nil, 0o600); err != nil {
+		return err
 	}
 	if err := os.Rename(daemonStage, daemonTarget); err != nil {
 		return err

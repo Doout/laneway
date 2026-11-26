@@ -19,7 +19,7 @@ path = "src/managed_update_main.rs"
 anyhow.workspace = true
 arc-swap.workspace = true
 argon2 = "0.5"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
 bytes.workspace = true
 crossbeam-queue.workspace = true
 getrandom.workspace = true
