@@ -2148,17 +2148,14 @@ EOF
     sed -n '1,260p' "${case_dir}/client-renewed.log" >&2
     return 1
   fi
-  # The peer receives a release for the retired session and a binding for the
-  # replacement on its control stream. Allow that ordered handoff to reach the
-  # peer before exercising bidirectional data traffic.
-  sleep 1
+  # Keep the echo server available for retries if the first reply is lost.
   start_process "${lan_host}" "${case_dir}/renewed-server.log" "${work_dir}/netprobe" \
-    udp-server -listen 192.168.60.2:9403
+    udp-server -listen 192.168.60.2:9403 -max-packets 0
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/renewed-server.log" "ready=udp-server"
   ip netns exec "${client}" "${work_dir}/netprobe" udp-client \
     -target 192.168.60.2:9403 -message renewed-subnet
-  wait "${server_pid}"
+  stop_process "${server_pid}"
   grep -q 'remote=192.168.60.1:' "${case_dir}/renewed-server.log"
 
   echo "==> revoking only the old serial preserves renewed traffic and rejects the old pair"
@@ -2215,12 +2212,12 @@ EOF
     return 1
   fi
   start_process "${lan_host}" "${case_dir}/renewed-after-revoke-server.log" "${work_dir}/netprobe" \
-    udp-server -listen 192.168.60.2:9404
+    udp-server -listen 192.168.60.2:9404 -max-packets 0
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/renewed-after-revoke-server.log" "ready=udp-server"
   ip netns exec "${client}" "${work_dir}/netprobe" udp-client \
     -target 192.168.60.2:9404 -message renewed-after-old-revoke
-  wait "${server_pid}"
+  stop_process "${server_pid}"
   grep -q 'remote=192.168.60.1:' "${case_dir}/renewed-after-revoke-server.log"
 
   echo "==> deleting the controller ACL fails closed while the kernel route remains installed"

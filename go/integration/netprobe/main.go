@@ -148,13 +148,13 @@ func certificateInfo(args []string) error {
 func udpServer(args []string) error {
 	fs := flag.NewFlagSet("udp-server", flag.ContinueOnError)
 	listen := fs.String("listen", "", "UDP listen address")
-	maxPackets := fs.Int("max-packets", 1, "maximum packets to echo before exiting")
+	maxPackets := fs.Int("max-packets", 1, "maximum packets to echo before exiting (0 runs until stopped or the deadline)")
 	timeout := fs.Duration("timeout", 20*time.Second, "overall probe deadline")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *maxPackets <= 0 {
-		return fmt.Errorf("max-packets must be positive")
+	if *maxPackets < 0 {
+		return errors.New("max-packets must be nonnegative")
 	}
 	if *timeout <= 0 || *timeout > 5*time.Minute {
 		return errors.New("UDP server deadline must be between zero and five minutes")
@@ -173,7 +173,7 @@ func udpServer(args []string) error {
 		return err
 	}
 	buffer := make([]byte, 2048)
-	for packet := 0; packet < *maxPackets; packet++ {
+	for packet := 0; *maxPackets == 0 || packet < *maxPackets; packet++ {
 		n, remote, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			return err
