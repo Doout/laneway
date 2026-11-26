@@ -24,7 +24,9 @@ const MAX_ARCHIVE: usize = 256 << 20;
 const MAX_EXPANDED: u64 = 512 << 20;
 const MAX_BINARY: u64 = 128 << 20;
 const MEMBER: &[u8] = b"laneway/sbin/lanewayd-rs";
-const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
+pub(super) const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge";
+pub(super) const LEGACY_CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
+const NODE_IMAGE: &str = "ghcr.io/doout/laneway-node";
 
 pub(super) fn compare_versions(target: &str, previous: &str) -> Result<Ordering> {
     fn numbers(value: &str) -> Result<Vec<u64>> {
@@ -118,25 +120,39 @@ pub(super) async fn connector_image(tag: &str, directory: &Path) -> Result<Strin
     Ok(reference)
 }
 
-fn connector_subject(manifest: &str) -> Result<String> {
-    let mut matches = manifest.lines().filter(|line| {
-        line.split_once('@')
-            .is_some_and(|(repository, _)| repository == CONNECTOR_IMAGE)
+fn image_subject<'a>(manifest: &'a str, repository: &str) -> Result<Option<&'a str>> {
+    let mut entries = manifest.lines().filter_map(|line| {
+        let (name, digest) = line.split_once('@')?;
+        (name == repository).then_some((line, digest))
     });
-    let line = matches
-        .next()
-        .context("release has no Rust connector image")?;
-    let digest = line
-        .strip_prefix(CONNECTOR_IMAGE)
-        .and_then(|s| s.strip_prefix("@sha256:"));
+    let Some((line, digest)) = entries.next() else {
+        return Ok(None);
+    };
     ensure!(
-        matches.next().is_none()
-            && digest.is_some_and(|d| d.len() == 64
-                && d.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
-        "release has no unique canonical Rust connector digest"
+        entries.next().is_none()
+            && digest.strip_prefix("sha256:").is_some_and(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    && value.bytes().any(|byte| byte != b'0')
+            }),
+        "release has no unique valid digest for {repository}"
     );
-    Ok(line.into())
+    Ok(Some(line))
+}
+
+fn connector_subject(manifest: &str) -> Result<String> {
+    // The canonical inventory includes a standalone node image. Releases
+    // that published a Go connector under the same name lacked that entry.
+    let repository = if image_subject(manifest, NODE_IMAGE)?.is_some() {
+        CONNECTOR_IMAGE
+    } else {
+        LEGACY_CONNECTOR_IMAGE
+    };
+    Ok(image_subject(manifest, repository)?
+        .context("release has no Rust connector image")?
+        .to_owned())
 }
 
 fn github_client() -> Result<reqwest::Client> {
@@ -460,15 +476,24 @@ mod tests {
     }
 
     #[test]
-    fn rust_connector_manifest_never_selects_the_go_image() {
-        let go = format!("ghcr.io/doout/lane-edge@sha256:{}", "a".repeat(64));
-        let native = format!("{CONNECTOR_IMAGE}@sha256:{}", "b".repeat(64));
+    fn connector_manifest_selects_the_image_for_its_release_layout() {
+        let canonical = format!("{CONNECTOR_IMAGE}@sha256:{}", "a".repeat(64));
+        let legacy = format!("{LEGACY_CONNECTOR_IMAGE}@sha256:{}", "b".repeat(64));
+        let node = format!("{NODE_IMAGE}@sha256:{}", "c".repeat(64));
+
         assert_eq!(
-            connector_subject(&format!("{go}\n{native}\n")).unwrap(),
-            native
+            connector_subject(&format!("{canonical}\n{legacy}")).unwrap(),
+            legacy
         );
-        assert!(connector_subject(&go).is_err());
-        assert!(connector_subject(&format!("{native}\n{CONNECTOR_IMAGE}@invalid")).is_err());
+        assert!(connector_subject(&canonical).is_err());
+        assert_eq!(
+            connector_subject(&format!("{node}\n{canonical}")).unwrap(),
+            canonical
+        );
+        assert!(
+            connector_subject(&format!("{node}\n{canonical}\n{CONNECTOR_IMAGE}@invalid")).is_err()
+        );
+        assert!(connector_subject(&format!("{node}\n{NODE_IMAGE}@invalid\n{canonical}")).is_err());
     }
 
     fn archive(entries: &[(tar::EntryType, &[u8])]) -> Vec<u8> {

@@ -193,7 +193,7 @@ curl --fail --silent --show-error --proto '=https' --tlsv1.3 --max-time 15 "$url
 unset key
 connector_digest=$(sed -n 's/^LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=//p' "$destination/.env")
 [[ $connector_digest =~ ^sha256:[a-f0-9]{64}$ ]]
-docker inspect "$connector" | jq -e --arg image "ghcr.io/doout/lane-edge-rust:${tag#v}@$connector_digest" '
+docker inspect "$connector" | jq -e --arg image "ghcr.io/doout/lane-edge:${tag#v}@$connector_digest" '
   .[0].Config | .Image == $image and
   all(.Env[]; (startswith("SETUP_TOKEN") or startswith("ENROLLMENT_TOKEN")) | not)
 ' >/dev/null
@@ -232,7 +232,7 @@ relay_id=$(setting LANEWAY_RELAY_SERVICE_ID)
 exit_digest=$(setting LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST)
 [[ $network_id =~ ^[a-f0-9]{32}$ && $controller_id =~ ^[a-f0-9]{32}$ &&
   $relay_id =~ ^[a-f0-9]{32}$ && $exit_digest =~ ^sha256:[a-f0-9]{64}$ ]]
-exit_image="ghcr.io/doout/laneway-exit-node-rust:${tag#v}@$exit_digest"
+exit_image="ghcr.io/doout/laneway-exit-node:${tag#v}@$exit_digest"
 laneway=/usr/local/bin/laneway
 pki="$destination/generated/pki"
 remote=(--controller "https://127.0.0.1:$(setting LANEWAY_CONTROLLER_PORT)"

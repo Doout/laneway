@@ -8,13 +8,13 @@ const OLD: &str = "1111111111111111111111111111111111111111111111111111111111111
 const NEW: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const TAG: &str = "v1.2.4";
 const PREVIOUS: &str = "v1.2.3";
-const IMAGE: &str = "ghcr.io/doout/lane-edge-rust@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const IMAGE: &str = "ghcr.io/doout/lane-edge@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn inspect_fixture() -> Value {
     json!({
         "Id":OLD, "Name":format!("/{NAME}"), "State":{"Running":true},
         "Config":{
-            "Image":IMAGE, "Hostname":"connector-lab", "User":"65532:65532",
+            "Image":IMAGE.replacen("lane-edge@", "lane-edge-rust@", 1), "Hostname":"connector-lab", "User":"65532:65532",
             "Entrypoint":["/usr/local/bin/laneway"], "Cmd":["connector","run"],
             "Env":["PATH=/usr/bin"], "Labels":{"org.opencontainers.image.version":"1.2.3"},
         },

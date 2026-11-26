@@ -27,7 +27,8 @@ case "$1" in
     case "$6" in
       "${REJECT_IMAGE:-}"@*) exit 1 ;;
       ghcr.io/doout/laneway-controller-rust@sha256:*|ghcr.io/doout/laneway-relay-rust@sha256:*|ghcr.io/doout/laneway-exit-node-rust@sha256:*|\
-      ghcr.io/doout/laneway-admin@sha256:*|ghcr.io/doout/lane-edge-rust@sha256:*|ghcr.io/doout/laneway-node-rust@sha256:*) ;;
+      ghcr.io/doout/laneway-admin@sha256:*|ghcr.io/doout/laneway-controller@sha256:*|ghcr.io/doout/laneway-relay@sha256:*|\
+      ghcr.io/doout/laneway-exit-node@sha256:*|ghcr.io/doout/lane-edge@sha256:*|ghcr.io/doout/laneway-node@sha256:*) ;;
       *) exit 1 ;;
     esac
     ;;
@@ -60,7 +61,7 @@ reject() {
 verify v0.0.9103
 printf '%s\n' LANEWAY_RUST_VERSION=0.0.9103 \
   "LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=sha256:$one" "LANEWAY_RUST_RELAY_IMAGE_DIGEST=sha256:$two" \
-  "LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:$three" | diff - settings
+  "LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:$three" LANEWAY_RUST_IMAGE_SUFFIX=-rust | diff - settings
 reject v0.0.9104 'checksum signature did not match'
 reject v0.0.9103-test 'expected a stable release tag'
 printf '[bootstrap]\n' > metadata/bootstrap-artifacts.toml
@@ -69,14 +70,14 @@ printf '[bootstrap]\n' > metadata/bootstrap-artifacts.toml
   else shasum -a 256 bootstrap-artifacts.toml; fi >> checksums.txt
 )
 sh "$root/deploy/compose/verify-rust-release.sh" --prepare v0.0.9103 metadata > candidate
-tail -n +5 candidate | diff - metadata/bootstrap-artifacts.toml
+tail -n +6 candidate | diff - metadata/bootstrap-artifacts.toml
 mkdir published
 cp metadata/checksums.sigstore.json metadata/bootstrap-artifacts.toml published/
 write_published_images() {
-  write_images
+  write_images | sed 's/-rust@/@/'
   printf 'ghcr.io/doout/laneway-admin@sha256:%s\n' "$one"
-  printf 'ghcr.io/doout/lane-edge-rust@sha256:%s\n' "$two"
-  printf 'ghcr.io/doout/laneway-node-rust@sha256:%s\n' "$three"
+  printf 'ghcr.io/doout/lane-edge@sha256:%s\n' "$two"
+  printf 'ghcr.io/doout/laneway-node@sha256:%s\n' "$three"
 }
 verify_published() (
   cd published
@@ -87,7 +88,7 @@ verify_published() (
 write_published_images > published/image-digests.txt
 verify_published > settings
 grep -Fx "LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=sha256:$two" settings >/dev/null
-for image in laneway-controller-rust laneway-relay-rust laneway-exit-node-rust laneway-admin lane-edge-rust laneway-node-rust; do
+for image in laneway-controller laneway-relay laneway-exit-node laneway-admin lane-edge laneway-node; do
   if REJECT_IMAGE="ghcr.io/doout/$image" verify_published > settings 2> diagnostic; then
     echo "publication accepted an invalid image signature: $image" >&2
     exit 1
@@ -96,7 +97,7 @@ for image in laneway-controller-rust laneway-relay-rust laneway-exit-node-rust l
   grep -F "image signature did not match v0.0.9103: ghcr.io/doout/$image" diagnostic >/dev/null ||
     { cat diagnostic >&2; exit 1; }
 done
-printf 'ghcr.io/doout/laneway-relay@sha256:%s\n' "$one" >> published/image-digests.txt
+printf 'ghcr.io/doout/laneway-relay-rust@sha256:%s\n' "$one" >> published/image-digests.txt
 if verify_published > settings 2> diagnostic; then
   echo "publication accepted an extra legacy runtime" >&2
   exit 1

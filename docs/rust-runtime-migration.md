@@ -533,8 +533,7 @@ Repeat on a disposable rootful Linux Docker host with `iproute2`, `iptables`,
 `iputils-ping`, and `nftables`:
 
 ```sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=rust \
-  ./integration/docker-plugin.sh
+sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-plugin.sh
 ```
 
 The same rootful ARM64 lab also exercised `docker plugin upgrade` from Go to
@@ -545,16 +544,9 @@ by Rust after the upgrade. Both containers passed packet probes after rollback;
 this verifies state and post-switch traffic, not uninterrupted packet delivery
 during plugin disable/enable.
 
-Run the upgrade gate on an isolated host with `curl` and `jq` in addition to
-the forwarding test tools:
-
-```sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 LANEWAY_DOCKER_PLUGIN_RUNTIME=go \
-  LANEWAY_DOCKER_PLUGIN_UPGRADE=1 ./integration/docker-plugin.sh
-```
-
-This migration check is historical and not a release gate. Rolling back to
-Go also rolls back Rust's kernel-enforced grant expiry.
+The managed plugin now builds from Rust only. The earlier Go-to-Rust
+upgrade and rollback fixture remains available in historical revisions.
+Rolling back to the Go plugin also rolls back Rust's kernel-enforced grant expiry.
 
 ## Linux node image
 
@@ -1309,7 +1301,7 @@ CA. Only the standard non-root, read-only Rust Connector with
 or copy setup-token settings. It uses the current node certificate from the
 selected container, not shared administrator or registry credentials.
 
-The release workflow publishes `ghcr.io/doout/lane-edge-rust`.
+The release workflow publishes `ghcr.io/doout/lane-edge`.
 A Connector update verifies both the signed
 release manifest and the native image's digest signature. It runs an offline,
 read-only state preflight before stopping the old container. After a swap,

@@ -87,23 +87,23 @@ if sed -n 's/^[[:space:]]*\(- \)\{0,1\}uses: \([^ #]*\).*/\2/p' "$workflow" |
   exit 1
 fi
 
-expected_images='ghcr.io/doout/lane-edge-rust
+expected_images='ghcr.io/doout/lane-edge
 ghcr.io/doout/laneway-admin
-ghcr.io/doout/laneway-controller-rust
-ghcr.io/doout/laneway-exit-node-rust
-ghcr.io/doout/laneway-node-rust
-ghcr.io/doout/laneway-relay-rust'
+ghcr.io/doout/laneway-controller
+ghcr.io/doout/laneway-exit-node
+ghcr.io/doout/laneway-node
+ghcr.io/doout/laneway-relay'
 actual_images=$(awk '$1 == "image:" && $2 ~ /^ghcr\.io\/doout\// { print $2 }' "$workflow" | LC_ALL=C sort)
 if [ "$actual_images" != "$expected_images" ]; then
   echo "tagged releases must publish exactly the Rust runtime images and the operator image" >&2
   exit 1
 fi
 require_release_target ghcr.io/doout/laneway-admin admin
-require_release_target ghcr.io/doout/laneway-controller-rust controller
-require_release_target ghcr.io/doout/laneway-relay-rust relay
-require_release_target ghcr.io/doout/laneway-node-rust node
-require_release_target ghcr.io/doout/laneway-exit-node-rust rust-exit
-require_release_target ghcr.io/doout/lane-edge-rust rust-connector
+require_release_target ghcr.io/doout/laneway-controller controller
+require_release_target ghcr.io/doout/laneway-relay relay
+require_release_target ghcr.io/doout/laneway-node node
+require_release_target ghcr.io/doout/laneway-exit-node rust-exit
+require_release_target ghcr.io/doout/lane-edge rust-connector
 if grep -F 'BINARY=' "$workflow" >/dev/null || grep -F 'matrix.binary' "$workflow" >/dev/null; then
   echo "release images must use fixed Docker targets instead of a free-form binary argument" >&2
   exit 1
@@ -255,7 +255,7 @@ if grep -Ei 'setup-qemu|tonistiigi/binfmt|fetch-tags:' "$workflow" >/dev/null; t
   exit 1
 fi
 require 'bootstrap-artifacts.toml ephemeral-exit-bootstrap.sh image-digests.txt install.sh' "$workflow"
-for image in laneway-controller-rust laneway-relay-rust laneway-node-rust laneway-exit-node-rust; do
+for image in laneway-controller laneway-relay laneway-node laneway-exit-node; do
   require "image: ghcr.io/doout/$image" "$workflow"
 done
 
@@ -381,11 +381,11 @@ require '--target relay --build-arg VERSION=ci' "$ci_workflow"
 require '--target admin --build-arg VERSION=ci' "$ci_workflow"
 require 'docker run --rm --network none laneway-controller:ci -version' "$ci_workflow"
 require 'docker run --rm --network none laneway-relay:ci -version' "$ci_workflow"
-require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge-rust:ci laneway-exit-node:ci' "$ci_workflow"
-require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge-rust:ci -c true; then' "$ci_workflow"
-require './integration/connector-bootstrap.sh lane-edge-rust:ci' "$ci_workflow"
-require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci' "$ci_workflow"
-require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:ci tcp-fallback' "$ci_workflow"
+require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci' "$ci_workflow"
+require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then' "$ci_workflow"
+require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci tcp-fallback' "$ci_workflow"
 require './integration/connector-updater.sh' "$ci_workflow"
 require './integration/administrator-lifecycle.sh' "$ci_workflow"
 if ! grep -Eq '^[[:space:]]+\./integration/administrator-lifecycle\.sh[[:space:]]*$' "$ci_workflow" ||

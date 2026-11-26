@@ -583,9 +583,13 @@ fn profile(row: &Value, id: &str, name: &str) -> Result<Profile> {
 }
 
 fn official_rust_image(value: &str) -> bool {
-    value
-        .strip_prefix("ghcr.io/doout/lane-edge-rust")
-        .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with("@sha256:"))
+    [
+        super::release::CONNECTOR_IMAGE,
+        super::release::LEGACY_CONNECTOR_IMAGE,
+    ]
+    .iter()
+    .filter_map(|repository| value.strip_prefix(repository))
+    .any(|suffix| suffix.starts_with(':') || suffix.starts_with("@sha256:"))
 }
 
 async fn pull(docker: &impl Docker, image: &str, volume: &str) -> Result<()> {
