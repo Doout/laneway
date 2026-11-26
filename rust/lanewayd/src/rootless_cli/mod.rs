@@ -54,6 +54,9 @@ enum Command {
         /// Configure the node for Linux system networking.
         #[arg(long)]
         system: bool,
+        /// Abandon an interrupted enrollment without changing an existing identity.
+        #[arg(long)]
+        discard_pending: bool,
     },
     /// Run authenticated SOCKS5 and userspace subnet forwarding.
     #[command(visible_alias = "start")]
@@ -207,7 +210,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         .command
         .unwrap_or_else(|| Command::Run(RunOptions::default()));
     let system_mode = match &command {
-        Command::Enroll { system } | Command::Configure { system } => *system,
+        Command::Enroll { system } | Command::Configure { system, .. } => *system,
         Command::Run(options) => options.system,
         Command::Credential { .. } => false,
     };
@@ -244,7 +247,18 @@ async fn run_cli(cli: Cli) -> Result<()> {
             let identity = enroll::activate(&state, &token).await?;
             println!("Enrolled {} ({})", identity.name, identity.node_id);
         }
-        Command::Configure { .. } => setup::configure(&state, system_mode).await?,
+        Command::Configure {
+            discard_pending: true,
+            ..
+        } => {
+            enroll::discard_pending_enrollment(&state)?;
+        }
+        Command::Configure {
+            discard_pending: false,
+            ..
+        } => {
+            setup::configure(&state, system_mode).await?;
+        }
         Command::Run(options) if system_mode => {
             system::run_enrolled(&state, options.check_config).await?
         }
@@ -259,6 +273,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
             enroll::clean_staged_tls(&state)?;
             let identity = enroll::Identity::load(&state)
                 .context("load node identity; enroll before running")?;
+            enroll::discard_completed_enrollment(&state);
             let listen = listen.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 1080)));
             tokio::select! {
                 result = runtime::run(identity, database, (!no_proxy).then_some(listen), !proxy_only) => result?,

@@ -25,20 +25,6 @@ fn pair(kind: libc::c_int) -> (OwnedFd, OwnedFd) {
     (client, server)
 }
 
-#[test]
-fn sets_close_on_exec_for_inherited_control_descriptor() {
-    let (_client, server) = pair(libc::SOCK_SEQPACKET);
-    let inherited =
-        socket::syscall(unsafe { libc::fcntl(server.as_raw_fd(), libc::F_DUPFD, 10) }).unwrap();
-    let inherited = unsafe { OwnedFd::from_raw_fd(inherited) };
-    let flags =
-        || socket::syscall(unsafe { libc::fcntl(inherited.as_raw_fd(), libc::F_GETFD) }).unwrap();
-    assert_eq!(flags() & libc::FD_CLOEXEC, 0);
-    let channel = socket::Channel::open(inherited.as_fd()).unwrap();
-    drop(channel);
-    assert_ne!(flags() & libc::FD_CLOEXEC, 0);
-}
-
 fn reply(channel: &OwnedFd) -> (Value, Option<OwnedFd>) {
     let mut bytes = [0u8; 8192];
     let mut control = [0usize; 8];
@@ -140,19 +126,15 @@ const SETUP: &[u8] = br#"{"version":1,"id":1,"op":"setup","setup":{"name":"lane0
 #[test]
 fn go_wire_setup_routes_restore_and_descriptor_handoff() {
     let (client, server) = pair(libc::SOCK_SEQPACKET);
-    let sender = socket::Channel::open(client.as_fd()).unwrap();
+    let sender = socket::Channel::open(client.try_clone().unwrap()).unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let backend = Fixture(Arc::clone(&events));
     let harden_events = Arc::clone(&events);
     let handle = thread::spawn(move || {
-        serve(
-            socket::Channel::open(server.as_fd()).unwrap(),
-            backend,
-            || {
-                harden_events.lock().unwrap().push("harden");
-                Ok(())
-            },
-        )
+        serve(socket::Channel::open(server).unwrap(), backend, || {
+            harden_events.lock().unwrap().push("harden");
+            Ok(())
+        })
     });
 
     sender.write(SETUP, None).unwrap();
@@ -199,12 +181,12 @@ fn go_wire_setup_routes_restore_and_descriptor_handoff() {
 #[test]
 fn rejects_stream_peer_and_requests_with_rights_or_truncation() {
     let (_client, server) = pair(libc::SOCK_STREAM);
-    assert!(socket::Channel::open(server.as_fd()).is_err());
+    assert!(socket::Channel::open(server).is_err());
 
     for (bytes, rights) in [(SETUP.to_vec(), true), (vec![b'x'; MAX_MESSAGE + 1], false)] {
         let (client, server) = pair(libc::SOCK_SEQPACKET);
-        let sender = socket::Channel::open(client.as_fd()).unwrap();
-        let reader = socket::Channel::open(server.as_fd()).unwrap();
+        let sender = socket::Channel::open(client.try_clone().unwrap()).unwrap();
+        let reader = socket::Channel::open(server).unwrap();
         let file = File::open("/dev/null").unwrap();
         sender.write(&bytes, rights.then(|| file.as_fd())).unwrap();
         assert!(reader.read(&mut [0; MAX_MESSAGE]).is_err());
@@ -215,18 +197,14 @@ fn rejects_stream_peer_and_requests_with_rights_or_truncation() {
 fn peer_death_or_hardening_failure_restores_session() {
     for hardening_fails in [false, true] {
         let (client, server) = pair(libc::SOCK_SEQPACKET);
-        let sender = socket::Channel::open(client.as_fd()).unwrap();
+        let sender = socket::Channel::open(client.try_clone().unwrap()).unwrap();
         let events = Arc::new(Mutex::new(Vec::new()));
         let backend = Fixture(Arc::clone(&events));
         let handle = thread::spawn(move || {
-            serve(
-                socket::Channel::open(server.as_fd()).unwrap(),
-                backend,
-                || {
-                    ensure!(!hardening_fails, "fixture hardening failed");
-                    Ok(())
-                },
-            )
+            serve(socket::Channel::open(server).unwrap(), backend, || {
+                ensure!(!hardening_fails, "fixture hardening failed");
+                Ok(())
+            })
         });
         sender.write(SETUP, None).unwrap();
         let (response, descriptor) = reply(&client);
@@ -257,16 +235,11 @@ fn rejects_invalid_operation_json_without_backend_mutation() {
 #[test]
 fn malformed_close_is_terminal_and_acknowledges_after_restore() {
     let (client, server) = pair(libc::SOCK_SEQPACKET);
-    let sender = socket::Channel::open(client.as_fd()).unwrap();
+    let sender = socket::Channel::open(client.try_clone().unwrap()).unwrap();
     let events = Arc::new(Mutex::new(Vec::new()));
     let backend = Fixture(Arc::clone(&events));
-    let handle = thread::spawn(move || {
-        serve(
-            socket::Channel::open(server.as_fd()).unwrap(),
-            backend,
-            || Ok(()),
-        )
-    });
+    let handle =
+        thread::spawn(move || serve(socket::Channel::open(server).unwrap(), backend, || Ok(())));
     sender.write(SETUP, None).unwrap();
     assert_eq!(reply(&client).0["ok"], true);
     sender
@@ -288,7 +261,7 @@ fn rejects_even_connected_seqpacket_sockets_with_a_named_endpoint() {
     };
     let listener = create();
     let client = create();
-    assert!(socket::Channel::open(client.as_fd()).is_err());
+    assert!(socket::Channel::open(client.try_clone().unwrap()).is_err());
     let mut address: libc::sockaddr_un = unsafe { mem::zeroed() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     // A Linux abstract name creates no filesystem entry.
@@ -311,6 +284,6 @@ fn rejects_even_connected_seqpacket_sockets_with_a_named_endpoint() {
     })
     .unwrap();
     let server = unsafe { OwnedFd::from_raw_fd(server) };
-    assert!(socket::Channel::open(client.as_fd()).is_err());
-    assert!(socket::Channel::open(server.as_fd()).is_err());
+    assert!(socket::Channel::open(client.try_clone().unwrap()).is_err());
+    assert!(socket::Channel::open(server).is_err());
 }

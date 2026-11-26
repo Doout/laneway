@@ -1306,6 +1306,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-queue",
+ "fastrand",
  "ipnet",
  "laneway-protocol",
  "laneway-relay",
@@ -1383,6 +1384,7 @@ dependencies = [
 name = "laneway-healthcheck"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rustls",
  "rustls-pemfile",
  "tempfile",

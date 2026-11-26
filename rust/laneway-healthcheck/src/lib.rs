@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     io,
     net::{Ipv4Addr, SocketAddrV4},
     process::ExitCode,
@@ -77,7 +78,7 @@ async fn probe(target: Target, deadline: Duration) -> io::Result<()> {
     timeout(deadline, async {
         match target {
             Target::Tcp(address) => TcpStream::connect(address).await.map(drop),
-            Target::Tls(address, ca, name) => tls_probe(address, &ca, name).await,
+            Target::Tls(address, ca, name) => tls_probe(address, ca, name).await,
             #[cfg(unix)]
             Target::Unix(path) => status(&path).await,
         }
@@ -85,19 +86,26 @@ async fn probe(target: Target, deadline: Duration) -> io::Result<()> {
     .await?
 }
 
-async fn tls_probe(
-    address: SocketAddrV4,
-    ca: &str,
-    name: rustls::pki_types::ServerName<'static>,
-) -> io::Result<()> {
-    use std::{io::Read, sync::Arc};
-    let file = std::fs::File::open(ca)?;
+fn load_ca(ca: &str) -> io::Result<rustls::RootCertStore> {
+    use std::{fs::OpenOptions, io::Read};
+
+    const MAX_CA_BYTES: usize = 65536;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Check the opened descriptor without getting stuck opening a FIFO.
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(ca)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::other("CA bundle must be a regular file"));
     }
     let mut data = Vec::new();
-    file.take(65537).read_to_end(&mut data)?;
-    if data.len() > 65536 {
+    file.take(MAX_CA_BYTES as u64 + 1).read_to_end(&mut data)?;
+    if data.len() > MAX_CA_BYTES {
         return Err(io::Error::other("CA bundle too large"));
     }
     let mut roots = rustls::RootCertStore::empty();
@@ -107,6 +115,19 @@ async fn tls_probe(
     if roots.is_empty() {
         return Err(io::Error::other("no trust anchors in CA bundle"));
     }
+    Ok(roots)
+}
+
+async fn tls_probe(
+    address: SocketAddrV4,
+    ca: String,
+    name: rustls::pki_types::ServerName<'static>,
+) -> io::Result<()> {
+    use std::sync::Arc;
+
+    let roots = tokio::task::spawn_blocking(move || load_ca(&ca))
+        .await
+        .map_err(io::Error::other)??;
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -121,15 +142,25 @@ async fn tls_probe(
         .map(drop)
 }
 
-#[tokio::main(flavor = "current_thread")]
-pub async fn run(command: &str, args: impl Iterator<Item = String>) -> ExitCode {
+fn run_probe(probe: impl Future<Output = io::Result<()>>) -> io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(probe);
+    // A filesystem syscall can outlive the probe deadline. The standalone
+    // healthcheck must return to main without waiting for the blocking pool.
+    runtime.shutdown_background();
+    result
+}
+
+pub fn run(command: &str, args: impl Iterator<Item = String>) -> ExitCode {
     let Some(target) = target(args) else {
         eprintln!(
             "usage: {command} (-tcp 127.0.0.1:PORT [-tls-ca PATH -tls-server-name NAME] | -unix /absolute/socket)"
         );
         return ExitCode::FAILURE;
     };
-    match probe(target, Duration::from_secs(2)).await {
+    match run_probe(probe(target, Duration::from_secs(2))) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{command}: {error}");
@@ -166,6 +197,56 @@ mod tests {
         ] {
             assert!(target(args.into_iter().map(String::from)).is_none());
         }
+    }
+
+    #[test]
+    fn timed_out_probe_does_not_wait_for_a_running_blocking_task() {
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let result = run_probe(async {
+            let worker = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                // Bound cleanup even if runtime shutdown regresses.
+                let _ = blocked.recv_timeout(Duration::from_secs(3));
+            });
+            running.await.unwrap();
+            timeout(Duration::from_millis(25), worker)
+                .await?
+                .map_err(io::Error::other)
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        release
+            .send(())
+            .expect("probe waited for its blocking task");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_unopened_ca_fifo_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("ca.pem");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let parsed = target(
+            [
+                "-tcp",
+                "127.0.0.1:1",
+                "-tls-ca",
+                fifo.to_str().unwrap(),
+                "-tls-server-name",
+                "localhost",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        let error = run_probe(probe(parsed, Duration::from_secs(2))).unwrap_err();
+        assert_eq!(error.to_string(), "CA bundle must be a regular file");
     }
 
     #[cfg(unix)]

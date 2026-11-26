@@ -33,6 +33,7 @@ pub(crate) async fn configure(state: &Path, system: bool) -> Result<()> {
             enroll::activate(state, &invitation).await?
         }
     };
+    enroll::discard_completed_enrollment(state);
     println!("Configured {} ({})", identity.name, identity.node_id);
     if !system && let Some(key) = credentials::initial_key(&state.join("credentials.json"))? {
         println!("SOCKS5 username: local\nSOCKS5 password (shown once): {key}");

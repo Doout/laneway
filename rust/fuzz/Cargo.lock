@@ -275,6 +275,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "serde",
  "thiserror",
  "x509-parser",
 ]

@@ -20,6 +20,8 @@ Run Laneway in your regular user account on Linux or macOS to give selected appl
 
 On first configuration, Laneway displays the username `local` and its generated password once. Save the password and configure the application to use SOCKS5 at `127.0.0.1:1080` with that username and password. Keep `laneway start` running while applications use the proxy. The proxy endpoint supports TCP CONNECT and UDP ASSOCIATE when the application's SOCKS5 implementation supports those operations.
 
+If setup is interrupted, run `laneway configure` again with the same invitation. Laneway saves the original keys and request in the private state directory and asks the controller to recover the enrollment. A controller that predates enrollment recovery can report that the invitation was already used. If the invitation is permanently refused or unavailable, ask your network operator to check whether a node was created and to issue a fresh invitation. Run `laneway configure --discard-pending` before using the replacement invitation. This abandons the local pending request and preserves any configured identity and proxy credentials. Repeat any `--state-dir` or Linux `--system` option from the original configuration.
+
 The userspace client carries traffic through an authenticated relay. Private destinations require an approved route and an ACL that permits this node's traffic. Ask the operator for the destination's private IP and port. A browser or other application may also need its own settings for name resolution.
 
 ## State and credentials

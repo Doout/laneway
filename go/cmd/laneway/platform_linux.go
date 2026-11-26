@@ -51,7 +51,7 @@ func runInstalledSystem(workflow string, args []string) error {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		switch workflow {
 		case "configure":
-			fmt.Println("Usage: sudo laneway configure --system\nRead an st1 enrollment token from standard input.")
+			fmt.Println("Usage: sudo laneway configure --system [--discard-pending]\nRead an st1 enrollment token from standard input, or discard a pending enrollment.")
 		case "start":
 			fmt.Println("Usage: sudo laneway start --system [--config PATH] [--check-config]")
 		}

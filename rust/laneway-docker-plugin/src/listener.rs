@@ -17,11 +17,14 @@ use serde_json::json;
 use tokio::{
     net::{UnixListener, UnixStream},
     sync::Semaphore,
-    task::JoinSet,
+    task::{JoinHandle, JoinSet},
     time::{MissedTickBehavior, interval, timeout},
 };
 
 use crate::{Backend, Driver, Error, Reply, Result, conflict};
+
+const MAX_CONNECTIONS: usize = 32;
+const MAX_REQUEST_WORKERS: usize = 32;
 
 /// Reserve the socket before mutating host state. Serve requests only after
 /// the driver has reconciled all recorded networks.
@@ -43,7 +46,8 @@ pub async fn serve_until<B: Backend + 'static>(
         .await
         .map_err(worker_error)??;
     fs::set_permissions(path, Permissions::from_mode(0o660))?;
-    let permits = Arc::new(Semaphore::new(32));
+    let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let workers = Arc::new(Semaphore::new(MAX_REQUEST_WORKERS));
     let mut connections = JoinSet::new();
     let mut authorization_check = JoinSet::new();
     let mut refresh = interval(Duration::from_secs(3));
@@ -71,9 +75,12 @@ pub async fn serve_until<B: Backend + 'static>(
                 let (stream, _) = next?;
                 let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else { continue; };
                 let driver = Arc::clone(&driver);
+                let workers = Arc::clone(&workers);
                 connections.spawn(async move {
                     let _permit = permit;
-                    let service = service_fn(move |request| http_request(Arc::clone(&driver), request));
+                    let service = service_fn(move |request| {
+                        http_request(Arc::clone(&driver), Arc::clone(&workers), request)
+                    });
                     let connection = http1::Builder::new()
                         .timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(5))
                         .max_headers(32).max_buf_size(32 << 10)
@@ -97,6 +104,7 @@ pub async fn serve_until<B: Backend + 'static>(
 
 async fn http_request<B: Backend + 'static>(
     driver: Arc<Driver<B>>,
+    workers: Arc<Semaphore>,
     request: Request<Incoming>,
 ) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
     let (parts, body) = request.into_parts();
@@ -106,15 +114,19 @@ async fn http_request<B: Backend + 'static>(
     )
     .await
     {
-        Ok(Ok(body)) => match tokio::task::spawn_blocking(move || {
+        Ok(Ok(body)) => match try_spawn_worker(workers, move || {
             driver.handle(parts.method.as_str(), parts.uri.path(), &body.to_bytes())
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Reply {
-                status: 500,
-                body: json!({"Err":"Docker driver worker failed"}),
+        }) {
+            Some(worker) => match worker.await {
+                Ok(result) => result,
+                Err(_) => Reply {
+                    status: 500,
+                    body: json!({"Err":"Docker driver worker failed"}),
+                },
+            },
+            None => Reply {
+                status: 503,
+                body: json!({"Err":"Docker driver workers are busy"}),
             },
         },
         Ok(Err(_)) => Reply {
@@ -133,6 +145,18 @@ async fn http_request<B: Backend + 'static>(
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(body)))
         .expect("valid Docker HTTP response"))
+}
+
+fn try_spawn_worker<T: Send + 'static>(
+    workers: Arc<Semaphore>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<JoinHandle<T>> {
+    let permit = workers.try_acquire_owned().ok()?;
+    Some(tokio::task::spawn_blocking(move || {
+        // Dropping the connection does not stop a running blocking task.
+        let _permit = permit;
+        work()
+    }))
 }
 
 fn worker_error(error: tokio::task::JoinError) -> Error {
@@ -191,5 +215,33 @@ impl Drop for SocketGuard {
         }) {
             let _ = fs::remove_file(&self.path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn detached_worker_retains_its_permit_until_it_finishes() {
+        let budget = Arc::new(Semaphore::new(1));
+        let (started, running) = oneshot::channel();
+        let (release, blocked) = mpsc::channel();
+        let worker = try_spawn_worker(Arc::clone(&budget), move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        })
+        .unwrap();
+
+        running.await.unwrap();
+        drop(worker);
+        assert!(try_spawn_worker(Arc::clone(&budget), || ()).is_none());
+        release.send(()).unwrap();
+        let _permit = timeout(Duration::from_secs(5), budget.acquire())
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

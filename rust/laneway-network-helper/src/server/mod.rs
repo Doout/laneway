@@ -13,7 +13,7 @@ mod socket;
 mod wire;
 
 use std::{
-    os::fd::BorrowedFd,
+    os::fd::{BorrowedFd, OwnedFd},
     time::{Duration, Instant},
 };
 
@@ -60,7 +60,7 @@ pub trait Session {
 /// Linux uses seqpacket and macOS uses a length-framed stream. The caller must
 /// keep the socket out of child command stdio and provide a backend that
 /// enforces its operation deadlines.
-pub fn serve_inherited(control: BorrowedFd<'_>, backend: impl Backend) -> Result<()> {
+pub fn serve_inherited(control: OwnedFd, backend: impl Backend) -> Result<()> {
     let channel = socket::Channel::open(control)?;
     security::require_single_thread()?;
     #[cfg(target_os = "linux")]

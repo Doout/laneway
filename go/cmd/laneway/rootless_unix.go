@@ -19,7 +19,7 @@ import (
 )
 
 func addRootlessCommands(root *cobra.Command) {
-	configureUsage := "configure [--state-dir PATH]"
+	configureUsage := "configure [--state-dir PATH] [--discard-pending]"
 	startUsage := "start [--state-dir PATH] [--listen ADDRESS | --no-proxy] [--proxy-only]"
 	configureHelp := "Configure a per-user node using an enrollment token. Run 'laneway configure --system --check' to verify the installed macOS networking runtime, or use --system --yes to install from the release archive."
 	startHelp := "Run an enrolled per-user node and the local SOCKS5 proxy in the foreground."

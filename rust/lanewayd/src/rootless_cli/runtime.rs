@@ -68,20 +68,52 @@ impl LocalProxy {
         eprintln!("SOCKS5 listening on {}", listener.local_addr()?);
         Ok(Self { listener, verifier })
     }
+
+    async fn refresh_credentials(&self) -> Result<()> {
+        // Run one refresh at a time across transport reconnects.
+        let mut reload = interval(Duration::from_secs(1));
+        reload.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            reload.tick().await;
+            let verifier = self.verifier.clone();
+            let result = tokio::task::spawn_blocking(move || verifier.reload())
+                .await
+                .context("reload local proxy credentials")?;
+            if let Err(error) = result {
+                tracing::warn!(%error, "local proxy credential file unavailable");
+            }
+        }
+    }
 }
 
 pub async fn run(
-    mut identity: Identity,
+    identity: Identity,
     database: PathBuf,
     listen: Option<SocketAddr>,
     serve_routes: bool,
 ) -> Result<()> {
     let services = Services {
-        proxy: listen
-            .map(|address| LocalProxy::bind(address, database))
-            .transpose()?,
+        proxy: match listen {
+            Some(address) => Some(
+                tokio::task::spawn_blocking(move || LocalProxy::bind(address, database))
+                    .await
+                    .context("open local proxy")??,
+            ),
+            None => None,
+        },
         serve_routes,
     };
+    let Some(proxy) = &services.proxy else {
+        return run_transport(identity, &services).await;
+    };
+    tokio::select! {
+        biased;
+        result = proxy.refresh_credentials() => result,
+        result = run_transport(identity, &services) => result,
+    }
+}
+
+async fn run_transport(mut identity: Identity, services: &Services) -> Result<()> {
     loop {
         let files = identity.tls_files()?;
         // The connector invitation uses the controller DNS name for the public
@@ -104,7 +136,7 @@ pub async fn run(
             tcp_fallback: fallback,
         };
         tokio::select! {
-            () = maintain_transport(options, &services) => unreachable!(),
+            () = maintain_transport(options, services) => unreachable!(),
             result = wait_for_renewal(&mut identity) => {
                 result?;
                 tracing::info!("using renewed node certificate");
@@ -185,22 +217,7 @@ async fn serve_epoch(
             sender: sender.clone(),
             stack: stack.clone(),
         };
-        let mut reload = interval(Duration::from_secs(1));
-        reload.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        let serve = proxy::serve(socket, proxy.verifier.clone(), stack.clone(), router);
-        tokio::pin!(serve);
-        loop {
-            tokio::select! {
-                biased;
-                // The first tick is immediate, including after a long outage.
-                _ = reload.tick() => {
-                    if let Err(error) = proxy.verifier.reload() {
-                        tracing::warn!(%error, "local proxy credential file unavailable");
-                    }
-                }
-                result = &mut serve => return result,
-            }
-        }
+        proxy::serve(socket, proxy.verifier.clone(), stack.clone(), router).await
     };
     let packets = async {
         loop {

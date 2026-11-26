@@ -20,16 +20,9 @@ pub(super) struct Channel {
 }
 
 impl Channel {
-    pub(super) fn open(inherited: BorrowedFd<'_>) -> Result<Self> {
-        // Own only the duplicate. The caller chose and still owns the inherited fd.
-        let inherited = inherited.as_raw_fd();
-        let flags = syscall(unsafe { libc::fcntl(inherited, libc::F_GETFD) })?;
-        syscall(unsafe { libc::fcntl(inherited, libc::F_SETFD, flags | libc::FD_CLOEXEC) })
-            .context("protect inherited helper control descriptor")?;
-        let duplicate = unsafe { libc::fcntl(inherited, libc::F_DUPFD_CLOEXEC, 3) };
-        let duplicate = syscall(duplicate).context("duplicate helper control descriptor")?;
+    pub(super) fn open(socket: OwnedFd) -> Result<Self> {
         let channel = Self {
-            socket: unsafe { OwnedFd::from_raw_fd(duplicate) },
+            socket,
             shutdown: None,
         };
         let kind: libc::c_int = channel.socket_option(libc::SO_TYPE)?;

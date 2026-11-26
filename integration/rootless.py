@@ -5,6 +5,9 @@ import argparse
 import base64
 import contextlib
 import fcntl
+import hashlib
+import http.client
+import http.server
 import ipaddress
 import json
 import os
@@ -12,6 +15,8 @@ from pathlib import Path
 import secrets
 import signal
 import socket
+import sqlite3
+import ssl
 import struct
 import subprocess
 import sys
@@ -234,6 +239,99 @@ def echoes(host):
                 thread.join(timeout=1)
 
 
+@contextlib.contextmanager
+def enrollment_transport(work, controller_port):
+    """Connect two loopback TLS sockets and selectively withhold enrollment replies."""
+    ca = ssl.create_default_context(cafile=str(work / "ca.crt"))
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(work / "controller.crt", work / "controller.key")
+    deliver = threading.Event()
+    exchanges = []
+
+    class EnrollmentForwarder(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            if self.path != "/v1/enroll" or not 0 < length <= 128 << 10:
+                self.send_error(400)
+                return
+            self.connection.settimeout(8)
+            request = self.rfile.read(length)
+            backend = http.client.HTTPSConnection(LOOPBACK, controller_port, context=ca, timeout=8)
+            try:
+                backend.request("POST", self.path, request, {"Content-Type": self.headers["Content-Type"]})
+                upstream = backend.getresponse()
+                status = upstream.status
+                content_type = upstream.getheader("Content-Type")
+                response = upstream.read(128 << 10)
+            finally:
+                backend.close()
+            exchanges.append((status, hashlib.sha256(request).digest(), hashlib.sha256(response).digest()))
+            if not deliver.is_set():
+                # Read the complete committed response, then close without sending it.
+                self.close_connection = True
+                return
+            self.send_response(status)
+            self.send_header("Content-Type", content_type or "application/octet-stream")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+        def log_message(self, _format, *_args):
+            pass
+
+    with http.server.ThreadingHTTPServer((LOOPBACK, 0), EnrollmentForwarder) as server:
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server.server_port, deliver, exchanges
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+
+def enrollment_rows(database):
+    with contextlib.closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+        return tuple(set(connection.execute(query)) for query in (
+            "SELECT lower(hex(id)) FROM nodes",
+            "SELECT lower(hex(node_id)), serial FROM certificates",
+            "SELECT id, lower(hex(consumed_by)) FROM enrollment_tokens WHERE consumed_at IS NOT NULL",
+        ))
+
+def interrupted_enrollment(call, cli, flags, invite, state, database, env, fault):
+    _, deliver, exchanges = fault
+    deliver.clear()
+    exchanges.clear()
+    baseline = enrollment_rows(database)
+    first = subprocess.run((cli, "configure", *flags), input=invite + "\n",
+                           capture_output=True, text=True, timeout=25, env=env)
+    assert first.returncode != 0 and "enrollment remains pending" in first.stderr, (
+        "the initial configure did not stop with an actionable recovery error"
+    )
+    assert exchanges and all(request == exchanges[0] for request in exchanges), (
+        "the controller did not send a consistent committed enrollment response"
+    )
+    assert exchanges[0][0] == 200, f"upstream enrollment returned HTTP {exchanges[0][0]}"
+    committed = enrollment_rows(database)
+    assert all(before <= after and len(after - before) == 1
+               for before, after in zip(baseline, committed)), "the initial attempt did not commit one enrollment"
+    pending = state / "pending-enrollment.json"
+    assert pending.stat().st_mode & 0o777 == 0o600, "pending enrollment secret is not private"
+    assert not (state / "identity.json").exists(), "the withheld identity was published locally"
+    attempts = len(exchanges)
+    deliver.set()
+    configured = call(cli, "configure", *flags, input_text=invite + "\n")
+    assert len(exchanges) > attempts and all(request == exchanges[0] for request in exchanges), (
+        "configure did not replay the same request and recover the original response"
+    )
+    assert enrollment_rows(database) == committed, "configure retry changed controller enrollment rows"
+    assert not pending.exists(), "successful configure left the pending enrollment file behind"
+    identity = json.loads((state / "identity.json").read_bytes())
+    assert committed[0] - baseline[0] == {(identity["node_id"],)}, "configure persisted a different node ID"
+    print(f"Recovered {identity['name']} after a dropped TLS response without creating another node.")
+    return configured
+
+
 def exercise(work, root, host, check_renewal):
     cli = binary(root, "laneway", "bin")
     controller = binary(root, "laneway-controller-rs", "sbin")
@@ -300,15 +398,18 @@ poll_interval = "100ms"
               "--name", "rootless-relay", "--endpoint", relay_addr)
 
         initial_passwords = {}
+        fault = scope.enter_context(enrollment_transport(work, controller_port))
         for name, state in states.items():
-            reservation = admin("enrollment-token", "issue", "--network-id", NETWORK, "--connector",
+            capabilities = () if name == "sender" else ("--connector",)
+            reservation = admin("enrollment-token", "issue", "--network-id", NETWORK, *capabilities,
                                 "--label", name, "--requested-name", name, "--expires-in", "10m")
-            fields = [name, reservation["enrollment_token"], f"https://{controller_addr}",
+            enrollment_addr = f"{LOOPBACK}:{fault[0]}"
+            fields = [name, reservation["enrollment_token"], f"https://{enrollment_addr}",
                       controller_addr, LOOPBACK, NETWORK, CONTROLLER, relay_addr, RELAY,
                       b64((work / "ca.crt").read_bytes())]
             invite = "st1." + b64(("\n".join(fields) + "\n").encode())
             flags = () if name == "sender" else ("--state-dir", state)
-            configure = call(cli, "configure", *flags, input_text=invite + "\n")
+            configure = interrupted_enrollment(call, cli, flags, invite, state, database, cli_env, fault)
             password_label = "SOCKS5 password (shown once): "
             generated = [line.removeprefix(password_label) for line in configure.splitlines()
                          if line.startswith(password_label)]

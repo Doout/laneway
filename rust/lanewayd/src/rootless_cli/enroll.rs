@@ -1,4 +1,5 @@
 use std::{
+    io::ErrorKind,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -26,6 +27,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use x509_parser::parse_x509_certificate;
 
 use crate::rootless_cli::private;
@@ -35,6 +37,7 @@ const MAX_RESPONSE: usize = 1 << 20;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const IDENTITY_FILE: &str = "identity.json";
 const IDENTITY_LOCK: &str = "identity.lock";
+const PENDING_ENROLLMENT_FILE: &str = "pending-enrollment.json";
 const TLS_STAGE_PREFIX: &str = ".tls-";
 
 struct Setup {
@@ -196,7 +199,87 @@ pub(crate) fn clean_staged_tls(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingEnrollment {
+    invitation_digest: [u8; 32],
+    #[serde(with = "stored_pem")]
+    private_key_pem: Vec<u8>,
+    csr_der: Vec<u8>,
+    wireguard_private_key: [u8; 32],
+}
+
+impl PendingEnrollment {
+    fn load_or_prepare(state: &Path, setup_token: &str, name: &str) -> Result<Self> {
+        let path = state.join(PENDING_ENROLLMENT_FILE);
+        let invitation_digest: [u8; 32] = Sha256::digest(setup_token.trim().as_bytes()).into();
+        match private::read(&path) {
+            Ok(bytes) => {
+                let pending: Self =
+                    serde_json::from_slice(&bytes).context("parse pending connector enrollment")?;
+                ensure!(
+                    invitation_digest == pending.invitation_digest,
+                    "an interrupted enrollment is pending; rerun configure with its original invitation, or use configure --discard-pending to abandon it"
+                );
+                Ok(pending)
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                let mut wireguard_private_key = [0; 32];
+                getrandom::fill(&mut wireguard_private_key)
+                    .context("generate WireGuard private key")?;
+                let (key, csr_der) = new_csr(name)?;
+                let pending = Self {
+                    invitation_digest,
+                    private_key_pem: key.serialize_pem().into_bytes(),
+                    csr_der,
+                    wireguard_private_key,
+                };
+                private::create(&path, &serde_json::to_vec(&pending)?)
+                    .context("save pending connector enrollment before submission")?;
+                Ok(pending)
+            }
+            Err(error) => Err(error).context("read pending connector enrollment"),
+        }
+    }
+}
+
+fn remove_pending_enrollment(state: &Path) -> Result<bool> {
+    match std::fs::remove_file(state.join(PENDING_ENROLLMENT_FILE)) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).context("remove pending connector enrollment"),
+    }
+}
+
+pub(crate) fn discard_pending_enrollment(state: &Path) -> Result<()> {
+    let _lock =
+        private::try_lock(&state.join("node.lock")).context("node setup is already in progress")?;
+    let _identity = private::try_lock(&state.join(IDENTITY_LOCK))
+        .context("connector identity is already in use")?;
+    if remove_pending_enrollment(state)? {
+        println!("Discarded pending enrollment. Run configure with a fresh invitation.");
+    } else {
+        println!("No pending enrollment.");
+    }
+    Ok(())
+}
+
+// Once identity.json has been published, this file only contains redundant secrets.
+pub(crate) fn discard_completed_enrollment(state: &Path) {
+    if let Err(error) = remove_pending_enrollment(state) {
+        tracing::warn!(%error, "could not remove completed enrollment staging file");
+    }
+}
+
 pub(crate) async fn activate(state_dir: &Path, setup_token: &str) -> Result<Identity> {
+    activate_with(state_dir, setup_token, enroll_request).await
+}
+
+async fn activate_with(
+    state_dir: &Path,
+    setup_token: &str,
+    request_enrollment: impl AsyncFnOnce(&Setup, EnrollmentRequest) -> Result<EnrollmentResponse>,
+) -> Result<Identity> {
     let mut setup = Setup::parse(setup_token)?;
     private::ensure_directory(state_dir).context("prepare private connector state")?;
     let _guard = private::try_lock(&state_dir.join(IDENTITY_LOCK))
@@ -207,23 +290,27 @@ pub(crate) async fn activate(state_dir: &Path, setup_token: &str) -> Result<Iden
         Err(error) => return Err(error).context("inspect connector identity"),
         Ok(_) => anyhow::bail!("connector identity already exists"),
     }
-    let mut wireguard_private_key = [0; 32];
-    getrandom::fill(&mut wireguard_private_key).context("generate WireGuard private key")?;
+    let PendingEnrollment {
+        private_key_pem,
+        csr_der,
+        wireguard_private_key,
+        ..
+    } = PendingEnrollment::load_or_prepare(state_dir, setup_token, &setup.name)?;
     let wireguard_public_key = wireguard_public_key(wireguard_private_key);
-    let (key, csr) = new_csr(&setup.name)?;
     let enrollment_token = std::mem::take(&mut setup.code);
-    let response = enroll_request(
+    let response = request_enrollment(
         &setup,
         EnrollmentRequest {
             enrollment_token,
-            pkcs10_csr_der: csr,
+            pkcs10_csr_der: csr_der,
             requested_name: setup.name.clone(),
             expected_network_id: setup.network_id.as_bytes().to_vec(),
             expected_enrollment_class: EnrollmentClass::DurableNode as i32,
             wireguard_public_key: wireguard_public_key.to_vec(),
         },
     )
-    .await?;
+    .await
+    .context("enrollment remains pending; retry configure with the same invitation. If the controller says it is used or expired, contact your network operator before running configure --discard-pending")?;
     ensure!(
         Id::from_slice(&response.network_id)? == setup.network_id
             && response.enrollment_class == EnrollmentClass::DurableNode as i32
@@ -254,11 +341,12 @@ pub(crate) async fn activate(state_dir: &Path, setup_token: &str) -> Result<Iden
         relay_service_id: setup.relay_service_id,
         ca_pem: setup.ca_pem,
         certificate_pem: chain_pem(response.certificate_chain)?,
-        private_key_pem: key.serialize_pem().into_bytes(),
+        private_key_pem,
         wireguard_private_key,
     };
     identity.validate()?;
     private::create(&path, &identity.encode()?).context("publish connector identity")?;
+    discard_completed_enrollment(state_dir);
     Ok(identity)
 }
 
@@ -567,11 +655,17 @@ async fn enroll_request(setup: &Setup, request: EnrollmentRequest) -> Result<Enr
         .send()
         .await
         .context("request connector enrollment")?;
-    ensure!(
-        response.status() == reqwest::StatusCode::CREATED,
-        "controller enrollment returned HTTP {}",
-        response.status()
-    );
+    use reqwest::StatusCode;
+    match response.status() {
+        StatusCode::CREATED => (),
+        StatusCode::UNAUTHORIZED => {
+            anyhow::bail!("controller rejected the invitation as invalid or expired")
+        }
+        StatusCode::CONFLICT => {
+            anyhow::bail!("controller reported an already-used invitation or enrollment conflict")
+        }
+        status => anyhow::bail!("controller enrollment returned HTTP {status}"),
+    }
     ensure!(
         response
             .content_length()
@@ -836,6 +930,112 @@ mod tests {
         assert!(identity.validate().is_err());
     }
     #[tokio::test]
+    async fn interrupted_enrollment_replays_original_request_and_cleans_private_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("private");
+        let (pem, issuer) = ca();
+        let invitation = |code: &str| {
+            let payload = format!(
+                "edge-01\n{code}\nhttps://control.example.test:4443\ncontrol.example.test:4443\ncontrol.example.test\n{NETWORK}\n{CONTROLLER}\nrelay.example.test:443\n{NODE}\n{}\n",
+                STANDARD.encode(pem.as_bytes()),
+            );
+            format!("st1.{}", STANDARD.encode(payload))
+        };
+        let code = "single-use-invitation-fixture";
+        let token = invitation(code);
+        let pending_path = state.join(PENDING_ENROLLMENT_FILE);
+        let mut submitted = None;
+        let result = activate_with(&state, &token, async |_, request| {
+            assert!(pending_path.is_file());
+            submitted = Some(request);
+            anyhow::bail!("connection closed after controller committed");
+        })
+        .await;
+        let error = result.err().expect("simulated lost response");
+        assert!(submitted.is_some(), "{error:#}");
+        assert!(!state.join(IDENTITY_FILE).exists());
+        let bytes = private::read(&pending_path).unwrap();
+        assert!(
+            !bytes
+                .windows(code.len())
+                .any(|window| window == code.as_bytes())
+        );
+        assert!(
+            !bytes
+                .windows(token.len())
+                .any(|window| window == token.as_bytes())
+        );
+
+        let result = activate_with(&state, &invitation("another-code"), async |_, _| {
+            panic!("a different invitation should not reach the controller")
+        })
+        .await;
+        assert!(result.is_err());
+        assert_eq!(private::read(&pending_path).unwrap(), bytes);
+
+        let identity = activate_with(&state, &token, async |_, request| {
+            let submitted = submitted.take().unwrap();
+            assert_eq!(request.encode_to_vec(), submitted.encode_to_vec());
+            let pending: PendingEnrollment = serde_json::from_slice(&bytes).unwrap();
+            let key =
+                KeyPair::from_pem(std::str::from_utf8(&pending.private_key_pem).unwrap()).unwrap();
+            let mut parameters = CertificateParams::default();
+            parameters.extended_key_usages = vec![
+                ExtendedKeyUsagePurpose::ClientAuth,
+                ExtendedKeyUsagePurpose::ServerAuth,
+            ];
+            parameters.subject_alt_names.push(SanType::URI(
+                format!("spiffe://laneway/network/{NETWORK}/node/{NODE}")
+                    .try_into()
+                    .unwrap(),
+            ));
+            let certificate = parameters.signed_by(&key, &issuer).unwrap();
+            Ok(EnrollmentResponse {
+                network_id: request.expected_network_id,
+                node_id: NODE.parse::<Id>().unwrap().as_bytes().to_vec(),
+                certificate_chain: Some(CertificateChain {
+                    certificates_der: vec![certificate.der().to_vec()],
+                    not_after_unix_seconds: 0,
+                }),
+                overlay_addresses: vec![vec![100, 64, 0, 2]],
+                enrollment_class: request.expected_enrollment_class,
+                lease_expires_at_unix_seconds: 0,
+                ephemeral_exit_lease_generation: 0,
+                wireguard_public_key: request.wireguard_public_key,
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(identity.node_id.to_string(), NODE);
+        assert!(Identity::load(&state).is_ok());
+        assert!(!pending_path.exists());
+    }
+
+    #[test]
+    fn discard_only_removes_pending_enrollment() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("private");
+        private::ensure_directory(&state).unwrap();
+        let pending = state.join(PENDING_ENROLLMENT_FILE);
+        let identity = state.join(IDENTITY_FILE);
+        let credentials = state.join("credentials.json");
+        private::create(&pending, b"pending").unwrap();
+        private::create(&identity, b"identity").unwrap();
+        private::create(&credentials, b"credentials").unwrap();
+
+        let lock = private::try_lock(&state.join(IDENTITY_LOCK)).unwrap();
+        assert!(discard_pending_enrollment(&state).is_err());
+        assert!(pending.exists());
+        drop(lock);
+
+        discard_pending_enrollment(&state).unwrap();
+        discard_pending_enrollment(&state).unwrap();
+        assert!(!pending.exists());
+        assert_eq!(private::read(&identity).unwrap(), b"identity");
+        assert_eq!(private::read(&credentials).unwrap(), b"credentials");
+    }
+
+    #[tokio::test]
     async fn reconfigure_reuses_identity_and_preserves_revoked_proxy_credentials() {
         use crate::rootless_cli::{credentials, setup};
 
@@ -847,7 +1047,10 @@ mod tests {
         private::create(&path, &identity).unwrap();
         let database = state.join("credentials.json");
 
+        let pending = state.join(PENDING_ENROLLMENT_FILE);
+        private::create(&pending, b"completed fixture").unwrap();
         setup::configure(&state, true).await.unwrap();
+        assert!(!pending.exists());
         assert_eq!(private::read(&path).unwrap(), identity);
         assert!(!database.exists());
 

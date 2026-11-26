@@ -549,16 +549,21 @@ impl Client {
             .await
             .context("read relay configuration chunk")?
         {
-            ensure!(
-                bytes.len() <= MAX_RESPONSE.saturating_sub(chunk.len()),
-                "controller response exceeds limit"
-            );
-            bytes.extend_from_slice(&chunk);
+            append_configuration_chunk(&mut bytes, &chunk)?;
         }
         state.replace(
             RelayConfiguration::decode(bytes.as_slice()).context("decode relay configuration")?,
         )
     }
+}
+
+fn append_configuration_chunk(bytes: &mut Vec<u8>, chunk: &[u8]) -> Result<()> {
+    ensure!(
+        chunk.len() <= MAX_RESPONSE.saturating_sub(bytes.len()),
+        "controller response exceeds limit"
+    );
+    bytes.extend_from_slice(chunk);
+    Ok(())
 }
 
 impl QuicControl {
@@ -994,6 +999,18 @@ mod tests {
     use laneway_protocol::v1::{
         IpProtocol, PolicyAction, PolicyRule, PortRange, RelayPeerAuthorization, TrafficSelector,
     };
+
+    #[test]
+    fn configuration_response_limit_rejects_an_oversized_first_chunk() {
+        let chunk = vec![0; MAX_RESPONSE + 1];
+        let mut response = Vec::new();
+        assert!(append_configuration_chunk(&mut response, &chunk).is_err());
+        assert!(response.is_empty());
+        append_configuration_chunk(&mut response, &chunk[..MAX_RESPONSE - 1]).unwrap();
+        append_configuration_chunk(&mut response, &chunk[..1]).unwrap();
+        assert!(append_configuration_chunk(&mut response, &chunk[..1]).is_err());
+        assert_eq!(response.len(), MAX_RESPONSE);
+    }
 
     fn prefix(address: [u8; 4], prefix_length: u32) -> IpPrefix {
         IpPrefix {
