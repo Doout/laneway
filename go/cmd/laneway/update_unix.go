@@ -88,7 +88,13 @@ func updateClient(args []string) error {
 	if err != nil || !stableUpdateTag.MatchString("v"+current) {
 		return fmt.Errorf("cannot determine the installed stable Laneway version at %s", executable)
 	}
-	work, err := os.MkdirTemp("", "laneway-client-update-*")
+	temporaryParent := ""
+	if runtime.GOOS == "linux" && !rootless {
+		// The privileged updater may run a verified script from this stage.
+		// Use the already checked system directory instead of caller TMPDIR.
+		temporaryParent = filepath.Dir(executable)
+	}
+	work, err := os.MkdirTemp(temporaryParent, ".laneway-client-update-*")
 	if err != nil {
 		return err
 	}

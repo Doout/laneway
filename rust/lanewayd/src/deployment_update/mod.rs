@@ -156,11 +156,6 @@ fn classify_container(
         (binary, first, second),
         (Some("laneway" | "laneway-compat"), "connector", "run")
             | (Some("lanewayd" | "lanewayd-rs"), "--connector-state", _)
-            | (
-                Some("lanewayd" | "lanewayd-rs"),
-                "_rootless",
-                "connector-run"
-            )
     );
     if connector || connector_state {
         return (
@@ -444,6 +439,14 @@ mod tests {
         assert_eq!(
             classify_container(
                 "/usr/local/bin/laneway\0connector\0run\0",
+                "laneway-connector-office",
+                false
+            ),
+            ("connector", Some("laneway-connector-office".to_owned()))
+        );
+        assert_eq!(
+            classify_container(
+                "/usr/local/bin/lanewayd-rs\0--connector-state\0/var/lib/laneway/connector\0",
                 "laneway-connector-office",
                 false
             ),

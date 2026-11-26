@@ -525,18 +525,18 @@ if grep -E 'update-env|verify-blob' "$log" >/dev/null; then
   echo "already-current update performed package work" >&2
   exit 1
 fi
-if sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
-  LANE_TEST_LATEST_ORIGIN=http://fixture.invalid "$compose_dir/laneway-control" update > "$test_dir/update-rejected" 2>&1; then
+if rejected=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_LATEST_ORIGIN=http://fixture.invalid "$compose_dir/laneway-control" update 2>&1); then
   echo "update accepted a latest release from an untrusted origin" >&2
   exit 1
 fi
-grep -F 'latest redirected outside the release tag path' "$test_dir/update-rejected" >/dev/null
-if sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
-  LANE_TEST_LATEST_TAG=v0.9.9 "$compose_dir/laneway-control" update > "$test_dir/update-rejected" 2>&1; then
+printf '%s\n' "$rejected" | grep -F 'latest redirected outside the release tag path' >/dev/null
+if rejected=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
+  LANE_TEST_LATEST_TAG=v0.9.9 "$compose_dir/laneway-control" update 2>&1); then
   echo "update accepted a downgrade" >&2
   exit 1
 fi
-grep -F 'would downgrade installed v1.0.0' "$test_dir/update-rejected" >/dev/null
+printf '%s\n' "$rejected" | grep -F 'would downgrade installed v1.0.0' >/dev/null
 : > "$log"
 update_output=$(sudo /usr/bin/env PATH="$PATH" LANE_TEST_LOG="$log" \
   LANE_TEST_UPDATE_ASSETS="$update_assets" LANEWAY_COSIGN_BIN="$fake_bin/cosign" \
