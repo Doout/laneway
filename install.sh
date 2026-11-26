@@ -9,6 +9,7 @@ upgrade_control_plane=false
 production_mode=false
 quick_control_plane=false
 client_install=false
+client_mode=auto
 cosign_bin=
 cosign_is_fallback=false
 
@@ -84,7 +85,9 @@ case "${1:-}" in
       quick_control_plane=true
     fi
     ;;
-  --client|--rust-preview) shift ;;
+  --client) shift ;;
+  --rootless) client_mode=rootless; shift ;;
+  --system|--rust-preview) client_mode=system; shift ;;
   --control-plane)
     install_control_plane=true; shift
     if [ "${1:-}" = --production ]; then production_mode=true; shift; fi
@@ -96,11 +99,14 @@ case "${1:-}" in
     ;;
   -h|--help)
     cat <<'EOF'
-usage: sh install.sh [--client | --control-plane [--production] | --prepare-control-plane | --upgrade-control-plane [--production]]
+usage: sh install.sh [--client | --rootless | --system | --control-plane [--production] | --prepare-control-plane | --upgrade-control-plane [--production]]
 
 Without options, install the latest Laneway client and packaged files on Linux
 or macOS. On Linux, setting LANEWAY_DOMAIN runs the control-plane quick setup
 with non-interactive defaults. Use --client to force a client-only install.
+A fresh unprivileged client install uses ~/.local/bin without sudo.
+Use --rootless to select a per-user install even on a previously configured
+host. Use --system for the existing system client installation and upgrades.
 Linux and macOS clients use the signed Rust release archive. Installing the
 client does not start a tunnel.
 With --control-plane, select a stable release tag, verify its signed release,
@@ -144,19 +150,29 @@ esac
 if [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
   client_install=true
 fi
+if [ "$client_install" = true ] && [ "$client_mode" = auto ] &&
+   [ "$(id -u)" -ne 0 ] && [ -z "${DESTDIR:-}" ] &&
+   [ ! -x /usr/local/bin/laneway ]; then
+  client_mode=rootless
+fi
+
 missing=
 checksum_command=sha256sum
 if [ "$operating_system" = darwin ]; then checksum_command=shasum; fi
 for command in awk base64 cat curl date find grep mktemp readlink sed "$checksum_command" tar wc; do
   command -v "$command" >/dev/null 2>&1 || add_missing "$command"
 done
-if [ "$operating_system" = darwin ] && \
-  [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
+if [ "$client_mode" = rootless ]; then
+  for command in cp install mkdir mv rm; do
+    command -v "$command" >/dev/null 2>&1 || add_missing "$command"
+  done
+fi
+if [ "$operating_system" = darwin ] && [ "$client_install" = true ] && [ "$client_mode" != rootless ]; then
   [ "$(id -u)" -ne 0 ] || add_missing "a normal macOS user (do not run the client installer with sudo)"
   command -v sudo >/dev/null 2>&1 || add_missing sudo
 fi
 if [ "$operating_system" = linux ] && [ -z "${DESTDIR:-}" ] && [ "$(id -u)" -ne 0 ] && \
-  [ "$install_control_plane" = false ] && [ "$prepare_control_plane" = false ] && [ "$upgrade_control_plane" = false ]; then
+  [ "$client_install" = true ] && [ "$client_mode" != rootless ]; then
   command -v sudo >/dev/null 2>&1 || add_missing sudo
 fi
 
@@ -318,6 +334,88 @@ if [ "$upgrade_control_plane" = true ] && \
   echo "release $release predates control-plane upgrades; select a newer stable tag" >&2
   exit 1
 fi
+
+if [ "$client_mode" = rootless ]; then
+  [ -z "${DESTDIR:-}" ] || { echo '--rootless does not support DESTDIR' >&2; exit 1; }
+  case "${HOME:-}" in /*) ;; *) echo '--rootless requires an absolute HOME' >&2; exit 1 ;; esac
+  package=$download_dir/laneway
+  daemon=$package/sbin/lanewayd-rs
+  if [ "$operating_system" = darwin ]; then
+    daemon=$package/bin/lanewayd-rs
+    if [ ! -f "$package/macos-runtime" ] || [ -L "$package/macos-runtime" ] ||
+       [ "$(cat "$package/macos-runtime")" != rust-v1 ]; then
+      echo "release $release does not provide the macOS Rust package" >&2
+      exit 1
+    fi
+  fi
+  if [ ! -f "$package/VERSION" ] || [ -L "$package/VERSION" ] ||
+     [ "$(cat "$package/VERSION")" != "${release#v}" ]; then
+    echo "release $release does not provide the expected Rust package version" >&2
+    exit 1
+  fi
+  for candidate in "$package/bin/laneway" "$daemon"; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] && [ -x "$candidate" ] || {
+      echo "release $release is missing an executable ${candidate##*/}" >&2
+      exit 1
+    }
+  done
+
+  if ! daemon_version=$("$daemon" --version) ||
+     [ "$daemon_version" != "${release#v}" ] ||
+     ! "$daemon" _rootless --help >/dev/null 2>&1; then
+    echo "release $release does not provide matching rootless client support; select a newer signed release or use --system" >&2
+    exit 1
+  fi
+
+  bin_dir=$HOME/.local/bin
+  mkdir -p "$bin_dir"
+  install_stage=$bin_dir/.laneway-install.lock
+  (umask 077 && mkdir "$install_stage") || {
+    echo "another Laneway install owns $install_stage" >&2
+    exit 1
+  }
+  finish_rootless_install() {
+    # The staged CLI is the commit marker. If it was not published, restore
+    # the daemon that belongs to the still-installed CLI.
+    if [ -f "$install_stage/laneway" ] && [ ! -f "$install_stage/lanewayd-rs" ] &&
+       [ -f "$install_stage/publishing" ]; then
+      if [ -f "$install_stage/previous-daemon" ]; then
+        if ! mv -f "$install_stage/previous-daemon" "$bin_dir/lanewayd-rs"; then
+          echo "Laneway restore failed; the previous daemon is in $install_stage" >&2
+          find "$download_dir" -depth -delete
+          return 1
+        fi
+      else
+        rm -f "$bin_dir/lanewayd-rs"
+      fi
+    fi
+    find "$install_stage" "$download_dir" -depth -delete
+  }
+  trap 'finish_rootless_install' EXIT
+  trap 'exit 1' HUP INT TERM
+  for installed in laneway lanewayd-rs; do
+    if [ -e "$bin_dir/$installed" ] || [ -L "$bin_dir/$installed" ]; then
+      [ -f "$bin_dir/$installed" ] && [ ! -L "$bin_dir/$installed" ] || {
+        echo "refusing to replace non-regular $bin_dir/$installed" >&2
+        exit 1
+      }
+    fi
+  done
+  install -m 0755 "$package/bin/laneway" "$install_stage/laneway"
+  install -m 0755 "$daemon" "$install_stage/lanewayd-rs"
+  if [ -f "$bin_dir/lanewayd-rs" ]; then
+    cp -p "$bin_dir/lanewayd-rs" "$install_stage/previous-daemon"
+  fi
+  : > "$install_stage/publishing"
+  mv -f "$install_stage/lanewayd-rs" "$bin_dir/lanewayd-rs"
+  mv -f "$install_stage/laneway" "$bin_dir/laneway"
+  trap - EXIT HUP INT TERM
+  finish_rootless_install
+  echo "Laneway $release installed in $bin_dir."
+  echo "Run $bin_dir/laneway configure, then $bin_dir/laneway start."
+  exit 0
+fi
+
 if [ "$operating_system" = darwin ]; then
   package=$download_dir/laneway
   if [ ! -f "$package/macos-runtime" ] || [ -L "$package/macos-runtime" ] ||

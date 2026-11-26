@@ -15,6 +15,8 @@ desktop/node_modules
 desktop/dist
 desktop/src-tauri/gen
 desktop/src-tauri/target
+rust/target
+rust/**/target
 deploy/compose/.env
 deploy/compose/generated
 **/*.tsbuildinfo

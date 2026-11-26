@@ -109,7 +109,7 @@ fn default_controller_poll_interval() -> Duration {
 fn default_controller_timeout() -> Duration {
     Duration::from_secs(10)
 }
-fn default_socket_path() -> PathBuf {
+pub(crate) fn default_socket_path() -> PathBuf {
     PathBuf::from("/run/laneway/lanewayd.sock")
 }
 fn default_exit_intent_path() -> PathBuf {

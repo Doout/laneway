@@ -91,7 +91,7 @@ pub(crate) struct Client {
     quic: Option<QuicControl>,
 }
 
-struct QuicControl {
+pub(crate) struct QuicControl {
     endpoint: Endpoint,
     addresses: Vec<SocketAddr>,
     server_name: String,
@@ -308,26 +308,18 @@ impl Client {
             self.exit_generation().is_none(),
             "ephemeral Exit certificates cannot be renewed by the runtime"
         );
-        use laneway_protocol::v1::{ControllerEnvelope, RenewalRequest, controller_envelope::Body};
         let control = self
             .quic
             .as_ref()
             .context("renewal requires authenticated controller QUIC")?;
         // Omitting the WireGuard key is the protocol's preserve-current-binding
         // operation. Certificate maintenance must never rotate dataplane keys.
-        let request = ControllerEnvelope {
-            schema_version: 1,
-            request_id: control.next_request_id(),
-            body: Some(Body::RenewalRequest(RenewalRequest {
+        control
+            .renew(laneway_protocol::v1::RenewalRequest {
                 pkcs10_csr_der: csr,
                 wireguard_public_key: Vec::new(),
-            })),
-        };
-        match control.exchange(request).await?.body {
-            Some(Body::RenewalResponse(reply)) => Ok(reply),
-            Some(Body::Error(e)) => bail!("controller refused node renewal: {:?}", e.code()),
-            _ => bail!("unexpected controller renewal response"),
-        }
+            })
+            .await
     }
 
     pub(crate) async fn poll(&self, known_epoch: u64) -> Result<PollResult> {
@@ -635,6 +627,19 @@ fn pinned_controller(
 }
 
 impl QuicControl {
+    pub(crate) async fn rootless(options: &ClientOptions) -> Result<Self> {
+        let address = options
+            .quic_endpoint
+            .as_deref()
+            .context("rootless transport requires controller QUIC")?;
+        Self::new(
+            address,
+            options,
+            expected_controller(options.network, options.service),
+        )
+        .await
+    }
+
     async fn new(
         address: &str,
         options: &ClientOptions,
@@ -695,7 +700,30 @@ impl QuicControl {
         })
     }
 
-    async fn poll(&self, known_epoch: u64, generation: Option<NonZeroU64>) -> Result<PollResult> {
+    pub(crate) async fn renew(
+        &self,
+        request: laneway_protocol::v1::RenewalRequest,
+    ) -> Result<laneway_protocol::v1::RenewalResponse> {
+        use laneway_protocol::v1::{ControllerEnvelope, controller_envelope::Body};
+        let envelope = ControllerEnvelope {
+            schema_version: 1,
+            request_id: self.next_request_id(),
+            body: Some(Body::RenewalRequest(request)),
+        };
+        match self.exchange(envelope).await?.body {
+            Some(Body::RenewalResponse(reply)) => Ok(reply),
+            Some(Body::Error(error)) => {
+                bail!("controller refused node renewal: {:?}", error.code())
+            }
+            _ => bail!("unexpected controller renewal response"),
+        }
+    }
+
+    pub(crate) async fn poll(
+        &self,
+        known_epoch: u64,
+        generation: Option<NonZeroU64>,
+    ) -> Result<PollResult> {
         use laneway_protocol::v1::{ControllerEnvelope, controller_envelope};
         let envelope = ControllerEnvelope {
             schema_version: 1,
@@ -872,7 +900,7 @@ impl QuicControl {
     }
 }
 
-fn split_host_port(value: &str) -> Result<(String, u16)> {
+pub(crate) fn split_host_port(value: &str) -> Result<(String, u16)> {
     if let Ok(address) = value.parse::<SocketAddr>() {
         return Ok((address.ip().to_string(), address.port()));
     }
@@ -1373,8 +1401,12 @@ impl Snapshot {
         expired(self.valid_until)
     }
 
-    pub(crate) fn wireguard_authority_expired(&self) -> bool {
+    pub(crate) fn session_expired(&self) -> bool {
         self.expired() || expired(self.certificate_not_after)
+    }
+
+    pub(crate) fn wireguard_authority_expired(&self) -> bool {
+        self.session_expired()
     }
 
     /// A shorter snapshot lease can mean an earlier peer or route deadline.

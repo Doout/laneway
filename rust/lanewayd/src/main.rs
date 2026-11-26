@@ -1,3 +1,5 @@
+mod rootless_cli;
+
 use std::{env, future::Future, num::NonZeroU64, path::PathBuf, process::ExitCode};
 
 use anyhow::{Context, Result, bail};
@@ -5,14 +7,33 @@ use lanewayd_rs::{Agent, Config};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<ExitCode> {
-    let command = env::args_os().nth(1);
-    if command.is_some_and(|flag| flag == "healthcheck") {
-        return Ok(laneway_healthcheck::run(
-            "lanewayd-rs healthcheck",
-            env::args().skip(2),
-        ));
-    }
-    run_daemon().map(|()| ExitCode::SUCCESS)
+    let mut args = env::args_os().skip(1);
+    let first = args.next();
+    let result = match first.as_deref().and_then(|arg| arg.to_str()) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Some("_network-helper") => laneway_network_helper::run(&args.collect::<Vec<_>>()),
+        #[cfg(target_os = "linux")]
+        Some("_deployment-update") => {
+            lanewayd_rs::deployment_update::run(&args.collect::<Vec<_>>())
+        }
+        Some("_rootless") => rootless_cli::run(&args.collect::<Vec<_>>()),
+        Some("healthcheck") => {
+            return Ok(laneway_healthcheck::run(
+                "lanewayd-rs healthcheck",
+                env::args().skip(2),
+            ));
+        }
+        None if first.is_none() => rootless_cli::run(&[]),
+        Some(
+            "configure" | "enroll" | "run" | "start" | "credential" | "--state-dir" | "--help"
+            | "-h",
+        ) => rootless_cli::run(&env::args_os().skip(1).collect::<Vec<_>>()),
+        Some(flag) if flag.starts_with("--state-dir=") => {
+            rootless_cli::run(&env::args_os().skip(1).collect::<Vec<_>>())
+        }
+        _ => run_daemon(),
+    };
+    result.map(|()| ExitCode::SUCCESS)
 }
 
 fn run_daemon() -> Result<()> {

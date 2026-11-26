@@ -130,6 +130,43 @@ pub(crate) fn client_config(
     Ok(client)
 }
 
+pub(crate) fn rootless_relay_tls(
+    tls: &TlsConfig,
+    server_name: &str,
+    network: Id,
+    service: Id,
+    alpn: &[u8],
+) -> Result<rustls::ClientConfig> {
+    let mut crypto = crate::controller_tls::pinned_service_tls(
+        root_store(&tls.ca)?,
+        Some(ServerName::try_from(server_name.to_owned()).context("invalid relay TLS name")?),
+        AuthenticatedIdentity {
+            network_id: network,
+            role: Role::Relay,
+            subject_id: service,
+        },
+        Some((
+            load_certificates(&tls.certificate)?,
+            load_private_key(&tls.private_key)?,
+        )),
+    )?;
+    crypto.alpn_protocols = vec![alpn.to_vec()];
+    Ok(crypto)
+}
+
+pub(crate) fn rootless_relay_client(
+    tls: &TlsConfig,
+    relay: &RelayConfig,
+    server_name: &str,
+    network: Id,
+    service: Id,
+) -> Result<ClientConfig> {
+    let crypto = rootless_relay_tls(tls, server_name, network, service, RELAY_ALPN)?;
+    let mut client = ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto)?));
+    client.transport_config(transport_config(relay)?);
+    Ok(client)
+}
+
 pub(crate) fn direct_client_config(
     tls: &TlsConfig,
     relay: &RelayConfig,

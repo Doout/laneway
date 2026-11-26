@@ -21,13 +21,16 @@ func TestExtractMacClientRequiresMatchingRealMembers(t *testing.T) {
 		name    string
 		members []item
 		valid   bool
+		linux   bool
 	}{
-		{"matched", []item{cli, runtime, marker, version, {"laneway/bin/lane", "", tar.TypeSymlink}}, true},
-		{"no runtime", []item{cli, marker, version}, false},
-		{"old package", []item{cli, runtime, version}, false},
-		{"wrong version", []item{cli, runtime, marker, {version.name, "1.2.4\n", tar.TypeReg}}, false},
-		{"duplicate", []item{cli, runtime, marker, version, runtime}, false},
-		{"symlink runtime", []item{cli, {runtime.name, "", tar.TypeSymlink}, marker, version}, false},
+		{"matched", []item{cli, runtime, marker, version, {"laneway/bin/lane", "", tar.TypeSymlink}}, true, false},
+		{"no runtime", []item{cli, marker, version}, false, false},
+		{"old package", []item{cli, runtime, version}, false, false},
+		{"wrong version", []item{cli, runtime, marker, {version.name, "1.2.4\n", tar.TypeReg}}, false, false},
+		{"duplicate", []item{cli, runtime, marker, version, runtime}, false, false},
+		{"symlink runtime", []item{cli, {runtime.name, "", tar.TypeSymlink}, marker, version}, false, false},
+		{"linux", []item{cli, {"laneway/sbin/lanewayd-rs", runtime.body, tar.TypeReg}, version}, true, true},
+		{"linux rejects mac daemon path", []item{cli, runtime, version}, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			directory := t.TempDir()
@@ -55,7 +58,11 @@ func TestExtractMacClientRequiresMatchingRealMembers(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			client, daemon, err := ExtractMacClient(archive, directory, "1.2.3", 4096)
+			extract := ExtractMacClient
+			if tc.linux {
+				extract = ExtractLinuxClient
+			}
+			client, daemon, err := extract(archive, directory, "1.2.3", 4096)
 			if (err == nil) != tc.valid {
 				t.Fatalf("valid=%v, extract returned %v", tc.valid, err)
 			}

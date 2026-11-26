@@ -5,7 +5,7 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 work_dir=$(mktemp -d)
 trap 'find "$work_dir" -depth -delete' EXIT HUP INT TERM
 mkdir -p "$work_dir/bin" "$work_dir/fixture/darwin/laneway/bin" \
-  "$work_dir/fixture/linux/laneway/sbin" "$work_dir/fixture/legacy"
+  "$work_dir/fixture/linux/laneway/sbin" "$work_dir/fixture/linux/laneway/bin" "$work_dir/fixture/legacy"
 
 cat > "$work_dir/fixture/darwin/laneway/bin/laneway" <<'EOF'
 #!/bin/sh
@@ -31,11 +31,19 @@ tar -C "$work_dir/fixture/linux" -czf "$work_dir/fixture/legacy/laneway_linux_ar
 )
 printf '%s\n' rust-v1 > "$work_dir/fixture/darwin/laneway/macos-runtime"
 printf '9.8.7\n' > "$work_dir/fixture/darwin/laneway/VERSION"
-printf '#!/bin/sh\nexit 0\n' > "$work_dir/fixture/darwin/laneway/bin/lanewayd-rs"
+cat > "$work_dir/fixture/darwin/laneway/bin/lanewayd-rs" <<'EOF'
+#!/bin/sh
+case "$*" in
+  --version) echo 9.8.7 ;;
+  '_rootless --help') exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
 chmod 0755 "$work_dir/fixture/darwin/laneway/bin/lanewayd-rs"
 tar -C "$work_dir/fixture/darwin" -czf "$work_dir/fixture/laneway_darwin_arm64.tar.gz" laneway
 printf '9.8.7\n' > "$work_dir/fixture/linux/laneway/VERSION"
-printf '#!/bin/sh\nexit 0\n' > "$work_dir/fixture/linux/laneway/sbin/lanewayd-rs"
+cp -p "$work_dir/fixture/darwin/laneway/bin/laneway" "$work_dir/fixture/linux/laneway/bin/laneway"
+cp "$work_dir/fixture/darwin/laneway/bin/lanewayd-rs" "$work_dir/fixture/linux/laneway/sbin/lanewayd-rs"
 chmod 0755 "$work_dir/fixture/linux/laneway/sbin/lanewayd-rs"
 tar -C "$work_dir/fixture/linux" -czf "$work_dir/fixture/laneway_linux_arm64.tar.gz" laneway
 (
@@ -121,7 +129,7 @@ darwin_output=$(env \
   LANEWAY_INSTALLER_TEST_OS=Darwin \
   LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture" \
   LANEWAY_INSTALLER_TEST_RECORD="$darwin_record" \
-  sh "$repo_dir/install.sh")
+  sh "$repo_dir/install.sh" --system)
 
 expected=$(printf '%s\n' signature-verified 'configure --yes' 'configure --check')
 [ "$(cat "$darwin_record")" = "$expected" ]
@@ -158,7 +166,7 @@ fi
 legacy_record=$work_dir/darwin-legacy-record
 if env PATH="$work_dir/bin:$PATH" LANEWAY_INSTALLER_TEST_OS=Darwin \
   LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture/legacy" LANEWAY_INSTALLER_TEST_RECORD="$legacy_record" \
-  sh "$repo_dir/install.sh" > "$work_dir/darwin-legacy-output" 2>&1; then
+  sh "$repo_dir/install.sh" --system > "$work_dir/darwin-legacy-output" 2>&1; then
   echo 'the macOS installer accepted a Go-only package' >&2
   exit 1
 fi
@@ -201,5 +209,94 @@ if linux_preview "$work_dir/fixture/legacy" "$work_dir/linux-legacy-record" >"$w
 fi
 test "$(cat "$work_dir/linux-legacy-record")" = signature-verified
 grep -F 'does not provide the Linux Rust package' "$work_dir/linux-legacy.out" >/dev/null
+
+# Do not put sudo (even a failing stub) on PATH for per-user installation.
+rootless_path=$work_dir/rootless-bin
+mkdir "$rootless_path"
+for command in awk base64 cat cp curl date find grep gzip id install mkdir mktemp mv readlink rm sed sha256sum sh shasum tar uname wc cosign; do
+  ln -s "$(PATH="$work_dir/bin:$PATH" command -v "$command")" "$rootless_path/$command"
+done
+if PATH="$rootless_path" command -v sudo >/dev/null 2>&1; then
+  echo "rootless fixture unexpectedly has sudo on PATH" >&2
+  exit 1
+fi
+
+for fixture_os in Linux Darwin; do
+  case "$fixture_os" in
+    Linux) fixture_platform=linux; daemon_directory=sbin ;;
+    Darwin) fixture_platform=darwin; daemon_directory=bin ;;
+  esac
+  home="$work_dir/rootless-$fixture_platform"
+  record="$home.record"
+  env -u DESTDIR HOME="$home" PATH="$rootless_path" LANEWAY_INSTALLER_TEST_OS="$fixture_os" \
+    LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture" LANEWAY_INSTALLER_TEST_RECORD="$record" \
+    sh "$repo_dir/install.sh" --rootless > "$home.out"
+  [ "$(cat "$record")" = signature-verified ]
+  for executable in laneway lanewayd-rs; do
+    test -x "$home/.local/bin/$executable"
+  done
+  cmp "$home/.local/bin/laneway" "$work_dir/fixture/$fixture_platform/laneway/bin/laneway"
+  cmp "$home/.local/bin/lanewayd-rs" "$work_dir/fixture/$fixture_platform/laneway/$daemon_directory/lanewayd-rs"
+  grep -F "Run $home/.local/bin/laneway configure" "$home.out" >/dev/null
+done
+
+if [ ! -x /usr/local/bin/laneway ]; then
+  home="$work_dir/default-rootless"
+  env -u DESTDIR HOME="$home" PATH="$rootless_path" LANEWAY_INSTALLER_TEST_OS=Linux \
+    LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture" LANEWAY_INSTALLER_TEST_RECORD="$home.record" \
+    sh "$repo_dir/install.sh" --client > "$home.out"
+  [ "$(cat "$home.record")" = signature-verified ]
+  test -x "$home/.local/bin/laneway"
+  test -x "$home/.local/bin/lanewayd-rs"
+fi
+
+mkdir -p "$work_dir/old-rootless"
+cp -R "$work_dir/fixture/linux/laneway" "$work_dir/old-rootless/"
+cat > "$work_dir/old-rootless/laneway/sbin/lanewayd-rs" <<'EOF'
+#!/bin/sh
+[ "$1" = --version ] || exit 1
+echo 9.8.7
+EOF
+(
+  cd "$work_dir/old-rootless"
+  tar -czf laneway_linux_arm64.tar.gz laneway
+  sha256sum laneway_linux_arm64.tar.gz > checksums.txt
+  cp "$work_dir/fixture/checksums.sigstore.json" .
+)
+home="$work_dir/unsupported-rootless"
+if env -u DESTDIR HOME="$home" PATH="$rootless_path" LANEWAY_INSTALLER_TEST_OS=Linux \
+  LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/old-rootless" LANEWAY_INSTALLER_TEST_RECORD="$home.record" \
+  sh "$repo_dir/install.sh" --rootless >"$home.out" 2>&1; then
+  echo 'rootless installation accepted a signed package without the rootless command' >&2
+  exit 1
+fi
+[ "$(cat "$home.record")" = signature-verified ]
+grep -F 'does not provide matching rootless client support' "$home.out" >/dev/null
+test ! -e "$home/.local/bin/laneway"
+
+# Model failure of the second rename and verify the previous pair remains.
+home="$work_dir/rollback-rootless"
+mkdir -p "$home/.local/bin"
+printf old-cli > "$home/.local/bin/laneway"
+printf old-daemon > "$home/.local/bin/lanewayd-rs"
+rollback_bin="$work_dir/rollback-bin"
+mkdir "$rollback_bin"
+cat > "$rollback_bin/mv" <<'EOF'
+#!/bin/sh
+case "$2" in
+  */.laneway-install.lock/laneway) exit 91 ;;
+esac
+exec /bin/mv "$@"
+EOF
+chmod 0755 "$rollback_bin/mv"
+if env -u DESTDIR HOME="$home" PATH="$rollback_bin:$rootless_path" LANEWAY_INSTALLER_TEST_OS=Linux \
+  LANEWAY_INSTALLER_TEST_FIXTURE="$work_dir/fixture" LANEWAY_INSTALLER_TEST_RECORD="$home.record" \
+  sh "$repo_dir/install.sh" --rootless >"$home.out" 2>&1; then
+  echo 'rootless installation accepted a failed CLI publication' >&2
+  exit 1
+fi
+[ "$(cat "$home/.local/bin/laneway")" = old-cli ]
+[ "$(cat "$home/.local/bin/lanewayd-rs")" = old-daemon ]
+test ! -e "$home/.local/bin/.laneway-install.lock"
 
 echo "one installer detects, verifies, and installs Laneway on macOS and Linux"

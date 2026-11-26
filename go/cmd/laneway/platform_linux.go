@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -37,25 +36,45 @@ func connectPlatformPreflight() error {
 	return nil
 }
 
+func runProductConfigure(args []string) error {
+	if system, remaining := splitExplicitSystem(args); system {
+		return runInstalledSystem("configure", remaining)
+	}
+	return runRootless("configure", args)
+}
+
+func runSystemStart(args []string) error {
+	return runInstalledSystem("start", args)
+}
+
+func runInstalledSystem(workflow string, args []string) error {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		switch workflow {
+		case "configure":
+			fmt.Println("Usage: sudo laneway configure --system\nRead an st1 enrollment token from standard input.")
+		case "start":
+			fmt.Println("Usage: sudo laneway start --system [--config PATH] [--check-config]")
+		}
+		return nil
+	}
+	runtime, err := platformConnectRustRuntime()
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(runtime,
+		append([]string{runtime, "_rootless", workflow, "--system"}, args...),
+		[]string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"})
+}
+
 func platformConnectRustRuntime() (string, error) {
-	for path := managedRustBinary; ; path = filepath.Dir(path) {
-		info, err := os.Lstat(path)
-		if err != nil {
-			return "", fmt.Errorf("install the matching Laneway Linux package: %w", err)
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != 0 || info.Mode().Perm()&0o022 != 0 ||
-			(path == managedRustBinary && (!info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0)) ||
-			(path != managedRustBinary && !info.IsDir()) {
-			return "", fmt.Errorf("untrusted Rust runtime path %s: must be root-owned and non-writable by other users", path)
-		}
-		if path == "/" {
-			break
-		}
+	if err := protectedRootlessRuntime(managedRustBinary); err != nil {
+		return "", fmt.Errorf("install the matching Laneway Linux package: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, managedRustBinary, "--version").Output()
+	probe := exec.CommandContext(ctx, managedRustBinary, "--version")
+	probe.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"}
+	output, err := probe.Output()
 	if err != nil || strings.TrimSpace(string(output)) != buildinfo.Version {
 		return "", fmt.Errorf("the Rust runtime must match Laneway %s; install the matching Linux package", buildinfo.Version)
 	}

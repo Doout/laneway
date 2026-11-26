@@ -257,7 +257,7 @@ pub(super) async fn manual_update(name: &str, pin: Option<&str>) -> Result<bool>
     Ok(outcome == Activated::Healthy)
 }
 
-pub(super) fn valid_name(name: &str) -> bool {
+pub(crate) fn valid_name(name: &str) -> bool {
     name.len() <= 90
         && name
             .strip_prefix("laneway-connector-")
@@ -437,6 +437,13 @@ async fn inspect(docker: &impl Docker, id: &str, name: &str) -> Result<Profile> 
     let mut rows: Vec<Value> = json(docker, &["container", "inspect", id]).await?;
     ensure!(rows.len() == 1, "ambiguous Docker inspection");
     profile(&rows.remove(0), id, name)
+}
+
+pub(crate) fn is_standard_running(row: &Value, name: &str) -> bool {
+    valid_name(name)
+        && row["Id"]
+            .as_str()
+            .is_some_and(|id| valid_id(id) && profile(row, id, name).is_ok())
 }
 
 fn profile(row: &Value, id: &str, name: &str) -> Result<Profile> {

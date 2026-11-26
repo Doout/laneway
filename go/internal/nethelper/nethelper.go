@@ -1,7 +1,5 @@
-// Package nethelper implements the narrow privileged boundary used by
-// foreground Laneway sessions. The helper accepts only typed TUN and route
-// plans over an inherited Unix socket; it never listens on a pathname and it
-// never receives credentials or private keys.
+// Package nethelper is the Go client for the privileged network helper.
+// It sends typed TUN and route plans over an inherited Unix socket.
 package nethelper
 
 import (
@@ -15,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Doout/laneway/go/internal/exitnode"
 	"github.com/Doout/laneway/go/internal/platform"
 )
 
@@ -37,7 +34,6 @@ const (
 	maxAddresses     = 8
 	maxRoutes        = 1024
 	maxBypasses      = 64
-	maxDNSAddresses  = 8
 	roundTripTimeout = 10 * time.Second
 )
 
@@ -107,9 +103,7 @@ func parseSetup(value Setup) (platform.TUNConfig, platform.RoutePlan, error) {
 		return platform.TUNConfig{}, platform.RoutePlan{}, err
 	}
 	config := platform.TUNConfig{Name: value.Name, MTU: value.MTU, Addresses: addresses}
-	// AdoptTUNFile and OpenTUN use the same strict normalization. Validate here
-	// without performing a privileged mutation by checking a disposable nil fd
-	// only after the route plan; OpenTUN remains authoritative in the service.
+	// AdoptTUNFile checks the original setup when accepting the helper descriptor.
 	return config, plan, nil
 }
 
@@ -138,58 +132,6 @@ func parseRoutePlan(value RoutePlan) (platform.RoutePlan, error) {
 	return plan, nil
 }
 
-func parseExitRoutePlan(value ExitRoutePlan) (exitnode.RoutePlan, error) {
-	if len(value.TunnelPrefixes) > 4 || len(value.TransportBypass) > maxBypasses || len(value.LocalLANBypass) > maxBypasses {
-		return exitnode.RoutePlan{}, errors.New("exit route plan exceeds helper limits")
-	}
-	plan := exitnode.RoutePlan{
-		TunnelPrefixes:  make([]netip.Prefix, 0, len(value.TunnelPrefixes)),
-		TransportBypass: make([]netip.Addr, 0, len(value.TransportBypass)),
-		LocalLANBypass:  make([]netip.Prefix, 0, len(value.LocalLANBypass)),
-	}
-	for _, raw := range value.TunnelPrefixes {
-		prefix, err := netip.ParsePrefix(raw)
-		if err != nil {
-			return exitnode.RoutePlan{}, fmt.Errorf("invalid exit tunnel prefix %q", raw)
-		}
-		plan.TunnelPrefixes = append(plan.TunnelPrefixes, prefix)
-	}
-	for _, raw := range value.TransportBypass {
-		address, err := netip.ParseAddr(raw)
-		if err != nil {
-			return exitnode.RoutePlan{}, fmt.Errorf("invalid exit transport bypass %q", raw)
-		}
-		plan.TransportBypass = append(plan.TransportBypass, address)
-	}
-	for _, raw := range value.LocalLANBypass {
-		prefix, err := netip.ParsePrefix(raw)
-		if err != nil {
-			return exitnode.RoutePlan{}, fmt.Errorf("invalid exit local-LAN bypass %q", raw)
-		}
-		plan.LocalLANBypass = append(plan.LocalLANBypass, prefix)
-	}
-	if err := exitnode.ValidateRoutePlan(plan); err != nil {
-		return exitnode.RoutePlan{}, err
-	}
-	return plan, nil
-}
-
-func parseDNSPlan(value DNSPlan) ([]netip.Addr, error) {
-	if len(value.Servers) == 0 || len(value.Servers) > maxDNSAddresses {
-		return nil, fmt.Errorf("DNS plan must contain from 1 through %d servers", maxDNSAddresses)
-	}
-	servers := make([]netip.Addr, 0, len(value.Servers))
-	for _, raw := range value.Servers {
-		address, err := netip.ParseAddr(raw)
-		if err != nil || address.Is4In6() || address.IsUnspecified() || address.IsMulticast() {
-			return nil, fmt.Errorf("invalid DNS server %q", raw)
-		}
-		servers = append(servers, address)
-	}
-	return servers, nil
-}
-
-// Session is the unprivileged side of a helper connection.
 type Session struct {
 	conn      packetConn
 	TUN       platform.TUNDevice
@@ -212,9 +154,8 @@ func (s *Session) ApplyRoutes(ctx context.Context, plan RoutePlan) error {
 	return s.request(ctx, request{Op: "apply-routes", Routes: &plan})
 }
 
-// ApplyExitRoutes reconciles the dedicated exit policy-routing table. It does
-// not permit arbitrary tables, priorities, protocols, devices, or commands;
-// those remain fixed by ProductionConfig in the privileged process.
+// ApplyExitRoutes asks the helper to reconcile its dedicated exit policy table.
+// The helper chooses the policy and route ownership parameters.
 func (s *Session) ApplyExitRoutes(ctx context.Context, plan ExitRoutePlan) error {
 	return s.request(ctx, request{Op: "apply-exit-routes", Exit: &plan})
 }

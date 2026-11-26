@@ -26,8 +26,25 @@ pub(crate) trait ConfigurationSource: Send + Sync {
         known_epoch: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + 'a>>;
 
+    fn terminate_on_identity_loss(&self) -> bool {
+        false
+    }
+
     fn reconnect_after_expiry(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async {})
+    }
+}
+
+impl ConfigurationSource for crate::controller::QuicControl {
+    fn poll(
+        &self,
+        known_epoch: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PollResult>> + Send + '_>> {
+        Box::pin(async move { self.poll(known_epoch, None).await })
+    }
+
+    fn terminate_on_identity_loss(&self) -> bool {
+        true
     }
 }
 
@@ -209,12 +226,15 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
         drop(initial);
         let mut delay = self.poll_interval;
         let mut failed_closed = false;
+        let terminate_on_identity_loss = self.client.terminate_on_identity_loss();
         loop {
             let retained = self
                 .authority
                 .retained()
                 .context("controller authority disappeared")?;
             let terminal = retained.exit_terminal_at();
+            let certificate_deadline =
+                terminate_on_identity_loss.then_some(retained.certificate_not_after);
             if terminal.is_some() && !failed_closed {
                 // Poll early enough even when the controller clamps validity
                 // to the nearest revocation or route-expiry deadline.
@@ -222,8 +242,12 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
             }
             let result = tokio::select! {
                 biased;
+                _ = wait_deadline(certificate_deadline) => {
+                    self.retire_authority().await.context("fail close expired node certificate")?;
+                    bail!("local node certificate is expired");
+                }
                 _ = wait_deadline(terminal) => {
-                    self.retire_exit().await.context("fail close terminal ephemeral Exit")?;
+                    self.retire_authority().await.context("fail close terminal ephemeral Exit")?;
                     bail!("ephemeral Exit lease is terminal");
                 }
                 _ = wait_deadline((!failed_closed).then_some(retained.valid_until)) => {
@@ -245,10 +269,12 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
             let prepared = match result {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    if terminal.is_some() && error.is::<AuthorityRejected>() {
-                        self.retire_exit()
+                    if (terminal.is_some() || terminate_on_identity_loss)
+                        && error.is::<AuthorityRejected>()
+                    {
+                        self.retire_authority()
                             .await
-                            .context("fail close rejected ephemeral Exit")?;
+                            .context("fail close rejected authority")?;
                         return Err(error);
                     }
                     warn!(%error, "controller node snapshot poll failed");
@@ -256,11 +282,13 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
                     continue;
                 }
             };
-            if terminal.is_some() && prepared.local_certificate_revoked() {
-                self.retire_exit()
+            if (terminal.is_some() || terminate_on_identity_loss)
+                && prepared.local_certificate_revoked()
+            {
+                self.retire_authority()
                     .await
-                    .context("fail close revoked ephemeral Exit certificate")?;
-                bail!("ephemeral Exit certificate is revoked");
+                    .context("fail close revoked node certificate")?;
+                bail!("local node certificate is revoked");
             }
             match self.apply_poll(prepared, failed_closed).await {
                 Ok(now_active) => failed_closed = !now_active,
@@ -270,7 +298,7 @@ impl<S: ConfigurationSource + 'static, A: SnapshotApplier + 'static> Runner<S, A
         }
     }
 
-    async fn retire_exit(&self) -> Result<()> {
+    async fn retire_authority(&self) -> Result<()> {
         let retire = self.authority.retire();
         // Cut the dataplane even if marking the local lease retired fails.
         self.applier.fail_close().await?;

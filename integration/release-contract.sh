@@ -176,6 +176,7 @@ if ! awk '/cosign sign-blob/ { signed=1 }
 fi
 require 'set -- --control-tools' "$client_installer"
 require 'sh integration/rust-compose-release.sh' "$ci_workflow"
+require 'integration/rust-release-rootless.sh --linux-archive' "$ci_workflow"
 require 'verified release does not contain the Rust Exit runtime' "$ephemeral_exit_bootstrap"
 require 'mount -t tmpfs -o rw,nosuid,nodev,exec,mode=0700,size=256M tmpfs "$runtime_dir"' "$ephemeral_exit_bootstrap"
 require 'systemd-run --unit="$cleanup_unit"' "$ephemeral_exit_bootstrap"
@@ -199,6 +200,7 @@ for value in \
   'PACKAGE_RUST_MACOS=' \
   'integration/rust-release-macos.sh' \
   'integration/rust-release-systemd.sh' \
+  'integration/rust-release-rootless.sh --linux-archive' \
 	"dist/laneway_\${{ matrix.os }}_\${{ matrix.arch }}" \
 	'laneway_darwin_amd64 laneway_darwin_arm64' \
 	'install.sh' \

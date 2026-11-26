@@ -16,13 +16,14 @@ RUN cargo chef prepare --recipe-path /recipe.json
 
 # The recipe contains Cargo manifests and the lockfile, not application code or
 # the release version. Cache these compiled dependencies on main for both CPUs.
+# The lanewayd-rs package includes the rootless frontend and network helper.
 FROM chef AS dependencies
 WORKDIR /src/rust
 COPY --from=recipe /recipe.json /recipe.json
 RUN target="$(rustc -vV | sed -n 's/^host: //p')" && \
     cargo chef cook --locked --release --target "$target" --recipe-path /recipe.json \
       -p lanewayd-rs -p laneway-controller -p laneway-relay -p laneway-healthcheck && \
-    cargo fetch --locked
+    cargo fetch --locked --target "$target"
 
 FROM dependencies AS sources
 WORKDIR /src

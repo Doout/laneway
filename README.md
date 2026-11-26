@@ -1,8 +1,8 @@
 # Laneway
 
 Laneway connects clients to Linux hosts and private networks through an
-encrypted IP overlay. Applications use normal IP addresses without a proxy.
-Direct QUIC is preferred; an authenticated relay provides fallback.
+encrypted IP overlay. The rootless client exposes an authenticated SOCKS5 proxy
+on loopback. System clients can route traffic directly through a tunnel.
 
 ## Quick start
 
@@ -47,10 +47,13 @@ capability.
 
 ### 3. Enroll a client
 
-Install the same Laneway package on Linux or macOS:
+For an ordinary user account, follow the [rootless client guide](docs/rootless.md).
+A fresh client install defaults to this mode.
+
+To follow the system tunnel example below, install the system client on Linux or macOS:
 
 ```sh
-curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install.sh | bash -s -- --system
 ```
 
 Create a login token on the control-plane host:
@@ -92,6 +95,7 @@ UDP, not ICMP; test with a reachable service such as
 ## Documentation
 
 - [Control-plane deployment and recovery](deploy/compose/README.md)
+- [Rootless SOCKS5 client](docs/rootless.md)
 - [Operations and troubleshooting](docs/operations.md)
 - [Protocol specifications](spec/)
 - [Security reporting](SECURITY.md)

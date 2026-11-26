@@ -31,6 +31,23 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+helper_binary="${LANEWAY_TEST_HELPER:-}"
+if [[ -z "${helper_binary}" ]]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "ERROR: cargo is required to build lanewayd-rs, or set LANEWAY_TEST_HELPER to the packaged binary" >&2
+    exit 1
+  fi
+  cargo build --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+    --target-dir "${work_dir}/rust-target" -p lanewayd-rs --bin lanewayd-rs
+  helper_binary="${work_dir}/rust-target/debug/lanewayd-rs"
+else
+  helper_binary="$(realpath "${helper_binary}")"
+fi
+if [[ ! -x "${helper_binary}" ]]; then
+  echo "ERROR: network helper is unavailable: ${helper_binary}" >&2
+  exit 1
+fi
+
 (
   cd "${repo_root}/go"
   go test -c -o "${work_dir}/linux.test" ./integration/linux
@@ -53,8 +70,8 @@ ip netns exec "${namespace}" env \
 
 echo "==> least-privileged foreground networking helper and requester-death cleanup"
 ip netns exec "${namespace}" env \
-  LANEWAY_PRIVILEGED_TEST=1 \
-  "${work_dir}/nethelper.test" -test.v -test.run '^TestPrivilegedHelper'
+  LANEWAY_PRIVILEGED_TEST=1 LANEWAY_TEST_HELPER="${helper_binary}" \
+  "${work_dir}/nethelper.test" -test.v -test.run '^Test(PrivilegedHelper|NativeHelperRouteRecovery)'
 
 echo "==> authenticated TCP fallback with all UDP output blocked"
 ip netns exec "${namespace}" nft add table inet laneway_udp_block

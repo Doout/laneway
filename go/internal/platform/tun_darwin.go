@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
 	wgtun "golang.zx2c4.com/wireguard/tun"
 )
 
@@ -80,18 +79,6 @@ func OpenTUN(ctx context.Context, config TUNConfig) (TUNDevice, error) {
 		}
 	}
 	return &darwinTUN{device: device, name: name, mtu: normalized.MTU, addresses: append([]netip.Prefix(nil), normalized.Addresses...)}, nil
-}
-
-func DuplicateTUNFile(device TUNDevice) (*os.File, error) {
-	tun, ok := device.(*darwinTUN)
-	if !ok || tun.device.File() == nil {
-		return nil, fmt.Errorf("platform: TUN device cannot be transferred")
-	}
-	fd, err := unix.FcntlInt(tun.device.File().Fd(), unix.F_DUPFD_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("platform: duplicate macOS utun descriptor: %w", err)
-	}
-	return os.NewFile(uintptr(fd), tun.name), nil
 }
 
 func AdoptTUNFile(file *os.File, config TUNConfig) (TUNDevice, error) {

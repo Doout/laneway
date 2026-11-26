@@ -66,6 +66,21 @@ impl NodeCredential {
         }
         Ok(Some(tx.query_row("SELECT suspect_at<=?1 FROM ephemeral_exit_sessions WHERE node_id=?2 AND network_id=?3 AND terminated_at IS NULL AND revoke_at>?1",params![now,self.node.as_bytes(),self.net.as_bytes()],|r|r.get(0)).optional()?.ok_or(EnrollError::Denied)?))
     }
+    fn renewal_binding(
+        &self,
+        tx: &Transaction<'_>,
+        transport: RenewalTransport,
+    ) -> Result<(i64, Binding)> {
+        let now = tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?;
+        let bound = self.binding(tx, now)?;
+        if let RenewalTransport::Quic { holds_exit_claim } = transport {
+            ensure!(
+                self.exit_admission(tx, &bound, now)?.is_some() == holds_exit_claim,
+                EnrollError::Denied
+            );
+        }
+        Ok((now, bound))
+    }
 }
 impl SessionStore {
     /// Returns takeover eligibility only for an active ephemeral Exit. Ordinary
@@ -94,6 +109,15 @@ impl SessionStore {
         transport: RenewalTransport,
         cancelled: impl Fn() -> bool,
     ) -> Result<RenewalResponse> {
+        ensure!(!cancelled(), "renewal cancelled");
+        // Authorize after the body has arrived, before verifying its signature.
+        // Release the read transaction before doing CPU-intensive CSR work.
+        {
+            let tx = self.db.transaction()?;
+            check_snapshot(&tx)?;
+            peer.renewal_binding(&tx, transport)?;
+            tx.commit()?;
+        }
         let csr = VerifiedCsr::parse(&req.pkcs10_csr_der)
             .map_err(|_| EnrollError::Malformed("invalid PKCS#10 CSR"))?;
         let requested = if req.wireguard_public_key.is_empty() {
@@ -124,14 +148,7 @@ impl SessionStore {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_snapshot(&tx)?;
-        let now = tx.query_row("SELECT unixepoch()", [], |r| r.get(0))?;
-        let bound = peer.binding(&tx, now)?;
-        if let RenewalTransport::Quic { holds_exit_claim } = transport {
-            ensure!(
-                peer.exit_admission(&tx, &bound, now)?.is_some() == holds_exit_claim,
-                EnrollError::Denied
-            );
-        }
+        let (now, bound) = peer.renewal_binding(&tx, transport)?;
         if let Some(k) = bound.key {
             ensure!(
                 x25519_dalek::x25519([1; 32], k) != [0; 32],
@@ -158,11 +175,58 @@ impl SessionStore {
                 now,
             )?;
         }
+        // A certificate or ephemeral authorization can expire while signing.
+        peer.renewal_binding(&tx, transport)?;
         ensure!(!cancelled(), "renewal cancelled");
         tx.commit()?;
         Ok(RenewalResponse {
             certificate_chain: Some(chain),
             wireguard_public_key: key.map_or_else(Vec::new, |k| k.to_vec()),
         })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose, PKCS_ED25519,
+    };
+    use rusqlite::Connection;
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+    #[test]
+    fn unauthorized_renewal_is_denied_before_parsing_csr() -> Result<()> {
+        let mut store = SessionStore {
+            db: Connection::open_in_memory()?,
+        };
+        let tx = store.db.transaction()?;
+        crate::schema::initialize(&tx, 1)?;
+        tx.commit()?;
+
+        let key = KeyPair::generate_for(&PKCS_ED25519)?;
+        let mut ca = CertificateParams::new(vec![])?;
+        ca.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let ca = ca.self_signed(&key)?;
+        let key = PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key.serialize_der()));
+        let issuer = NodeIssuer::new(std::slice::from_ref(ca.der()), &key, 300)?;
+        let peer = NodeCredential {
+            net: Id::new([1; 16])?,
+            node: Id::new([2; 16])?,
+            serial: vec![1],
+            der: vec![1],
+        };
+        let err = store
+            .renew_certificate(
+                &peer,
+                RenewalRequest::default(),
+                &issuer,
+                RenewalTransport::Https,
+                || false,
+            )
+            .unwrap_err();
+        assert!(matches!(err.downcast_ref(), Some(EnrollError::Denied)));
+        Ok(())
     }
 }

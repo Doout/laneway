@@ -51,6 +51,7 @@ pub struct State {
     /// Current authenticated direct connections keyed by peer.
     pub direct: ArcSwap<HashMap<Id, DirectPath>>,
     authority: ArcSwapOption<Snapshot>,
+    rootless_authority: ArcSwapOption<crate::rootless::PacketAuthority>,
     wireguard_drain: ArcSwapOption<Snapshot>,
     exit_sources: ArcSwapOption<Vec<ipnet::IpNet>>,
     controller_managed: bool,
@@ -79,6 +80,7 @@ impl State {
             handles: ArcSwap::from_pointee(Handles::default()),
             direct: ArcSwap::from_pointee(HashMap::new()),
             authority: ArcSwapOption::empty(),
+            rootless_authority: ArcSwapOption::empty(),
             wireguard_drain: ArcSwapOption::empty(),
             exit_sources: ArcSwapOption::empty(),
             controller_managed,
@@ -105,6 +107,17 @@ impl State {
         }
         self.direct.store(Arc::new(retained));
         self.authority.store(Some(snapshot));
+    }
+
+    pub(crate) fn publish_rootless(&self, view: Arc<crate::rootless::PacketAuthority>) {
+        self.publish_authority(Arc::clone(&view.snapshot));
+        self.rootless_authority.store(Some(view));
+    }
+
+    pub(crate) fn rootless_authority(&self) -> Option<Arc<crate::rootless::PacketAuthority>> {
+        self.rootless_authority
+            .load_full()
+            .filter(|view| !view.snapshot.session_expired())
     }
 
     pub(crate) fn authority_snapshot(&self) -> Option<Arc<Snapshot>> {
@@ -243,6 +256,7 @@ impl State {
 
     /// Removes all dynamic authority, routes, relay handles, and direct paths.
     pub(crate) fn fail_close(&self) {
+        self.rootless_authority.store(None);
         self.suspend_gateway();
         self.wireguard_drain.store(None);
         self.authority.store(None);

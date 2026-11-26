@@ -25,7 +25,6 @@ import (
 	"github.com/Doout/laneway/go/internal/controllerclient"
 	"github.com/Doout/laneway/go/internal/identity"
 	"github.com/Doout/laneway/go/internal/localapi"
-	"github.com/Doout/laneway/go/internal/nethelper"
 	"github.com/Doout/laneway/go/internal/nodeapp"
 	"github.com/Doout/laneway/go/internal/pki"
 	"github.com/Doout/laneway/go/internal/wireguard"
@@ -56,7 +55,7 @@ func runNetworkHelper(args []string) error {
 	if fs.NArg() != 0 || *fd < 0 {
 		return errors.New("invalid privileged helper invocation")
 	}
-	return nethelper.ServeInheritedFD(context.Background(), *fd, nethelper.ProductionConfig())
+	return runPlatformNetworkHelper(*fd)
 }
 
 func runNode(args []string) error {

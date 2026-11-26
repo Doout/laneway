@@ -22,8 +22,8 @@ func TestDarwinHelperUsesSupportedUnixStreams(t *testing.T) {
 	defer unix.Close(fds[0])
 	defer unix.Close(fds[1])
 	for _, fd := range fds {
-		if err := authenticateHelperPeer(fd); err != nil {
-			t.Fatalf("authenticate helper socket peer: %v", err)
+		if pid, err := unix.GetsockoptInt(fd, unix.SOL_LOCAL, unix.LOCAL_PEERPID); err != nil || pid <= 0 {
+			t.Fatalf("invalid Darwin helper socket peer PID %d: %v", pid, err)
 		}
 	}
 }

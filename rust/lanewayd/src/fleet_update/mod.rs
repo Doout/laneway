@@ -1,6 +1,6 @@
 //! Root-owned, opt-in updater for Linux Rust nodes and Docker Connectors.
 mod activate;
-mod connector;
+pub(crate) mod connector;
 mod journal;
 mod release;
 #[cfg(test)]

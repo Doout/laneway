@@ -22,6 +22,34 @@ import (
 const credentialDescriptorDirectory = "/dev/fd"
 const macRustRuntimePath = "/Library/Application Support/Laneway/lanewayd-rs"
 
+func runProductConfigure(args []string) error {
+	system, remaining := splitExplicitSystem(args)
+	if !system {
+		for _, arg := range args {
+			if arg == "--" || strings.HasPrefix(arg, "--state-dir") || strings.HasPrefix(arg, "-state-dir") {
+				break
+			}
+			flag, _, _ := strings.Cut(arg, "=")
+			switch flag {
+			case "--check", "-check", "--yes", "-yes":
+				system = true
+			}
+		}
+	}
+	if system {
+		return runMacConfigure(remaining)
+	}
+	return runRootless("configure", args)
+}
+
+func runSystemStart(args []string) error {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Println("On macOS, use 'laneway configure --system' to install host networking and 'laneway connect DOMAIN' to start an authenticated host connection.")
+		return nil
+	}
+	return errors.New("use 'laneway connect DOMAIN' for macOS host networking")
+}
+
 func foregroundTunName(string) string { return "utun" }
 
 func prepareRustForegroundProcess(*exec.Cmd) func() { return func() {} }
@@ -57,7 +85,9 @@ func platformConnectRustRuntime() (string, error) {
 func checkMacRustVersion(executable string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, executable, "--version").Output()
+	probe := exec.CommandContext(ctx, executable, "--version")
+	probe.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"}
+	output, err := probe.Output()
 	if err != nil || strings.TrimSpace(string(output)) != buildinfo.Version {
 		return fmt.Errorf("the Rust runtime must match Laneway %s; reinstall the signed macOS package", buildinfo.Version)
 	}
