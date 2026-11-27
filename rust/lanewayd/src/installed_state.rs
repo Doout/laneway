@@ -13,6 +13,7 @@ struct Stored {
     socket_path: PathBuf,
     tls: StoredTls,
     node: StoredNode,
+    #[serde(default)]
     controller: StoredController,
     #[serde(default)]
     connector: ConnectorConfig,
@@ -27,7 +28,14 @@ struct Stored {
     #[serde(default)]
     tcp_fallback: StoredTcp,
     #[serde(default)]
-    peers: Vec<toml::Value>,
+    peers: Vec<StoredPeer>,
+}
+
+#[derive(Deserialize)]
+struct StoredPeer {
+    network_id: String,
+    node_id: String,
+    prefixes: Vec<IpNet>,
 }
 
 #[derive(Deserialize)]
@@ -57,7 +65,8 @@ struct StoredNode {
     reconnect_max: Duration,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct StoredController {
     endpoint: String,
     quic_endpoint: String,
@@ -127,6 +136,12 @@ struct StoredExit {
     #[cfg(target_os = "linux")]
     #[serde(default)]
     failure_mode: String,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    dns_servers: Vec<std::net::IpAddr>,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    local_lan_bypasses: Vec<ipnet::IpNet>,
 }
 
 #[derive(Default, Deserialize)]
@@ -214,6 +229,8 @@ enum InstalledRole<'a> {
     Connector(&'a Path),
     ExitGateway,
     #[cfg(target_os = "linux")]
+    Persistent,
+    #[cfg(target_os = "linux")]
     SharedHost,
 }
 
@@ -265,6 +282,22 @@ impl Config {
             );
         }
         stored.convert(tls, InstalledRole::ExitGateway)
+    }
+
+    /// Load an existing controller-managed Go node without modifying its files.
+    #[cfg(target_os = "linux")]
+    pub fn load_persistent_node(path: &Path) -> Result<(Self, Option<PathBuf>)> {
+        let stored = Stored::read(path)?;
+        let tls = TlsConfig {
+            certificate: stored.tls.certificate.clone(),
+            private_key: stored.tls.private_key.clone(),
+            ca: stored.tls.ca.clone(),
+        };
+        let wireguard = stored
+            .wireguard
+            .enabled
+            .then(|| stored.wireguard.private_key.clone());
+        Ok((stored.convert(tls, InstalledRole::Persistent)?, wireguard))
     }
 
     #[cfg(target_os = "linux")]
@@ -336,9 +369,19 @@ impl Stored {
         let shared_host = matches!(role, InstalledRole::SharedHost);
         #[cfg(not(target_os = "linux"))]
         let shared_host = false;
+        #[cfg(target_os = "linux")]
+        let persistent = matches!(role, InstalledRole::Persistent);
+        #[cfg(not(target_os = "linux"))]
+        let persistent = false;
         let (userspace, state_dir, supported) = match role {
             InstalledRole::Connector(directory) => (true, directory, modern || legacy),
             InstalledRole::ExitGateway => (false, self.state_dir.as_path(), legacy),
+            #[cfg(target_os = "linux")]
+            InstalledRole::Persistent => (
+                self.connector.userspace,
+                self.state_dir.as_path(),
+                !self.exit.serve || (nat && !self.routing.output_interface.is_empty()),
+            ),
             #[cfg(target_os = "linux")]
             InstalledRole::SharedHost => (
                 false,
@@ -355,16 +398,15 @@ impl Stored {
                     && self.routing.output_interface == "uplink0",
             ),
         };
+        let managed = !persistent || !self.controller.endpoint.is_empty();
         ensure!(
             self.mode == "node"
                 && supported
-                && self.wireguard.enabled == shared_host
-                && !self.exit.enabled
-                && self.exit.selected_node_id.is_empty()
+                && (persistent || self.wireguard.enabled == shared_host)
+                && (persistent || (!self.exit.enabled && self.exit.selected_node_id.is_empty()))
                 && (self.exit.lease_generation != 0) == shared_host
-                && self.peers.is_empty()
-                && self.node.overlay_addresses.is_empty()
-                && self.routing.advertise.is_empty(),
+                && (!managed || (self.peers.is_empty() && self.node.overlay_addresses.is_empty()))
+                && (persistent || self.routing.advertise.is_empty()),
             "saved configuration does not match the requested node role"
         );
         ensure!(
@@ -375,16 +417,41 @@ impl Stored {
         ensure!(identity.role == Role::Node, "installed leaf is not a node");
         let network = identity.network_id.to_string();
         ensure!(
-            network == self.node.relay_network_id && network == self.controller.network_id,
+            network == self.node.relay_network_id
+                && (!managed || network == self.controller.network_id),
             "installed node network differs from certificate identity"
         );
-        let controller_name = self.controller.server_name;
-        crate::controller::controller_origins(&self.controller.endpoint, &controller_name)?;
-        let quic_endpoint = canonical_host_port(&self.controller.quic_endpoint)
-            .context("invalid installed controller QUIC endpoint")?;
+        let controller = if managed {
+            let name = if persistent && self.controller.server_name.is_empty() {
+                reqwest::Url::parse(&self.controller.endpoint)?
+                    .host_str()
+                    .context("missing controller hostname")?
+                    .trim_matches(['[', ']'])
+                    .to_owned()
+            } else {
+                self.controller.server_name
+            };
+            crate::controller::controller_origins(&self.controller.endpoint, &name)?;
+            let quic = canonical_host_port(&self.controller.quic_endpoint)
+                .context("invalid installed controller QUIC endpoint")?;
+            Some(ControllerConfig {
+                topology_reporting: self.controller.topology_reporting && !shared_host,
+                auto_renew_certificate: false, // Keep the configured identity storage intact.
+                disable_status_reporting: shared_host,
+                private_dns_listen: self.controller.private_dns_listen,
+                endpoint: self.controller.endpoint,
+                quic_endpoint: Some(quic),
+                server_name: name,
+                service_id: self.controller.service_id,
+                poll_interval: self.controller.poll_interval,
+                timeout: default_controller_timeout(),
+            })
+        } else {
+            None
+        };
         let relay = canonical_host_port(&self.node.relay_address)
             .context("invalid saved relay endpoint")?;
-        let relay_name = if shared_host && self.tls.server_name.is_empty() {
+        let relay_name = if (shared_host || persistent) && self.tls.server_name.is_empty() {
             relay
                 .rsplit_once(':')
                 .context("invalid shared-host relay")?
@@ -396,13 +463,28 @@ impl Stored {
             self.tls.server_name
         };
         ServerName::try_from(relay_name.as_str()).context("invalid relay TLS name")?;
+        let resolve = |endpoint: &str| -> Result<SocketAddr> {
+            use std::net::ToSocketAddrs;
+            endpoint
+                .to_socket_addrs()?
+                .next()
+                .context("installed relay endpoint resolved no addresses")
+        };
+        let relay_socket = if managed {
+            relay.parse().ok()
+        } else {
+            Some(resolve(&relay)?)
+        };
         let tcp = self.tcp_fallback;
         let tcp_fallback = if tcp.address.is_empty() {
             None
         } else {
             Some(TcpFallbackConfig {
-                address: canonical_host_port(&tcp.address)
-                    .context("invalid TCP fallback endpoint")?,
+                address: if managed {
+                    canonical_host_port(&tcp.address).context("invalid TCP fallback endpoint")?
+                } else {
+                    resolve(&tcp.address)?.to_string()
+                },
                 handshake_timeout: tcp
                     .handshake_timeout
                     .unwrap_or_else(default_handshake_timeout),
@@ -425,6 +507,131 @@ impl Stored {
             };
             listen.parse().context("invalid saved UDP bind address")?
         };
+        let forwarding = if userspace || (persistent && !self.exit.serve) {
+            ForwardingConfig::default()
+        } else {
+            ForwardingConfig {
+                exit_gateway: true,
+                exit_gateway_controller_sources: managed,
+                exit_output_interface: Some(self.routing.output_interface.clone()),
+                ..ForwardingConfig::default()
+            }
+        };
+        #[cfg(target_os = "linux")]
+        let forwarding = {
+            let mut forwarding = forwarding;
+            if persistent {
+                forwarding.subnet_router = !userspace && !self.routing.advertise.is_empty();
+                for prefix in self.routing.advertise {
+                    let prefix = prefix.parse()?;
+                    forwarding.owned_prefixes.push(prefix);
+                    forwarding.subnet_routes.push(SubnetForwardConfig {
+                        prefix,
+                        mode: if nat {
+                            ForwardMode::Nat
+                        } else {
+                            ForwardMode::Routed
+                        },
+                        output_interface: self.routing.output_interface.clone(),
+                    });
+                }
+                let exit = &mut forwarding.exit_client;
+                exit.enabled = self.exit.enabled;
+                exit.authorized = self.exit.enabled;
+                exit.selected_node = Some(self.exit.selected_node_id).filter(|id| !id.is_empty());
+                exit.failure_mode = match self.exit.failure_mode.as_str() {
+                    "" => ExitFailureMode::Unspecified,
+                    "open" => ExitFailureMode::Open,
+                    "closed" => ExitFailureMode::Closed,
+                    _ => anyhow::bail!("invalid exit.failure_mode"),
+                };
+                exit.local_lan_bypass = self.exit.local_lan_bypasses;
+                exit.dns_servers = self.exit.dns_servers;
+            }
+            forwarding
+        };
+        let addresses = self
+            .node
+            .overlay_addresses
+            .iter()
+            .map(|address| address.parse())
+            .collect::<Result<Vec<IpNet>, _>>()?;
+        let mut routes = Vec::new();
+        let mut direct_peers = Vec::new();
+        for peer in self.peers {
+            ensure!(
+                peer.network_id == network && !peer.prefixes.is_empty(),
+                "invalid static peer network or prefixes"
+            );
+            for prefix in peer.prefixes {
+                let kind = if prefix.prefix_len() == 0 {
+                    RouteKind::Exit
+                } else if prefix.prefix_len() == prefix.max_prefix_len() {
+                    RouteKind::Overlay
+                } else {
+                    RouteKind::Subnet
+                };
+                routes.push(RouteConfig {
+                    prefix,
+                    via_node: peer.node_id.clone(),
+                    metric: 0,
+                    kind,
+                });
+            }
+            if self.direct.enabled {
+                direct_peers.push(DirectPeerConfig {
+                    node_id: peer.node_id,
+                    address: None,
+                    server_name: String::new(),
+                });
+            }
+        }
+        let forwarding = if forwarding.exit_gateway && !managed {
+            ForwardingConfig {
+                exit_gateway_sources: routes
+                    .iter()
+                    .filter(|route| route.kind == RouteKind::Overlay)
+                    .map(|route| route.prefix)
+                    .collect(),
+                ..forwarding
+            }
+        } else {
+            forwarding
+        };
+        let interface = if userspace { "userspace" } else { "lane0" }.to_owned();
+        // Match the older IPv4 TUN limit and honor the IPv6 minimum.
+        let mtu = if userspace
+            || shared_host
+            || addresses
+                .iter()
+                .any(|address| matches!(address, IpNet::V6(_)))
+        {
+            1280
+        } else {
+            1200
+        };
+        #[cfg(target_os = "linux")]
+        let (interface, mtu) = if persistent && self.wireguard.enabled {
+            ensure!(
+                self.wireguard.listen_port == 0,
+                "native WireGuard requires an automatic listen port"
+            );
+            let name = if self.wireguard.interface.is_empty() {
+                interface
+            } else {
+                self.wireguard.interface
+            };
+            (
+                name,
+                if self.wireguard.mtu == 0 {
+                    1280
+                } else {
+                    self.wireguard.mtu
+                },
+            )
+        } else {
+            (interface, mtu)
+        };
         let config = Config {
             foreground_routes: None,
             mode: self.mode,
@@ -435,29 +642,16 @@ impl Stored {
                 node_id: identity.subject_id.to_string(),
             },
             tls,
-            controller: Some(ControllerConfig {
-                topology_reporting: self.controller.topology_reporting && !shared_host,
-                auto_renew_certificate: false, // Keep identity bytes intact for a reversible image swap.
-                disable_status_reporting: shared_host,
-                private_dns_listen: self.controller.private_dns_listen,
-                endpoint: self.controller.endpoint,
-                quic_endpoint: Some(quic_endpoint),
-                server_name: controller_name,
-                service_id: self.controller.service_id,
-                poll_interval: self.controller.poll_interval,
-                timeout: default_controller_timeout(),
-            }),
+            controller,
             tun: TunConfig {
-                name: if userspace { "userspace" } else { "lane0" }.to_owned(),
-                // Match the old Go TUN limit on IPv4-only networks. An
-                // initial IPv6 overlay raises it to the IPv6 minimum.
-                mtu: if userspace || shared_host { 1280 } else { 1200 },
-                addresses: vec![],
+                name: interface,
+                mtu,
+                addresses,
                 configure: !userspace,
             },
             connector: ConnectorConfig { userspace },
             relay: RelayConfig {
-                address: relay.parse().ok(), // DNS relay targets are resolved from live controller authority.
+                address: relay_socket,
                 server_name: relay_name,
                 service_id: self.node.relay_service_id,
                 queue_depth: default_queue_depth(),
@@ -490,18 +684,9 @@ impl Stored {
                 allow_link_local: self.direct.allow_link_local,
                 ..DirectConfig::default()
             },
-            routes: vec![],
-            direct_peers: vec![],
-            forwarding: if userspace {
-                ForwardingConfig::default()
-            } else {
-                ForwardingConfig {
-                    exit_gateway: true,
-                    exit_gateway_controller_sources: true,
-                    exit_output_interface: Some(self.routing.output_interface),
-                    ..ForwardingConfig::default()
-                }
-            },
+            routes,
+            direct_peers,
+            forwarding,
             diagnostics: DiagnosticsConfig::default(),
         };
         config.validate()?;

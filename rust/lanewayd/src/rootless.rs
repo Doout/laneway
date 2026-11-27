@@ -100,14 +100,48 @@ pub async fn get_configuration(
     node: Id,
     tls: &TlsConfig,
 ) -> Result<laneway_protocol::v1::NodeConfiguration> {
-    let options = controller_options(controller, network, tls)?;
+    get_initial_configuration(controller, network, node, tls, None).await
+}
+
+/// Fetches and verifies the first full configuration for an enrolled Exit lease.
+#[cfg(target_os = "linux")]
+pub async fn get_exit_configuration(
+    controller: &ControllerConfig,
+    network: Id,
+    node: Id,
+    tls: &TlsConfig,
+    generation: std::num::NonZeroU64,
+) -> Result<laneway_protocol::v1::NodeConfiguration> {
+    get_initial_configuration(controller, network, node, tls, Some(generation)).await
+}
+
+async fn get_initial_configuration(
+    controller: &ControllerConfig,
+    network: Id,
+    node: Id,
+    tls: &TlsConfig,
+    generation: Option<std::num::NonZeroU64>,
+) -> Result<laneway_protocol::v1::NodeConfiguration> {
+    let mut options = controller_options(controller, network, tls)?;
+    options.exit_generation = generation;
     tls::validate_local(tls, network, node)?;
     let certificate = tls::local_certificate_health(tls)?;
     let client = QuicControl::rootless(&options).await?;
-    match client.poll(0, None).await? {
+    let result = client.poll(0, generation).await;
+    if generation.is_some() {
+        // The controller permits one live claim. Drive CONNECTION_CLOSE on
+        // the socket before the bootstrap runtime and network namespace end.
+        client.close().await;
+    }
+    match result? {
         PollResult::Modified(configuration) => {
-            let snapshot =
-                Snapshot::compile((*configuration).clone(), network, node, &certificate)?;
+            let snapshot = Snapshot::compile_for(
+                (*configuration).clone(),
+                network,
+                node,
+                &certificate,
+                generation,
+            )?;
             ensure!(
                 !snapshot.local_certificate_revoked,
                 "local node certificate is revoked"

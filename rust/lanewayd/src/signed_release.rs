@@ -210,8 +210,10 @@ pub async fn client_archive(tag: &str, directory: &Path) -> Result<ClientArchive
     let checksum = checksum_for(&manifest, &name)?;
     let archive = directory.join(&name);
     download(&client, tag, &name, &archive, MAX_ARCHIVE, 180).await?;
-    let cli = directory.join("candidate-laneway");
-    let daemon = directory.join("candidate-lanewayd-rs");
+    let candidates = directory.join("client-candidates");
+    fs::create_dir(&candidates)?;
+    let cli = candidates.join("laneway");
+    let daemon = candidates.join("lanewayd-rs");
     let paths = (archive.clone(), cli.clone(), daemon.clone());
     tokio::task::spawn_blocking(move || {
         let mut file = File::open(paths.0)?;

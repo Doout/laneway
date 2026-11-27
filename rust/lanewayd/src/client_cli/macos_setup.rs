@@ -1,5 +1,4 @@
 use std::{
-    env,
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, Read, Seek, Write},
@@ -47,7 +46,7 @@ pub(crate) fn run(source: PathBuf, args: impl Iterator<Item = OsString>) -> Resu
             }
             let status = Command::new("/usr/bin/sudo")
                 .arg("--")
-                .arg(env::current_exe()?)
+                .arg(&companion)
                 .arg("_mac-setup")
                 .arg(&source)
                 .arg("--yes")
@@ -63,6 +62,12 @@ pub(crate) fn run(source: PathBuf, args: impl Iterator<Item = OsString>) -> Resu
     }
     println!("macOS client configured cli={CLIENT} runtime={RUNTIME}");
     Ok(())
+}
+
+pub(super) fn verify_installed_client() -> Result<()> {
+    let path = std::env::current_exe()?.canonicalize()?;
+    verify(&path, Path::new(RUNTIME))
+        .context("macOS host networking requires matching installed components; run 'laneway configure --system --check'")
 }
 
 fn confirm() -> Result<()> {

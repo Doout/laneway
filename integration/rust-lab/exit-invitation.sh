@@ -9,7 +9,7 @@ redeem_lab_invitation() {
     mount --bind "$1" /etc/hosts
     exec env -i PATH="$PATH" SSL_CERT_FILE="$2" SSL_CERT_DIR=/nonexistent "${@:3}"
   ' bash "${work_dir}/exit-lab.hosts" "${work_dir}/pki/ca.crt" \
-    "${work_dir}/laneway" node ephemeral-exit-prepare \
+    "${work_dir}/native-cli/laneway" node ephemeral-exit-prepare \
     --authority "${discovery_name}:9443" --runtime-dir "${systemd_runtime}" \
     --runtime-name "${systemd_unit%.service}" --name "${exit_name}" --token-fd 3 \
     3<"${systemd_sources}/invitation"
@@ -18,6 +18,10 @@ redeem_lab_invitation() {
 check_invited_systemd_exit() {
   local exit_name="borrowed-lab-exit" rust_id rust_key rust_overlay nat_pid route_id credential
   stage_systemd_exit
+  if [[ ! -x "$work_dir/native-cli/laneway" ]]; then
+    mkdir "$work_dir/native-cli"
+    ln "$work_dir/rust-node" "$work_dir/native-cli/laneway"
+  fi
   printf '%s %s\n' "${location_controller_ip}" "${discovery_name}" >"${work_dir}/exit-lab.hosts"
   (umask 077
     ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
@@ -59,21 +63,21 @@ check_invited_systemd_exit() {
 
   echo '==> forward an encrypted packet through the invited exit'
   start_process "${lan_ns}" "${work_dir}/invited-nat.log" \
-    "${work_dir}/netprobe" udp-server -listen 203.0.113.2:9793 -max-packets 16 -timeout 75s
+    "${work_dir}/netprobe-stream" udp-server -listen 203.0.113.2:9793 -max-packets 16 -timeout 75s
   nat_pid="${last_pid}"
   wait_log "${nat_pid}" "${work_dir}/invited-nat.log" ready=udp-server
   ip netns exec "${gateway_ns}" wg set lane0 peer "${rust_key}" \
     allowed-ips "${rust_overlay},203.0.113.2/32"
   ip -n "${gateway_ns}" route add 203.0.113.2/32 dev lane0
   for _ in $(seq 1 10); do
-    if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+    if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
       -target 203.0.113.2:9793 -message invited-exit-nat -timeout 1s; then break; fi
   done
   grep -Eq 'remote=203\.0\.113\.1:[0-9]+ payload=invited-exit-nat' "${work_dir}/invited-nat.log"
   ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node revoke \
     --node-id "${rust_id}" --reason invitation-packet-lab "${management_connection[@]}" >/dev/null
   wait_systemd_revocation
-  if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+  if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
     -target 203.0.113.2:9793 -message revoked-exit -timeout 2s; then
     echo 'ERROR: the invited exit still forwarded after revocation' >&2
     return 1

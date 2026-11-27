@@ -68,5 +68,7 @@ printf '%s\n' 'temporary-release-probe-password' |
 printf 'Verified packaged rootless CLI and helper at version %s.\n' "$client_version"
 
 if [ "$linux_archive" = true ]; then
+  [ "$("$installed/bin/lane" -version)" = "$client_version" ]
+  [ "$("$client" node run -version)" = "$client_version" ]
   python3 "$root/integration/rootless.py" --bin-dir "$installed"
 fi

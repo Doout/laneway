@@ -30,8 +30,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 mkdir "$probe_dir/go" "$probe_dir/rust"
-# Keep the Go CLI for enrollment. Build the legacy relay and test tools as
-# fixtures so wire interoperability does not require shipping them.
+# Use the archive for the native CLI and daemon. Source-build the legacy
+# clients for the independent mixed-runtime interoperability cases.
 listing=$(tar -tzf "$archive")
 bootstrap=laneway/deploy/ephemeral-exit/bootstrap.sh
 if [[ $(grep -Fxc "$bootstrap" <<<"$listing") != 1 ]] ||
@@ -44,19 +44,19 @@ if [[ $(grep -Fxc "$member" <<<"$listing") != 1 ]]; then
   printf 'Expected one %s in the Linux archive.\n' "$member" >&2
   exit 1
 fi
-tar -xzOf "$archive" "$member" > "$probe_dir/go/laneway"
-cp "$probe_dir/go/laneway" "$probe_dir/go/lanewayd"
+tar -xzOf "$archive" "$member" > "$probe_dir/rust/laneway"
 for name in laneway-controller-rs laneway-relay-rs lanewayd-rs; do
   tar -xzOf "$archive" "laneway/sbin/$name" > "$probe_dir/rust/$name"
 done
-for fixture in laneway-relay netprobe rustnodecontroller; do
+for fixture in laneway laneway-relay rustnodecontroller; do
   if [[ -n ${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-} ]]; then
     install -m 0755 "$LANEWAY_NODE_TEST_GO_FIXTURE_DIR/$fixture" "$probe_dir/go/$fixture"
   else
-    case "$fixture" in laneway-relay) pkg="./cmd/$fixture" ;; *) pkg="./integration/$fixture" ;; esac
+    case "$fixture" in laneway|laneway-relay) pkg="./cmd/$fixture" ;; *) pkg="./integration/$fixture" ;; esac
     (cd "$root/go" && CGO_ENABLED=0 go build -o "$probe_dir/go/$fixture" "$pkg")
   fi
 done
+cp "$probe_dir/go/laneway" "$probe_dir/go/lanewayd"
 chmod 0755 "$probe_dir/go/"* "$probe_dir/rust/"*
 
 run_packet_gate() {

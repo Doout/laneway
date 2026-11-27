@@ -67,6 +67,8 @@ pub(super) struct Enrolled {
     pub(super) key: Zeroizing<String>,
     pub(super) wireguard: Zeroizing<[u8; 32]>,
     pub(super) lease_expires: u64,
+    #[cfg(target_os = "linux")]
+    pub(super) exit_generation: Option<std::num::NonZeroU64>,
     #[cfg(unix)]
     pub(super) overlay: Vec<Vec<u8>>,
 }
@@ -211,7 +213,7 @@ impl RedeemTarget<'_> {
             );
         } else {
             ensure!(
-                lease_expires == 0,
+                lease_expires == 0 && response.ephemeral_exit_lease_generation == 0,
                 "non-ephemeral enrollment unexpectedly contains an ephemeral lease"
             );
         }
@@ -221,6 +223,8 @@ impl RedeemTarget<'_> {
             key: Zeroizing::new(key.serialize_pem()),
             wireguard,
             lease_expires,
+            #[cfg(target_os = "linux")]
+            exit_generation: std::num::NonZeroU64::new(response.ephemeral_exit_lease_generation),
             #[cfg(unix)]
             overlay: response.overlay_addresses,
         })

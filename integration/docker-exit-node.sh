@@ -33,6 +33,7 @@ relay_image="${prefix}-relay:dev"
 admin_image="${prefix}-admin:dev"
 node_image="${prefix}-node:dev"
 probe_image="${prefix}-probe:dev"
+probe_container="${prefix}-probe-export"
 client_volume="${prefix}-client-state"
 gateway_volume="${prefix}-gateway-state"
 
@@ -116,7 +117,7 @@ cleanup() {
       fi
     done
   fi
-  for container in "${external_name}" "${nat_name}" "${client_name}" "${gateway_name}" "${relay_name}" "${controller_name}"; do
+  for container in "${probe_container}" "${external_name}" "${nat_name}" "${client_name}" "${gateway_name}" "${relay_name}" "${controller_name}"; do
     owned_container "${container}" && docker rm -f "${container}" >/dev/null 2>&1
   done
   for network in "${internet_network}" "${egress_network}" "${control_network}"; do
@@ -189,13 +190,11 @@ docker build --quiet --label "${owner}" --target relay -t "${relay_image}" -f "$
 docker build --quiet --label "${owner}" --target admin -t "${admin_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
 docker build --quiet --label "${owner}" --target go-exit -t "${node_image}" -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
 mkdir -p "${work_dir}/probe-context"
-(cd "${repo_root}/go" && CGO_ENABLED=0 go build -trimpath -o "${work_dir}/probe-context/netprobe" ./integration/netprobe)
-cat >"${work_dir}/probe-context/Dockerfile" <<'EOF'
-FROM scratch
-COPY netprobe /netprobe
-ENTRYPOINT ["/netprobe"]
-EOF
-docker build --quiet --label "${owner}" -t "${probe_image}" "${work_dir}/probe-context" >/dev/null
+docker build --quiet --label "${owner}" --target network-probe -t "${probe_image}" \
+  -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
+docker create --name "$probe_container" --label "$owner" "${probe_image}" >/dev/null
+docker cp "$probe_container:/netprobe" "${work_dir}/probe-context/netprobe"
+docker rm "$probe_container" >/dev/null
 
 echo "==> create uniquely owned Docker networks and state volumes"
 docker network create --label "${owner}" --opt com.docker.network.container_iface_prefix=ctl "${control_network}" >/dev/null
@@ -426,12 +425,14 @@ for node_name in "${client_name}" "${gateway_name}"; do
       devices: .HostConfig.Devices
     }
   ')"
+  # setpriv draws NET_ADMIN from the file capability before setting
+  # no_new_privs. Check the entrypoint here and the actual process below.
   if ! jq -e '
     .[0].Config.User == "65532:65532" and
     .[0].HostConfig.Privileged == false and
     .[0].HostConfig.NetworkMode != "host" and
     (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
-    ((.[0].HostConfig.SecurityOpt // []) | map(sub(":true$"; ""))) == ["no-new-privileges"] and
+    (.[0].HostConfig.SecurityOpt // []) == [] and
     .[0].Config.Entrypoint == ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"] and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and

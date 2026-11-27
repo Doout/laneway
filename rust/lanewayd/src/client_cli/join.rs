@@ -38,7 +38,7 @@ pub(super) struct Options {
     out_wireguard_key: PathBuf,
 }
 
-pub(super) async fn run(mut options: Options) -> Result<()> {
+pub(super) async fn run(mut options: Options, class: EnrollmentClass) -> Result<()> {
     let paths = [
         &options.out_wireguard_key,
         &options.out_key,
@@ -136,8 +136,18 @@ pub(super) async fn run(mut options: Options) -> Result<()> {
         network,
         service,
     }
-    .redeem(&code, &options.name, EnrollmentClass::DurableNode)
+    .redeem(&code, &options.name, class)
     .await?;
+    #[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+    let generation = if class == EnrollmentClass::EphemeralUser {
+        Some(
+            enrolled
+                .exit_generation
+                .context("missing test Exit generation")?,
+        )
+    } else {
+        None
+    };
     let files = [
         stage(paths[0], enrolled.wireguard.as_ref(), 0o600, 0o700)?,
         stage(paths[1], enrolled.key.as_bytes(), 0o600, 0o700)?,
@@ -164,6 +174,14 @@ pub(super) async fn run(mut options: Options) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?
         .join(",");
+    #[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+    if let Some(generation) = generation {
+        println!(
+            "enrolled network={network} node={} overlay={overlays} generation={generation}",
+            enrolled.node
+        );
+        return Ok(());
+    }
     println!(
         "enrolled network={network} node={} overlay={overlays} certificate={}",
         enrolled.node,

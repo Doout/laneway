@@ -688,7 +688,9 @@ pub(crate) async fn submit_enrollment(
             anyhow::bail!("controller rejected the invitation as invalid or expired")
         }
         StatusCode::CONFLICT => {
-            anyhow::bail!("controller reported an already-used invitation or enrollment conflict")
+            anyhow::bail!(
+                "enrollment code has already been used or conflicts with existing enrollment"
+            )
         }
         status => anyhow::bail!("controller enrollment returned HTTP {status}"),
     }

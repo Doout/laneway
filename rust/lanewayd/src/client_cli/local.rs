@@ -38,24 +38,12 @@ fn default_socket() -> PathBuf {
 }
 
 pub(super) async fn run(query: Query, options: Options) -> Result<()> {
-    let socket = if let Some(socket) = options.socket {
-        socket
-    } else {
-        let path = read_file(&options.config, 128 << 10)?;
-        toml::from_str::<SocketConfig>(std::str::from_utf8(&path)?)?.socket_path
-    };
-    ensure!(socket.is_absolute(), "local socket path must be absolute");
+    let client = client(&options.config, options.socket)?;
     let resource = match query {
         Query::Status => "status",
         Query::Peers => "peers",
         Query::Routes => "routes",
     };
-    let client = reqwest::Client::builder()
-        .unix_socket(socket)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5))
-        .build()?;
     let response = client
         .get(format!("http://localhost/v1/{resource}"))
         .send()
@@ -103,6 +91,32 @@ pub(super) async fn run(query: Query, options: Options) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub(super) fn client(config: &std::path::Path, socket: Option<PathBuf>) -> Result<reqwest::Client> {
+    let socket = if let Some(socket) = socket {
+        socket
+    } else {
+        match read_file(config, 128 << 10) {
+            Ok(path) => toml::from_str::<SocketConfig>(std::str::from_utf8(&path)?)?.socket_path,
+            Err(error)
+                if config == std::path::Path::new("/etc/laneway/laneway.toml")
+                    && error
+                        .downcast_ref::<io::Error>()
+                        .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+            {
+                default_socket()
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    ensure!(socket.is_absolute(), "local socket path must be absolute");
+    Ok(reqwest::Client::builder()
+        .unix_socket(socket)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()?)
 }
 
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {

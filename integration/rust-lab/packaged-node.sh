@@ -165,7 +165,7 @@ check_foreground_packaged_node() {
   local role=$1 peer_ns=$2 address=$3
   shift 3
   local installed="$packaged_node/usr/local" directory="$work_dir/foreground-$role"
-  local token="$work_dir/foreground-$role-invitation" pid peer_pid runtime_pid interface
+  local token="$work_dir/foreground-$role-invitation" pid peer_pid interface
   local log="$work_dir/foreground-$role.log" peer_log="$work_dir/foreground-$role-udp.log"
   local enrollment=(--class ephemeral --session-lifetime 5m)
   local session=(--ephemeral --token-file "$token")
@@ -191,9 +191,7 @@ check_foreground_packaged_node() {
   start_process "$rust_ns" "$log" "${client[@]}" connect "$discovery_name:9443" "${session[@]}" "$@"
   pid=$last_pid
   wait_log "$pid" "$log" 'native Rust Laneway agent started'
-  runtime_pid=$(pgrep -P "$pid" -x lanewayd-rs)
-  [[ $runtime_pid =~ ^[1-9][0-9]*$ && $(readlink "/proc/$runtime_pid/exe") == /usr/local/sbin/lanewayd-rs ]]
-  tr '\0' '\n' <"/proc/$runtime_pid/cmdline" | grep -Fx '_client'
+  [[ $(readlink "/proc/$pid/exe") == /usr/local/bin/laneway ]]
   interface=$(ip -n "$rust_ns" route show "$gateway_address" | awk '$2 == "dev" {print $3}')
   [[ $interface =~ ^lwc[0-9a-f]{12}$ && -z $(ip -n "$rust_ns" route show default) ]]
   wait_log "$pid" "$log" 'Rust agent relay connected'
@@ -244,7 +242,7 @@ check_foreground_packaged_node() {
   ! ip -n "$rust_ns" link show "$interface" >/dev/null 2>&1
   ! ip -n "$rust_ns" rule show | grep -q 'lookup 51820'
   [[ -z $(ip -n "$rust_ns" route show table 51820 2>/dev/null || true) ]]
-  [[ ! -e "/proc/$runtime_pid" && -z $(find "$directory" -mindepth 1 -maxdepth 1 ! -name profiles -print -quit) ]]
+  [[ ! -e "/proc/$pid" && -z $(find "$directory" -mindepth 1 -maxdepth 1 ! -name profiles -print -quit) ]]
   if [[ $role == remembered ]]; then
     [[ -d "$directory/profiles" ]]
   else
@@ -393,7 +391,7 @@ EOF
   fi
   start_process "$gateway_ns" "$work_dir/gateway.log" "$work_dir/lanewayd" -config "$work_dir/gateway.toml"
   wait_log "$last_pid" "$work_dir/gateway.log" interface=lane0
-  before=$("$work_dir/netprobe" certificate-info -cert "$cert")
+  before=$("$work_dir/netprobe-inspect" certificate-info -cert "$cert")
   key_hash=$(sha256sum "$key")
   packaged_node_started=true
   systemctl start lanewayd-rs.service
@@ -403,7 +401,7 @@ EOF
   [[ $(readlink "/proc/$pid/exe") == /usr/local/sbin/lanewayd-rs ]]
   [[ $(awk '/^Uid:/ {print $3}' "/proc/$pid/status") == "$(id -u laneway)" &&
     $(awk '/^Gid:/ {print $3}' "/proc/$pid/status") == "$(id -g laneway)" ]]
-  after=$("$work_dir/netprobe" certificate-info -cert "$cert")
+  after=$("$work_dir/netprobe-inspect" certificate-info -cert "$cert")
   [[ ${before% serial=*} == "${after% serial=*}" && ${before##* serial=} != "${after##* serial=}" ]]
   [[ $(sha256sum "$key") == "$key_hash" && $(stat -c '%u:%g:%a' "$cert") == "$(id -u laneway):$(id -g laneway):400" ]]
 
