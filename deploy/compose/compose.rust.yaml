@@ -26,6 +26,9 @@ services:
       - /var/lib/laneway-controller/rust-tls
     volumes:
       - type: bind
+        source: ${LANEWAY_GATEWAY_SPOOL:-./generated/gateway-spool}
+        target: /run/laneway-gateways
+      - type: bind
         source: ./generated/config/bootstrap.rust.json
         target: /etc/laneway/bootstrap.rust.json
         read_only: true

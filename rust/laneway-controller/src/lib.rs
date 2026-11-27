@@ -29,6 +29,7 @@ pub mod endpoint_status;
 pub mod enrollment;
 mod enrollment_tokens;
 mod fleet_updates;
+pub mod gateway_overlay;
 mod management_write;
 mod network_create;
 pub mod node_location;

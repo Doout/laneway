@@ -155,6 +155,38 @@ impl Discovery {
         })
     }
 
+    pub fn network_id(&self) -> Id {
+        self.network
+    }
+
+    pub(crate) fn connector_setup(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        network: Id,
+        name: &str,
+        token: &str,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        ensure!(
+            network == self.network,
+            "gateway network differs from bootstrap identity"
+        );
+        let relays = self.relays(tx)?;
+        let relay = relays.first().context("no relay configured for gateway")?;
+        let contents = zeroize::Zeroizing::new(format!(
+            "{name}\n{token}\n{}\n{}\n{}\n{network}\n{}\n{}\n{}\n{}\n",
+            self.controller.enrollment_endpoint,
+            self.controller.quic_endpoint,
+            self.controller.server_name,
+            self.controller.service_id,
+            relay.endpoint,
+            relay.service_id,
+            STANDARD.encode(&self.trust),
+        ));
+        let mut setup = zeroize::Zeroizing::new(String::from("st1."));
+        STANDARD.encode_string(contents.as_bytes(), &mut setup);
+        Ok(setup)
+    }
+
     pub fn document(&self, database: &Path) -> Result<Vec<u8>> {
         let mut db = open_existing(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let tx = db.transaction()?;

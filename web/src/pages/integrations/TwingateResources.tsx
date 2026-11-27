@@ -6,18 +6,36 @@ import { useControlPlane } from '../../lib/control-plane'
 
 type Protocol = { policy: string; ports: Array<{ start: number; end: number }> }
 
-type Resource = {
+export type TwingateResource = {
   id: string
   name: string
   alias: string | null
   kind: string
+  routing_mode?: string | null
   active: boolean
   address: { value: string }
   remote_network: { name: string }
   protocols: { tcp: Protocol; udp: Protocol; allow_icmp: boolean }
 }
 
-type ResourcePage = { resources: Resource[]; total_count: number; next_cursor: string | null }
+type ResourcePage = { resources: TwingateResource[]; total_count: number; next_cursor: string | null }
+
+export function allowsSshPort({ protocols: { tcp } }: TwingateResource, port: number) {
+  return Number.isInteger(port) && port >= 1 && port <= 65535 &&
+    (tcp.policy === 'ALLOW_ALL' || (tcp.policy === 'RESTRICTED' && tcp.ports.some(({ start, end }) => port >= start && port <= end)))
+}
+
+function supportsSshGateway(resource: TwingateResource) {
+  const address = resource.address.value.replace(/\/32$/, '')
+  if (!/^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(address)) return false
+  const octets = address.split('.').map(Number)
+  const [first, second] = octets
+  const privateAddress = octets.every((part) => part <= 255) &&
+    (first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168))
+  return resource.active && resource.kind === 'NetworkResource' && privateAddress &&
+    (resource.routing_mode == null || resource.routing_mode === 'THROUGH_TWINGATE') &&
+    (resource.protocols.tcp.policy === 'ALLOW_ALL' || resource.protocols.tcp.ports.some(({ start }) => allowsSshPort(resource, Math.max(1, start))))
+}
 
 function protocolLabel(name: string, protocol: Protocol) {
   if (protocol.policy === 'ALLOW_ALL') return `${name} all ports`
@@ -37,7 +55,10 @@ function resourceError(failure: unknown) {
   return failure instanceof Error ? failure.message : 'Twingate resources could not be loaded.'
 }
 
-export function TwingateResources() {
+export function TwingateResources({ onSetupGateway, onRefresh }: {
+  onSetupGateway?: (resource: TwingateResource) => void
+  onRefresh: () => void
+}) {
   const { request } = useControlPlane()
   const [page, setPage] = useState<(ResourcePage & { cursors: Array<string | null> })>()
   const [cursors, setCursors] = useState<Array<string | null>>([null])
@@ -65,7 +86,7 @@ export function TwingateResources() {
     setRefresh((current) => current + 1)
   }
 
-  function toggle(resource: Resource, checked: boolean) {
+  function toggle(resource: TwingateResource, checked: boolean) {
     setCopyFeedback('')
     setSelected((current) => {
       const next = new Map(current)
@@ -84,16 +105,19 @@ export function TwingateResources() {
     }
   }
 
-  const columns: DataColumn<Resource>[] = [
+  const columns: DataColumn<TwingateResource>[] = [
     {
       key: 'name',
       label: 'Resource',
-      render: (row) => <label className="twingate-resource-name">
-        <Checkbox className="twingate-checkbox" aria-label={`Select ${row.name}`} disabled={pending} checked={selected.has(row.id)} onCheckedChange={(checked) => toggle(row, checked === true)}>
-          <CheckboxIndicator><Check size={13} aria-hidden="true" /></CheckboxIndicator>
-        </Checkbox>
-        <span><strong>{row.name}</strong><small>{resourceTypes[row.kind] ?? row.kind}</small></span>
-      </label>,
+      render: (row) => <>
+        <label className="twingate-resource-name">
+          <Checkbox className="twingate-checkbox" aria-label={`Select ${row.name}`} disabled={pending} checked={selected.has(row.id)} onCheckedChange={(checked) => toggle(row, checked === true)}>
+            <CheckboxIndicator><Check size={13} aria-hidden="true" /></CheckboxIndicator>
+          </Checkbox>
+          <span><strong>{row.name}</strong><small>{resourceTypes[row.kind] ?? row.kind}</small></span>
+        </label>
+        {onSetupGateway && supportsSshGateway(row) && <Button className="twingate-resource-gateway" variant="quiet" disabled={pending || Boolean(error)} aria-label={`Set up SSH gateway for ${row.name}`} onClick={() => onSetupGateway(row)}>Set up SSH gateway</Button>}
+      </>,
     },
     {
       key: 'address',
@@ -126,6 +150,7 @@ export function TwingateResources() {
         setSelected(new Map())
         setCopyFeedback('')
         navigate([null])
+        onRefresh()
       }}><RefreshCw size={14} aria-hidden="true" />Refresh</Button>
     </header>
     {pending && <p className="twingate-inventory__message" role="status">{page ? 'Updating resources…' : 'Loading Twingate resources…'}</p>}

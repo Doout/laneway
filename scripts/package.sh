@@ -100,6 +100,10 @@ for directory in containers ephemeral-exit examples nftables; do
 done
 cp -R "$package_dir/systemd" "$package_dir/deploy/systemd"
 install -m 0644 "$project_dir/deploy/README.md" "$package_dir/deploy/README.md"
+install -d -m 0755 "$package_dir/deploy/twingate-gateway"
+for name in worker.py install.sh compose.yaml laneway-twingate-gateway.service README.md; do
+	install -m 0644 "$project_dir/deploy/twingate-gateway/$name" "$package_dir/deploy/twingate-gateway/$name"
+done
 install -d -m 0755 "$package_dir/deploy/compose/generated/config"
 for name in .env.example README.md compose.dev.yaml compose.rust.yaml compose.yaml laneway-certificate-renewal.service laneway-certificate-renewal.timer; do
 	install -m 0644 "$project_dir/deploy/compose/$name" "$package_dir/deploy/compose/$name"

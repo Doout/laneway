@@ -17,6 +17,9 @@ use serde::{
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
+pub mod actuator;
+pub mod gateway;
+pub mod provider;
 mod resources;
 pub use resources::{list_resources, valid_cursor};
 
@@ -41,6 +44,12 @@ pub enum Failure {
     Unavailable,
     NotConnected,
     ConnectionChanged,
+    GatewayConflict,
+    GatewayBusy,
+    GatewayChanged,
+    GatewayUnsupported,
+    GatewayUnavailable,
+    GatewayRoute,
     Storage,
 }
 
@@ -284,7 +293,16 @@ impl Storage {
             credentials,
             verified_at_unix_seconds: verification_time()?,
         };
-        self.with_lock(|store| store.write(&saved))?;
+        self.with_lock(|store| {
+            if store.binding()?.is_some()
+                && store
+                    .read()?
+                    .is_none_or(|previous| previous.credentials.tenant != saved.credentials.tenant)
+            {
+                return Err(Failure::GatewayConflict);
+            }
+            store.write(&saved)
+        })?;
         Ok(saved.status())
     }
 
@@ -313,7 +331,10 @@ impl Storage {
     }
 
     pub fn disconnect(&self) -> Result<ConnectionStatus, Failure> {
-        self.with_lock(Self::remove)?;
+        self.with_lock(|store| {
+            store.require_gateway_disabled()?;
+            store.remove()
+        })?;
         Ok(disconnected())
     }
 
@@ -350,8 +371,12 @@ impl Storage {
     }
 
     fn read(&self) -> Result<Option<Connection>, Failure> {
+        self.read_json(&self.path())
+    }
+
+    fn read_json<T: DeserializeOwned>(&self, path: &Path) -> Result<Option<T>, Failure> {
         let file = match open(
-            self.path(),
+            path,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
         ) {
@@ -370,11 +395,15 @@ impl Storage {
     }
 
     fn write(&self, connection: &Connection) -> Result<(), Failure> {
+        self.write_json(&self.path(), connection)
+    }
+
+    fn write_json<T: Serialize>(&self, path: &Path, value: &T) -> Result<(), Failure> {
         let mut temp = tempfile::NamedTempFile::new_in(&self.0).map_err(|_| Failure::Storage)?;
-        serde_json::to_writer(&mut temp, connection).map_err(|_| Failure::Storage)?;
+        serde_json::to_writer(&mut temp, value).map_err(|_| Failure::Storage)?;
         temp.flush().map_err(|_| Failure::Storage)?;
         temp.as_file().sync_all().map_err(|_| Failure::Storage)?;
-        temp.persist(self.path()).map_err(|_| Failure::Storage)?;
+        temp.persist(path).map_err(|_| Failure::Storage)?;
         self.sync_directory()
     }
 

@@ -1,0 +1,23 @@
+[Unit]
+Description=Laneway managed Twingate gateways
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
+EnvironmentFile=/etc/laneway-twingate-gateway
+ExecStart=/usr/bin/python3 /usr/local/lib/laneway/twingate-gateway.py
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/laneway-gateways
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+
+[Install]
+WantedBy=multi-user.target

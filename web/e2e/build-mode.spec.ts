@@ -342,6 +342,13 @@ test('compiled live Twingate inventory keeps resource details readable and keybo
   await mockManagementApi(page, [controllerNetwork])
   await page.route('**/v1/admin/integrations/twingate', (route) =>
     route.fulfill({ headers: sessionHeaders(), json: { tenant: 'east', verified_at_unix_seconds: 1700000000 } }))
+  await page.route('**/v1/admin/integrations/twingate/gateway', (route) => route.fulfill({
+    headers: sessionHeaders(),
+    json: {
+      state: 'disabled', gateway_id: null, network_id: null, client_node_id: null,
+      resource_id: null, destination: null, tcp_port: null, runtime_available: false, detail: null,
+    },
+  }))
   await page.route('**/v1/admin/integrations/twingate/resources', (route) => route.fulfill({
     headers: sessionHeaders(),
     json: {

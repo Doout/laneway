@@ -663,6 +663,39 @@ func tenantAdminChecks(t *testing.T, web *http.Client, base func(tenantLab) stri
 	call(ownURL, twingatePath+"/test", []byte{}, cookies, http.StatusConflict)
 	call(ownURL, twingatePath+"/resources", nil, nil, http.StatusUnauthorized)
 	call(ownURL, twingatePath+"/resources", nil, cookies, http.StatusConflict)
+
+	gatewayPath := twingatePath + "/gateway"
+	call(ownURL, gatewayPath, nil, nil, http.StatusUnauthorized)
+	requestTenant(http.MethodPut, ownURL, gatewayPath, nil, cookies, http.StatusForbidden)
+	requestTenant(http.MethodDelete, ownURL, gatewayPath, nil, cookies, http.StatusForbidden)
+	_, gatewayStatus := call(ownURL, gatewayPath, nil, cookies, http.StatusOK)
+	_, disabledAgain := requestTenant(http.MethodDelete, ownURL, gatewayPath, []byte{}, cookies, http.StatusOK)
+	if !bytes.Equal(gatewayStatus, disabledAgain) {
+		t.Fatal("disabling an unconfigured gateway should preserve its status")
+	}
+	gatewayRequest := []byte(fmt.Sprintf(`{"network_id":%q,"client_node_id":%q,"resource_id":"fixture-resource","tcp_port":22}`,
+		own.network.String(), own.network.String()))
+	_, unavailable := requestTenant(http.MethodPut, ownURL, gatewayPath, gatewayRequest, cookies, http.StatusConflict)
+	if !bytes.Contains(unavailable, []byte("Save a Twingate connection to continue")) {
+		t.Fatal("gateway setup should direct the owner to save a Twingate connection")
+	}
+
+	var gateway map[string]json.RawMessage
+	if err := json.Unmarshal(gatewayStatus, &gateway); err != nil {
+		t.Fatalf("could not decode Twingate gateway status: %v", err)
+	}
+	if len(gateway) != 9 || string(gateway["state"]) != `"disabled"` {
+		t.Fatal("expected only public fields and a disabled Twingate gateway")
+	}
+	for _, field := range []string{"gateway_id", "network_id", "client_node_id", "resource_id", "destination", "tcp_port", "detail"} {
+		if string(gateway[field]) != "null" {
+			t.Fatalf("unexpected %s for a disabled Twingate gateway", field)
+		}
+	}
+	if available := string(gateway["runtime_available"]); available != "false" && available != "true" {
+		t.Fatal("expected a Twingate gateway runtime availability flag")
+	}
+
 	call(ownURL, "/v1/admin/networks", []byte(`{"name":"another","ipv4_pool":"100.96.99.0/24"}`), cookies, http.StatusForbidden)
 	_, raw := call(ownURL, "/v1/admin/networks", nil, cookies, http.StatusOK)
 	var networks struct {
@@ -698,6 +731,8 @@ func tenantAdminChecks(t *testing.T, web *http.Client, base func(tenantLab) stri
 		call(base(other), "/v1/admin/auth/session", nil, cookies, http.StatusUnauthorized)
 		call(base(other), twingatePath, nil, cookies, http.StatusUnauthorized)
 		call(base(other), twingatePath+"/resources", nil, cookies, http.StatusUnauthorized)
+		call(base(other), gatewayPath, nil, cookies, http.StatusUnauthorized)
+		requestTenant(http.MethodPut, base(other), gatewayPath, []byte(`{}`), cookies, http.StatusUnauthorized)
 		call(ownURL, "/v1/admin/networks/"+other.network.String(), nil, cookies, http.StatusNotFound)
 		call(ownURL, "/v1/admin/networks/"+other.network.String()+"/nodes", nil, cookies, http.StatusNotFound)
 	}

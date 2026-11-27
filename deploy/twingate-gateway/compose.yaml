@@ -1,0 +1,8 @@
+services:
+  controller:
+    volumes:
+      - type: bind
+        source: /var/lib/laneway-gateways/spool
+        target: /run/laneway-gateways
+        bind:
+          create_host_path: false

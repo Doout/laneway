@@ -365,9 +365,40 @@ To invalidate the token itself, revoke it in Twingate.
 
 Owners can review Twingate resources and their addresses, remote networks,
 and traffic policies on the same page. Select rows and copy the shortlist
-for review. Listing or selecting resources does not create routes or grant
-access in Laneway.
+for review.
 
-The Rust controller stores the token in `twingate.json` in the database's
-sibling `<database>.integrations` directory, using mode `0600`. SQLite backups
-exclude this directory. Re-enter the token after restoring to fresh storage.
+### Set up an always-on SSH gateway
+
+The controller host needs a [Twingate gateway worker](../deploy/twingate-gateway/README.md).
+In the Twingate Admin Console, create a **Read, Write & Provision** API token
+and confirm that your Twingate plan includes Service Accounts. Save the token
+under **Connection settings**. A read-only token remains sufficient for
+inventory.
+
+Use **Set up SSH gateway** on the resource row for a private IPv4 host. Select
+the **Laneway network**, **Permitted client**, and **SSH port**, then choose
+**Enable gateway**. Laneway provisions a Twingate Service Account for the
+selected resource, starts an unattended Twingate client on the gateway host,
+and restricts Laneway access to the chosen client and TCP port.
+
+An existing approved host route stays active during gateway setup. Before
+withdrawing it, confirm that the gateway worker can reach the resource.
+Laneway publishes the gateway route after the old route is withdrawn.
+
+Wait for **Online**, then use SSH from the permitted Laneway client to the
+resource's private IPv4 address and selected port. With a [rootless Laneway
+client](rootless.md), use its local SOCKS5 endpoint for the SSH connection.
+The gateway keeps its own Twingate session, so the client can use the route
+while other devices are offline. Use **Change permitted client** and
+**Save permitted client** to switch access to another enrolled client.
+**Needs attention** shows a provisioning failure and an option to retry.
+Check the token scope and Service Account entitlement if the failure points
+to Twingate. You can rotate the API token for the same Twingate
+network while the gateway runs. Choose **Disable gateway** to withdraw
+access before changing the Twingate network or choosing a different resource.
+
+Laneway keeps per-tenant integration state in the database's sibling
+`<database>.integrations` directory. The API token is written to `twingate.json`
+with mode `0600`. SQLite backups exclude this directory. Re-enter the token
+after restoring to fresh storage and check the gateway before relying on the
+route.
