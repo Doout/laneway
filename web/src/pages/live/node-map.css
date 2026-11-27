@@ -31,3 +31,20 @@
   .node-map__layout, .node-map__detail { grid-template-columns: minmax(0, 1fr); }
   .node-map__list { max-height: 220px; border-left: 0; border-top: 1px solid var(--border); }
 }
+.node-map { border: 0; border-radius: 0; }
+.node-map__header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; }
+.node-map__header h2 { margin: 0; font-size: .92rem; }
+.node-map__header span { font-size: .75rem; color: var(--muted); }
+.node-map__toolbar { padding: 12px 0; }
+.node-map__layout { border-block: 1px solid var(--border); }
+.node-map__list h3 { position: sticky; top: 0; padding: 8px 12px; margin: 0; font-size: .76rem; background: var(--surface-raised); border-bottom: 1px solid var(--border); }
+.node-map__detail { border: 0; padding: 16px 0; }
+.node-map__detail > div > .status, .node-map__detail > div > small { display: block; margin-bottom: 4px; }
+.node-map__detail > div > .status { display: inline-flex; }
+.node-map__detail > div > small { color: var(--muted); }
+.node-map__editor { border-inline-start: 1px solid var(--border); padding-inline-start: 20px; }
+@media (max-width: 800px) {
+  .node-map__editor { border: 0; border-top: 1px solid var(--border); padding: 14px 0 0; }
+  .node-map__canvas { padding: 8px; }
+  .node-map__canvas svg { min-height: 0; }
+}

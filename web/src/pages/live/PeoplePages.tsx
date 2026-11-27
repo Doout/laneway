@@ -1,9 +1,26 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { NavLink, useNavigate, useParams } from 'react-router-dom'
-import { MonitorDot, Plus, Users } from 'lucide-react'
-import { Button, Callout, DataTable, DetailLayout, EntityTitle, Field, FormStack, IdentityBlock, PageHeader, ResourceLink, SearchField, Section, Status, Toolbar, type DataColumn } from '../../components/ui'
+import { useEffect, useState, type ReactNode, type FormEvent } from 'react'
+import { Link, NavLink, useNavigate, useParams } from 'react-router-dom'
+import { ArrowLeft, ChevronRight, KeyRound, MonitorDot, Plus, UserRound, Users } from 'lucide-react'
+import { Button, Callout, Field, FormStack, PageHeader, ResourceLink, SearchField, Section, Status, Toolbar } from '../../components/ui'
 import { useControlPlane, type ControllerAccessGrant, type ControllerAccessTeam, type ControllerAccessUser } from '../../lib/control-plane'
 import { ErrorMessage, Missing, SummaryStrip, VisibilityToolbar, nodeState, routeState, time, type RecordVisibility } from './shared'
+import './people.css'
+
+function countLabel(count: number, noun: string) {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`
+}
+
+function DirectoryRow({ to, name, id, team, children }: { to: string; name: string; id: string; team?: boolean; children: ReactNode }) {
+  return <li><Link className="people-entry" to={to}>
+    <span className="people-entry__icon" aria-hidden="true">{team ? <Users size={18} /> : <UserRound size={18} />}</span>
+    <span className="people-entry__name"><strong>{name}</strong><small>{id}</small></span>
+    <span className="people-entry__facts">{children}</span><ChevronRight size={15} aria-hidden="true" />
+  </Link></li>
+}
+
+function PeopleBack({ to, children }: { to: string; children: ReactNode }) {
+  return <Link className="people-back" to={to}><ArrowLeft size={14} aria-hidden="true" />{children}</Link>
+}
 
 function PeopleTabs() {
   const { inventory } = useControlPlane()
@@ -22,14 +39,19 @@ export function UsersPage() {
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLowerCase()
   const visibleRecords = records.filter((user) => (visibility === 'all' || user.enabled) && (!normalizedQuery || [user.name, user.user_id].some((value) => value.toLowerCase().includes(normalizedQuery))))
-  const columns: DataColumn<ControllerAccessUser>[] = [
-    { key: 'user', label: 'User', render: (user) => <EntityTitle icon={<Users size={16} />} subtitle={user.user_id}>{user.name}</EntityTitle> },
-    { key: 'devices', label: 'Nodes', render: (user) => (inventory?.nodes ?? []).filter((node) => node.user_id === user.user_id && !nodeState(node).inactive).length },
-    { key: 'teams', label: 'Teams', render: (user) => (inventory?.accessMemberships ?? []).filter((member) => member.user_id === user.user_id).length },
-    { key: 'state', label: 'State', render: (user) => <Status tone={user.enabled ? 'positive' : 'muted'}>{user.enabled ? 'Enabled' : 'Disabled'}</Status> },
-    { key: 'open', label: '', render: (user) => <Button to={`/users/${user.user_id}`} variant="quiet">View</Button> },
-  ]
-  return <><PageHeader title="People" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/users/new" variant="primary"><Plus size={16} />Create user</Button> : undefined} /><SummaryStrip label="People summary" items={[{ label: 'Enabled users', value: records.filter((user) => user.enabled).length, detail: `${records.length} total` }, { label: 'Teams', value: inventory?.accessTeams.length ?? 0 }, { label: 'Assigned nodes', value: canReadNodes ? (inventory?.nodes ?? []).filter((node) => node.user_id && !nodeState(node).inactive).length : '—', detail: canReadNodes ? undefined : 'Not authorized' }, { label: 'Access grants', value: inventory?.accessGrants.length ?? 0 }]} /><PeopleTabs /><div className="people-table"><VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Enabled only" visible={visibleRecords.length} total={records.length}><SearchField label="Search users" placeholder="Search name or user ID" value={query} onChange={setQuery} /></VisibilityToolbar><DataTable columns={columns} rows={visibleRecords} rowKey={(user) => user.user_id} empty={<p>No users match this view.</p>} /></div></>
+  return <div className="people-directory">
+    <PageHeader title="People" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/users/new" variant="primary"><Plus size={16} />Create user</Button> : undefined} />
+    <PeopleTabs />
+    <VisibilityToolbar value={visibility} onChange={setVisibility} currentLabel="Enabled only" visible={visibleRecords.length} total={records.length}>
+      <SearchField label="Search users" placeholder="Search name or user ID" value={query} onChange={setQuery} />
+    </VisibilityToolbar>
+    {visibleRecords.length ? <ul className="people-entries" aria-label="Users">{visibleRecords.map(user => <DirectoryRow key={user.user_id} to={`/users/${user.user_id}`} name={user.name} id={user.user_id}>
+      <span>{canReadNodes ? countLabel((inventory?.nodes ?? []).filter(node => node.user_id === user.user_id && !nodeState(node).inactive).length, 'node') : 'Node count unavailable'}</span>
+      <span>{countLabel((inventory?.accessMemberships ?? []).filter(member => member.user_id === user.user_id).length, 'team')}</span>
+      <Status tone={user.enabled ? 'positive' : 'muted'}>{user.enabled ? 'Enabled' : 'Disabled'}</Status>
+    </DirectoryRow>)}</ul> : <p className="inline-empty">No users match this view.</p>}
+    <details className="people-disclosure"><summary>Directory totals</summary><SummaryStrip label="People summary" items={[{ label: 'Enabled users', value: records.filter(user => user.enabled).length, detail: `${records.length} total` }, { label: 'Teams', value: inventory?.accessTeams.length ?? 0 }, { label: 'Assigned nodes', value: canReadNodes ? (inventory?.nodes ?? []).filter(node => node.user_id && !nodeState(node).inactive).length : '—', detail: canReadNodes ? undefined : 'Not authorized' }, { label: 'Access grants', value: inventory?.accessGrants.length ?? 0 }]} /></details>
+  </div>
 }
 
 export function UserDetailPage() {
@@ -50,11 +72,21 @@ export function UserDetailPage() {
   async function removeGrant(grantId: string) {
     try { await request(`/v1/admin/access-grants/${grantId}`, { method: 'DELETE' }); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Grant removal failed.') }
   }
-  return <><PageHeader title={user.name} action={<div className="button-row"><Button to="/users">All users</Button>{canManage ? <Button to={`/users/${user.user_id}/grants/new`}>Grant access</Button> : null}{user.enabled && hasPermission('enrollment.issue', user.network_id) ? <Button to={`/users/${user.user_id}/enroll`} variant="primary">Enroll node</Button> : null}</div>} /><ErrorMessage value={error} /><DetailLayout identity={<IdentityBlock icon={<Users size={30} />} title={user.name} state={<Status tone={user.enabled ? 'positive' : 'muted'}>{user.enabled ? 'Enabled' : 'Disabled'}</Status>} actions={canManage ? <Button variant={user.enabled ? 'danger' : 'primary'} onClick={() => void toggleUser()}>{user.enabled ? 'Disable user' : 'Enable user'}</Button> : undefined} metadata={[["User ID", <code>{user.user_id}</code>], ["Network ID", <code>{user.network_id}</code>], ["Created", time(user.created_at_unix_seconds)]]} />}>
+  return <div className="people-record">
+    <PeopleBack to="/users">All users</PeopleBack>
+    <PageHeader title={user.name} action={<div className="button-row">{canManage ? <Button to={`/users/${user.user_id}/grants/new`}>Grant access</Button> : null}{user.enabled && hasPermission('enrollment.issue', user.network_id) ? <Button to={`/users/${user.user_id}/enroll`} variant="primary">Enroll node</Button> : null}</div>} />
+    <div className="people-byline"><Status tone={user.enabled ? 'positive' : 'muted'}>{user.enabled ? 'Enabled' : 'Disabled'}</Status><span>{inventory?.network?.name ?? user.network_id}</span></div>
+    <ErrorMessage value={error} />
+    <div className="people-relationships">
     <Section title="Teams" meta={`${teams.length} assigned`}>{teams.length ? <div className="resource-list">{teams.map((team) => <ResourceLink key={team.team_id} to={`/teams/${team.team_id}`} icon={<Users size={18} />} title={team.name} />)}</div> : <div className="inline-empty">Not in a team.</div>}</Section>
     <Section title="Access grants" meta={`${grants.length} direct`}>{grants.length ? <div className="resource-list">{grants.map((grant) => <AccessGrantRow key={grant.grant_id} grant={grant} inventory={inventory} remove={canManage ? removeGrant : undefined} />)}</div> : <div className="inline-empty">No direct grants. Team grants may still apply.</div>}</Section>
     <Section title="Enrolled nodes" meta={`${nodes.length} current`}>{nodes.length ? <div className="resource-list">{nodes.map((node) => <ResourceLink key={node.node_id} to={`/nodes/${node.node_id}`} icon={<MonitorDot size={18} />} title={node.name || node.node_id} meta={node.enrollment_class} state={<Status tone={nodeState(node).tone}>{nodeState(node).label}</Status>} />)}</div> : <div className="inline-empty">No current nodes for this user.</div>}</Section>
-  </DetailLayout></>
+    </div>
+    <details className="people-disclosure"><summary>User details</summary>
+      <dl className="people-properties"><div><dt>User ID</dt><dd><code>{user.user_id}</code></dd></div><div><dt>Network ID</dt><dd><code>{user.network_id}</code></dd></div><div><dt>Created</dt><dd>{time(user.created_at_unix_seconds)}</dd></div></dl>
+      {canManage && <Button variant={user.enabled ? 'danger' : 'primary'} onClick={() => void toggleUser()}>{user.enabled ? 'Disable user' : 'Enable user'}</Button>}
+    </details>
+  </div>
 }
 
 function AccessGrantRow({ grant, inventory, remove }: { grant: ControllerAccessGrant; inventory: ReturnType<typeof useControlPlane>['inventory']; remove?: (id: string) => Promise<void> }) {
@@ -80,7 +112,16 @@ function CreateAccessSubject({ kind }: { kind: 'user' | 'team' }) {
       navigate(kind === 'user' ? `/users/${(created as ControllerAccessUser).user_id}` : `/teams/${(created as ControllerAccessTeam).team_id}`)
     } catch (cause) { setError(cause instanceof Error ? cause.message : `${kind === 'user' ? 'User' : 'Team'} creation failed.`) }
   }
-  return <><PageHeader title={`Create ${kind}`} /><FormStack onSubmit={submit}><Field label="Name"><input autoFocus value={name} onChange={(event) => setName(event.target.value)} /></Field><ErrorMessage value={error} /><div className="button-row"><Button type="submit" variant="primary">Create {kind}</Button><Button to={kind === 'user' ? '/users' : '/teams'}>Cancel</Button></div></FormStack></>
+  const directory = kind === 'user' ? '/users' : '/teams'
+  return <div className="people-editor">
+    <PeopleBack to={directory}>All {kind}s</PeopleBack><PageHeader title={`Create ${kind}`} />
+    <FormStack onSubmit={submit}>
+      <div className="people-editor__context">{kind === 'user' ? <UserRound size={18} /> : <Users size={18} />}<span>Network<strong>{inventory?.network?.name ?? 'No network selected'}</strong></span></div>
+      <Field label="Name"><input autoFocus value={name} onChange={event => setName(event.target.value)} /></Field>
+      <ErrorMessage value={error} />
+      <div className="button-row"><Button type="submit" variant="primary">Create {kind}</Button><Button to={directory} variant="quiet">Cancel</Button></div>
+    </FormStack>
+  </div>
 }
 
 export function TeamsPage() {
@@ -90,13 +131,18 @@ export function TeamsPage() {
   const [query, setQuery] = useState('')
   const normalizedQuery = query.trim().toLowerCase()
   const visibleRecords = records.filter((team) => !normalizedQuery || [team.name, team.team_id].some((value) => value.toLowerCase().includes(normalizedQuery)))
-  const columns: DataColumn<ControllerAccessTeam>[] = [
-    { key: 'team', label: 'Team', render: (team) => <EntityTitle icon={<Users size={16} />} subtitle={team.team_id}>{team.name}</EntityTitle> },
-    { key: 'members', label: 'Members', render: (team) => (inventory?.accessMemberships ?? []).filter((member) => member.team_id === team.team_id).length },
-    { key: 'grants', label: 'Access grants', render: (team) => (inventory?.accessGrants ?? []).filter((grant) => grant.subject_kind === 'team' && grant.subject_id === team.team_id).length },
-    { key: 'open', label: '', render: (team) => <Button to={`/teams/${team.team_id}`} variant="quiet">View</Button> },
-  ]
-  return <><PageHeader title="People" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/teams/new" variant="primary"><Plus size={16} />Create team</Button> : undefined} /><SummaryStrip label="People summary" items={[{ label: 'Users', value: inventory?.accessUsers.filter((user) => user.enabled).length ?? 0, detail: `${inventory?.accessUsers.length ?? 0} total`, tone: 'positive' }, { label: 'Teams', value: records.length }, { label: 'Memberships', value: inventory?.accessMemberships.length ?? 0 }, { label: 'Team grants', value: inventory?.accessGrants.filter((grant) => grant.subject_kind === 'team').length ?? 0 }]} /><PeopleTabs /><div className="people-table"><Toolbar filters={<span className="inventory-result-count" aria-live="polite">{visibleRecords.length} of {records.length} shown</span>}><SearchField label="Search teams" placeholder="Search name or team ID" value={query} onChange={setQuery} /></Toolbar><DataTable columns={columns} rows={visibleRecords} rowKey={(team) => team.team_id} empty={<p>No teams match this search.</p>} /></div></>
+  return <div className="people-directory">
+    <PageHeader title="People" action={networkId && hasPermission('acl.manage', networkId) ? <Button to="/teams/new" variant="primary"><Plus size={16} />Create team</Button> : undefined} />
+    <PeopleTabs />
+    <Toolbar filters={<span className="inventory-result-count" aria-live="polite">{visibleRecords.length} of {records.length} shown</span>}>
+      <SearchField label="Search teams" placeholder="Search name or team ID" value={query} onChange={setQuery} />
+    </Toolbar>
+    {visibleRecords.length ? <ul className="people-entries" aria-label="Teams">{visibleRecords.map(team => <DirectoryRow team key={team.team_id} to={`/teams/${team.team_id}`} name={team.name} id={team.team_id}>
+      <span>{countLabel((inventory?.accessMemberships ?? []).filter(member => member.team_id === team.team_id).length, 'member')}</span>
+      <span>{countLabel((inventory?.accessGrants ?? []).filter(grant => grant.subject_kind === 'team' && grant.subject_id === team.team_id).length, 'grant')}</span>
+    </DirectoryRow>)}</ul> : <p className="inline-empty">No teams match this search.</p>}
+    <details className="people-disclosure"><summary>Directory totals</summary><SummaryStrip label="People summary" items={[{ label: 'Users', value: inventory?.accessUsers.filter(user => user.enabled).length ?? 0, detail: `${inventory?.accessUsers.length ?? 0} total` }, { label: 'Teams', value: records.length }, { label: 'Memberships', value: inventory?.accessMemberships.length ?? 0 }, { label: 'Team grants', value: inventory?.accessGrants.filter(grant => grant.subject_kind === 'team').length ?? 0 }]} /></details>
+  </div>
 }
 
 export function TeamDetailPage() {
@@ -119,10 +165,19 @@ export function TeamDetailPage() {
   async function removeGrant(grantId: string) {
     try { await request(`/v1/admin/access-grants/${grantId}`, { method: 'DELETE' }); await refresh() } catch (cause) { setError(cause instanceof Error ? cause.message : 'Grant removal failed.') }
   }
-  return <><PageHeader title={team.name} action={<div className="button-row"><Button to="/teams">All teams</Button>{canManage ? <Button to={`/teams/${team.team_id}/grants/new`} variant="primary">Grant access</Button> : null}</div>} /><ErrorMessage value={error} /><DetailLayout identity={<IdentityBlock icon={<Users size={30} />} title={team.name} state={<Status tone="positive">Active</Status>} metadata={[["Team ID", <code>{team.team_id}</code>], ["Network ID", <code>{team.network_id}</code>], ["Created", time(team.created_at_unix_seconds)]]} />}>
-    <Section title="Members" meta={`${members.length} users`}>{canManage && available.length ? <div className="inline-editor"><select aria-label="User to add" value={selectedUser} onChange={(event) => setSelectedUser(event.target.value)}><option value="">Choose user</option>{available.map((user) => <option key={user.user_id} value={user.user_id}>{user.name}</option>)}</select><Button disabled={!selectedUser} onClick={() => void changeMember(selectedUser, true)}>Add</Button></div> : null}{members.length ? <div className="resource-list">{members.map((user) => <div className="access-grant-row" key={user.user_id}><ResourceLink to={`/users/${user.user_id}`} icon={<Users size={18} />} title={user.name} />{canManage ? <Button variant="danger" onClick={() => void changeMember(user.user_id, false)}>Remove</Button> : null}</div>)}</div> : <div className="inline-empty">No users in this team.</div>}</Section>
+  return <div className="people-record">
+    <PeopleBack to="/teams">All teams</PeopleBack>
+    <PageHeader title={team.name} action={<div className="button-row">{canManage ? <Button to={`/teams/${team.team_id}/grants/new`} variant="primary">Grant access</Button> : null}</div>} />
+    <div className="people-byline"><Status>Active</Status><span>{inventory?.network?.name ?? team.network_id}</span></div>
+    <ErrorMessage value={error} />
+    <div className="people-relationships">
+    <Section title="Members" meta={countLabel(members.length, 'user')}>{canManage && available.length ? <div className="inline-editor"><select aria-label="User to add" value={selectedUser} onChange={(event) => setSelectedUser(event.target.value)}><option value="">Choose user</option>{available.map((user) => <option key={user.user_id} value={user.user_id}>{user.name}</option>)}</select><Button disabled={!selectedUser} onClick={() => void changeMember(selectedUser, true)}>Add</Button></div> : null}{members.length ? <div className="resource-list">{members.map((user) => <div className="access-grant-row" key={user.user_id}><ResourceLink to={`/users/${user.user_id}`} icon={<Users size={18} />} title={user.name} />{canManage ? <Button variant="danger" onClick={() => void changeMember(user.user_id, false)}>Remove</Button> : null}</div>)}</div> : <div className="inline-empty">No users in this team.</div>}</Section>
     <Section title="Access grants" meta={`${grants.length} shared`}>{grants.length ? <div className="resource-list">{grants.map((grant) => <AccessGrantRow key={grant.grant_id} grant={grant} inventory={inventory} remove={canManage ? removeGrant : undefined} />)}</div> : <div className="inline-empty">No team grants.</div>}</Section>
-  </DetailLayout></>
+    </div>
+    <details className="people-disclosure"><summary>Team details</summary>
+      <dl className="people-properties"><div><dt>Team ID</dt><dd><code>{team.team_id}</code></dd></div><div><dt>Network ID</dt><dd><code>{team.network_id}</code></dd></div><div><dt>Created</dt><dd>{time(team.created_at_unix_seconds)}</dd></div></dl>
+    </details>
+  </div>
 }
 
 export function CreateGrantPage({ subjectKind }: { subjectKind: 'user' | 'team' }) {
@@ -142,5 +197,17 @@ export function CreateGrantPage({ subjectKind }: { subjectKind: 'user' | 'team' 
     if (!inventory?.network || !subjectId || (targetKind !== 'network' && !nodeId)) return setError('Choose a valid access target.')
     try { await request(`/v1/admin/networks/${inventory.network.network_id}/access-grants`, { method: 'POST', body: { subject_kind: subjectKind, subject_id: subjectId, target_kind: targetKind, ...(targetKind === 'network' ? {} : { node_id: nodeId }) } }); await refresh(); navigate(subjectKind === 'user' ? `/users/${subjectId}` : `/teams/${subjectId}`) } catch (cause) { setError(cause instanceof Error ? cause.message : 'Access grant failed.') }
   }
-  return <><PageHeader title="Grant access" /><Callout tone="warning">Network access does not include exit nodes.</Callout><FormStack onSubmit={submit}><Field label="Access scope"><select value={targetKind} onChange={(event) => setTargetKind(event.target.value as typeof targetKind)}><option value="network">Entire network, excluding exits</option><option value="node">One node</option><option value="exit">One exit node</option></select></Field>{targetKind !== 'network' ? <Field label={targetKind === 'exit' ? 'Exit node' : 'Node'}><select value={nodeId} onChange={(event) => setNodeId(event.target.value)}><option value="">Choose node</option>{choices.map((node) => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</select></Field> : null}<ErrorMessage value={error} /><div className="button-row"><Button type="submit" variant="primary">Grant access</Button><Button to={subjectKind === 'user' ? `/users/${subjectId}` : `/teams/${subjectId}`}>Cancel</Button></div></FormStack></>
+  const subject = subjectKind === 'user' ? inventory?.accessUsers.find(user => user.user_id === subjectId) : inventory?.accessTeams.find(team => team.team_id === subjectId)
+  const back = subjectKind === 'user' ? `/users/${subjectId}` : `/teams/${subjectId}`
+  return <div className="people-editor">
+    <PeopleBack to={back}>{subject?.name ?? (subjectKind === 'user' ? 'User details' : 'Team details')}</PeopleBack>
+    <PageHeader title="Grant access" />
+    <FormStack onSubmit={submit}>
+      <div className="people-editor__context"><KeyRound size={18} /><span>{subjectKind === 'user' ? 'User' : 'Team'}<strong>{subject?.name ?? subjectId}</strong></span></div>
+      <Field label="Access scope"><select value={targetKind} onChange={event => setTargetKind(event.target.value as typeof targetKind)}><option value="network">Entire network, excluding exits</option><option value="node">One node</option><option value="exit">One exit node</option></select></Field>
+      {targetKind === 'network' ? <Callout>Network access does not include exit nodes.</Callout> : <Field label={targetKind === 'exit' ? 'Exit node' : 'Node'}><select value={nodeId} onChange={event => setNodeId(event.target.value)}><option value="">Choose node</option>{choices.map(node => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</select></Field>}
+      <ErrorMessage value={error} />
+      <div className="button-row"><Button type="submit" variant="primary">Grant access</Button><Button to={back} variant="quiet">Cancel</Button></div>
+    </FormStack>
+  </div>
 }

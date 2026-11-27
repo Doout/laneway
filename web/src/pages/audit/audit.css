@@ -1,59 +1,56 @@
-.audit-page { display: flex; flex-direction: column; height: max(540px, calc(100dvh - 95px)); }
-.audit-page > .page-header, .audit-page > .toolbar, .audit-page > .audit-message { flex: 0 0 auto; }
-.audit-message { margin: 14px 0 0; padding: 11px 14px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-.audit-message.is-error, .audit-copy-error { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 35%, transparent); }
-.audit-workspace { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(280px, .88fr); flex: 1 1 auto; min-height: 0; overflow: hidden; margin-top: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.audit-page { display: flex; flex-direction: column; min-width: 0; height: max(480px, calc(100dvh - 104px)); }
+.audit-page > .page-header, .audit-page > .toolbar, .audit-message { flex: none; }
+.audit-page > .toolbar { padding: 0 0 12px; border-width: 0 0 1px; border-radius: 0; background: transparent; }
+.audit-message, .audit-copy-error { margin: 8px 0; color: var(--muted); font-size: .8rem; }
+.audit-message.is-error, .audit-copy-error { color: var(--danger); }
+.audit-workspace { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(285px, .8fr); flex: 1; min-height: 0; }
 .audit-workspace.is-closed { grid-template-columns: 1fr; }
-.audit-stream { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border-inline-end: 1px solid var(--border); }
-.audit-stream-head { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; gap: 14px; padding: 11px 15px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: .68rem; }
-.audit-stream-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
-.audit-day > h2 { margin: 0; padding: 8px 15px; color: var(--faint); background: var(--surface-raised); border-bottom: 1px solid var(--border); font-size: .75rem; font-weight: 600; }
-.audit-day > button { display: grid; grid-template-columns: 72px 34px minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; min-height: 52px; padding: 7px 12px; color: var(--muted); text-align: start; background: transparent; border: 0; border-bottom: 1px solid var(--border); }
+.audit-stream { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.audit-stream-head { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; min-height: 41px; padding-right: 14px; }
+.audit-stream-head h2, .audit-inspector h3 { margin: 0; font-size: .84rem; }
+.audit-stream-head span { margin-left: 4px; color: var(--muted); font: .73rem var(--font-mono); }
+.audit-stream-head small, .audit-event-copy small, .audit-event-context { color: var(--muted); font-size: .74rem; }
+.audit-stream-scroll { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.audit-day h3 { position: sticky; top: 0; z-index: 1; margin: 0; padding: 5px 10px; background: var(--sidebar); border-block: 1px solid var(--border); color: var(--muted); font-size: .74rem; font-weight: 550; }
+.audit-day > button { display: grid; grid-template-columns: 18px minmax(0, 1fr) minmax(56px, auto); align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 6px 12px; color: var(--text); background: transparent; border: 0; border-bottom: 1px solid var(--border); text-align: start; }
 .audit-day > button:hover { background: var(--surface-hover); }
-.audit-day > button.is-selected { background: var(--selection); box-shadow: inset 2px 0 var(--primary); }
-.audit-day time { color: var(--faint); font-size: .69rem; font-variant-numeric: tabular-nums; }
-.audit-day strong, .audit-day small { display: block; }
-.audit-day strong { color: var(--text); font-size: .8rem; font-weight: 600; }
-.audit-day small { margin-top: 3px; color: var(--muted); font-size: .68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audit-day em { padding: 4px 7px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; font-size: .62rem; font-style: normal; white-space: nowrap; }
-.audit-event-icon, .audit-inspector-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }
-.audit-event-icon { width: 32px; height: 32px; }
-.audit-event-icon.is-warning { color: var(--warning); background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 30%, transparent); }
-.audit-event-icon.is-danger { color: var(--danger); background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
-.audit-empty { padding: 32px 16px; text-align: center; }
-.audit-empty p { margin-inline: auto; }
-.audit-inspector { min-width: 0; min-height: 0; padding-bottom: 18px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
-.audit-inspector-head { display: grid; grid-template-columns: 42px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 15px 17px; border-bottom: 1px solid var(--border); }
-.audit-inspector-head h2 { margin-bottom: 2px; font-size: 1rem; }
-.audit-inspector-head p { margin: 0; font-size: .7rem; }
-.audit-inspector-icon { width: 40px; height: 40px; color: var(--focus); background: var(--surface-raised); border-color: var(--border); }
-.audit-inspector dl { display: grid; margin: 0; padding: 3px 17px; }
-.audit-inspector dl > div { display: grid; grid-template-columns: 95px minmax(0, 1fr); gap: 13px; padding: 11px 0; border-bottom: 1px solid var(--border); }
-.audit-inspector dt { color: var(--muted); }
-.audit-inspector dd { min-width: 0; margin: 0; text-align: end; overflow-wrap: anywhere; }
-.audit-inspector dd a { color: var(--focus); text-decoration: underline; text-underline-offset: 3px; }
-.audit-payload { margin: 17px; }
-.audit-payload > span { display: block; margin-bottom: 7px; color: var(--muted); font-size: .72rem; }
-.audit-payload pre { max-height: 180px; margin: 0; padding: 13px; overflow: auto; color: var(--text); background: var(--bg-deep); border: 1px solid var(--border); border-radius: var(--radius); font-size: .7rem; line-height: 1.55; }
-.audit-copy-error { margin: 0 17px 14px; padding: 11px; border: 1px solid; border-radius: var(--radius); font-size: .74rem; }
-.audit-inspector > .button-row { padding-inline: 17px; }
-
-@media (max-width: 1100px) {
-  .audit-workspace { grid-template-columns: 1fr; grid-template-rows: minmax(240px, .85fr) minmax(280px, 1.15fr); }
-  .audit-stream { border-inline-end: 0; border-bottom: 1px solid var(--border); }
-}
-
+.audit-day > button[aria-current] { background: var(--selection); box-shadow: inset 2px 0 var(--text); }
+.audit-day > button:focus-visible { outline-offset: -2px; }
+.audit-event-icon { display: grid; place-items: center; color: var(--muted); }
+.audit-event-icon.is-danger { color: var(--danger); }
+.audit-event-icon.is-warning { color: var(--warning); }
+.audit-event-copy, .audit-event-context { min-width: 0; display: grid; gap: 2px; }
+.audit-event-copy strong { font-size: .82rem; font-weight: 560; }
+.audit-event-copy > *, .audit-event-context small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-event-context { max-width: 16ch; justify-items: end; }
+.audit-event-context time { font: .69rem var(--font-mono); }
+.audit-event-context small { max-width: 100%; font-size: .69rem; }
+.audit-empty { padding: 25px 10px; }
+.audit-empty h3, .audit-empty p { margin: 0 0 4px; font-size: .84rem; }
+.audit-inspector { min-width: 0; min-height: 0; padding: 16px 18px; overflow-y: auto; overscroll-behavior: contain; background: var(--sidebar); border-left: 1px solid var(--border); }
+.audit-inspector-head { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.audit-inspector-head h2 { margin: 0 0 4px; font-size: 1.05rem; overflow-wrap: anywhere; }
+.audit-inspector-head > div { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; color: var(--muted); font-size: .75rem; }
+.audit-inspector h3 { margin: 15px 0 5px; }
+.audit-facts dl { margin: 0; }
+.audit-facts dl > div { display: grid; grid-template-columns: minmax(67px, .35fr) minmax(0, 1fr); gap: 8px; padding: 5px 0; }
+.audit-facts dt, .audit-facts dd { margin: 0; font-size: .78rem; }
+.audit-facts dt { color: var(--muted); }
+.audit-facts dd { overflow-wrap: anywhere; }
+.audit-facts code { font-size: .71rem; }
+.audit-facts a { text-decoration: underline; text-underline-offset: 3px; }
+.audit-payload pre { max-height: 200px; margin: 0; padding: 9px 11px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); font-size: .72rem; }
+.audit-inspector > .button-row { margin-top: 17px; padding-top: 12px; border-top: 1px solid var(--border); }
+.audit-back { display: none; }
 @media (max-width: 680px) {
   .audit-page { height: auto; }
   .audit-workspace { display: block; }
-  .audit-stream { max-height: 480px; }
-  .audit-inspector { overflow: visible; }
-  .audit-day > button { grid-template-columns: 34px minmax(0, 1fr) auto; }
-  .audit-day time { grid-column: 2; grid-row: 2; }
-  .audit-day > button > em { grid-column: 3; grid-row: 1 / span 2; }
-  .audit-event-icon { grid-row: 1 / span 2; }
-  .audit-inspector-head { grid-template-columns: 40px minmax(0, 1fr) auto; }
-  .audit-inspector-head .status { grid-column: 2; }
-  .audit-inspector dl > div { grid-template-columns: 1fr; gap: 4px; }
-  .audit-inspector dd { text-align: start; }
+  .audit-stream-scroll { overflow: visible; }
+  .audit-day h3 { position: static; }
+  .audit-stream-head { padding-right: 0; }
+  .audit-inspector { display: none; overflow: visible; padding: 0; border: 0; background: transparent; }
+  .audit-workspace.is-inspecting .audit-stream { display: none; }
+  .audit-workspace.is-inspecting .audit-inspector { display: block; }
+  .audit-back { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; margin: 3px 0 6px; padding: 0; color: var(--muted); background: transparent; border: 0; font-size: .8rem; }
+  .audit-inspector > .button-row .button { min-height: 44px; }
 }

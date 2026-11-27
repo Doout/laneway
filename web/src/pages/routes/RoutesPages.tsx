@@ -27,7 +27,7 @@ import { useControlPlane, type ControllerNode, type ControllerRoute } from '../.
 import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
 import { controllerRoutes, isPendingControllerRoute } from '../../lib/live-records'
 import { attributed, persistedRoutes, readDemoState, updateDemoState } from '../../lib/persisted-demo-state'
-import { SummaryStrip } from '../live/shared'
+import '../traffic-workspace.css'
 import './routes-pages.css'
 
 type RouteFormState = {
@@ -130,19 +130,18 @@ export function RoutesListPage() {
   const thirdSummaryCount = live ? inventory?.routes.filter(route => route.state === 'withdrawn').length ?? 0 : records.filter(route => route.state === 'Relay fallback').length
   const canManageRoutes = !live || Boolean(inventory?.network && hasPermission('route.manage', inventory.network.network_id))
 
-  return <div className="routes-page">
+  return <div className="routes-page traffic-workspace">
     <PageHeader
       title="Routes"
+      description={`Configuration epoch ${live ? inventory?.network?.configuration_epoch ?? 'Unavailable' : 418} · ${thirdSummaryCount} ${live ? 'withdrawn' : 'using relay fallback'}`}
       action={canManageRoutes ? <Button variant="primary" to="/routes/new"><RouteIcon aria-hidden="true" size={17} />Create route</Button> : undefined}
     />
-    <SummaryStrip label="Route inventory summary" items={[
-      { label: live ? 'Approved routes' : 'Healthy routes', value: approvedCount },
-      { label: 'Approval queue', value: pendingCount, tone: pendingCount ? 'warning' : undefined },
-      { label: live ? 'Withdrawn routes' : 'Relay fallback', value: thirdSummaryCount },
-      { label: 'Configuration epoch', value: live ? inventory?.network?.configuration_epoch ?? '—' : 418 },
-    ]} />
+    <div className="traffic-views" role="group" aria-label="Route state">
+      <button type="button" aria-pressed={state === 'all'} onClick={() => changeState('all')}>All <small aria-hidden="true">{records.length}</small></button>
+      <button type="button" aria-pressed={state === approvedState} onClick={() => changeState(approvedState)}>{live ? 'Approved' : 'Healthy'} <small aria-hidden="true">{approvedCount}</small></button>
+      <button type="button" aria-pressed={state === 'Pending approval'} onClick={() => changeState('Pending approval')}>Needs attention <small aria-hidden="true">{pendingCount}</small></button>
+    </div>
     <Toolbar filters={<>
-      <div className="routes-segments" role="group" aria-label="Route state"><button type="button" aria-pressed={state === 'all'} onClick={() => changeState('all')}>All</button><button type="button" aria-pressed={state === approvedState} onClick={() => changeState(approvedState)}>{live ? 'Approved' : 'Healthy'}</button><button type="button" aria-pressed={state === 'Pending approval'} onClick={() => changeState('Pending approval')}>Needs attention</button></div>
       <FilterSelect label="Filter by mode" value={mode} onChange={setMode}>
         <option value="all">All modes</option>
         <option value="NAT">NAT</option>
@@ -153,19 +152,23 @@ export function RoutesListPage() {
     </>}>
       <SearchField label="Search routes" placeholder="Search name, prefix, or next hop" value={query} onChange={setQuery} />
     </Toolbar>
-    <div className="routes-workspace"><section className="routes-inventory"><DataTable
+    <div className="routes-workspace traffic-layout"><section className="routes-inventory"><DataTable
         rows={visibleRoutes}
         rowKey={route => route.id}
+        rowClassName={route => selected?.id === route.id ? 'traffic-table-selected' : undefined}
         columns={[
           { key: 'route', label: 'Route', render: route => <EntityTitle icon={<MapPinned size={16} />} subtitle={route.id}>{route.name}</EntityTitle> },
           { key: 'destination', label: 'Destination', render: route => <code>{route.destination}</code> },
           { key: 'via', label: 'Gateway', render: route => route.via },
           { key: 'mode', label: 'Mode', render: route => live ? controllerRouteMode(inventory?.routes.find(record => record.route_id === route.id)) : route.mode },
           { key: 'status', label: 'State', render: route => <Status tone={route.tone}>{route.state}</Status> },
-          { key: 'actions', label: '', align: 'end', render: route => <Button variant={selected?.id === route.id ? 'secondary' : 'quiet'} onClick={() => setSelectedId(route.id)}>Inspect</Button> },
+          { key: 'actions', label: '', align: 'end', render: route => <>
+            <Button className="traffic-table-inspect" variant="quiet" aria-pressed={selected?.id === route.id} onClick={() => setSelectedId(route.id)}>Inspect</Button>
+            <Button className="traffic-table-link" variant="quiet" to={route.state === 'Pending approval' && canManageRoutes ? `/routes/${route.id}/approve` : `/routes/${route.id}`}>{route.state === 'Pending approval' && canManageRoutes ? 'Review' : 'Details'}</Button>
+          </> },
         ]}
         empty={<div className="routes-empty"><RouteIcon aria-hidden="true" /><h2>No routes match</h2><p>Clear a filter or search for a different prefix.</p></div>}
-      /></section>{selected ? <aside className="routes-panel routes-inspector"><span className="routes-panel-label">Inspector</span><h2>{selected.name}</h2><p><code>{selected.destination}</code> · {selected.state}</p><dl><div><dt>Gateway</dt><dd>{selected.via}</dd></div><div><dt>Mode</dt><dd>{live ? controllerRouteMode(selectedControllerRoute) : selected.mode}</dd></div><div><dt>Metric</dt><dd>{selected.metric}</dd></div><div><dt>{live ? 'Created' : 'Requested'}</dt><dd>{live ? formatControllerTime(selectedControllerRoute?.created_at_unix_seconds) : selected.state === 'Pending approval' ? '14 minutes ago' : 'Today, 09:38'}</dd></div></dl><div className="button-row">{selected.state === 'Pending approval' && canManageRoutes ? <Button variant="primary" to={`/routes/${selected.id}/approve`}>Review request</Button> : <Button variant="primary" to={`/routes/${selected.id}`}>View route</Button>}</div></aside> : null}</div>
+      /></section>{selected ? <aside className="routes-inspector traffic-inspector"><span className="routes-panel-label">Inspector</span><h2>{selected.name}</h2><p><code>{selected.destination}</code> · {selected.state}</p><dl><div><dt>Gateway</dt><dd>{selected.via}</dd></div><div><dt>Mode</dt><dd>{live ? controllerRouteMode(selectedControllerRoute) : selected.mode}</dd></div><div><dt>Metric</dt><dd>{selected.metric}</dd></div><div><dt>{live ? 'Created' : 'Requested'}</dt><dd>{live ? formatControllerTime(selectedControllerRoute?.created_at_unix_seconds) : selected.state === 'Pending approval' ? '14 minutes ago' : 'Today, 09:38'}</dd></div></dl><div className="button-row">{selected.state === 'Pending approval' && canManageRoutes ? <Button variant="primary" to={`/routes/${selected.id}/approve`}>Review request</Button> : <Button variant="primary" to={`/routes/${selected.id}`}>View route</Button>}</div></aside> : null}</div>
   </div>
 }
 
@@ -248,40 +251,46 @@ export function CreateRoutePage() {
     navigate('/routes/rte_preview/approve', { state: { route: draft, lifetime: form.lifetime, kind: form.kind } })
   }
 
-  return <div className="routes-page routes-form-page">
-    <PageHeader title="Create route" action={<Button variant="quiet" to="/routes">Cancel</Button>} />
+  return <div className="routes-page traffic-workspace traffic-form-page">
+    <PageHeader title="Create route" />
     <FormLayout
       form={<FormStack onSubmit={submit}>
-        {!live ? <Field label="Route name" error={errors.name}>
-          <input aria-invalid={Boolean(errors.name)} value={form.name} onChange={event => update('name', event.target.value)} placeholder="Production services" autoFocus />
-        </Field> : null}
-        <Field label="Destination prefix" hint="Use a canonical CIDR prefix, such as 10.24.0.0/16." error={errors.destination}>
-          <input aria-invalid={Boolean(errors.destination)} value={form.destination} onChange={event => update('destination', event.target.value)} spellCheck={false} autoFocus={live} />
-        </Field>
-        {live ? <Field label="Route kind"><input value="Subnet" readOnly /></Field> : <ChoiceGroup label="Route kind" value={form.kind} onChange={value => update('kind', value as RouteFormState['kind'])} options={[
-          { value: 'subnet', label: 'Subnet', description: 'Private network behind a Connector.' },
-          { value: 'exit', label: 'Exit', description: 'Default traffic through an exit node.' },
-        ]} />}
-        <Field label="Via node" hint={live ? 'Assignment grants subnet-router capability to the selected durable node.' : 'The node must have the matching Connector or exit capability.'}>
-          <select value={form.via} onChange={event => update('via', event.target.value)}>{live ? <>{!eligibleNodes.length ? <option value="">No eligible durable nodes</option> : null}{eligibleNodes.map(node => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</> : <><option value="atlas-gateway">atlas-gateway · Connector</option><option value="home-pi">home-pi · Connector</option><option value="fra-exit-01">fra-exit-01 · Exit node</option></>}</select>
-        </Field>
-        <ChoiceGroup label="Forwarding mode" value={form.mode} onChange={value => update('mode', value as RouteFormState['mode'])} options={[
-          { value: 'NAT', label: 'NAT', description: 'Translate overlay sources at the forwarding node.' },
-          { value: 'Routed', label: 'Routed', description: 'Preserve source addresses; the destination needs a return route.' },
-        ]} />
-        <div className="routes-field-grid">
-          <Field label="Metric" hint="Lower metrics win for equal prefixes." error={errors.metric}>
-            <input type="number" min="0" max="1000000" step="1" aria-invalid={Boolean(errors.metric)} value={form.metric} onChange={event => update('metric', event.target.value)} />
-          </Field>
-          {!live ? <Field label="Lifetime" hint="Expired advertisements are withdrawn automatically.">
-            <select value={form.lifetime} onChange={event => update('lifetime', event.target.value)}>
-              <option>No expiry</option>
-              <option>8 hours</option>
-              <option>24 hours</option>
-              <option>7 days</option>
-            </select>
+        <section className="traffic-action-panel" aria-labelledby="route-destination-heading">
+          <h2 className="traffic-section-heading" id="route-destination-heading">Destination</h2>
+          {!live ? <Field label="Route name" error={errors.name}>
+            <input aria-invalid={Boolean(errors.name)} value={form.name} onChange={event => update('name', event.target.value)} placeholder="Production services" autoFocus />
           </Field> : null}
-        </div>
+          <Field label="Destination prefix" hint="Use a canonical CIDR prefix, such as 10.24.0.0/16." error={errors.destination}>
+            <input aria-invalid={Boolean(errors.destination)} value={form.destination} onChange={event => update('destination', event.target.value)} spellCheck={false} autoFocus={live} />
+          </Field>
+          {live ? <Field label="Route kind"><input value="Subnet" readOnly /></Field> : <ChoiceGroup label="Route kind" value={form.kind} onChange={value => update('kind', value as RouteFormState['kind'])} options={[
+            { value: 'subnet', label: 'Subnet', description: 'Private network behind a Connector.' },
+            { value: 'exit', label: 'Exit', description: 'Default traffic through an exit node.' },
+          ]} />}
+        </section>
+        <section className="traffic-action-panel" aria-labelledby="route-forwarding-heading">
+          <h2 className="traffic-section-heading" id="route-forwarding-heading">Forwarding</h2>
+          <Field label="Via node" hint={live ? 'Assignment grants subnet-router capability to the selected durable node.' : 'The node must have the matching Connector or exit capability.'}>
+            <select value={form.via} onChange={event => update('via', event.target.value)}>{live ? <>{!eligibleNodes.length ? <option value="">No eligible durable nodes</option> : null}{eligibleNodes.map(node => <option key={node.node_id} value={node.node_id}>{node.name || node.node_id}</option>)}</> : <><option value="atlas-gateway">atlas-gateway · Connector</option><option value="home-pi">home-pi · Connector</option><option value="fra-exit-01">fra-exit-01 · Exit node</option></>}</select>
+          </Field>
+          <ChoiceGroup label="Forwarding mode" value={form.mode} onChange={value => update('mode', value as RouteFormState['mode'])} options={[
+            { value: 'NAT', label: 'NAT', description: 'Translate overlay sources at the forwarding node.' },
+            { value: 'Routed', label: 'Routed', description: 'Preserve source addresses; the destination needs a return route.' },
+          ]} />
+          <div className="traffic-fields">
+            <Field label="Metric" hint="Lower metrics win for equal prefixes." error={errors.metric}>
+              <input type="number" min="0" max="1000000" step="1" aria-invalid={Boolean(errors.metric)} value={form.metric} onChange={event => update('metric', event.target.value)} />
+            </Field>
+            {!live ? <Field label="Lifetime" hint="Expired advertisements are withdrawn automatically.">
+              <select value={form.lifetime} onChange={event => update('lifetime', event.target.value)}>
+                <option>No expiry</option>
+                <option>8 hours</option>
+                <option>24 hours</option>
+                <option>7 days</option>
+              </select>
+            </Field> : null}
+          </div>
+        </section>
         <Callout tone="warning"><strong>Forwarding impact</strong><br />{live ? 'The controller approves this route immediately and includes it in the next configuration epoch.' : `After approval, matching traffic can leave enrolled nodes through ${form.via}.`} Access rules still apply.</Callout>
         <label className="routes-confirm">
           <input type="checkbox" checked={form.confirmed} onChange={event => update('confirmed', event.target.checked)} />
@@ -382,7 +391,7 @@ export function RouteApprovalPage() {
   if (decision !== 'pending') {
     const approved = decision === 'approved'
     const decidedRoute: RouteRecord = { ...route, state: approved ? 'Healthy' : 'Rejected', tone: approved ? 'positive' : 'danger' }
-    return <div className="routes-page routes-decision" role="status">
+    return <div className="routes-page traffic-workspace routes-decision" role="status">
       <span className={`routes-decision__icon routes-decision__icon--${decision}`}>{approved ? <CheckCircle2 aria-hidden="true" /> : <CircleSlash2 aria-hidden="true" />}</span>
       <h1>Route {decision}</h1>
       <p>{route.destination} {approved ? 'approved.' : 'rejected.'}</p>
@@ -392,7 +401,7 @@ export function RouteApprovalPage() {
 
   if ((live && (!liveRoute || !isPendingControllerRoute(liveRoute))) || (!live && route.state !== 'Pending approval')) {
     const saved = live ? undefined : readDemoState().routes[route.id]
-    return <div className="routes-page routes-decision" role="status">
+    return <div className="routes-page traffic-workspace routes-decision" role="status">
       <span className="routes-decision__icon routes-decision__icon--approved"><CheckCircle2 aria-hidden="true" /></span>
       <h1>No approval pending</h1>
       <p>{live ? 'This route has no approval awaiting review.' : `${route.name} is ${route.state.toLowerCase()}.${saved ? ` ${saved.result}.` : ''}`}</p>
@@ -400,23 +409,40 @@ export function RouteApprovalPage() {
     </div>
   }
 
-  return <div className="routes-page routes-approval-page">
-    <PageHeader title={`Review ${route.name}`} action={<Button variant="quiet" disabled={actionPending} onClick={() => navigate('/routes')}>Back to approval queue</Button>} />
-    <div className="routes-approval-grid">
-      <section className="routes-approval-summary">
-        <Status tone="warning">Awaiting approval</Status>
-        <h2>{route.name}</h2>
-        <code className="routes-prefix">{route.destination}</code>
-        {!live ? <FlowPath items={[
-          <span key="source">Authorized source node</span>,
-          <span key="overlay">Laneway overlay</span>,
-          <span key="via"><strong>{route.via}</strong><small>{route.mode} forwarding</small></span>,
-          <span key="destination"><strong>{route.destination}</strong><small>Private destination</small></span>,
-        ]} /> : null}
-        <Callout tone="warning"><strong>{live ? 'Approval includes this route in the next configuration epoch.' : 'Approval distributes this route to enrolled nodes.'}</strong><br />ACL rules still apply.</Callout>
-      </section>
-      <aside className="routes-approval-actions">
+  return <div className="routes-page traffic-workspace">
+    <PageHeader title={`Review ${route.name}`} description={route.destination} action={<Button variant="quiet" disabled={actionPending} onClick={() => navigate('/routes?state=pending')}>Back to approval queue</Button>} />
+    <div className="traffic-layout">
+      <div className="traffic-content">
+        <section aria-labelledby="approval-impact">
+          <h2 className="traffic-section-heading" id="approval-impact">Forwarding impact</h2>
+          {!live ? <FlowPath items={[
+            <span key="source">Authorized source node</span>,
+            <span key="overlay">Laneway overlay</span>,
+            <span key="via"><strong>{route.via}</strong><small>{route.mode} forwarding</small></span>,
+            <span key="destination"><strong>{route.destination}</strong><small>Private destination</small></span>,
+          ]} /> : null}
+          <Callout tone="warning"><strong>{live ? 'Approval includes this route in the next configuration epoch.' : 'Approval distributes this route to enrolled nodes.'}</strong><br />ACL rules still apply.</Callout>
+        </section>
+        <section className="traffic-action-panel" aria-labelledby="approval-confirmation">
+          <h2 className="traffic-section-heading" id="approval-confirmation">Decision</h2>
+          <label className="routes-confirm">
+            <input type="checkbox" checked={confirmed} disabled={actionPending} onChange={event => { setConfirmed(event.target.checked); setError('') }} />
+            <span>I verified the destination, forwarding node, mode, and metric.</span>
+          </label>
+          <Field label={`Type ${expected} to confirm`}>
+            <input value={confirmation} disabled={actionPending} onChange={event => { setConfirmation(event.target.value); setError('') }} autoComplete="off" spellCheck={false} />
+          </Field>
+          {!live ? <Field label="Rejection reason" hint="Required when rejecting.">
+            <textarea value={reason} disabled={actionPending} onChange={event => { setReason(event.target.value); setError('') }} placeholder="Explain why this advertisement must not be distributed" />
+          </Field> : null}
+          {error ? <p className="routes-error" role="alert">{error}</p> : null}
+          <div className="button-row"><Button variant="primary" disabled={actionPending || !confirmed || confirmation !== expected} onClick={approve}>{actionPending ? 'Approving…' : 'Approve route'}</Button>{!live ? <Button variant="danger" disabled={actionPending || confirmation !== expected} onClick={reject}>Reject advertisement</Button> : null}<Button variant="quiet" disabled={actionPending} onClick={() => navigate(`/routes/${route.id}`)}>Cancel</Button></div>
+        </section>
+      </div>
+      <aside className="traffic-inspector">
         <ReviewPanel title="Advertisement" rows={[
+          ['State', <Status tone="warning">Awaiting approval</Status>],
+          ['Destination', <code>{route.destination}</code>],
           ['Route ID', <code>{route.id}</code>],
           ['Via node', route.via],
           ['Mode', live ? controllerRouteMode(liveRoute) : route.mode],
@@ -424,18 +450,6 @@ export function RouteApprovalPage() {
           ['Kind', live ? controllerRouteKind(liveRoute) : (location.state as ApprovalLocation | null)?.kind ?? (route.destination.endsWith('/0') ? 'Exit' : 'Subnet')],
           ['Lifetime', live ? liveRoute ? liveRoute.valid_until_unix_seconds === undefined ? 'No expiry' : formatControllerTime(liveRoute.valid_until_unix_seconds) : 'Unavailable' : (location.state as ApprovalLocation | null)?.lifetime ?? 'No expiry'],
         ]} />
-        <label className="routes-confirm">
-          <input type="checkbox" checked={confirmed} disabled={actionPending} onChange={event => { setConfirmed(event.target.checked); setError('') }} />
-          <span>I verified the destination, forwarding node, mode, and metric.</span>
-        </label>
-        <Field label={`Type ${expected} to confirm`}>
-          <input value={confirmation} disabled={actionPending} onChange={event => { setConfirmation(event.target.value); setError('') }} autoComplete="off" spellCheck={false} />
-        </Field>
-        {!live ? <Field label="Rejection reason" hint="Required when rejecting.">
-          <textarea value={reason} disabled={actionPending} onChange={event => { setReason(event.target.value); setError('') }} placeholder="Explain why this advertisement must not be distributed" />
-        </Field> : null}
-        {error ? <p className="routes-error" role="alert">{error}</p> : null}
-        <div className="button-row"><Button variant="primary" disabled={actionPending || !confirmed || confirmation !== expected} onClick={approve}>{actionPending ? 'Approving…' : 'Approve route'}</Button>{!live ? <Button variant="danger" disabled={actionPending || confirmation !== expected} onClick={reject}>Reject advertisement</Button> : null}<Button variant="quiet" disabled={actionPending} onClick={() => navigate(`/routes/${route.id}`)}>Cancel</Button></div>
       </aside>
     </div>
   </div>
@@ -493,7 +507,7 @@ export function RouteDetailPage() {
     setRevision(value => value + 1)
   }
 
-  return <div className="routes-page routes-detail-page">
+  return <div className="routes-page traffic-workspace traffic-detail-page">
     <PageHeader title={route.name} action={<div className="button-row">{pending && canManageRoute ? <Button variant="primary" to={`/routes/${route.id}/approve`}>Review approval</Button> : null}<Button variant="quiet" to="/routes">All routes</Button></div>} />
     <DetailLayout
       identity={<IdentityBlock

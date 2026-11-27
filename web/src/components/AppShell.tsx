@@ -9,13 +9,14 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
-import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { isNetworkScopedAdministratorPermission, useControlPlane, type AdministratorPermission } from '../lib/control-plane'
 import { isPendingControllerRoute } from '../lib/live-records'
 import { ThemeToggle } from './Theme'
 import { MobileNavigation } from './MobileNavigation'
 import { BrandMark } from './BrandMark'
+import { WorkspaceBreadcrumbs } from './WorkspaceBreadcrumbs'
 
 const navigation = [
   {
@@ -43,44 +44,7 @@ const navigation = [
   },
 ]
 
-const sectionLabels: Record<string, string> = {
-  overview: 'Overview',
-  nodes: 'Nodes',
-  users: 'User access',
-  routes: 'Routes',
-  access: 'Access rules',
-  infrastructure: 'Infrastructure',
-  security: 'Security',
-  audit: 'Audit log',
-}
-
-const detailLabels: Record<string, string> = {
-  new: 'New',
-  capabilities: 'Capabilities',
-  revoke: 'Revoke',
-  approve: 'Approval',
-  edit: 'Edit',
-  networks: 'Networks',
-  relays: 'Relays',
-}
-
-function Breadcrumbs({ pathname }: { pathname: string }) {
-  const segments = pathname.split('/').filter(Boolean)
-  const section = segments[0] ?? 'overview'
-  const tail = segments.slice(1).map(segment => detailLabels[segment] ?? decodeURIComponent(segment).replaceAll('-', ' '))
-
-  return (
-    <nav className="breadcrumbs" aria-label="Breadcrumb">
-      <Link to="/overview">Laneway</Link>
-      <span aria-hidden="true">/</span>
-      <Link to={`/${section}`}>{sectionLabels[section] ?? section}</Link>
-      {tail.map((label, index) => <span className="breadcrumbs__tail" key={`${label}-${index}`}><span aria-hidden="true">/</span><span>{label}</span></span>)}
-    </nav>
-  )
-}
-
 export function AppShell() {
-  const location = useLocation()
   const navigate = useNavigate()
   const { live, session, inventory, inventoryError, inventoryPending, authPending, authError, hasPermission, refresh, signOut } = useControlPlane()
   const networkName = inventory?.network?.name
@@ -136,7 +100,7 @@ export function AppShell() {
     <div className="app-frame">
       <header className="command-bar">
         <MobileNavigation>{navigationMenu}</MobileNavigation>
-        <Breadcrumbs pathname={location.pathname} />
+        <WorkspaceBreadcrumbs />
         <div className="command-bar__tools">
           {!live ? <div className="demo-notice" role="note" aria-label="Demo data notice"><strong>Demo data</strong></div> : null}
           {live ? <button className="refresh-button" type="button" onClick={() => void refresh()} disabled={inventoryPending} aria-label="Refresh controller inventory"><RefreshCw aria-hidden="true" size={15} /></button> : null}

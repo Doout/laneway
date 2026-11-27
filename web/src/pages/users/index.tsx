@@ -1,11 +1,10 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { Check, Clipboard, Clock3, KeyRound, Laptop, RotateCcw, Trash2, UserRound, Users } from 'lucide-react'
-import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { ArrowLeft, Check, ChevronRight, Clipboard, Clock3, KeyRound, Laptop, RotateCcw, Trash2, UserRound, Users } from 'lucide-react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   Button,
   Callout,
   ChoiceGroup,
-  DataTable,
   DetailLayout,
   EmptyState,
   EntityTitle,
@@ -55,7 +54,7 @@ export function UsersListPage() {
       return matchesQuery && (kind === 'all' || user.enrollment === kind) && (state === 'all' || user.state === state)
     })
   }, [kind, query, records, state])
-  const selected = records.find(user => user.id === selectedId) ?? filteredUsers[0]
+  const selected = filteredUsers.find(user => user.id === selectedId) ?? filteredUsers[0]
   const selectedControllerNode = live && selected ? inventory?.nodes.find(node => node.node_id === selected.id) : undefined
   const activeCount = records.filter(user => user.state === 'Active').length
   const ephemeralCount = records.filter(user => user.enrollment === 'Ephemeral').length
@@ -63,35 +62,33 @@ export function UsersListPage() {
 
   return <div className="users-page">
     <PageHeader title="Users" action={canIssueEnrollment ? <Button to="/users/new" variant="primary"><KeyRound size={17} />Issue access</Button> : undefined} />
-    <SummaryStrip label="User access summary" items={[
-      { label: 'Active enrollments', value: activeCount },
-      { label: live ? 'Enrollment nodes' : 'Enrolled devices', value: live ? records.length : records.reduce((total, user) => total + user.devices, 0) },
-      { label: live ? 'Ephemeral enrollment nodes' : 'Ephemeral enrollments', value: ephemeralCount },
-      ...(live ? [{ label: 'Inactive enrollments', value: records.length - activeCount }] : []),
-    ]} />
     <div className="users-table-space">
       <Toolbar filters={<>
-        <div className="users-segments" role="group" aria-label="Enrollment type"><button type="button" aria-pressed={kind === 'all'} onClick={() => setKind('all')}>All</button><button type="button" aria-pressed={kind === 'Remembered'} onClick={() => setKind('Remembered')}>Remembered</button><button type="button" aria-pressed={kind === 'Ephemeral'} onClick={() => setKind('Ephemeral')}>Ephemeral</button></div>
+        <div className="users-segments" role="group" aria-label="Enrollment type">{(['all', 'Remembered', 'Ephemeral'] as const).map(type => <Button key={type} variant="quiet" aria-pressed={kind === type} onClick={() => setKind(type)}>{type === 'all' ? 'All' : type}</Button>)}</div>
         <FilterSelect label="Filter by state" value={state} onChange={setState}><option value="all">Any state</option><option>Active</option><option>Expired</option><option>Revoked</option></FilterSelect>
         <span className="users-result-count" aria-live="polite">{filteredUsers.length} shown</span>
       </>}><SearchField label="Search user enrollments" placeholder={`Search name, network, or ${live ? 'node' : 'enrollment'} ID`} value={query} onChange={setQuery} /></Toolbar>
       <div className="users-workspace">
-        <section className="users-inventory" aria-label="User access inventory"><DataTable
-          rows={filteredUsers}
-          rowKey={user => user.id}
-          empty={<EmptyState icon={<Users />} title="No enrollments match" description="No records match the current filters." action={<Button onClick={() => { setQuery(''); setKind('all'); setState('all') }}><RotateCcw size={16} />Reset filters</Button>} />}
-          columns={[
-            { key: 'subject', label: 'User', render: user => <EntityTitle icon={<UserRound size={17} />} subtitle={user.id}>{user.subject}</EntityTitle> },
-            { key: 'type', label: 'Enrollment', render: user => user.enrollment },
-            { key: 'network', label: 'Network', render: user => user.network },
-            { key: 'devices', label: live ? 'Address' : 'Devices', render: user => live ? [inventory?.nodes.find(node => node.node_id === user.id)?.ipv4_address, inventory?.nodes.find(node => node.node_id === user.id)?.ipv6_address].filter(Boolean).join(' · ') || 'Not assigned' : user.devices },
-            { key: 'state', label: 'Status', render: user => <Status tone={user.tone}>{user.state}</Status> },
-            { key: 'action', label: '', align: 'end', render: user => <Button onClick={() => setSelectedId(user.id)} variant={selected?.id === user.id ? 'secondary' : 'quiet'}>Inspect</Button> },
-          ]}
-        /></section>
-        {selected ? <aside className="users-panel users-inspector"><span className="users-panel-label">Inspector</span><h2>{selected.subject}</h2><p>{selected.enrollment} enrollment · {selected.state}</p>{live ? <dl><div><dt>Node ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>IPv4</dt><dd><code>{selectedControllerNode?.ipv4_address ?? 'Not assigned'}</code></dd></div><div><dt>IPv6</dt><dd><code>{selectedControllerNode?.ipv6_address ?? 'Not assigned'}</code></dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl> : <dl><div><dt>Enrollment ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>Devices</dt><dd>{selected.devices}</dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl>}<div className="button-row"><Button to={`/users/${selected.id}`} variant="primary">View details</Button>{canIssueEnrollment ? <Button to="/users/new" variant="quiet">Issue access</Button> : null}</div></aside> : null}
+        <section className="users-inventory" aria-label="User access inventory">
+          {filteredUsers.length ? <ul className="users-inventory-list">
+            {filteredUsers.map(user => <li key={user.id}>
+              <Button className="users-inventory-entry" variant="quiet" aria-pressed={selected?.id === user.id} onClick={() => setSelectedId(user.id)}>
+                <span className="users-entry-icon"><UserRound size={17} aria-hidden="true" /></span>
+                <span className="users-entry-name"><strong>{user.subject}</strong><small>{user.network} · {user.enrollment}</small></span>
+                <Status tone={user.tone}>{user.state}</Status><ChevronRight size={15} aria-hidden="true" />
+              </Button>
+            </li>)}
+          </ul> : <EmptyState icon={<Users />} title="No enrollments match" action={<Button onClick={() => { setQuery(''); setKind('all'); setState('all') }}><RotateCcw size={16} />Reset filters</Button>} />}
+        </section>
+        {selected ? <aside className="users-panel users-inspector"><div className="users-inspector-title"><UserRound size={17} aria-hidden="true" /><span className="users-panel-label">Inspector</span></div><h2>{selected.subject}</h2><p>{selected.enrollment} enrollment · {selected.state}</p>{live ? <dl><div><dt>Node ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>IPv4</dt><dd><code>{selectedControllerNode?.ipv4_address ?? 'Not assigned'}</code></dd></div><div><dt>IPv6</dt><dd><code>{selectedControllerNode?.ipv6_address ?? 'Not assigned'}</code></dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl> : <dl><div><dt>Enrollment ID</dt><dd><code>{selected.id}</code></dd></div><div><dt>Network</dt><dd>{selected.network}</dd></div><div><dt>Devices</dt><dd>{selected.devices}</dd></div><div><dt>Lease</dt><dd>{selected.lease}</dd></div></dl>}<div className="button-row"><Button to={`/users/${selected.id}`} variant="primary">View details<ChevronRight size={14} /></Button></div></aside> : null}
       </div>
     </div>
+    <details className="users-totals"><summary>Enrollment totals</summary><SummaryStrip label="User access summary" items={[
+      { label: 'Active enrollments', value: activeCount },
+      { label: live ? 'Enrollment nodes' : 'Enrolled devices', value: live ? records.length : records.reduce((total, user) => total + user.devices, 0) },
+      { label: live ? 'Ephemeral enrollment nodes' : 'Ephemeral enrollments', value: ephemeralCount },
+      ...(live ? [{ label: 'Inactive enrollments', value: records.length - activeCount }] : []),
+    ]} /></details>
   </div>
 }
 
@@ -158,6 +155,7 @@ export function IssueUserAccessPage() {
   }
 
   return <div className="users-page users-form-page">
+    <Link to="/users" className="users-back"><ArrowLeft size={14} />User access</Link>
     <PageHeader title="Issue user access" description="Create a single-use enrollment token." />
     <FormLayout
       form={<FormStack onSubmit={submit}>
@@ -209,6 +207,7 @@ export function UserTokenPage() {
   }
 
   return <div className="users-page users-token-page">
+    <Link to="/users" className="users-back"><ArrowLeft size={14} />User access</Link>
     <PageHeader title="User token issued" description="Send the single-use secret through a secure channel." />
     <div className="users-token-grid"><section className="users-panel users-token-card"><div className="users-panel-head"><h2>One-time credential</h2><Status tone="warning">Shown once</Status></div><Callout tone="warning"><strong>Copy this credential now.</strong> Laneway stores only its fingerprint and cannot reveal it again.</Callout><div className="users-token-space"><TokenBox label="User enrollment token" value={displayedToken}><Button onClick={copyToken} variant="primary">{copyState === 'copied' ? <Check size={17} /> : <Clipboard size={17} />}{copyState === 'copied' ? 'Copied' : 'Copy credential'}</Button></TokenBox></div>{copyState === 'failed' ? <Callout tone="danger">Clipboard access was blocked. Select the token text and copy it manually.</Callout> : null}</section>
     <section className="users-panel users-connect-card"><div className="users-panel-head"><h2>Connect</h2><span>Linux / macOS</span></div><p>Save the token in <code>./laneway.code</code> with mode <code>0600</code>, then run:</p><pre className="users-command" tabIndex={0}><code>{enrollmentCommand}</code></pre></section></div>
@@ -247,7 +246,8 @@ export function UserDetailPage() {
   }
 
   return <div className="users-page users-detail-page">
-    <PageHeader title="User enrollment detail" action={<Button to="/users">Back to user access</Button>} />
+    <Link to="/users" className="users-back"><ArrowLeft size={14} />Back to user access</Link>
+    <PageHeader title="User enrollment detail" />
     <DetailLayout identity={<IdentityBlock icon={<UserRound size={34} />} title={user.subject} state={<Status tone={isRevoked ? 'danger' : user.tone}>{live ? user.state : isRevoked ? 'Revoked' : user.state}</Status>} actions={!isRevoked && !live ? <Button variant="quiet" onClick={() => setShowRevoke(current => !current)}><Trash2 size={16} />Revoke access</Button> : undefined} metadata={[[live ? "Node ID" : "Enrollment ID", <code>{user.id}</code>], ["Type", user.enrollment], ["Network", user.network], ["Issued", live ? issuedAt : 'Aug 10, 2026'], ["Lease", live ? leaseStatus : isRevoked ? 'Ended by administrator' : user.lease]]} />}>
       {live && !identityInactive ? <Callout>User revocation is unavailable. Revoke the enrolled node instead.</Callout> : null}
       {leaseExpired ? <Callout>The lease expired. This node can no longer authenticate.</Callout> : null}

@@ -26,7 +26,7 @@ import { useControlPlane, type ControllerACLRule } from '../../lib/control-plane
 import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
 import { controllerRules } from '../../lib/live-records'
 import { attributed, persistedAccessRules, readDemoState, updateDemoState } from '../../lib/persisted-demo-state'
-import { SummaryStrip } from '../live/shared'
+import '../traffic-workspace.css'
 import './access-pages.css'
 
 type RuleFormState = {
@@ -138,19 +138,18 @@ export function AccessRulesPage() {
   const enabledCount = records.filter(rule => rule.state === 'Enabled').length
   const canManageRules = !live || Boolean(inventory?.network && hasPermission('acl.manage', inventory.network.network_id))
 
-  return <div className="access-page">
+  return <div className="access-page traffic-workspace">
     <PageHeader
       title="Access rules"
+      description={`Policy epoch ${live ? inventory?.network?.configuration_epoch ?? 'Unavailable' : 418} · ${enabledCount} enabled · ${records.length - enabledCount} disabled`}
       action={canManageRules ? <Button variant="primary" to="/access/new"><ShieldCheck aria-hidden="true" size={17} />New rule</Button> : undefined}
     />
-    <SummaryStrip label="Access policy summary" items={[
-      { label: 'Enabled rules', value: enabledCount },
-      { label: 'Disabled rules', value: records.length - enabledCount },
-      { label: 'Accept rules', value: records.filter(rule => rule.action === 'Allow').length },
-      { label: 'Configuration epoch', value: live ? inventory?.network?.configuration_epoch ?? '—' : 418 },
-    ]} />
+    <div className="traffic-views" role="group" aria-label="Rule action">
+      <button type="button" aria-pressed={action === 'all'} onClick={() => setAction('all')}>All <small aria-hidden="true">{records.length}</small></button>
+      <button type="button" aria-pressed={action === 'allow'} onClick={() => setAction('allow')}>Accept <small aria-hidden="true">{records.filter(rule => rule.action === 'Allow').length}</small></button>
+      <button type="button" aria-pressed={action === 'deny'} onClick={() => setAction('deny')}>Deny <small aria-hidden="true">{records.filter(rule => rule.action === 'Deny').length}</small></button>
+    </div>
     <Toolbar filters={<>
-      <div className="access-segments" role="group" aria-label="Rule action"><button type="button" aria-pressed={action === 'all'} onClick={() => setAction('all')}>All</button><button type="button" aria-pressed={action === 'allow'} onClick={() => setAction('allow')}>Accept</button><button type="button" aria-pressed={action === 'deny'} onClick={() => setAction('deny')}>Deny</button></div>
       <FilterSelect label="Filter by state" value={enabled} onChange={setEnabled}>
         <option value="all">All states</option>
         <option value="enabled">Enabled</option>
@@ -160,9 +159,10 @@ export function AccessRulesPage() {
     </>}>
       <SearchField label="Search access rules" placeholder={live ? 'Search description or selector' : 'Search description, selector, or destination'} value={query} onChange={setQuery} />
     </Toolbar>
-    <div className="access-workspace"><section className="access-inventory"><DataTable
+    <div className="access-workspace traffic-layout"><section className="access-inventory"><DataTable
         rows={visibleRules}
         rowKey={rule => rule.id}
+        rowClassName={rule => selected?.id === rule.id ? 'traffic-table-selected' : undefined}
         columns={[
           { key: 'priority', label: 'Priority', render: rule => <span className="access-priority">{rule.priority}</span> },
           { key: 'rule', label: 'Rule', render: rule => <EntityTitle icon={rule.action === 'Allow' ? <ShieldCheck size={16} /> : <ShieldX size={16} />} subtitle={rule.id}>{rule.name}</EntityTitle> },
@@ -170,10 +170,13 @@ export function AccessRulesPage() {
           { key: 'source', label: live ? 'Selector' : 'Subject', render: rule => <code>{live ? JSON.stringify(inventory?.aclRules.find(record => record.rule_id === rule.id)?.selector ?? {}) : rule.selector}</code> },
           { key: 'destination', label: live ? 'Epoch' : 'Destination', render: rule => live ? inventory?.aclRules.find(record => record.rule_id === rule.id)?.configuration_epoch ?? 'Unavailable' : rule.target },
           { key: 'state', label: 'State', render: rule => <Status tone={rule.tone}>{rule.state}</Status> },
-          { key: 'actions', label: '', align: 'end', render: rule => <Button variant={selected?.id === rule.id ? 'secondary' : 'quiet'} onClick={() => setSelectedId(rule.id)}>Inspect</Button> },
+          { key: 'actions', label: '', align: 'end', render: rule => <>
+            <Button className="traffic-table-inspect" variant="quiet" aria-pressed={selected?.id === rule.id} onClick={() => setSelectedId(rule.id)}>Inspect</Button>
+            <Button className="traffic-table-link" variant="quiet" to={`/access/${rule.id}`}>Details</Button>
+          </> },
         ]}
         empty={<div className="access-empty"><SlidersHorizontal aria-hidden="true" /><h2>No rules match</h2><p>Clear a filter or search for a different selector.</p></div>}
-      /></section>{selected ? <aside className="access-panel access-inspector"><span className="access-panel-label">Inspector</span><h2>{selected.name}</h2><p>{displayAction(selected)} rule · priority {selected.priority}</p>{live ? <dl><div><dt>Selector</dt><dd><code>{selectedControllerRule ? JSON.stringify(selectedControllerRule.selector) : 'Unavailable'}</code></dd></div><div><dt>Network ID</dt><dd><code>{selectedControllerRule?.network_id ?? 'Unavailable'}</code></dd></div><div><dt>State</dt><dd><Status tone={selected.tone}>{selected.state}</Status></dd></div><div><dt>Epoch</dt><dd>{selectedControllerRule?.configuration_epoch ?? 'Unavailable'}</dd></div></dl> : <dl><div><dt>Subject</dt><dd><code>{selected.selector}</code></dd></div><div><dt>Destination</dt><dd>{selected.target}</dd></div><div><dt>State</dt><dd><Status tone={selected.tone}>{selected.state}</Status></dd></div><div><dt>Epoch</dt><dd>418</dd></div></dl>}<div className="button-row"><Button variant="primary" to={`/access/${selected.id}`}>Open rule</Button></div></aside> : null}</div>
+      /></section>{selected ? <aside className="access-inspector traffic-inspector"><span className="access-panel-label">Inspector</span><h2>{selected.name}</h2><p>{displayAction(selected)} rule · priority {selected.priority}</p>{live ? <dl><div><dt>Selector</dt><dd><code>{selectedControllerRule ? JSON.stringify(selectedControllerRule.selector) : 'Unavailable'}</code></dd></div><div><dt>Network ID</dt><dd><code>{selectedControllerRule?.network_id ?? 'Unavailable'}</code></dd></div><div><dt>State</dt><dd><Status tone={selected.tone}>{selected.state}</Status></dd></div><div><dt>Epoch</dt><dd>{selectedControllerRule?.configuration_epoch ?? 'Unavailable'}</dd></div></dl> : <dl><div><dt>Subject</dt><dd><code>{selected.selector}</code></dd></div><div><dt>Destination</dt><dd>{selected.target}</dd></div><div><dt>State</dt><dd><Status tone={selected.tone}>{selected.state}</Status></dd></div><div><dt>Epoch</dt><dd>418</dd></div></dl>}<div className="button-row"><Button variant="primary" to={`/access/${selected.id}`}>Open rule</Button></div></aside> : null}</div>
   </div>
 }
 
@@ -273,38 +276,44 @@ export function AccessRuleFormPage() {
   const sourceLabel = form.source === 'any' ? 'Any enrolled node' : form.source === 'nod_01J8OPS7F3A' ? 'ops-session-7f3a' : 'atlas-gateway'
   const protocolName = `IP_PROTOCOL_${form.protocol}`
 
-  return <div className="access-page access-form-page">
-    <PageHeader title={editing ? 'Edit access rule' : 'Create access rule'} action={<Button variant="quiet" to={editing ? `/access/${ruleId}` : '/access'}>Cancel</Button>} />
+  return <div className="access-page traffic-workspace traffic-form-page">
+    <PageHeader title={editing ? 'Edit access rule' : 'Create access rule'} />
     <FormLayout
       form={<FormStack onSubmit={submit}>
-        <Field label="Description" error={errors.description}>
-          <input value={form.description} aria-invalid={Boolean(errors.description)} onChange={event => update('description', event.target.value)} placeholder="Allow production operators to HTTPS services" autoFocus />
-        </Field>
-        <Field label="Priority" hint="Lowest value runs first; ties sort by rule ID." error={errors.priority}>
-          <input type="number" min="0" max="4294967295" step="1" value={form.priority} aria-invalid={Boolean(errors.priority)} onChange={event => update('priority', event.target.value)} />
-        </Field>
-        <ChoiceGroup label="Action" value={form.action} onChange={value => { update('action', value as RuleFormState['action']); if (value === 'deny') update('confirmed', false) }} options={[
-          { value: 'accept', label: 'Accept', description: 'Allow traffic matching every field.' },
-          { value: 'deny', label: 'Deny', description: 'Reject matching traffic.' },
-        ]} />
-        {live ? <Field label="Source node"><input value="Any enrolled node" readOnly /></Field> : <Field label="Source node" hint="Authorization uses the selected Node ID.">
-          <select value={form.source} onChange={event => update('source', event.target.value)}><option value="nod_01J8OPS7F3A">ops-session-7f3a · Remembered user</option><option value="nod_01J8ATLAS9GP">atlas-gateway · Connector</option><option value="any">Any enrolled node</option></select>
-        </Field>}
-        <Field label="Destination prefix" hint={live ? 'Enter an IPv4 CIDR prefix.' : 'Enter an IPv4 or IPv6 CIDR prefix.'} error={errors.destination}>
-          <input value={form.destination} aria-invalid={Boolean(errors.destination)} onChange={event => update('destination', event.target.value)} spellCheck={false} />
-        </Field>
-        <div className="access-field-grid">
-          <Field label="IP protocol">
-            <select value={form.protocol} onChange={event => update('protocol', event.target.value as RuleFormState['protocol'])}>
-              <option value="TCP">TCP</option>
-              <option value="UDP">UDP</option>
-              <option value="ICMP">ICMP</option>
-            </select>
+        <section className="traffic-action-panel" aria-labelledby="rule-decision-heading">
+          <h2 className="traffic-section-heading" id="rule-decision-heading">Decision</h2>
+          <Field label="Description" error={errors.description}>
+            <input value={form.description} aria-invalid={Boolean(errors.description)} onChange={event => update('description', event.target.value)} placeholder="Allow production operators to HTTPS services" autoFocus />
           </Field>
-          <Field label="Destination ports" hint={form.protocol === 'ICMP' ? 'Ports do not apply to ICMP.' : 'Optional; comma-separated ports or ranges.'} error={errors.ports}>
-            <input disabled={form.protocol === 'ICMP'} value={form.protocol === 'ICMP' ? '' : form.ports} aria-invalid={Boolean(errors.ports)} onChange={event => update('ports', event.target.value)} placeholder="443, 8443-8450" />
+          <Field label="Priority" hint="Lowest value runs first; ties sort by rule ID." error={errors.priority}>
+            <input type="number" min="0" max="4294967295" step="1" value={form.priority} aria-invalid={Boolean(errors.priority)} onChange={event => update('priority', event.target.value)} />
           </Field>
-        </div>
+          <ChoiceGroup label="Action" value={form.action} onChange={value => { update('action', value as RuleFormState['action']); if (value === 'deny') update('confirmed', false) }} options={[
+            { value: 'accept', label: 'Accept', description: 'Allow traffic matching every field.' },
+            { value: 'deny', label: 'Deny', description: 'Reject matching traffic.' },
+          ]} />
+        </section>
+        <section className="traffic-action-panel" aria-labelledby="rule-match-heading">
+          <h2 className="traffic-section-heading" id="rule-match-heading">Traffic match</h2>
+          {live ? <Field label="Source node"><input value="Any enrolled node" readOnly /></Field> : <Field label="Source node" hint="Authorization uses the selected Node ID.">
+            <select value={form.source} onChange={event => update('source', event.target.value)}><option value="nod_01J8OPS7F3A">ops-session-7f3a · Remembered user</option><option value="nod_01J8ATLAS9GP">atlas-gateway · Connector</option><option value="any">Any enrolled node</option></select>
+          </Field>}
+          <Field label="Destination prefix" hint={live ? 'Enter an IPv4 CIDR prefix.' : 'Enter an IPv4 or IPv6 CIDR prefix.'} error={errors.destination}>
+            <input value={form.destination} aria-invalid={Boolean(errors.destination)} onChange={event => update('destination', event.target.value)} spellCheck={false} />
+          </Field>
+          <div className="traffic-fields">
+            <Field label="IP protocol">
+              <select value={form.protocol} onChange={event => update('protocol', event.target.value as RuleFormState['protocol'])}>
+                <option value="TCP">TCP</option>
+                <option value="UDP">UDP</option>
+                <option value="ICMP">ICMP</option>
+              </select>
+            </Field>
+            <Field label="Destination ports" hint={form.protocol === 'ICMP' ? 'Ports do not apply to ICMP.' : 'Optional; comma-separated ports or ranges.'} error={errors.ports}>
+              <input disabled={form.protocol === 'ICMP'} value={form.protocol === 'ICMP' ? '' : form.ports} aria-invalid={Boolean(errors.ports)} onChange={event => update('ports', event.target.value)} placeholder="443, 8443-8450" />
+            </Field>
+          </div>
+        </section>
         {form.action === 'accept' ? <>
           <Callout tone="warning"><strong>Accept rule</strong><br />Matching packets are accepted when every configured selector field matches. Priority determines evaluation order.</Callout>
           <label className="access-confirm">
@@ -391,7 +400,7 @@ export function AccessRuleDetailPage() {
   }
 
   const action = displayAction(rule)
-  return <div className="access-page access-detail-page">
+  return <div className="access-page traffic-workspace traffic-detail-page">
     {locationState?.saved || saved?.result ? <div className="access-saved" role="status"><CheckCircle2 aria-hidden="true" size={17} />{saved?.result ?? 'Rule saved.'}</div> : null}
     <PageHeader title={rule.name} action={<div className="button-row">{!live && canManageRule ? <Button variant="secondary" to={`/access/${rule.id}/edit`}>Edit rule</Button> : null}<Button variant="quiet" to="/access">All rules</Button></div>} />
     <DetailLayout

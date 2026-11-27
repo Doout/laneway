@@ -557,7 +557,7 @@ describe('cookie session runtime races', () => {
     expect(await screen.findByLabelText('session ID')).toHaveTextContent(oldSessionId)
     fireEvent.click(screen.getByRole('button', { name: 'Begin token issue' }))
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
-    expect(await screen.findByLabelText('auth state')).toHaveTextContent('anonymous')
+    await waitFor(() => expect(screen.getByLabelText('auth state')).toHaveTextContent('anonymous'))
     fireEvent.click(screen.getByRole('button', { name: 'Complete token issue' }))
     expect(screen.getByLabelText('result')).toHaveTextContent('issue-failed')
     fireEvent.click(screen.getByRole('button', { name: 'Read one-time token' }))

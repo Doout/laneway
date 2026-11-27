@@ -6,6 +6,7 @@ import { isNetworkScopedAdministratorPermission, useControlPlane, type Administr
 import { ThemeToggle } from './Theme'
 import { MobileNavigation } from './MobileNavigation'
 import { BrandMark } from './BrandMark'
+import { WorkspaceBreadcrumbs } from './WorkspaceBreadcrumbs'
 
 const navigation: Array<{ group: 'Workspace' | 'Network' | 'Operations'; label: string; to: string; activePrefixes?: string[]; icon: typeof LayoutDashboard; permission: AdministratorPermission }> = [
   { group: 'Workspace', label: 'Overview', to: '/overview', icon: LayoutDashboard, permission: 'network.list' },
@@ -19,23 +20,13 @@ const navigation: Array<{ group: 'Workspace' | 'Network' | 'Operations'; label: 
   { group: 'Operations', label: 'Audit', to: '/audit', icon: ScrollText, permission: 'audit.read' },
 ]
 
-const pathLabels: Record<string, string> = {
-  overview: 'Overview', networks: 'Networks', nodes: 'Nodes', users: 'Users', teams: 'Teams', routes: 'Routes', infrastructure: 'Infrastructure',
-  access: 'Access', twingate: 'Twingate', applications: 'Applications', consent: 'Review application', install: 'Connect application', security: 'Security', audit: 'Audit', new: 'New', approve: 'Approve', revoke: 'Revoke', capabilities: 'Capabilities',
-}
-
-function breadcrumbLabel(pathname: string) {
-  const segment = pathname.split('/').filter(Boolean).at(-1) ?? 'overview'
-  if (pathLabels[segment]) return pathLabels[segment]
-  return segment.length > 18 ? `${segment.slice(0, 8)}…${segment.slice(-4)}` : segment
-}
-
 export function ControllerAppShell() {
   const location = useLocation()
   const navigate = useNavigate()
   const [rotationPending, setRotationPending] = useState(false)
   const [signOutPending, setSignOutPending] = useState(false)
   const { session, inventory, inventoryError, inventoryPending, authPending, authError, hasPermission, refresh, rotateSession, signOut } = useControlPlane()
+  const inventoryStatus = inventoryPending ? 'Refreshing' : inventoryError ? 'Refresh failed' : inventory ? 'Connected' : 'Connecting'
   const networkId = inventory?.network?.network_id
   const visibleNavigation = navigation.filter((item) => {
     if (item.to === '/audit' && hasPermission('audit.read_global')) return true
@@ -100,9 +91,9 @@ export function ControllerAppShell() {
     <div className="app-frame">
       <header className="command-bar">
         <MobileNavigation account={accountControls}>{navigationMenu}</MobileNavigation>
-        <nav className="breadcrumbs" aria-label="Breadcrumb"><Link to="/overview">Laneway</Link><span aria-hidden="true">/</span><span>{breadcrumbLabel(location.pathname)}</span></nav>
+        <WorkspaceBreadcrumbs live />
         <div className="command-bar__tools">
-          <div className={clsx('inventory-health', inventoryError && 'is-error')} role="status"><span aria-hidden="true" />{inventoryError || (inventoryPending ? 'Refreshing' : inventory ? 'Connected' : 'Connecting')}</div>
+          <div className={clsx('inventory-health', inventoryError && 'is-error')} role="status" title={inventoryError || undefined}><span aria-hidden="true" />{inventoryStatus}</div>
           <button className="refresh-button" type="button" onClick={() => void refresh()} disabled={inventoryPending} aria-label="Refresh controller inventory"><RefreshCw aria-hidden="true" size={15} /></button>
           <ThemeToggle />
           <div className="command-bar__account">{accountControls}</div>

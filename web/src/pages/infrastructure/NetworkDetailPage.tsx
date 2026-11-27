@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertTriangle, Gauge, Laptop, Network, Plus, RadioTower, Route, ServerCog, TriangleAlert, Users } from 'lucide-react'
+import { AlertTriangle, Laptop, Network, Plus, RadioTower, Route, ServerCog, TriangleAlert } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { Button, Callout, ConfirmPanel, DataTable, EmptyState, EntityTitle, Field, PageHeader, Status, type DataColumn } from '../../components/ui'
 import { INFRASTRUCTURE_ACTOR, deleteInfrastructureNetwork } from '../../lib/infrastructure-state'
@@ -64,33 +64,31 @@ export function NetworkDetailPage() {
   }
 
   return (
-    <>
+    <div className="infra-network-page">
       <PageHeader
         title={`${network.name} network`}
-        description={`${network.addressPool} · ${network.nodes} nodes`}
         action={canManageRoutes || canIssueEnrollment ? <div className="button-row">{canManageRoutes ? <Button to="/routes/new" variant="secondary"><Route aria-hidden="true" size={16} /> Add route</Button> : null}{canIssueEnrollment ? <Button to="/nodes/new" variant="primary"><Plus aria-hidden="true" size={16} /> Add node</Button> : null}</div> : undefined}
       />
 
-      <div className={`infra-health-strip${live ? ' is-live-network' : ''}`} aria-label={`${network.name} summary`}>
-        <div><Laptop aria-hidden="true" size={16} /><span><strong>{network.connectedNodes}/{network.nodes}</strong><small>{live ? 'Nodes enrolled' : 'Nodes connected'}</small></span></div>
-        <div><Route aria-hidden="true" size={16} /><span><strong>{network.healthyRoutes}/{network.routes}</strong><small>{live ? 'Routes approved' : 'Routes healthy'}</small></span></div>
-        {!live ? <div><Gauge aria-hidden="true" size={16} /><span><strong>{network.connectedNodes ? '92%' : '—'}</strong><small>Direct paths</small></span></div> : null}
-        <div><Users aria-hidden="true" size={16} /><span><strong>{network.userEnrollments}</strong><small>User enrollments</small></span></div>
+      <div className="infra-network-facts" role="group" aria-label={`${network.name} summary`}>
+        <span><strong>{network.connectedNodes}/{network.nodes}</strong> {live ? 'nodes enrolled' : 'nodes connected'}</span>
+        <span><strong>{network.healthyRoutes}/{network.routes}</strong> {live ? 'routes approved' : 'routes healthy'}</span>
+        <span><strong>{network.userEnrollments}</strong> user enrollments</span>
       </div>
 
       <div className="infra-detail-workspace">
-        <section className="infra-panel infra-network-path" aria-labelledby={live ? 'network-connectors-title' : 'network-path-title'}>
-          {!live ? <><div className="infra-panel-head"><div><h2 id="network-path-title">Network path</h2></div><Status tone={network.connectedNodes ? 'positive' : 'muted'}>{network.connectedNodes ? 'Healthy' : 'Awaiting connector'}</Status></div>
-          <div className="infra-effective-path" role="group" aria-label={`${network.connectedNodes} connected nodes use ${network.connector.name} to reach ${network.routes} routes with relay fallback`}>
-            <div><span className="infra-path-icon"><Laptop aria-hidden="true" size={19} /></span><strong>{network.connectedNodes} {live ? 'enrolled nodes' : 'connected nodes'}</strong><small>{live ? `${network.nodes - network.connectedNodes} revoked` : `${network.nodes - network.connectedNodes} offline`}</small></div>
-            <span className="infra-path-line"><small>QUIC direct</small></span>
-            <Link className="infra-path-gateway" to={network.connector.id === 'none' ? '/nodes/new' : `/nodes/${network.connector.id}`}><ServerCog aria-hidden="true" size={21} /><strong>{network.connector.name}</strong><small>{network.connector.sessions}</small></Link>
-            <span className="infra-path-line"><small>{network.routes} published routes</small></span>
-            <div><span className="infra-path-icon is-mint"><Network aria-hidden="true" size={19} /></span><strong>Private services</strong><small>{network.healthyRoutes} healthy · {network.routes - network.healthyRoutes} pending</small></div>
-            {networkRelays[0] ? <Link className="infra-fallback-path" to={`/infrastructure/relays/${networkRelays[0].id}`}><RadioTower aria-hidden="true" size={15} /> {networkRelays[0].name} · authenticated fallback</Link> : null}
-          </div></> : null}
+        <section className="infra-panel infra-network-path" aria-labelledby="network-connectors-title">
           <div className="infra-panel-head infra-connectors-head"><div><h2 id="network-connectors-title">Connectors</h2></div>{live ? null : network.connector.id === 'none' ? <Button to="/nodes/new" variant="secondary">Add connector</Button> : <Button to={`/nodes/${network.connector.id}`} variant="quiet">Open connector</Button>}</div>
           <DataTable columns={visibleConnectorColumns} empty={<p className="infra-empty-copy">{live ? 'No node has the connector capability enabled.' : 'No connector is assigned. Add a connector before publishing routes.'}</p>} rowKey={(row) => row.id} rows={connectorRows} />
+          {!live ? <div className="infra-network-path-section">
+            <div className="infra-panel-head"><h3>Network path</h3><Status tone={network.connectedNodes ? 'positive' : 'muted'}>{network.connectedNodes ? 'Healthy' : 'Awaiting connector'}</Status></div>
+            <div className="infra-path-steps" role="group" aria-label={`${network.connectedNodes} connected nodes use ${network.connector.name} to reach ${network.routes} routes with relay fallback`}>
+              <div><Laptop aria-hidden="true" size={16} /><span><strong>{network.connectedNodes} connected nodes</strong><small>{network.nodes - network.connectedNodes} offline</small></span></div>
+              <Link to={network.connector.id === 'none' ? '/nodes/new' : `/nodes/${network.connector.id}`}><ServerCog aria-hidden="true" size={16} /><span><strong>{network.connector.name}</strong><small>QUIC direct · {network.connector.sessions}</small></span></Link>
+              <div><Network aria-hidden="true" size={16} /><span><strong>Private services</strong><small>{network.routes} published routes · {network.healthyRoutes} healthy</small></span></div>
+              {networkRelays[0] ? <Link to={`/infrastructure/relays/${networkRelays[0].id}`}><RadioTower aria-hidden="true" size={16} /><span><strong>{networkRelays[0].name}</strong><small>Authenticated fallback</small></span></Link> : null}
+            </div>
+          </div> : null}
         </section>
 
         <aside className="infra-panel infra-record-inspector" aria-labelledby="network-record-title">
@@ -107,6 +105,6 @@ export function NetworkDetailPage() {
           <div className="infra-inspector-actions">{network.routes > network.healthyRoutes && pendingRouteId ? <Button to={canManageRoutes ? `/routes/${pendingRouteId}/approve` : `/routes/${pendingRouteId}`} variant="primary">Review pending route</Button> : null}{!live ? <Button onClick={() => setConfirmingDelete(true)} variant="quiet">Delete network</Button> : null}</div>
         </aside>
       </div>
-    </>
+    </div>
   )
 }

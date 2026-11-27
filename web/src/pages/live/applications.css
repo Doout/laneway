@@ -1,82 +1,62 @@
-.applications-page, .application-consent-page { display: grid; gap: 16px; }
-.applications-page > .page-header, .application-consent-page > .page-header { margin-bottom: 0; }
-.applications-page .section { min-width: 0; }
-.applications-page .data-table th:nth-child(1) { width: 25%; }
-.applications-page .data-table th:nth-child(2) { width: 27%; }
-.applications-page .data-table th:nth-child(3) { width: 14%; }
-.applications-page .data-table th:nth-child(4) { width: 12%; }
-.applications-page .data-table th:nth-child(5) { width: 22%; }
-.application-name { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
-.application-name > span:first-child { display: grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }
-.application-name strong, .application-name small, .application-table-detail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.application-name small, .application-table-detail { margin-top: 2px; color: var(--faint); font-size: .7rem; }
-.applications-page .button-row.compact { flex-wrap: wrap; justify-content: flex-end; }
-.application-secret { display: grid; gap: 13px; padding: 16px; background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent); border-radius: var(--radius); }
-.application-secret > div:first-child { display: flex; align-items: center; gap: 10px; }
-.application-secret p { margin: 2px 0 0; font-size: .75rem; }
-.application-secret .token-box { margin: 0; }
-.application-secret > .button { justify-self: end; }
-.application-consent-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 18px; align-items: start; }
-.application-consent-card, .application-consent-summary { min-width: 0; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-.application-consent-summary { position: sticky; top: 82px; }
-.application-consent-summary p { margin: 18px 0 0; font-size: .78rem; }
-.application-consent-summary code { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.application-consent-identity { display: flex; align-items: center; gap: 13px; min-width: 0; margin-bottom: 24px; }
-.application-consent-identity > span { display: grid; flex: 0 0 auto; place-items: center; width: 38px; height: 38px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }
-.application-consent-identity h2 { margin: 0 0 3px; overflow-wrap: anywhere; }
-.application-consent-identity a, .application-consent-identity small { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: .75rem; }
-.application-consent-identity.compact { margin-bottom: 12px; }
-.application-scopes { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
-.application-scopes li { padding: 11px 0; border-bottom: 1px solid var(--border); }
-.application-scopes li:last-child { border-bottom: 0; }
-.application-scope-row { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; }
-label.application-scope-row { cursor: pointer; }
-.application-scopes li.disabled { opacity: .62; }
-.application-scopes li.disabled .application-scope-row { cursor: not-allowed; }
-.application-scope-check { display: grid; place-items: center; width: 26px; height: 26px; color: var(--accent); background: var(--accent-soft); border-radius: 50%; }
-.application-scope-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--primary); }
-.application-scopes strong, .application-scopes small { display: block; }
-.application-scopes strong { font-size: .82rem; }
-.application-scopes small { margin-top: 2px; color: var(--muted); font-size: .72rem; line-height: 1.4; }
-.application-consent-actions { display: flex; justify-content: flex-end; gap: 9px; }
-.application-registration-consent { width: min(100%, 1040px); margin-inline: auto; }
-.application-registration-panel { min-width: 0; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-.application-registration-header { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--border); }
-.application-registration-icon { display: grid; place-items: center; width: 36px; height: 36px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }
-.application-registration-header p { margin: 0 0 3px; color: var(--muted); font-size: .72rem; font-weight: 600; }
-.application-registration-header h1 { margin: 0; font-size: var(--font-heading-size, 1.5rem); overflow-wrap: anywhere; }
-.application-registration-header a { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--muted); font-size: .75rem; }
-.application-registration-body { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); }
-.application-registration-permissions, .application-registration-details { min-width: 0; padding: 16px 18px; }
-.application-registration-details { background: var(--surface-raised); border-left: 1px solid var(--border); }
-.application-registration-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
-.application-registration-section-heading h2, .application-registration-details h2 { margin: 0; font-size: .95rem; letter-spacing: -.01em; }
-.application-registration-section-heading > span, .application-registration-details dt > span { display: inline-flex; align-items: center; justify-content: center; min-width: 22px; height: 22px; padding: 0 7px; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 999px; font-size: .68rem; font-weight: 650; }
-.application-registration-details > h2 { margin-bottom: 13px; }
+.applications-page, .application-consent-page { display: grid; gap: 20px; min-width: 0; }
+.applications-page > .page-header, .application-consent-page > .page-header { margin: 0; }
+.application-inventory > header, .application-registration-section-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-height: 40px; border-bottom: 1px solid var(--border); }
+.application-inventory h2, .application-registration-section-heading h2, .application-registration-details h2 { margin: 0; font-size: .9rem; }
+.application-inventory > header > span, .application-registration-section-heading > span { color: var(--muted); font: .73rem var(--font-mono); }
+.application-inventory > header .filter-select { margin-inline-start: auto; }
+.application-inventory > ul, .application-scopes, .application-permission-details ul, .application-registration-details ul { margin: 0; padding: 0; list-style: none; }
+.application-inventory > ul > li { display: grid; grid-template-columns: 20px minmax(0, 1fr) minmax(85px, .35fr) minmax(70px, .25fr) minmax(145px, auto); align-items: start; gap: 12px; padding: 12px 4px; border-bottom: 1px solid var(--border); font-size: .8rem; }
+.application-inventory > ul > li > svg { margin-top: 3px; color: var(--muted); }
+.application-inventory > .data-empty { border-width: 0 0 1px; border-style: solid; border-radius: 0; background: transparent; }
+.application-record { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.application-record > span, .application-record code, .application-permission-details li, .application-registration-details dt { color: var(--muted); font-size: .75rem; }
+.application-record code { font-size: .69rem; }
+.application-permission-details summary { min-height: 28px; padding-block: 2px; cursor: pointer; }
+.application-permission-details li { padding-block: 3px; }
+.application-row-actions, .application-consent-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.application-secret { display: grid; gap: 12px; padding: 14px; background: var(--warning-soft); border-left: 3px solid var(--warning); }
+.application-secret > div:first-child, .application-publisher { display: flex; align-items: center; gap: 8px; }
+.application-secret p { margin: 2px 0 0; font-size: .8rem; }
+.application-secret > button { justify-self: end; }
+.application-consent-page { max-width: 1080px; gap: 8px; }
+.application-publisher { justify-self: start; max-width: 100%; color: var(--muted); font-size: .82rem; overflow-wrap: anywhere; }
+a.application-publisher:hover { text-decoration: underline; }
+.application-registration-panel { margin-top: 16px; }
+.application-registration-body { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(240px, .75fr); gap: clamp(18px, 4vw, 48px); }
+.application-registration-details { min-width: 0; align-self: start; padding: 14px 16px; background: var(--sidebar); border-radius: var(--radius); }
+.application-registration-details h2 { margin-bottom: 12px; }
 .application-registration-details dl { margin: 0; }
-.application-registration-details dl > div { min-width: 0; padding: 12px 0; border-bottom: 1px solid var(--border); }
-.application-registration-details dl > div:first-child { padding-top: 0; }
-.application-registration-details dl > div:last-child { padding-bottom: 0; border-bottom: 0; }
-.application-registration-details dt { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: .68rem; font-weight: 650; }
-.application-registration-details dd { min-width: 0; margin: 5px 0 0; font-size: .8rem; }
-.application-registration-details ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
-.application-registration-details code { display: block; max-width: 100%; color: var(--text); font-size: .72rem; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
-.application-registration-url > span { white-space: nowrap; }
-.application-registration-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border); }
-.application-registration-boundary { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; align-items: start; color: var(--muted); }
-.application-registration-boundary svg { margin-top: 1px; color: var(--accent); }
-.application-registration-boundary p { margin: 0; max-width: 620px; font-size: .72rem; line-height: 1.45; }
-@media (max-width: 880px) {
-  .application-consent-layout { grid-template-columns: 1fr; }
-  .application-consent-summary { position: static; }
-  .application-registration-body { grid-template-columns: 1fr; }
-  .application-registration-details { border-top: 1px solid var(--border); border-left: 0; }
-  .application-registration-footer { grid-template-columns: 1fr; }
-  .application-registration-footer .application-consent-actions { justify-content: flex-start; }
+.application-registration-details dl > div { padding: 10px 0; border-top: 1px solid var(--border); }
+.application-registration-details .field { margin-bottom: 12px; }
+.application-registration-details dd { margin: 4px 0 0; overflow-wrap: anywhere; font-size: .8rem; }
+.application-registration-details dt > span { margin-left: 4px; font: .7rem var(--font-mono); }
+.application-registration-details li + li { margin-top: 6px; }
+.application-registration-details code { font-size: .73rem; }
+.application-registration-section-heading { justify-content: space-between; }
+.application-scopes li { border-bottom: 1px solid var(--border); }
+.application-scope-row { display: flex; align-items: flex-start; gap: 10px; padding: 11px 4px; }
+label.application-scope-row { cursor: pointer; }
+.application-scope-check { display: grid; place-items: center; flex: none; width: 20px; height: 20px; color: var(--muted); }
+.application-scope-check input { margin: 0; width: 16px; height: 16px; accent-color: var(--primary); }
+.application-scopes strong, .application-scopes small { display: block; }
+.application-scopes strong { font-size: .83rem; }
+.application-scopes small { margin-top: 2px; font-size: .75rem; line-height: 1.45; color: var(--muted); }
+.application-scopes .disabled strong { color: var(--muted); }
+.application-registration-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px 24px; margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
+.application-registration-boundary { display: flex; flex: 1 1 280px; align-items: flex-start; gap: 8px; color: var(--muted); }
+.application-registration-boundary svg { flex: none; margin-top: 2px; }
+.application-registration-boundary p { margin: 0; font-size: .78rem; }
+@media (max-width: 900px) {
+  .application-inventory > ul > li { grid-template-columns: 20px minmax(0, 1fr) auto; }
+  .application-inventory .status { grid-column: 3; grid-row: 1; }
+  .application-inventory .application-permission-details, .application-inventory > ul > li > small { grid-column: 2; }
+  .application-row-actions { grid-column: 2 / -1; justify-content: start; }
 }
-@media (max-width: 560px) {
-  .application-registration-header, .application-registration-permissions, .application-registration-details { padding: 19px; }
-  .application-registration-footer { padding: 15px 19px; }
-  .application-registration-footer .application-consent-actions, .application-registration-footer .button { width: 100%; }
-  .application-registration-footer .button { flex: 1; }
+@media (max-width: 680px) {
+  .application-registration-body { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .application-registration-details { grid-row: 1; }
+  .application-consent-actions { width: 100%; }
+  .application-consent-actions button { min-height: 44px; }
+  .application-inventory > ul > li { gap: 5px 8px; }
+  .application-permission-details summary { display: list-item; min-height: 44px; padding-block: 12px; }
 }

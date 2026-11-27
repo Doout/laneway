@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { AlertTriangle, ArrowRight, Check, Network, RadioTower, RotateCw, ServerCog } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Check, RadioTower, RotateCw } from 'lucide-react'
 import { Link, useParams } from 'react-router-dom'
 import { Button, Callout, ConfirmPanel, EmptyState, Field, FormStack, PageHeader, Status } from '../../components/ui'
 import {
@@ -184,8 +184,8 @@ function RelayRegistrationPage() {
   }
 
   return (
-    <>
-      <PageHeader title="Register relay" action={<Button to="/infrastructure" variant="secondary">Back to infrastructure</Button>} />
+    <div className="infra-relay-registration">
+      <PageHeader title="Register relay" />
       {registeredRelay ? <div className="infra-success" role="status"><Check aria-hidden="true" size={17} /><span><strong>{registeredRelay.name} registered{live ? '.' : ` by ${registeredRelay.actor}.`}</strong> {registeredRelay.enabled ? live ? 'Enabled.' : 'Enabled and awaiting its first health probe.' : 'Saved disabled with no traffic eligibility.'}</span><Link to={`/infrastructure/relays/${registeredRelay.id}`}>Open relay <ArrowRight aria-hidden="true" size={15} /></Link></div> : null}
 
       <div className="infra-relay-form-grid">
@@ -211,11 +211,10 @@ function RelayRegistrationPage() {
         </section>
         <aside className="infra-panel infra-impact-preview" aria-labelledby="relay-impact-title">
           <div className="infra-panel-head"><div><h2 id="relay-impact-title">Registration</h2></div><Status tone={enabled ? live ? 'positive' : 'warning' : 'muted'}>{enabled ? live ? 'Enabled' : 'Awaiting probe' : 'Disabled'}</Status></div>
-          {!live ? <div className="infra-mini-path"><span><ServerCog aria-hidden="true" size={16} /> Enrolled nodes</span><ArrowRight aria-hidden="true" size={14} /><span><RadioTower aria-hidden="true" size={16} /> {name.trim() || 'Relay'}</span><ArrowRight aria-hidden="true" size={14} /><span><Network aria-hidden="true" size={16} /> {selectedNetwork}</span></div> : null}
-          <dl className="infra-record-list"><div><dt>Endpoint</dt><dd><code>{endpoint.trim() || 'Not set'}</code></dd></div>{live ? <><div><dt>Service ID</dt><dd><code>{serviceId.trim() || 'Not set'}</code></dd></div><div><dt>State</dt><dd>{enabled ? 'Enabled' : 'Disabled'}</dd></div></> : <><div><dt>Initial sessions</dt><dd>0</dd></div><div><dt>Payload access</dt><dd>None · encrypted</dd></div><div><dt>Credential</dt><dd>Single-use after review</dd></div><div><dt>Attributed to</dt><dd>{INFRASTRUCTURE_ACTOR}</dd></div></>}</dl>
+          <dl className="infra-record-list"><div><dt>Network scope</dt><dd>{selectedNetwork}</dd></div><div><dt>Endpoint</dt><dd><code>{endpoint.trim() || 'Not set'}</code></dd></div>{live ? <><div><dt>Service ID</dt><dd><code>{serviceId.trim() || 'Not set'}</code></dd></div><div><dt>State</dt><dd>{enabled ? 'Enabled' : 'Disabled'}</dd></div></> : <><div><dt>Initial sessions</dt><dd>0</dd></div><div><dt>Payload access</dt><dd>None · encrypted</dd></div><div><dt>Credential</dt><dd>Single-use after review</dd></div><div><dt>Attributed to</dt><dd>{INFRASTRUCTURE_ACTOR}</dd></div></>}</dl>
         </aside>
       </div>
-    </>
+    </div>
   )
 }
 
@@ -242,21 +241,20 @@ function RelayDetailPage({ relay }: { relay: InfrastructureRelay }) {
   if (action) return <TypedRelayAction action={action} live={live} onCancel={() => setAction(null)} onConfirm={applyAction} relay={relay} />
 
   return (
-    <>
+    <div className="infra-relay-page">
       <PageHeader title="Relays" action={canManageRelay ? <Button to="/infrastructure/relays/new" variant="primary">Register relay</Button> : undefined} />
       <div className="infra-relay-master-detail">
         <section className="infra-panel infra-relay-master" aria-label="Relay inventory">
           <div className="infra-panel-head"><div><h2>Relay inventory</h2><p>{relays.length} relays</p></div></div>
-          {relays.map((record) => <Link className={record.id === relay.id ? 'is-selected' : undefined} key={record.id} to={`/infrastructure/relays/${record.id}`}><span className="infra-record-icon"><RadioTower aria-hidden="true" size={16} /></span><span><strong>{record.name}</strong><small>{record.endpoint}</small></span><Status tone={!record.enabled ? 'muted' : live || record.reachable ? 'positive' : 'warning'}>{!record.enabled ? 'Disabled' : live ? 'Enabled' : record.reachable ? 'Enabled' : 'Awaiting probe'}</Status>{live ? null : <small>{record.sessions} sessions</small>}</Link>)}
+          {relays.map((record) => <Link aria-current={record.id === relay.id ? 'page' : undefined} key={record.id} to={`/infrastructure/relays/${record.id}`}><span className="infra-record-icon"><RadioTower aria-hidden="true" size={16} /></span><span><strong>{record.name}</strong><small>{record.endpoint}</small></span><Status tone={!record.enabled ? 'muted' : live || record.reachable ? 'positive' : 'warning'}>{!record.enabled ? 'Disabled' : live ? 'Enabled' : record.reachable ? 'Enabled' : 'Awaiting probe'}</Status>{live ? null : <small>{record.sessions} sessions</small>}</Link>)}
         </section>
         <section className="infra-panel infra-relay-detail" aria-labelledby="relay-detail-title">
           <div className="infra-panel-head"><div><div className="infra-detail-title"><span className="infra-record-icon"><RadioTower aria-hidden="true" size={19} /></span><span><h2 id="relay-detail-title">{relay.name}</h2><code>{relay.id}</code></span></div></div><Status tone={stateTone}>{stateLabel}</Status></div>
-          {!live ? <div className="infra-relay-path"><span><ServerCog aria-hidden="true" size={16} /> Direct path</span><span className="infra-relay-path-line">fallback only</span><span><RadioTower aria-hidden="true" size={16} /> {relay.name}</span><span className="infra-relay-path-line">encrypted</span><span><Network aria-hidden="true" size={16} /> {networkName}</span></div> : null}
-          <dl className="infra-record-list"><div><dt>Endpoint</dt><dd><code>{relay.endpoint}</code></dd></div><div><dt>Network scope</dt><dd>{networkName}</dd></div>{live ? <><div><dt>Created</dt><dd>{relay.createdAt ?? '—'}</dd></div><div><dt>Configuration epoch</dt><dd>{relay.configurationEpoch ?? '—'}</dd></div></> : <><div><dt>Active sessions</dt><dd>{relay.sessions} fallback</dd></div><div><dt>Last probe</dt><dd>{relay.lastProbe}</dd></div><div><dt>Certificate</dt><dd>{relay.certificateDays} days remaining</dd></div><div><dt>Latest result</dt><dd>{relay.lastAction}</dd></div><div><dt>Actor</dt><dd>{relay.updatedBy}</dd></div><div><dt>Recorded</dt><dd>{relay.updatedAt}</dd></div></>}</dl>
+          <dl className="infra-record-list"><div><dt>Endpoint</dt><dd><code>{relay.endpoint}</code></dd></div><div><dt>Network scope</dt><dd>{networkName}</dd></div>{live ? <><div><dt>Created</dt><dd>{relay.createdAt ?? '—'}</dd></div><div><dt>Configuration epoch</dt><dd>{relay.configurationEpoch ?? '—'}</dd></div></> : <><div><dt>Traffic</dt><dd>Encrypted fallback</dd></div><div><dt>Active sessions</dt><dd>{relay.sessions} fallback</dd></div><div><dt>Last probe</dt><dd>{relay.lastProbe}</dd></div><div><dt>Certificate</dt><dd>{relay.certificateDays} days remaining</dd></div><div><dt>Latest result</dt><dd>{relay.lastAction}</dd></div><div><dt>Actor</dt><dd>{relay.updatedBy}</dd></div><div><dt>Recorded</dt><dd>{relay.updatedAt}</dd></div></>}</dl>
           {canManageRelay ? <div className="button-row"><Button onClick={() => setAction(relay.enabled ? 'disable' : 'enable')} variant={relay.enabled ? 'quiet' : 'primary'}>{relay.enabled ? 'Disable relay' : 'Enable relay'}</Button>{!live ? <Button onClick={() => setAction('rotate')} variant="secondary"><RotateCw aria-hidden="true" size={16} /> Rotate certificate</Button> : null}</div> : null}
         </section>
       </div>
-    </>
+    </div>
   )
 }
 

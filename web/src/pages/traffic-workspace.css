@@ -1,0 +1,162 @@
+.traffic-workspace { --traffic-inspector: 285px; }
+.traffic-workspace .page-header { margin-bottom: 14px; }
+.traffic-views {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 14px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.traffic-views button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 6px 3px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  font-weight: 550;
+  white-space: nowrap;
+}
+.traffic-views button:hover { color: var(--text); }
+.traffic-views button[aria-pressed='true'] { color: var(--text); border-bottom-color: var(--text); }
+.traffic-views small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.traffic-list { min-width: 0; }
+.traffic-list > .toolbar, .traffic-workspace > .toolbar { margin: 0 0 8px; padding: 0; background: transparent; border: 0; }
+.traffic-list__head, .traffic-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, .9fr) minmax(0, .7fr) 58px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.traffic-list__head { color: var(--muted); font-size: .72rem; font-weight: 600; }
+.traffic-list ul { margin: 0; padding: 0; list-style: none; }
+.traffic-row { min-height: 53px; color: var(--text); border-radius: var(--radius) var(--radius) 0 0; }
+.traffic-row:hover, .traffic-row:focus-visible { background: var(--surface-hover); }
+.traffic-row__identity { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.traffic-row__identity > svg { flex: none; margin-top: 2px; color: var(--muted); }
+.traffic-row__identity > .is-allow { color: var(--accent); }
+.traffic-row__identity > .is-block { color: var(--danger); }
+.traffic-row__identity > span, .traffic-row__fact { min-width: 0; overflow-wrap: anywhere; }
+.traffic-row strong, .traffic-row small { display: block; }
+.traffic-row small { color: var(--muted); font-size: .73rem; }
+.traffic-row .status { display: inline-flex; white-space: normal; }
+.traffic-row__end { display: flex; justify-content: flex-end; align-items: center; gap: 2px; font-size: .73rem; color: var(--muted); }
+.traffic-row__end svg { flex: none; }
+.traffic-list__empty { margin: 0; padding: 18px 10px; color: var(--muted); border-block: 1px solid var(--border); }
+
+.traffic-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(245px, var(--traffic-inspector));
+  align-items: start;
+  gap: clamp(16px, 3vw, 36px);
+}
+.traffic-layout > * { min-width: 0; }
+.traffic-content { display: grid; gap: 16px; align-content: start; }
+.traffic-content section { min-width: 0; }
+.traffic-section-heading { margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); font-size: .92rem; }
+.traffic-form > div { min-width: 0; }
+.traffic-form > aside, .traffic-inspector {
+  min-width: 0;
+  padding: 0 0 0 16px;
+  border-inline-start: 1px solid var(--border);
+}
+.traffic-form .review-panel, .traffic-inspector .review-panel { padding: 0; background: transparent; border: 0; }
+.traffic-form .review-panel h2, .traffic-inspector .review-panel h2 { font-size: .9rem; }
+.traffic-inspector code, .traffic-form .review-panel code { overflow-wrap: anywhere; }
+.traffic-inspector .button-row { margin-top: 12px; }
+.traffic-form .form-stack { gap: 13px; }
+.traffic-form .callout { margin: 0; }
+.traffic-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.traffic-form .advanced-settings, .traffic-content .advanced-settings {
+  width: 100%;
+  margin: 0;
+  padding-inline: 0;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+}
+.traffic-form .advanced-settings[open] .field { max-width: 36ch; }
+.traffic-content .advanced-settings pre { padding: 10px; background: var(--surface-raised); border-radius: var(--radius); }
+.traffic-content .record-list { max-width: none; margin: 0; }
+.traffic-content .record-list dd, .traffic-inspector .record-list dd { white-space: normal; overflow-wrap: anywhere; }
+.traffic-action-panel { display: grid; gap: 12px; }
+.traffic-action-panel .callout, .traffic-content > .callout { margin: 0; }
+.traffic-action-panel > .traffic-section-heading, .traffic-content > .traffic-section-heading { margin-bottom: 0; }
+
+@media (max-width: 900px) {
+  .traffic-layout { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .traffic-form > aside, .traffic-inspector { padding: 12px 0 0; border-inline-start: 0; border-top: 1px solid var(--border); }
+}
+@media (max-width: 620px) {
+  .traffic-views { gap: 0 12px; }
+  .traffic-list__head { display: none; }
+  .traffic-row { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'identity link' 'fact state'; gap: 3px 9px; padding: 9px 3px; }
+  .traffic-row__identity { grid-area: identity; }
+  .traffic-row__fact { grid-area: fact; padding-inline-start: 24px; }
+  .traffic-row__state { grid-area: state; text-align: end; }
+  .traffic-row__fact > strong { font-weight: 500; }
+  .traffic-row__end { grid-area: link; }
+}
+@media (max-width: 460px) {
+  .traffic-fields { grid-template-columns: minmax(0, 1fr); }
+}
+
+.traffic-form .form-stack, .traffic-content .form-stack, .traffic-form-page .form-stack {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.traffic-form-page .form-layout, .traffic-detail-page .detail-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(245px, var(--traffic-inspector));
+  gap: clamp(16px, 3vw, 36px);
+}
+.traffic-form-page .form-layout > div { min-width: 0; }
+.traffic-form-page .form-layout > aside, .traffic-detail-page .detail-layout > aside {
+  padding: 0 0 0 16px;
+  background: transparent;
+  border: 0;
+  border-inline-start: 1px solid var(--border);
+  border-radius: 0;
+}
+.traffic-form-page .review-panel { padding: 0; background: transparent; border: 0; }
+.traffic-form-page .review-panel h2 { font-size: .9rem; }
+.traffic-form-page .form-stack .callout { margin: 0; }
+.traffic-form .choice, .traffic-form-page .choice { min-height: 36px; }
+.traffic-form .choice-group__options, .traffic-form-page .choice-group__options { grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); }
+.traffic-form .decision-confirm { padding: 0; background: none; border: 0; }
+
+.traffic-detail-page .detail-layout__content { grid-column: 1; grid-row: 1; }
+.traffic-detail-page .detail-layout > aside { grid-column: 2; grid-row: 1; }
+.traffic-detail-page .identity-block { gap: 6px; }
+.traffic-detail-page .identity-block__icon { width: 33px; height: 33px; }
+.traffic-detail-page .identity-block__icon > svg { width: 18px; height: 18px; }
+.traffic-detail-page .identity-block > h2 { margin: 0; font-size: 1rem; }
+.traffic-detail-page .metadata > div { padding-block: 7px; }
+.traffic-detail-page .section { padding: 0; background: transparent; border: 0; }
+.traffic-detail-page .section__header { margin: 0 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.traffic-detail-page .section__header h2 { font-size: .91rem; }
+.traffic-detail-page .section .callout { margin-top: 8px; }
+
+.traffic-content .record-list { display: block; background: transparent; border: 0; }
+.traffic-content .record-list > div { display: grid; grid-template-columns: minmax(104px, .65fr) minmax(0, 1.35fr); gap: 12px; align-items: start; padding: 8px 0; background: transparent; border-bottom: 1px solid var(--border); }
+.traffic-content .record-list dt { margin: 0; font-size: .79rem; font-weight: 500; }
+.traffic-content .record-list dd { font-size: .84rem; }
+.traffic-content .record-list code { font-size: inherit; }
+
+.traffic-workspace .data-table tbody tr.traffic-table-selected { background: var(--selection); }
+.traffic-workspace .traffic-table-link { display: none; }
+@media (max-width: 900px) {
+  .traffic-form-page .form-layout, .traffic-detail-page .detail-layout { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .traffic-form-page .form-layout > aside, .traffic-detail-page .detail-layout > aside { padding: 12px 0 0; border-inline-start: 0; border-top: 1px solid var(--border); }
+  .traffic-detail-page .detail-layout__content, .traffic-detail-page .detail-layout > aside { grid-column: 1; grid-row: auto; }
+  .traffic-workspace .traffic-table-link { display: inline-flex; }
+  .traffic-workspace .traffic-table-inspect { display: none; }
+}
