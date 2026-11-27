@@ -314,6 +314,12 @@ pub(crate) fn run_installed(args: Vec<OsString>) -> Result<()> {
             }
             crate::rootless_cli::run(&args)
         }
+        [command, rest @ ..] if command == "connect" => {
+            if !rest.iter().any(|arg| arg == "--help" || arg == "-h") {
+                macos_setup::verify_installed_client()?;
+            }
+            run_legacy_flags(args)
+        }
         [command, rest @ ..] if command == "update" => {
             macos_setup::update(std::env::current_exe()?, rest, false)
         }

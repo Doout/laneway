@@ -1339,14 +1339,12 @@ fn route_snapshot_matches(actual: &[String], expected: &[&PolicyRoute], protocol
                 Err(_) => return false,
             },
         };
-        let attributes = fields[1..].chunks_exact(2);
-        if !attributes.remainder().is_empty() {
+        let (attributes, remainder) = fields[1..].as_chunks::<2>();
+        if !remainder.is_empty() {
             return false;
         }
         let mut seen = BTreeSet::new();
-        for attribute in attributes {
-            let key = attribute[0];
-            let value = attribute[1];
+        for &[key, value] in attributes {
             if !seen.insert(key) {
                 return false;
             }
