@@ -259,6 +259,7 @@ fn params(name: &str, validity: Duration) -> Result<CertificateParams> {
     serial[0] |= 0x01;
     let mut params = CertificateParams::default();
     params.serial_number = Some(SerialNumber::from_slice(&serial));
+    params.use_authority_key_identifier_extension = true;
     params.not_before = now - time::Duration::minutes(1);
     params.not_after = now
         .checked_add(validity.try_into()?)
