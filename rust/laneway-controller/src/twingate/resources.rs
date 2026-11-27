@@ -62,7 +62,10 @@ struct Resource {
     kind: String,
     #[serde(rename(deserialize = "isActive"))]
     active: bool,
-    #[serde(rename(deserialize = "routingMode"), skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename(deserialize = "routingMode"),
+        skip_serializing_if = "Option::is_none"
+    )]
     routing_mode: Option<String>,
     address: Address,
     #[serde(rename(deserialize = "remoteNetwork"))]
