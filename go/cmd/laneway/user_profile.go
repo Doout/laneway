@@ -65,6 +65,13 @@ func runLogin(args []string) error {
 	if authority == "" {
 		return errors.New("usage: laneway login DOMAIN [--token-file PATH]")
 	}
+	nativeArgs := []string{"login"}
+	if *tokenFile != "" {
+		nativeArgs = append(nativeArgs, "--token-file", *tokenFile)
+	}
+	if handled, err := tryNativeClient(append(nativeArgs, "--", authority)...); handled || err != nil {
+		return err
+	}
 	if _, _, err := loadUserProfile(authority); err == nil {
 		return fmt.Errorf("already logged in to %s; use 'laneway logout %s' before replacing this identity", authority, authority)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -110,6 +117,9 @@ func runLogout(args []string) error {
 	}
 	if fs.NArg() != 1 {
 		return errors.New("usage: laneway logout DOMAIN")
+	}
+	if handled, err := tryNativeClient("logout", "--", fs.Arg(0)); handled || err != nil {
+		return err
 	}
 	directory := profilePath(fs.Arg(0))
 	info, err := os.Lstat(directory)

@@ -212,6 +212,46 @@ fn recovery_token(path: &Path) -> Result<zeroize::Zeroizing<String>> {
     Ok(token)
 }
 
+/// Renew the key pair and WireGuard binding of a saved client login.
+#[doc(hidden)]
+pub async fn renew_saved_login(
+    settings: &crate::ControllerConfig,
+    tls_config: &TlsConfig,
+    network: Id,
+    node: Id,
+    wireguard_public_key: [u8; 32],
+) -> Result<(Vec<u8>, zeroize::Zeroizing<String>)> {
+    tls::validate_local(tls_config, network, node)?;
+    let old = tls::local_certificate_health(tls_config)?;
+    let roots = tls::root_store(&tls_config.ca)?;
+    let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+    let csr = CertificateParams::new(Vec::new())?.serialize_request(&key)?;
+    let reply = crate::rootless::renew_certificate(
+        settings,
+        network,
+        tls_config,
+        laneway_protocol::v1::RenewalRequest {
+            pkcs10_csr_der: csr.der().to_vec(),
+            wireguard_public_key: wireguard_public_key.to_vec(),
+        },
+    )
+    .await?;
+    ensure!(
+        reply.wireguard_public_key == wireguard_public_key,
+        "renewal returned a different WireGuard public key"
+    );
+    let identity = AuthenticatedIdentity {
+        network_id: network,
+        role: Role::Node,
+        subject_id: node,
+    };
+    let chain = reply
+        .certificate_chain
+        .context("renewal omitted certificate chain")?;
+    let certificate = validate(&chain, &key, identity, &old, 0, &roots)?;
+    Ok((certificate, zeroize::Zeroizing::new(key.serialize_pem())))
+}
+
 fn validate(
     chain: &CertificateChain,
     key: &KeyPair,

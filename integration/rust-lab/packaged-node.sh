@@ -193,6 +193,7 @@ check_foreground_packaged_node() {
   wait_log "$pid" "$log" 'native Rust Laneway agent started'
   runtime_pid=$(pgrep -P "$pid" -x lanewayd-rs)
   [[ $runtime_pid =~ ^[1-9][0-9]*$ && $(readlink "/proc/$runtime_pid/exe") == /usr/local/sbin/lanewayd-rs ]]
+  tr '\0' '\n' <"/proc/$runtime_pid/cmdline" | grep -Fx '_client'
   interface=$(ip -n "$rust_ns" route show "$gateway_address" | awk '$2 == "dev" {print $3}')
   [[ $interface =~ ^lwc[0-9a-f]{12}$ && -z $(ip -n "$rust_ns" route show default) ]]
   wait_log "$pid" "$log" 'Rust agent relay connected'

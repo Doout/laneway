@@ -38,14 +38,14 @@ pub(super) enum Operation {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Metadata {
+pub(super) struct Metadata {
     schema_version: u32,
     generated_at_unix_seconds: u64,
     valid_until_unix_seconds: u64,
-    network_id: String,
-    controller: Controller,
-    relays: Vec<Relay>,
-    trust: Trust,
+    pub(super) network_id: String,
+    pub(super) controller: Controller,
+    pub(super) relays: Vec<Relay>,
+    pub(super) trust: Trust,
     protocol: Protocol,
     #[serde(default)]
     artifacts: Option<Vec<Artifact>>,
@@ -53,25 +53,42 @@ struct Metadata {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Controller {
-    enrollment_endpoint: String,
-    quic_endpoint: String,
-    server_name: String,
-    service_id: String,
+pub(super) struct Controller {
+    pub(super) enrollment_endpoint: String,
+    pub(super) quic_endpoint: String,
+    pub(super) server_name: String,
+    pub(super) service_id: String,
+}
+
+impl Controller {
+    pub(super) fn config(&self) -> lanewayd_rs::ControllerConfig {
+        lanewayd_rs::ControllerConfig {
+            topology_reporting: false,
+            auto_renew_certificate: false,
+            disable_status_reporting: false,
+            private_dns_listen: None,
+            endpoint: self.enrollment_endpoint.clone(),
+            quic_endpoint: Some(self.quic_endpoint.clone()),
+            server_name: self.server_name.clone(),
+            service_id: self.service_id.clone(),
+            poll_interval: Duration::from_secs(5),
+            timeout: Duration::from_secs(10),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Relay {
+pub(super) struct Relay {
     name: String,
-    endpoint: String,
-    service_id: String,
+    pub(super) endpoint: String,
+    pub(super) service_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Trust {
-    ca_pem: String,
+pub(super) struct Trust {
+    pub(super) ca_pem: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -85,7 +102,7 @@ struct Protocol {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Artifact {
+pub(super) struct Artifact {
     os: String,
     arch: String,
     url: String,
@@ -156,7 +173,7 @@ fn client(deadline: Duration, redirects: Policy) -> Result<Client> {
     Ok(builder.build()?)
 }
 
-async fn fetch(domain: &str) -> Result<Metadata> {
+pub(super) fn discovery_url(domain: &str) -> Result<Url> {
     let mut url = origin(&if domain.contains("://") {
         domain.to_owned()
     } else {
@@ -168,6 +185,11 @@ async fn fetch(domain: &str) -> Result<Metadata> {
         "bootstrap requires a DNS name authenticated by public Web PKI"
     );
     url.set_path(DISCOVERY_PATH);
+    Ok(url)
+}
+
+pub(super) async fn fetch(domain: &str) -> Result<Metadata> {
+    let url = discovery_url(domain)?;
     let mut response = client(Duration::from_secs(15), Policy::none())?
         .get(url)
         .header(header::ACCEPT, "application/json")
@@ -252,7 +274,7 @@ fn dns_name(host: &str) -> bool {
 }
 
 impl Metadata {
-    fn decode(bytes: &[u8], now: u64) -> Result<Self> {
+    pub(super) fn decode(bytes: &[u8], now: u64) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_DOCUMENT,
             "bootstrap metadata exceeds size limit"
@@ -326,7 +348,7 @@ impl Metadata {
         Ok(metadata)
     }
 
-    fn current_artifact(&self) -> Result<&Artifact> {
+    pub(super) fn current_artifact(&self) -> Result<&Artifact> {
         let os = if cfg!(target_os = "macos") {
             "darwin"
         } else {

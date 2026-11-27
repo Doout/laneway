@@ -15,6 +15,9 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// Release packaging enables native commands when the matching runtime is present.
+var nativeClientCommands string
+
 func nativeClientOutput(cmd *exec.Cmd, operation string) ([]byte, error) {
 	data, err := cmd.Output()
 	if failed, ok := err.(*exec.ExitError); ok && len(failed.Stderr) != 0 {

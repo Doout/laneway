@@ -66,9 +66,9 @@ pub struct TransportOptions {
     pub tcp_fallback: Option<SocketAddr>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl TransportOptions {
-    /// Builds a Linux TUN client configuration for the enrolled identity.
+    /// Builds a TUN client configuration for the enrolled identity.
     /// The controller supplies the interface addresses, routes, and QUIC targets.
     pub fn system_config(self, state: &std::path::Path) -> Result<Config> {
         let mut config = relay_config(self)?;

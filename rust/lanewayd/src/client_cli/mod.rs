@@ -1,8 +1,11 @@
 //! Native implementations used by the packaged Laneway CLI.
 mod bootstrap;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod connect;
 mod enrollment;
+mod profiles;
 
-use std::ffi::OsString;
+use std::{ffi::OsString, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -23,6 +26,17 @@ enum Command {
     },
     /// Generate a random Laneway ID.
     Id,
+    /// Save a renewable user login.
+    Login {
+        domain: String,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// Connect using a saved login or an ephemeral invitation.
+    Connect(connect::Options),
+    /// Remove a saved user login.
+    Logout { domain: String },
     #[command(hide = true)]
     SubmitEnrollment,
     #[command(hide = true)]
@@ -50,6 +64,16 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
             }
         }
         Command::Bootstrap { operation } => runtime()?.block_on(bootstrap::run(operation)),
+        Command::Login { domain, token_file } => {
+            runtime()?.block_on(enrollment::login(&domain, token_file.as_deref()))
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Command::Connect(options) => tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?
+            .block_on(connect::run(options)),
+        Command::Logout { domain } => profiles::Store::from_environment().logout(&domain),
         Command::SubmitEnrollment => runtime()?.block_on(enrollment::run()),
         Command::Discover { domain } => runtime()?.block_on(bootstrap::discover(&domain)),
     }
