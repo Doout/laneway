@@ -1,22 +1,30 @@
 use super::{
     AUTH, Credential, Failure, INTERNAL, QUERY_BUSY, Reply, State, credential, form, malformed,
-    mutations, response, with_session_headers,
+    mutations, response, valid_query_field, with_session_headers,
 };
 use hyper::{Method, Request, StatusCode as S, body::Incoming, header};
 use laneway_controller::{
     SessionError, SessionReply, SessionStore,
-    twingate::{
-        self, ConnectionStatus, Credentials, Failure as TwingateError, OwnerAccess, Storage,
-    },
+    twingate::{self, Credentials, Failure as TwingateError, OwnerAccess, Storage},
 };
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-pub(super) fn path(pieces: &[&str]) -> Option<bool> {
-    match pieces {
-        ["", "v1", "admin", "integrations", "twingate"] => Some(false),
-        ["", "v1", "admin", "integrations", "twingate", "test"] => Some(true),
-        _ => None,
+#[derive(Clone, Copy)]
+pub(super) enum Route {
+    Connection,
+    Test,
+    Resources,
+}
+
+impl Route {
+    pub(super) fn parse(pieces: &[&str]) -> Option<Self> {
+        match pieces {
+            ["", "v1", "admin", "integrations", "twingate"] => Some(Self::Connection),
+            ["", "v1", "admin", "integrations", "twingate", "test"] => Some(Self::Test),
+            ["", "v1", "admin", "integrations", "twingate", "resources"] => Some(Self::Resources),
+            _ => None,
+        }
     }
 }
 
@@ -25,6 +33,7 @@ enum Action {
     Save,
     Test,
     Disconnect,
+    Resources,
 }
 
 struct Owner {
@@ -72,14 +81,15 @@ pub(super) async fn handle(
     req: Request<Incoming>,
     state: State,
     id: &str,
-    test: bool,
+    route: Route,
 ) -> Result<Reply, Failure> {
     let head = req.method() == Method::HEAD;
-    let action = match (test, req.method()) {
-        (false, &Method::GET | &Method::HEAD) => Action::Read,
-        (false, &Method::PUT) => Action::Save,
-        (false, &Method::DELETE) => Action::Disconnect,
-        (true, &Method::POST) => Action::Test,
+    let action = match (route, req.method()) {
+        (Route::Connection, &Method::GET | &Method::HEAD) => Action::Read,
+        (Route::Connection, &Method::PUT) => Action::Save,
+        (Route::Connection, &Method::DELETE) => Action::Disconnect,
+        (Route::Test, &Method::POST) => Action::Test,
+        (Route::Resources, &Method::GET | &Method::HEAD) => Action::Resources,
         _ => {
             let mut reply = Failure(
                 S::METHOD_NOT_ALLOWED,
@@ -88,10 +98,10 @@ pub(super) async fn handle(
                 false,
             )
             .reply(id, head);
-            let allowed = if test {
-                "POST"
-            } else {
-                "GET, HEAD, PUT, DELETE"
+            let allowed = match route {
+                Route::Connection => "GET, HEAD, PUT, DELETE",
+                Route::Test => "POST",
+                Route::Resources => "GET, HEAD",
             };
             reply
                 .headers_mut()
@@ -111,6 +121,28 @@ pub(super) async fn handle(
         csrf,
     });
     let result = match action {
+        Action::Resources => {
+            let checked = actor
+                .run(&state, false, |store| store.saved())
+                .await?
+                .list
+                .map_err(failure)?;
+            let after = cursor(req.uri().query())?;
+            let _check = state
+                .twingate_checks
+                .try_acquire()
+                .map_err(|_| QUERY_BUSY)?;
+            let page = twingate::list_resources(checked.credentials(), after.as_deref())
+                .await
+                .map_err(resource_failure)?;
+            let result = actor
+                .run(&state, false, move |store| {
+                    store.ensure_current(&checked)?;
+                    Ok(page)
+                })
+                .await?;
+            return json_reply(result, id, head);
+        }
         Action::Read => actor.run(&state, false, |store| store.status()).await?,
         Action::Disconnect => actor.run(&state, true, |store| store.disconnect()).await?,
         Action::Save => {
@@ -142,11 +174,11 @@ pub(super) async fn handle(
                 .await?
         }
     };
-    connection_reply(result, id, head)
+    json_reply(result, id, head)
 }
 
-fn connection_reply(
-    result: SessionReply<Result<ConnectionStatus, TwingateError>>,
+fn json_reply<T: serde::Serialize>(
+    result: SessionReply<Result<T, TwingateError>>,
     id: &str,
     head: bool,
 ) -> Result<Reply, Failure> {
@@ -155,6 +187,40 @@ fn connection_reply(
         response(S::OK, id, data, head),
         Some((result.id, result.idle, result.absolute)),
     )
+}
+
+fn cursor(query: Option<&str>) -> Result<Option<String>, Failure> {
+    let Some(query) = query.filter(|query| !query.is_empty()) else {
+        return Ok(None);
+    };
+    if query.len() > 3 * 1024 + "after=".len() || !valid_query_field(query) {
+        return Err(malformed("Invalid Twingate resource cursor."));
+    }
+    let mut fields = form_urlencoded::parse(query.as_bytes());
+    match (fields.next(), fields.next()) {
+        (Some((key, value)), None) if key == "after" && twingate::valid_cursor(&value) => {
+            Ok(Some(value.into_owned()))
+        }
+        _ => Err(malformed("Invalid Twingate resource cursor.")),
+    }
+}
+
+fn resource_failure(error: TwingateError) -> Failure {
+    match error {
+        TwingateError::Rejected => Failure(
+            S::UNPROCESSABLE_ENTITY,
+            "ERROR_CODE_MALFORMED",
+            "Twingate did not allow the resource list. Check the saved connection and API token.",
+            false,
+        ),
+        TwingateError::Unavailable => Failure(
+            S::BAD_GATEWAY,
+            "ERROR_CODE_INTERNAL",
+            "Twingate resource inventory is unavailable. Try again shortly.",
+            true,
+        ),
+        _ => failure(error),
+    }
 }
 
 fn failure(error: TwingateError) -> Failure {
@@ -184,13 +250,13 @@ fn failure(error: TwingateError) -> Failure {
         TwingateError::NotConnected => Failure(
             S::CONFLICT,
             "ERROR_CODE_MALFORMED",
-            "Save a Twingate connection before testing it.",
+            "Save a Twingate connection to continue.",
             false,
         ),
         TwingateError::ConnectionChanged => Failure(
             S::CONFLICT,
             "ERROR_CODE_MALFORMED",
-            "The saved connection changed during the test. Reload the page and try again.",
+            "The saved connection changed during the request. Refresh and try again.",
             true,
         ),
         TwingateError::Storage => Failure(

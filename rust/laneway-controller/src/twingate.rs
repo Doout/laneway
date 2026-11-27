@@ -10,8 +10,15 @@ use std::{
 
 use reqwest::{Client, StatusCode, header::HeaderValue, redirect::Policy};
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{
+    Deserialize, Serialize,
+    de::{DeserializeOwned, IgnoredAny},
+};
+use serde_json::{Value, json};
 use zeroize::Zeroizing;
+
+mod resources;
+pub use resources::{list_resources, valid_cursor};
 
 const MAX_INPUT_BYTES: u64 = 32 * 1024;
 const MAX_API_BYTES: u64 = 64 * 1024;
@@ -155,6 +162,16 @@ fn token_header(token: &str) -> Result<HeaderValue, Failure> {
 }
 
 pub async fn verify(credentials: &Credentials) -> Result<(), Failure> {
+    let bytes = graphql(credentials, NETWORK_QUERY, Value::Null, MAX_API_BYTES).await?;
+    check_graphql(&bytes)
+}
+
+async fn graphql(
+    credentials: &Credentials,
+    query: &str,
+    variables: Value,
+    max_bytes: u64,
+) -> Result<Zeroizing<Vec<u8>>, Failure> {
     validate_tenant(&credentials.tenant)?;
     let key = token_header(&credentials.api_token)?;
     let client = Client::builder()
@@ -164,7 +181,10 @@ pub async fn verify(credentials: &Credentials) -> Result<(), Failure> {
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|_| Failure::Unavailable)?;
-    let payload = serde_json::json!({ "query": NETWORK_QUERY }).to_string();
+    let mut payload = json!({ "query": query });
+    if !variables.is_null() {
+        payload["variables"] = variables;
+    }
     let mut reply = client
         .post(format!(
             "https://{}.twingate.com/api/graphql/",
@@ -172,7 +192,7 @@ pub async fn verify(credentials: &Credentials) -> Result<(), Failure> {
         ))
         .header("x-api-key", key)
         .header("content-type", "application/json")
-        .body(payload)
+        .body(payload.to_string())
         .send()
         .await
         .map_err(|_| Failure::Unavailable)?;
@@ -180,12 +200,12 @@ pub async fn verify(credentials: &Credentials) -> Result<(), Failure> {
 
     let mut bytes = Zeroizing::new(Vec::new());
     while let Some(chunk) = reply.chunk().await.map_err(|_| Failure::Unavailable)? {
-        if chunk.len() as u64 > MAX_API_BYTES - bytes.len() as u64 {
+        if chunk.len() as u64 > max_bytes - bytes.len() as u64 {
             return Err(Failure::Unavailable);
         }
         bytes.extend_from_slice(&chunk);
     }
-    check_graphql(&bytes)
+    Ok(bytes)
 }
 
 fn check_http_status(status: StatusCode) -> Result<(), Failure> {
@@ -197,13 +217,21 @@ fn check_http_status(status: StatusCode) -> Result<(), Failure> {
     }
 }
 
-fn check_graphql(bytes: &[u8]) -> Result<(), Failure> {
+fn graphql_data<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Failure> {
     #[derive(Deserialize)]
-    struct GraphQlReply {
-        data: Option<GraphQlData>,
-        #[serde(default)]
-        errors: Vec<IgnoredAny>,
+    struct GraphQlReply<T> {
+        data: Option<T>,
+        errors: Option<Vec<IgnoredAny>>,
     }
+    let response: GraphQlReply<T> =
+        serde_json::from_slice(bytes).map_err(|_| Failure::Unavailable)?;
+    if response.errors.is_some_and(|errors| !errors.is_empty()) {
+        return Err(Failure::Rejected);
+    }
+    response.data.ok_or(Failure::Unavailable)
+}
+
+fn check_graphql(bytes: &[u8]) -> Result<(), Failure> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct GraphQlData {
@@ -214,13 +242,8 @@ fn check_graphql(bytes: &[u8]) -> Result<(), Failure> {
         #[serde(rename = "edges")]
         _edges: Vec<IgnoredAny>,
     }
-    let response: GraphQlReply = serde_json::from_slice(bytes).map_err(|_| Failure::Unavailable)?;
-    if !response.errors.is_empty() {
-        return Err(Failure::Rejected);
-    }
-    response
-        .data
-        .and_then(|data| data.remote_networks)
+    graphql_data::<GraphQlData>(bytes)?
+        .remote_networks
         .map(|_| ())
         .ok_or(Failure::Unavailable)
 }
@@ -265,14 +288,23 @@ impl Storage {
         Ok(saved.status())
     }
 
+    pub fn ensure_current(&self, checked: &Connection) -> Result<(), Failure> {
+        self.with_lock(|store| store.current_connection(checked).map(|_| ()))
+    }
+
+    fn current_connection(&self, checked: &Connection) -> Result<Connection, Failure> {
+        let current = self.read()?.ok_or(Failure::ConnectionChanged)?;
+        if current.credentials.tenant != checked.credentials.tenant
+            || *current.credentials.api_token != *checked.credentials.api_token
+        {
+            return Err(Failure::ConnectionChanged);
+        }
+        Ok(current)
+    }
+
     pub fn confirm(&self, checked: Connection) -> Result<ConnectionStatus, Failure> {
         self.with_lock(|store| {
-            let mut current = store.read()?.ok_or(Failure::ConnectionChanged)?;
-            if current.credentials.tenant != checked.credentials.tenant
-                || *current.credentials.api_token != *checked.credentials.api_token
-            {
-                return Err(Failure::ConnectionChanged);
-            }
+            let mut current = store.current_connection(&checked)?;
             current.verified_at_unix_seconds =
                 current.verified_at_unix_seconds.max(verification_time()?);
             store.write(&current)?;

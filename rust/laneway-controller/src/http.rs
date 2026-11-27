@@ -399,8 +399,8 @@ async fn dispatch(
         }
     }
     #[cfg(unix)]
-    if let Some(test) = twingate::path(&pieces) {
-        return twingate::handle(req, state, id, test).await;
+    if let Some(route) = twingate::Route::parse(&pieces) {
+        return twingate::handle(req, state, id, route).await;
     }
     if let Some(route) = access_admin::Route::parse(&pieces) {
         return access_admin::handle(req, state, id, route).await;

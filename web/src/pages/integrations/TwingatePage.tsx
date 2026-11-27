@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Button, Callout, Field, FormStack, PageHeader, Status } from '../../components/ui'
 import { useControlPlane } from '../../lib/control-plane'
+import { TwingateResources } from './TwingateResources'
+import './twingate.css'
 
 const endpoint = '/v1/admin/integrations/twingate'
 
@@ -29,6 +31,7 @@ export function TwingatePage() {
   const [loadError, setLoadError] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [connectionRevision, setConnectionRevision] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -52,6 +55,7 @@ export function TwingatePage() {
       const saved = await request<TwingateConnection>(path, { method, body })
       setConnection(saved)
       if (next !== 'test') {
+        setConnectionRevision((current) => current + 1)
         setTenant(saved.tenant ?? '')
         setApiToken('')
       }
@@ -71,11 +75,12 @@ export function TwingatePage() {
 
   return <>
     <PageHeader title="Twingate" action={<Button to="/infrastructure">Infrastructure</Button>} />
+    {connection?.tenant ? <TwingateResources key={connectionRevision} /> : null}
     {loadError ? <>
       <div role="alert"><Callout tone="danger">{loadError}</Callout></div>
       <Button onClick={() => { setLoadError(''); setLoadAttempt(loadAttempt + 1) }}>Retry</Button>
     </> : !connection ? <p role="status">Loading Twingate connection…</p> :
-      <FormStack onSubmit={save}>
+      <div className="twingate-connection"><FormStack onSubmit={save}>
         <div className="button-row">
           <Status tone={connection.tenant ? 'positive' : 'muted'}>{connection.tenant ? 'Saved' : 'Disconnected'}</Status>
           {connection.tenant ? <strong>{connection.tenant}.twingate.com</strong> : null}
@@ -100,7 +105,7 @@ export function TwingatePage() {
             <Button disabled={Boolean(action)} onClick={() => void apply('disconnect')} variant="quiet">{action === 'disconnect' ? 'Disconnecting…' : 'Disconnect'}</Button>
           </> : null}
         </div>
-      </FormStack>
+      </FormStack></div>
     }
   </>
 }

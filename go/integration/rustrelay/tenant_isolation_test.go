@@ -661,6 +661,8 @@ func tenantAdminChecks(t *testing.T, web *http.Client, base func(tenantLab) stri
 	requestTenant(http.MethodDelete, ownURL, twingatePath, nil, cookies, http.StatusForbidden)
 	requestTenant(http.MethodPut, ownURL, twingatePath, []byte(`{"tenant":"acme.example","api_token":"fixture-only-token"}`), cookies, http.StatusBadRequest)
 	call(ownURL, twingatePath+"/test", []byte{}, cookies, http.StatusConflict)
+	call(ownURL, twingatePath+"/resources", nil, nil, http.StatusUnauthorized)
+	call(ownURL, twingatePath+"/resources", nil, cookies, http.StatusConflict)
 	call(ownURL, "/v1/admin/networks", []byte(`{"name":"another","ipv4_pool":"100.96.99.0/24"}`), cookies, http.StatusForbidden)
 	_, raw := call(ownURL, "/v1/admin/networks", nil, cookies, http.StatusOK)
 	var networks struct {
@@ -695,6 +697,7 @@ func tenantAdminChecks(t *testing.T, web *http.Client, base func(tenantLab) stri
 		call(base(other), "/v1/admin/auth/login", login, nil, http.StatusUnauthorized)
 		call(base(other), "/v1/admin/auth/session", nil, cookies, http.StatusUnauthorized)
 		call(base(other), twingatePath, nil, cookies, http.StatusUnauthorized)
+		call(base(other), twingatePath+"/resources", nil, cookies, http.StatusUnauthorized)
 		call(ownURL, "/v1/admin/networks/"+other.network.String(), nil, cookies, http.StatusNotFound)
 		call(ownURL, "/v1/admin/networks/"+other.network.String()+"/nodes", nil, cookies, http.StatusNotFound)
 	}

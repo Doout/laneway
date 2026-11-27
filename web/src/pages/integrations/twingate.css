@@ -1,0 +1,4 @@
+.twingate-resource-name { display: inline-flex; align-items: baseline; gap: 8px; }
+.twingate-resource-name input { accent-color: var(--accent); }
+.twingate-resource-controls:not(:empty) { margin-top: 14px; }
+.section + .twingate-connection { margin-top: 16px; }

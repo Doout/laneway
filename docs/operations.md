@@ -363,6 +363,11 @@ connection if verification of a replacement fails. Use **Test saved connection**
 to verify the credentials again, or **Disconnect** to remove them from Laneway.
 To invalidate the token itself, revoke it in Twingate.
 
+Owners can review Twingate resources and their addresses, remote networks,
+and traffic policies on the same page. Select rows and copy the shortlist
+for review. Listing or selecting resources does not create routes or grant
+access in Laneway.
+
 The Rust controller stores the token in `twingate.json` in the database's
 sibling `<database>.integrations` directory, using mode `0600`. SQLite backups
 exclude this directory. Re-enter the token after restoring to fresh storage.
