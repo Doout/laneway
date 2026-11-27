@@ -255,6 +255,7 @@ jobs:
           fi
           ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci
           ./integration/connector-bootstrap.sh lane-edge:ci
+          ./integration/connector-upgrade.sh lane-edge:ci
           docker build --tag laneway-rust-lab:local integration/rust-lab
           bash integration/rust-lab/connector-cutover.sh --prime-cache
           bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci

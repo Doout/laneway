@@ -384,6 +384,7 @@ require 'docker run --rm --network none laneway-relay:ci -version' "$ci_workflow
 require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci' "$ci_workflow"
 require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then' "$ci_workflow"
 require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
+require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
 require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci' "$ci_workflow"
 require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci tcp-fallback' "$ci_workflow"
 require './integration/connector-updater.sh' "$ci_workflow"
