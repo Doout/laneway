@@ -371,14 +371,13 @@ fn render(
 
 async fn preflight() -> Result<Owner> {
     let version = option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
-    for (path, flag) in [
-        ("/usr/local/bin/laneway", "version"),
-        ("/usr/local/sbin/lanewayd-rs", "--version"),
-        (HEALTH, "--version"),
-    ] {
+    // The package frontend selected this runtime before dispatch. Keep the
+    // existing file checks for that frontend; avoid executing it as root here.
+    protected_leaf(Path::new("/usr/local/bin/laneway"), true)?;
+    for path in ["/usr/local/sbin/lanewayd-rs", HEALTH] {
         protected(path, true)?;
         ensure!(
-            output(path, &[flag]).await? == version,
+            output(path, &["--version"]).await? == version,
             "{path} must match Laneway {version}; install the matching release"
         );
     }
@@ -413,6 +412,10 @@ fn protected(path: &str, executable: bool) -> Result<()> {
     for parent in path.ancestors().skip(1) {
         protected_dir(parent, 0, None)?;
     }
+    protected_leaf(path, executable)
+}
+
+fn protected_leaf(path: &Path, executable: bool) -> Result<()> {
     let meta = path.symlink_metadata()?;
     ensure!(
         meta.is_file()
