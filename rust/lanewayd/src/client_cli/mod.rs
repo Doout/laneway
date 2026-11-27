@@ -1,5 +1,6 @@
 //! Native implementations used by the packaged Laneway CLI.
 mod bootstrap;
+mod enrollment;
 
 use std::ffi::OsString;
 
@@ -22,6 +23,8 @@ enum Command {
     },
     /// Generate a random Laneway ID.
     Id,
+    #[command(hide = true)]
+    SubmitEnrollment,
     #[command(hide = true)]
     Discover { domain: String },
 }
@@ -47,6 +50,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
             }
         }
         Command::Bootstrap { operation } => runtime()?.block_on(bootstrap::run(operation)),
+        Command::SubmitEnrollment => runtime()?.block_on(enrollment::run()),
         Command::Discover { domain } => runtime()?.block_on(bootstrap::discover(&domain)),
     }
 }
