@@ -300,13 +300,11 @@ jobs:
         name: Resolve immutable release version
         run: echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: matrix.role.name != 'admin'
         with:
           name: release-runtime-${{ matrix.arch }}
           path: ${{ runner.temp }}
       - id: runtime
         name: Supply prebuilt Rust binaries to the image
-        if: matrix.role.name != 'admin'
         run: |
           mkdir "$RUNNER_TEMP/runtime"
           tar -xzf "$RUNNER_TEMP/runtime.tar.gz" -C "$RUNNER_TEMP/runtime"

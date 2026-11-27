@@ -165,7 +165,11 @@ while (($#)); do
 		--authority) (($# >= 2)) || die '--authority requires a value'; authority=$2; shift 2 ;;
 		--name) (($# >= 2)) || die '--name requires a value'; name=$2; shift 2 ;;
 		--max-runtime) (($# >= 2)) || die '--max-runtime requires a value'; max_runtime=$2; shift 2 ;;
-		--runtime) (($# >= 2)) && [[ $2 == rust ]] || die 'only the Rust Exit runtime is supported'; shift 2 ;;
+		--runtime)
+			if (($# < 2)) || [[ $2 != rust ]]; then
+				die 'only the Rust Exit runtime is supported'
+			fi
+			shift 2 ;;
 		*) die "unknown option: $1" ;;
 	esac
 done
