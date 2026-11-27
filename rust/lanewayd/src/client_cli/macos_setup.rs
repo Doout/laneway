@@ -255,3 +255,78 @@ fn install(source: &Path, companion: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+pub(crate) fn update(source: PathBuf, args: &[OsString], privileged: bool) -> Result<()> {
+    use lanewayd_rs::client_package;
+
+    let args = args
+        .strip_prefix(&[OsString::from("client")])
+        .unwrap_or(args);
+    let yes = match args {
+        [] => false,
+        [arg]
+            if matches!(
+                arg.to_str(),
+                Some("--yes" | "-yes" | "--yes=true" | "-yes=true")
+            ) =>
+        {
+            true
+        }
+        [arg] if matches!(arg.to_str(), Some("--yes=false" | "-yes=false")) => false,
+        [arg] if arg == "--help" || arg == "-h" => {
+            println!("usage: laneway update client [--yes]");
+            return Ok(());
+        }
+        _ => anyhow::bail!("usage: laneway update client [--yes]"),
+    };
+    let source = source.canonicalize()?;
+    // SAFETY: geteuid reads the process credentials.
+    let uid = unsafe { libc::geteuid() };
+    if !privileged && let Some(bin) = client_package::user_bin(&source, uid)? {
+        return super::runtime()?.block_on(client_package::update_user(&bin, uid));
+    }
+    if !privileged && uid == 0 {
+        anyhow::bail!(
+            "run 'laneway update client' as your normal macOS user; the verified package will request sudo to install"
+        );
+    }
+    ensure!(
+        source == Path::new(CLIENT),
+        "update from the installed laneway in ~/.local/bin or /usr/local/bin"
+    );
+    let companion = Path::new(RUNTIME);
+    verify(&source, companion)?;
+    if !privileged {
+        if !yes {
+            confirm()?;
+        }
+        let status = Command::new("/usr/bin/sudo")
+            .arg("--")
+            .arg(companion)
+            .arg("_mac-update-approved")
+            .arg(&source)
+            .arg("--yes")
+            .status()?;
+        ensure!(status.success(), "macOS client update failed: {status}");
+        return Ok(());
+    }
+    ensure!(uid == 0 && yes, "system client installation requires root");
+    let directory = companion
+        .parent()
+        .context("missing protected runtime directory")?;
+    let _lock = laneway_private::try_lock(&directory.join(".client-update.lock"))?;
+    let stage = tempfile::Builder::new()
+        .prefix(".client-update-")
+        .tempdir_in(directory)?;
+    let (tag, archive) = super::runtime()?.block_on(async {
+        let previous = client_package::read_version(companion, "--version").await?;
+        client_package::prepare(stage.path(), &previous).await
+    })?;
+    install(&archive.cli, &archive.daemon)?;
+    verify(&archive.cli, &archive.daemon)?;
+    println!(
+        "updated CLI and Rust runtime to {tag} sha256={}",
+        hex::encode(archive.checksum)
+    );
+    Ok(())
+}

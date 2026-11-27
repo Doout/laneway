@@ -37,6 +37,15 @@ fn main() -> Result<ExitCode> {
             let source = PathBuf::from(args.next().context("missing CLI path")?);
             client_cli::macos_setup::run(source, args)
         }
+        #[cfg(target_os = "macos")]
+        Some(operation @ ("_host-update" | "_mac-update-approved")) => {
+            let source = PathBuf::from(args.next().context("missing installed CLI path")?);
+            client_cli::macos_setup::update(
+                source,
+                &args.collect::<Vec<_>>(),
+                operation == "_mac-update-approved",
+            )
+        }
         #[cfg(target_os = "linux")]
         Some("_host-update") => {
             let source = PathBuf::from(args.next().context("missing installed CLI path")?);

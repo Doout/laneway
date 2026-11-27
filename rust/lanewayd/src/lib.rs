@@ -7,6 +7,8 @@
 mod agent;
 mod authority;
 pub mod benchmark;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod client_package;
 mod codec;
 mod config;
 mod connector;
@@ -30,6 +32,8 @@ mod relay;
 mod renewal;
 pub mod rootless;
 mod routing;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod signed_release;
 mod state;
 mod status_report;
 mod tcp_fallback;

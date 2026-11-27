@@ -1,8 +1,11 @@
 //! Fetch only fixed GitHub release assets; never run a server-chosen URL or path.
-use super::{checked_command, clean_command, journal, stable_tag};
+#[cfg(target_os = "linux")]
+use crate::fleet_update::{installed_version, journal};
 use anyhow::{Context, Result, bail, ensure};
 use flate2::read::MultiGzDecoder;
+use laneway_protocol::fleet_updates::valid_version;
 use sha2::{Digest, Sha256};
+use std::process::Stdio;
 use std::{
     cmp::Ordering,
     fs::{self, File, OpenOptions},
@@ -11,7 +14,78 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
+
+pub(crate) fn stable_tag(value: &str) -> Result<String> {
+    let tag = if value.starts_with('v') {
+        value.to_owned()
+    } else {
+        format!("v{value}")
+    };
+    ensure!(
+        valid_version(&tag),
+        "expected an exact stable release version"
+    );
+    Ok(tag)
+}
+
+pub(crate) fn clean_command(path: impl AsRef<Path>) -> Command {
+    let mut command = Command::new(path.as_ref());
+    command
+        .env_clear()
+        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+
+pub(crate) async fn checked_command(mut command: Command, deadline: Duration) -> Result<()> {
+    let status = timeout(deadline, command.stdout(Stdio::null()).status()).await??;
+    ensure!(status.success(), "local command did not succeed");
+    Ok(())
+}
+
+fn absent(path: &Path) -> Result<bool> {
+    match path.symlink_metadata() {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_verifier(path: &Path) -> Result<()> {
+    journal::protect_parents(path)?;
+    ensure!(
+        path.symlink_metadata()?.is_file(),
+        "verifier must not be a symlink"
+    );
+    journal::verify_file(
+        &File::open(path).context("open pinned release verifier")?,
+        0o022,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn check_verifier(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    for (index, path) in path.ancestors().enumerate() {
+        let data = path.symlink_metadata()?;
+        let valid = if index == 0 {
+            data.is_file() && data.mode() & 0o100 != 0
+        } else {
+            data.is_dir()
+        };
+        ensure!(
+            valid && data.uid() == 0 && data.mode() & 0o7022 == 0,
+            "unsafe local release verifier path {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
 
 const RELEASE_ORIGIN: &str = "https://github.com/Doout/laneway/releases/download";
 const LATEST_URL: &str = "https://github.com/Doout/laneway/releases/latest";
@@ -23,12 +97,19 @@ const MAX_BUNDLE: usize = 4 << 20;
 const MAX_ARCHIVE: usize = 256 << 20;
 const MAX_EXPANDED: u64 = 512 << 20;
 const MAX_BINARY: u64 = 128 << 20;
+#[cfg(target_os = "linux")]
 const MEMBER: &[u8] = b"laneway/sbin/lanewayd-rs";
-pub(super) const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge";
-pub(super) const LEGACY_CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
+#[cfg(target_os = "macos")]
+const MEMBER: &[u8] = b"laneway/bin/lanewayd-rs";
+#[cfg(target_os = "linux")]
+pub(crate) const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge";
+#[cfg(target_os = "linux")]
+pub(crate) const LEGACY_CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
+#[cfg(target_os = "linux")]
 const NODE_IMAGE: &str = "ghcr.io/doout/laneway-node";
 
-pub(crate) fn compare_versions(target: &str, previous: &str) -> Result<Ordering> {
+/// Compare two canonical stable release versions.
+pub fn compare_versions(target: &str, previous: &str) -> Result<Ordering> {
     fn numbers(value: &str) -> Result<Vec<u64>> {
         stable_tag(value)?
             .trim_start_matches('v')
@@ -42,7 +123,8 @@ pub(crate) fn compare_versions(target: &str, previous: &str) -> Result<Ordering>
     Ok(numbers(target)?.cmp(&numbers(previous)?))
 }
 
-pub(crate) async fn latest_tag() -> Result<String> {
+/// Discover the latest stable release from the official repository.
+pub async fn latest_tag() -> Result<String> {
     let request_nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let reply = github_client()?
         .get(format!("{LATEST_URL}?laneway_cache_bust={request_nonce}"))
@@ -71,13 +153,19 @@ fn tag_from_url(url: &reqwest::Url) -> Result<String> {
     Ok(tag.into())
 }
 
-pub(super) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
+#[cfg(target_os = "linux")]
+pub(crate) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         _ => bail!("unsupported managed Linux node architecture"),
     };
-    let name = format!("laneway_linux_{arch}.tar.gz");
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    let name = format!("laneway_{os}_{arch}.tar.gz");
     let (client, manifest) = signed_manifest(tag, directory).await?;
     let checksum = checksum_for(&manifest, &name)?;
     let archive = directory.join(&name);
@@ -87,26 +175,37 @@ pub(super) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
     tokio::task::spawn_blocking(move || verified_extract(File::open(archive)?, &checksum, &output))
         .await??;
     ensure!(
-        super::installed_version(&binary).await? == tag,
+        installed_version(&binary).await? == tag,
         "verified daemon reports the wrong release tag"
     );
     Ok(binary)
 }
 
-pub(crate) struct ClientArchive {
+/// Authenticated client archive and the two staged executables.
+pub struct ClientArchive {
+    /// Verified release tarball.
     pub archive: PathBuf,
+    /// Staged CLI from the signed archive.
     pub cli: PathBuf,
+    /// Staged runtime from the signed archive.
     pub daemon: PathBuf,
+    /// Signed SHA-256 digest of the archive.
     pub checksum: [u8; 32],
 }
 
-pub(crate) async fn client_archive(tag: &str, directory: &Path) -> Result<ClientArchive> {
+/// Download and authenticate the host package before extracting its executables.
+pub async fn client_archive(tag: &str, directory: &Path) -> Result<ClientArchive> {
     let arch = match std::env::consts::ARCH {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
-        _ => bail!("unsupported Linux client architecture"),
+        _ => bail!("unsupported client architecture"),
     };
-    let name = format!("laneway_linux_{arch}.tar.gz");
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    let name = format!("laneway_{os}_{arch}.tar.gz");
     let (client, manifest) = signed_manifest(tag, directory).await?;
     let checksum = checksum_for(&manifest, &name)?;
     let archive = directory.join(&name);
@@ -132,7 +231,8 @@ pub(crate) async fn client_archive(tag: &str, directory: &Path) -> Result<Client
 }
 
 /// The same release must authenticate the manifest and the pinned OCI subject.
-pub(super) async fn connector_image(tag: &str, directory: &Path) -> Result<String> {
+#[cfg(target_os = "linux")]
+pub(crate) async fn connector_image(tag: &str, directory: &Path) -> Result<String> {
     let (client, manifest) = signed_manifest(tag, directory).await?;
     const ASSET: &str = "image-digests.txt";
     let expected = checksum_for(&manifest, ASSET)?;
@@ -158,6 +258,7 @@ pub(super) async fn connector_image(tag: &str, directory: &Path) -> Result<Strin
     Ok(reference)
 }
 
+#[cfg(target_os = "linux")]
 fn image_subject<'a>(manifest: &'a str, repository: &str) -> Result<Option<&'a str>> {
     let mut entries = manifest.lines().filter_map(|line| {
         let (name, digest) = line.split_once('@')?;
@@ -180,6 +281,7 @@ fn image_subject<'a>(manifest: &'a str, repository: &str) -> Result<Option<&'a s
     Ok(Some(line))
 }
 
+#[cfg(target_os = "linux")]
 fn connector_subject(manifest: &str) -> Result<String> {
     // The canonical inventory includes a standalone node image. Releases
     // that published a Go connector under the same name lacked that entry.
@@ -279,36 +381,40 @@ async fn verify(
 
 async fn release_verifier(client: &reqwest::Client, directory: &Path) -> Result<PathBuf> {
     let installed = Path::new(COSIGN);
-    if !journal::absent(installed)? {
-        journal::protect_parents(installed)?;
-        ensure!(
-            fs::symlink_metadata(installed)?.is_file(),
-            "verifier must not be a symlink"
-        );
-        journal::verify_file(
-            &File::open(installed).context("open pinned release verifier")?,
-            0o022,
-        )?;
+    if !absent(installed)? {
+        check_verifier(installed)?;
         return Ok(installed.into());
     }
-    let (arch, digest) = match std::env::consts::ARCH {
-        "x86_64" => (
+    let (os, arch, digest) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => (
+            "linux",
             "amd64",
             "4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71",
         ),
-        "aarch64" => (
+        ("linux", "aarch64") => (
+            "linux",
             "arm64",
             "c5d324e091826b0d7a78eb16fef316450b4eb9aaec045611c08ba06f5e73220a",
         ),
-        _ => bail!("no pinned Cosign verifier for this architecture"),
+        ("macos", "x86_64") => (
+            "darwin",
+            "amd64",
+            "2347488e5d5b25336644024dfeca5601b190e91197a71a917bda44744aff106c",
+        ),
+        ("macos", "aarch64") => (
+            "darwin",
+            "arm64",
+            "5cf948c2f4dfe59687bdd0b8523709067383e03982cc543475c8a7dc70e92a76",
+        ),
+        _ => bail!("no pinned Cosign verifier for this platform"),
     };
     let local = directory.join("cosign-v3.1.3");
     // Both the checksum bundle and the image can use this temporary verifier.
-    if journal::absent(&local)? {
+    if absent(&local)? {
         download_url(
             client,
             &format!(
-                "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-{arch}"
+                "https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-{os}-{arch}"
             ),
             &local,
             160 << 20,
@@ -333,6 +439,7 @@ async fn release_verifier(client: &reqwest::Client, directory: &Path) -> Result<
     Ok(local)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn verified_extract(
     mut source: impl Read + Seek,
     expected: &[u8; 32],
@@ -433,6 +540,7 @@ fn checksum_for(manifest: &str, asset: &str) -> Result<[u8; 32]> {
     Ok(result)
 }
 
+#[cfg(any(test, target_os = "linux"))]
 fn extract(source: impl Read, output: &Path) -> Result<()> {
     extract_members(source, &[(MEMBER, output)])
 }
@@ -531,6 +639,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn connector_manifest_selects_the_image_for_its_release_layout() {
         let canonical = format!("{CONNECTOR_IMAGE}@sha256:{}", "a".repeat(64));
@@ -614,7 +723,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("candidate");
         assert!(verified_extract(io::Cursor::new(&input), &[0; 32], &path).is_err());
-        assert!(journal::absent(&path).unwrap());
+        assert!(absent(&path).unwrap());
         let checksum = Sha256::digest(&input).into();
         verified_extract(io::Cursor::new(&input), &checksum, &path).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"candidate");
