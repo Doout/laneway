@@ -397,6 +397,7 @@ kbd { font-family: inherit; }
 .section__meta { margin-top: 3px; color: var(--muted); font-size: .78rem; }
 .infrastructure-grid { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(0, 1.2fr); gap: 16px; }
 .infrastructure-grid .section + .section { margin-top: 0; }
+.infrastructure-grid + .section { margin-top: 16px; }
 .resource-list { display: grid; gap: 8px; }
 .access-grant-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-width: 0; padding: 11px 12px; background: var(--panel-tint); border: 1px solid var(--border); border-radius: 11px; }
 .access-grant-row > span { display: grid; gap: 3px; min-width: 0; }

@@ -111,7 +111,10 @@ export function App() {
       <Route element={<RequirePermission permission="relay.read" />}><Route path="/infrastructure/relays/:relayId" element={<RelayPage />} /></Route>
       <Route element={<RequirePermission permission="relay.manage" />}><Route path="/infrastructure/relays/new" element={<RelayPage />} /></Route>
       <Route element={<RequirePermission permission="certificate.read" />}><Route path="/security" element={<SecurityPage />} /></Route>
-      <Route element={<RequirePermission permission="integration.manage" />}><Route path="/integrations/twingate" element={<TwingatePage />} /></Route>
+      <Route element={<RequirePermission permission="integration.manage" />}>
+        <Route path="/infrastructure/integrations/twingate" element={<TwingatePage />} />
+        <Route path="/integrations/twingate" element={<Navigate to="/infrastructure/integrations/twingate" replace />} />
+      </Route>
       <Route element={<RequireAuditPermission />}><Route path="/audit" element={<AuditPage />} /></Route>
       <Route path="*" element={<PageHeader title="Page not found" action={<Button to="/overview">Overview</Button>} />} />
     </Route></Route>

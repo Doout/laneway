@@ -70,7 +70,7 @@ export function TwingatePage() {
   }
 
   return <>
-    <PageHeader title="Twingate" />
+    <PageHeader title="Twingate" action={<Button to="/infrastructure">Infrastructure</Button>} />
     {loadError ? <>
       <div role="alert"><Callout tone="danger">{loadError}</Callout></div>
       <Button onClick={() => { setLoadError(''); setLoadAttempt(loadAttempt + 1) }}>Retry</Button>

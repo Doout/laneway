@@ -28,6 +28,46 @@ describe('shipped live application authorization', () => {
     expect(screen.queryByRole('link', { name: 'Security' })).not.toBeInTheDocument()
   })
 
+  it.each([
+    { path: '/infrastructure', followLink: true },
+    { path: '/integrations/twingate', followLink: false },
+  ])('shows Twingate under Infrastructure from $path', async ({ path, followLink }) => {
+    vi.stubEnv('MODE', 'live')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list', 'integration.manage'], { username: 'owner', role: 'owner', all_networks: true, network_ids: [] })))
+      if (url.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [] }))
+      if (url.endsWith('/admin/integrations/twingate')) return Promise.resolve(managementResponse({ tenant: null, verified_at_unix_seconds: null }))
+      throw new Error(`Unexpected request ${url}`)
+    }))
+
+    renderPath(path)
+    if (followLink) {
+      expect(await screen.findByRole('heading', { name: 'Network integrations' })).toBeVisible()
+      const link = screen.getByRole('link', { name: /^Twingate/ })
+      expect(link).toHaveAttribute('href', '/infrastructure/integrations/twingate')
+      fireEvent.click(link)
+    }
+    expect(await screen.findByLabelText('Twingate network')).toBeVisible()
+    const nav = screen.getByRole('navigation', { name: 'Primary navigation' })
+    expect(within(nav).getByRole('link', { name: 'Infrastructure' })).toHaveAttribute('aria-current', 'page')
+    expect(within(nav).queryByRole('link', { name: 'Twingate' })).not.toBeInTheDocument()
+  })
+
+  it('hides network integrations from administrators without integration access', async () => {
+    vi.stubEnv('MODE', 'live')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list'])))
+      if (url.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [] }))
+      throw new Error(`Unexpected request ${url}`)
+    }))
+
+    renderPath('/infrastructure')
+    expect(await screen.findByRole('heading', { name: 'Infrastructure' })).toBeVisible()
+    expect(screen.queryByRole('heading', { name: 'Network integrations' })).not.toBeInTheDocument()
+  })
+
   it('rejects an inventory record whose network provenance differs from the selected scope', async () => {
     vi.stubEnv('MODE', 'live')
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {

@@ -352,8 +352,8 @@ networking, the Docker socket, or privileged mode.
 
 ## Connect Twingate
 
-Sign in as an owner on your Laneway controller or tenant hostname and select
-**Twingate** in the sidebar. Enter the network subdomain and a **Read only**
+Sign in as an owner on your Laneway controller or tenant hostname. Open
+**Infrastructure → Network integrations → Twingate**. Enter the network subdomain and a **Read only**
 token from **Settings → API** in the Twingate Admin Console. Choose
 **Test and save**. If the token has IP restrictions, allow the controller's
 outbound address.
