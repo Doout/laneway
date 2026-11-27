@@ -79,7 +79,7 @@ pub(super) async fn run(options: Options) -> Result<()> {
     protected_dir(Path::new("/etc"), 0, None)?;
     protected_dir(Path::new("/var/lib"), 0, None)?;
     create_directory(CONFIG_DIR, 0, owner.gid, 0o750)?;
-    let _lock = laneway_private::lock(&Path::new(CONFIG_DIR).join(".node-install.lock"))?;
+    let _lock = lock_installation()?;
     let direct = !options.no_direct;
 
     if let Some(installed) = read_manifest()? {
@@ -240,6 +240,31 @@ pub(super) struct Uninstall {
     keep_state: bool,
 }
 
+fn lock_installation() -> Result<File> {
+    let path = Path::new(CONFIG_DIR).join(".node-install.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file()
+            && metadata.uid() == 0
+            && metadata.nlink() == 1
+            && metadata.mode() & 0o7777 == 0o600,
+        "managed-node installer lock must be a protected root-owned file"
+    );
+    // SAFETY: this descriptor remains open for the whole installation.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err(io::Error::last_os_error()).context("lock managed-node credentials");
+    }
+    Ok(file)
+}
+
 fn read_manifest() -> Result<Option<Manifest>> {
     match fs::symlink_metadata(MANIFEST) {
         Ok(_) => (),
@@ -263,7 +288,7 @@ pub(super) async fn uninstall(options: Uninstall) -> Result<()> {
         "node uninstall requires root on Linux"
     );
     protected_dir(Path::new(CONFIG_DIR), 0, None)?;
-    let _lock = laneway_private::lock(&Path::new(CONFIG_DIR).join(".node-install.lock"))?;
+    let _lock = lock_installation()?;
     let installed = read_manifest()?.context("managed node manifest is missing")?;
     match fs::symlink_metadata(STATE) {
         Ok(metadata) => ensure!(

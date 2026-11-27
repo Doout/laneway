@@ -133,13 +133,15 @@ pub async fn read_version(executable: &Path, flag: &str) -> Result<String> {
     Ok(version)
 }
 
-pub(crate) struct InstallLock {
+/// Scoped lock for a protected installation directory.
+pub struct InstallLock {
     path: PathBuf,
     retain: bool,
 }
 
 impl InstallLock {
-    pub(crate) fn acquire(directory: &Path) -> Result<Self> {
+    /// Acquire the lock used by the package installer.
+    pub fn acquire(directory: &Path) -> Result<Self> {
         let path = directory.join(".laneway-install.lock");
         fs::DirBuilder::new()
             .mode(0o700)

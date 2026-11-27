@@ -314,7 +314,7 @@ pub(crate) fn update(source: PathBuf, args: &[OsString], privileged: bool) -> Re
     let directory = companion
         .parent()
         .context("missing protected runtime directory")?;
-    let _lock = laneway_private::try_lock(&directory.join(".client-update.lock"))?;
+    let _lock = client_package::InstallLock::acquire(directory)?;
     let stage = tempfile::Builder::new()
         .prefix(".client-update-")
         .tempdir_in(directory)?;
