@@ -624,15 +624,26 @@ fn chain_pem(chain: Option<CertificateChain>) -> Result<Vec<u8>> {
 }
 
 async fn enroll_request(setup: &Setup, request: EnrollmentRequest) -> Result<EnrollmentResponse> {
-    let url = https_origin(&setup.controller_endpoint)?
-        .join("/v1/enroll")
-        .context("construct connector enrollment URL")?;
-    let verifier = PinnedController::new(
+    submit_enrollment(
+        &setup.controller_endpoint,
         &setup.ca_pem,
         &setup.server_name,
-        setup.network_id,
         setup.controller_service_id,
-    )?;
+        request,
+    )
+    .await
+}
+
+pub(crate) async fn submit_enrollment(
+    endpoint: &str,
+    ca: &[u8],
+    server_name: &str,
+    service: Id,
+    request: EnrollmentRequest,
+) -> Result<EnrollmentResponse> {
+    let network = Id::from_slice(&request.expected_network_id)?;
+    let url = https_origin(endpoint)?.join("/v1/enroll")?;
+    let verifier = PinnedController::new(ca, server_name, network, service)?;
     // Authenticate the pinned controller before the TLS connection carries the
     // one-time enrollment token.
     let tls = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
@@ -646,7 +657,7 @@ async fn enroll_request(setup: &Setup, request: EnrollmentRequest) -> Result<Enr
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REQUEST_TIMEOUT)
         .build()
-        .context("initialize connector enrollment client")?;
+        .context("initialize enrollment client")?;
     let mut response = http
         .post(url)
         .header("content-type", "application/x-protobuf")
@@ -654,7 +665,7 @@ async fn enroll_request(setup: &Setup, request: EnrollmentRequest) -> Result<Enr
         .body(request.encode_to_vec())
         .send()
         .await
-        .context("request connector enrollment")?;
+        .context("request enrollment")?;
     use reqwest::StatusCode;
     match response.status() {
         StatusCode::CREATED => (),
@@ -673,18 +684,14 @@ async fn enroll_request(setup: &Setup, request: EnrollmentRequest) -> Result<Enr
         "controller enrollment response exceeds 1 MiB"
     );
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .context("read connector enrollment response")?
-    {
+    while let Some(chunk) = response.chunk().await.context("read enrollment response")? {
         ensure!(
             chunk.len() <= MAX_RESPONSE - body.len(),
             "controller enrollment response exceeds 1 MiB"
         );
         body.extend_from_slice(&chunk);
     }
-    EnrollmentResponse::decode(body.as_slice()).context("decode connector enrollment response")
+    EnrollmentResponse::decode(body.as_slice()).context("decode enrollment response")
 }
 
 #[derive(Debug)]

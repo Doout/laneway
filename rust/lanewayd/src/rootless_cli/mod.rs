@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 
 mod credentials;
-mod enroll;
+pub(crate) mod enroll;
 mod forward;
 use laneway_private as private;
 mod proxy;

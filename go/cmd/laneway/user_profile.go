@@ -71,7 +71,7 @@ func runLogin(args []string) error {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	metadata, err := bootstrap.Fetch(ctx, authority)
+	metadata, err := fetchBootstrap(ctx, authority)
 	cancel()
 	if err != nil {
 		return err

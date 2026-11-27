@@ -34,6 +34,13 @@ func runBootstrap(args []string) error {
 	if authority == "" || (command == "download") != (*out != "") {
 		return errors.New("bootstrap inspect requires DOMAIN; bootstrap download requires DOMAIN and --out PATH")
 	}
+	nativeArgs := []string{"bootstrap", command, "--", authority}
+	if command == "download" {
+		nativeArgs = []string{"bootstrap", command, "--out", *out, "--", authority}
+	}
+	if handled, err := tryNativeClient(nativeArgs...); handled || err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	metadata, err := bootstrap.Fetch(ctx, authority)
 	cancel()

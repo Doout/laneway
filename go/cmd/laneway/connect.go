@@ -157,7 +157,7 @@ func runConnect(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 20*time.Second)
-	metadata, err := bootstrap.Fetch(discoveryCtx, authority)
+	metadata, err := fetchBootstrap(discoveryCtx, authority)
 	cancelDiscovery()
 	if err != nil {
 		return err
@@ -260,7 +260,7 @@ func runConnect(args []string) error {
 	renewLogin := func() error {
 		discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, 20*time.Second)
 		defer cancelDiscovery()
-		refreshed, err := bootstrap.Fetch(discoveryCtx, authority)
+		refreshed, err := fetchBootstrap(discoveryCtx, authority)
 		if err != nil {
 			return fmt.Errorf("refresh discovery before login renewal: %w", err)
 		}
@@ -481,10 +481,6 @@ func enrollForConnect(ctx context.Context, metadata bootstrap.Metadata, code str
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	expectedService, err := identity.ParseID(metadata.Controller.ServiceID)
-	if err != nil {
-		return connectEnrollment{}, err
-	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return connectEnrollment{}, err
@@ -497,14 +493,7 @@ func enrollForConnect(ctx context.Context, metadata bootstrap.Metadata, code str
 	if err != nil {
 		return connectEnrollment{}, err
 	}
-	client, err := controllerclient.New(controllerclient.Options{
-		Endpoint: metadata.Controller.EnrollmentEndpoint, CAPEM: []byte(metadata.Trust.CAPEM), ServerName: metadata.Controller.ServerName,
-		ExpectedNetworkID: expectedNetwork, ExpectedServiceID: expectedService,
-	})
-	if err != nil {
-		return connectEnrollment{}, err
-	}
-	response, err := client.EnrollForNetworkAndClass(ctx, code, "", csrDER, wireGuardPublicKey.Bytes(), expectedNetwork, expectedClass)
+	response, err := submitClientEnrollment(ctx, metadata, code, csrDER, wireGuardPublicKey.Bytes(), expectedNetwork, expectedClass)
 	if err != nil {
 		return connectEnrollment{}, err
 	}

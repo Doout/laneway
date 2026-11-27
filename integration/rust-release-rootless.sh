@@ -37,6 +37,13 @@ daemon_version=$("$daemon" --version)
 [ "$client_version" = "$daemon_version" ] ||
   { echo "packaged CLI and daemon versions differ: $client_version / $daemon_version" >&2; exit 1; }
 
+# The packaged CLI must take the Rust discovery path before any network request.
+if "$client" bootstrap inspect http://localhost >"$probe_dir/bootstrap-reject" 2>&1; then
+  echo 'packaged bootstrap accepted an insecure origin' >&2
+  exit 1
+fi
+grep -F -- 'expected authenticated HTTPS' "$probe_dir/bootstrap-reject"
+
 # The current release embeds the helper in lanewayd-rs. This probe checks that
 # the production runtime includes it and rejects an unprivileged invocation
 # before touching the control socket or any host networking state.
