@@ -114,7 +114,14 @@ func group(use, summary string, fallback commandHandler, children ...*cobra.Comm
 	return cmd
 }
 
-func runNodeDispatch(args []string) error { return runNode(args) }
+func runNodeDispatch(args []string) error {
+	if len(args) > 0 && args[0] == "install" {
+		if handled, err := tryNativeManagedInstall(args[1:]); handled || err != nil {
+			return err
+		}
+	}
+	return runNode(args)
+}
 
 func routeCommand(use, summary string) *cobra.Command {
 	return group(use, summary, runControllerRoute,

@@ -32,6 +32,19 @@ fn main() -> Result<ExitCode> {
     let result = match first.as_deref().and_then(|arg| arg.to_str()) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some("_network-helper") => laneway_network_helper::run(&args.collect::<Vec<_>>()),
+        #[cfg(target_os = "macos")]
+        Some("_mac-setup") => {
+            let source = PathBuf::from(args.next().context("missing CLI path")?);
+            client_cli::macos_setup::run(source, args)
+        }
+        #[cfg(target_os = "linux")]
+        Some("_host-update") => {
+            let source = PathBuf::from(args.next().context("missing installed CLI path")?);
+            lanewayd_rs::deployment_update::update_client_command(
+                &source,
+                &args.collect::<Vec<_>>(),
+            )
+        }
         #[cfg(target_os = "linux")]
         Some("_deployment-update") => {
             lanewayd_rs::deployment_update::run(&args.collect::<Vec<_>>())

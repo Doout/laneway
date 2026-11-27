@@ -2,7 +2,7 @@
 mod activate;
 pub(crate) mod connector;
 mod journal;
-mod release;
+pub(crate) mod release;
 #[cfg(test)]
 mod tests;
 

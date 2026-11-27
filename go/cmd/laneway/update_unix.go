@@ -43,6 +43,9 @@ func runUpdate(args []string) error {
 		}
 		return nil
 	}
+	if handled, err := tryNativeUpdate(args); handled || err != nil {
+		return err
+	}
 	target := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		target, args = args[0], args[1:]

@@ -19,3 +19,5 @@ func checkSystemUpdateScope(bool) error { return nil }
 func unixOwner(info fs.FileInfo) uint32 {
 	return info.Sys().(*syscall.Stat_t).Uid
 }
+
+func tryNativeUpdate([]string) (bool, error) { return false, nil }

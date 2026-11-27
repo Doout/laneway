@@ -28,7 +28,7 @@ pub(super) const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge";
 pub(super) const LEGACY_CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
 const NODE_IMAGE: &str = "ghcr.io/doout/laneway-node";
 
-pub(super) fn compare_versions(target: &str, previous: &str) -> Result<Ordering> {
+pub(crate) fn compare_versions(target: &str, previous: &str) -> Result<Ordering> {
     fn numbers(value: &str) -> Result<Vec<u64>> {
         stable_tag(value)?
             .trim_start_matches('v')
@@ -42,7 +42,7 @@ pub(super) fn compare_versions(target: &str, previous: &str) -> Result<Ordering>
     Ok(numbers(target)?.cmp(&numbers(previous)?))
 }
 
-pub(super) async fn latest_tag() -> Result<String> {
+pub(crate) async fn latest_tag() -> Result<String> {
     let request_nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let reply = github_client()?
         .get(format!("{LATEST_URL}?laneway_cache_bust={request_nonce}"))
@@ -91,6 +91,44 @@ pub(super) async fn obtain(tag: &str, directory: &Path) -> Result<PathBuf> {
         "verified daemon reports the wrong release tag"
     );
     Ok(binary)
+}
+
+pub(crate) struct ClientArchive {
+    pub archive: PathBuf,
+    pub cli: PathBuf,
+    pub daemon: PathBuf,
+    pub checksum: [u8; 32],
+}
+
+pub(crate) async fn client_archive(tag: &str, directory: &Path) -> Result<ClientArchive> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => bail!("unsupported Linux client architecture"),
+    };
+    let name = format!("laneway_linux_{arch}.tar.gz");
+    let (client, manifest) = signed_manifest(tag, directory).await?;
+    let checksum = checksum_for(&manifest, &name)?;
+    let archive = directory.join(&name);
+    download(&client, tag, &name, &archive, MAX_ARCHIVE, 180).await?;
+    let cli = directory.join("candidate-laneway");
+    let daemon = directory.join("candidate-lanewayd-rs");
+    let paths = (archive.clone(), cli.clone(), daemon.clone());
+    tokio::task::spawn_blocking(move || {
+        let mut file = File::open(paths.0)?;
+        verify_archive(&mut file, &checksum)?;
+        extract_members(
+            file,
+            &[(b"laneway/bin/laneway", &paths.1), (MEMBER, &paths.2)],
+        )
+    })
+    .await??;
+    Ok(ClientArchive {
+        archive,
+        cli,
+        daemon,
+        checksum,
+    })
 }
 
 /// The same release must authenticate the manifest and the pinned OCI subject.
@@ -300,15 +338,20 @@ fn verified_extract(
     expected: &[u8; 32],
     output: &Path,
 ) -> Result<()> {
+    verify_archive(&mut source, expected)?;
+    extract(source, output)
+}
+
+fn verify_archive(source: &mut (impl Read + Seek), expected: &[u8; 32]) -> Result<()> {
     let mut digest = Sha256::new();
-    io::copy(&mut source, &mut digest)?;
+    io::copy(source, &mut digest)?;
     let observed: [u8; 32] = digest.finalize().into();
     ensure!(
         &observed == expected,
         "release archive disagrees with the signed checksum"
     );
     source.rewind()?;
-    extract(source, output)
+    Ok(())
 }
 
 async fn download(
@@ -391,21 +434,30 @@ fn checksum_for(manifest: &str, asset: &str) -> Result<[u8; 32]> {
 }
 
 fn extract(source: impl Read, output: &Path) -> Result<()> {
+    extract_members(source, &[(MEMBER, output)])
+}
+
+fn extract_members(source: impl Read, members: &[(&[u8], &Path)]) -> Result<()> {
     let mut archive = tar::Archive::new(MultiGzDecoder::new(source).take(MAX_EXPANDED + 1));
-    let mut found = false;
+    let mut found = vec![false; members.len()];
     // Inspect raw members. GNU/PAX long name and sparse metadata never
     // substitute for the one short canonical regular path we accept.
     for (index, next) in archive.entries()?.raw(true).enumerate() {
         let mut entry = next?;
         ensure!(index < 10_000, "release archive contains too many members");
-        if entry.path_bytes().as_ref() != MEMBER {
+        let Some(index) = members
+            .iter()
+            .position(|(path, _)| entry.path_bytes().as_ref() == *path)
+        else {
             continue;
-        }
+        };
+        let output = members[index].1;
         ensure!(
-            !found
+            !found[index]
                 && entry.header().entry_type().is_file()
                 && (1..=MAX_BINARY).contains(&entry.size()),
-            "release lacks an unambiguous regular Rust node executable"
+            "release lacks an unambiguous regular executable at {}",
+            String::from_utf8_lossy(members[index].0)
         );
         let mut file = OpenOptions::new()
             .write(true)
@@ -414,9 +466,9 @@ fn extract(source: impl Read, output: &Path) -> Result<()> {
             .open(output)?;
         ensure!(
             io::copy(&mut entry, &mut file)? == entry.size(),
-            "truncated Rust node executable"
+            "truncated release executable"
         );
-        found = true;
+        found[index] = true;
     }
     // Consume/check gzip EOF and reject concatenated tar members after the
     // first terminator instead of silently choosing a duplicate target.
@@ -432,11 +484,15 @@ fn extract(source: impl Read, output: &Path) -> Result<()> {
             "unexpected data after release archive"
         );
     }
-    ensure!(
-        found && source.limit() > 0,
-        "release archive exceeds size limit or lacks Rust node executable"
-    );
-    fs::set_permissions(output, fs::Permissions::from_mode(0o700))?;
+    ensure!(source.limit() > 0, "release archive exceeds size limit");
+    for ((name, output), found) in members.iter().zip(found) {
+        ensure!(
+            found,
+            "release archive is missing {}",
+            String::from_utf8_lossy(name)
+        );
+        fs::set_permissions(output, fs::Permissions::from_mode(0o700))?;
+    }
     Ok(())
 }
 

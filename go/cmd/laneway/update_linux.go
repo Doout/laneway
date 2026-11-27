@@ -114,3 +114,19 @@ func runHostUpdate(command *exec.Cmd) error {
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return command.Run()
 }
+
+func tryNativeUpdate(args []string) (bool, error) {
+	runtime, err := nativeClientRuntime()
+	if runtime == "" || err != nil {
+		return false, err
+	}
+	source, err := os.Executable()
+	if err != nil {
+		return true, err
+	}
+	environment := os.Environ()
+	if os.Geteuid() == 0 {
+		environment = hostUpdateEnvironment
+	}
+	return true, syscall.Exec(runtime, append([]string{runtime, "_host-update", source}, args...), environment)
+}
