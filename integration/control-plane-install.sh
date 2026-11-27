@@ -23,7 +23,7 @@ mkdir -p "$source_dir/../twingate-gateway"
 cat > "$source_dir/../twingate-gateway/install.sh" <<'EOF'
 #!/bin/sh
 set -eu
-test -x "$LANEWAY_COSIGN_BIN"
+command -v "$LANEWAY_COSIGN_BIN" >/dev/null
 printf 'stage Twingate worker\n' >> "$LANEWAY_TEST_LOG"
 EOF
 printf '0.2.8\n' > "$test_root/package/VERSION"

@@ -91,7 +91,7 @@ mkdir -p "$work/gateway-spool"
 cat > "$worker_dir/install.sh" <<'EOF'
 #!/bin/sh
 set -eu
-test -x "$LANEWAY_COSIGN_BIN"
+command -v "$LANEWAY_COSIGN_BIN" >/dev/null
 touch "$LANEWAY_INSTALLER_FIXTURE/worker-invoked"
 EOF
 test ! -e "$tool_dir/sbin"
