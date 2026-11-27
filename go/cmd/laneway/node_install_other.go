@@ -20,4 +20,4 @@ func runEphemeralExitPrepare([]string) error {
 	return errors.New("ephemeral Exit preparation requires Linux and systemd")
 }
 
-func tryNativeManagedInstall([]string) (bool, error) { return false, nil }
+func tryNativeManagedNode(string, []string) (bool, error) { return false, nil }

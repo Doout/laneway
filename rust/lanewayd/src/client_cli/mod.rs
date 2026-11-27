@@ -7,6 +7,8 @@ mod bootstrap;
 mod connect;
 #[cfg(target_os = "linux")]
 mod connector;
+#[cfg(target_os = "linux")]
+mod control;
 mod enrollment;
 mod inventory;
 #[cfg(unix)]
@@ -56,6 +58,18 @@ enum Command {
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
     InstallNode(managed_install::Options),
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    UninstallNode(managed_install::Uninstall),
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    RenewNode,
+    #[cfg(target_os = "linux")]
+    /// Operate the installed Docker Compose control plane.
+    Control {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<OsString>,
+    },
     /// Manage controller resources.
     Controller {
         #[command(flatten)]
@@ -129,6 +143,12 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
         Command::Pki { operation } => pki::run(operation),
         #[cfg(target_os = "linux")]
         Command::InstallNode(options) => runtime()?.block_on(managed_install::run(options)),
+        #[cfg(target_os = "linux")]
+        Command::UninstallNode(options) => runtime()?.block_on(managed_install::uninstall(options)),
+        #[cfg(target_os = "linux")]
+        Command::RenewNode => managed_install::renew(),
+        #[cfg(target_os = "linux")]
+        Command::Control { arguments } => control::run(&arguments),
         Command::Controller {
             connection,
             operation,
@@ -182,6 +202,14 @@ pub(crate) fn run_installed(mut args: Vec<OsString>) -> Result<()> {
         [command, install, ..] if command == "node" && install == "install" => {
             args.remove(0);
             args[0] = "install-node".into();
+        }
+        [command, uninstall, ..] if command == "node" && uninstall == "uninstall" => {
+            args.remove(0);
+            args[0] = "uninstall-node".into();
+        }
+        [command, renew, ..] if command == "node" && renew == "renew" => {
+            args.remove(0);
+            args[0] = "renew-node".into();
         }
         [command, local, ..]
             if command == "node"

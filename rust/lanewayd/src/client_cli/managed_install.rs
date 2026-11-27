@@ -82,23 +82,11 @@ pub(super) async fn run(options: Options) -> Result<()> {
     let _lock = laneway_private::lock(&Path::new(CONFIG_DIR).join(".node-install.lock"))?;
     let direct = !options.no_direct;
 
-    let existing = match fs::symlink_metadata(MANIFEST) {
-        Ok(_) => true,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-        Err(error) => return Err(error).context("inspect managed node manifest"),
-    };
-    if existing {
-        verify_file(MANIFEST, 0, 0, 0o600)?;
-        let installed: Manifest = serde_json::from_slice(&read_file(Path::new(MANIFEST), 4096)?)?;
+    if let Some(installed) = read_manifest()? {
         ensure!(
-            installed.version == 1
-                && installed.runtime == "rust"
-                && installed.authority == options.authority
-                && installed.direct_enabled == direct,
+            installed.authority == options.authority && installed.direct_enabled == direct,
             "existing managed node was installed with different authority or dataplane settings"
         );
-        installed.network_id.parse::<Id>()?;
-        installed.node_id.parse::<Id>()?;
         validate_installation(owner)?;
         if !options.no_start
             && let Err(error) = start().await
@@ -243,6 +231,96 @@ pub(super) async fn run(options: Options) -> Result<()> {
         "managed Rust node installed network={network} node={} name={name} direct={direct}",
         enrolled.node
     );
+    Ok(())
+}
+
+#[derive(Args)]
+pub(super) struct Uninstall {
+    #[arg(long, action = ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true", default_value_t = false)]
+    keep_state: bool,
+}
+
+fn read_manifest() -> Result<Option<Manifest>> {
+    match fs::symlink_metadata(MANIFEST) {
+        Ok(_) => (),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect managed node manifest"),
+    }
+    verify_file(MANIFEST, 0, 0, 0o600)?;
+    let installed: Manifest = serde_json::from_slice(&read_file(Path::new(MANIFEST), 4096)?)?;
+    ensure!(
+        installed.version == 1 && installed.runtime == "rust",
+        "unsupported managed node manifest"
+    );
+    installed.network_id.parse::<Id>()?;
+    installed.node_id.parse::<Id>()?;
+    Ok(Some(installed))
+}
+
+pub(super) async fn uninstall(options: Uninstall) -> Result<()> {
+    ensure!(
+        laneway_private::is_root(),
+        "node uninstall requires root on Linux"
+    );
+    protected_dir(Path::new(CONFIG_DIR), 0, None)?;
+    let _lock = laneway_private::lock(&Path::new(CONFIG_DIR).join(".node-install.lock"))?;
+    let installed = read_manifest()?.context("managed node manifest is missing")?;
+    match fs::symlink_metadata(STATE) {
+        Ok(metadata) => ensure!(
+            metadata.is_dir(),
+            "refusing to remove files through an unsafe node state directory"
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error).context("inspect node state directory"),
+    }
+    cleanup().await.context("gracefully stop managed node")?;
+    for path in [CA, KEY, CERTIFICATE, CONFIG] {
+        remove(path)?;
+    }
+    if !options.keep_state {
+        remove(EXIT)?;
+    }
+    remove(MANIFEST)?;
+    println!(
+        "managed node uninstalled network={} node={}",
+        installed.network_id, installed.node_id
+    );
+    Ok(())
+}
+
+pub(super) fn renew() -> Result<()> {
+    ensure!(
+        laneway_private::is_root(),
+        "node renew requires root on Linux"
+    );
+    read_manifest()?.context("managed node manifest is missing")?;
+    anyhow::bail!(
+        "the Rust service renews node certificates automatically; check node status for renewal health"
+    )
+}
+
+fn remove(path: &str) -> Result<()> {
+    let (target, directory) = match pin(path) {
+        Ok((target, _, directory)) => (target, directory),
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::NotFound) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    match target.symlink_metadata() {
+        Ok(meta) => ensure!(
+            meta.is_file(),
+            "refusing to remove non-regular managed path {path}"
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("inspect {path}")),
+    }
+    fs::remove_file(target).with_context(|| format!("remove {path}"))?;
+    directory.sync_all()?;
     Ok(())
 }
 
@@ -413,21 +491,21 @@ struct Published {
     name: String,
 }
 
-fn publish(path: &str, bytes: &[u8], uid: u32, gid: u32, mode: u32) -> Result<Published> {
-    let parent = Path::new(path)
-        .parent()
-        .context("missing managed file parent")?;
+fn pin(path: &str) -> Result<(PathBuf, PathBuf, File)> {
+    let target = Path::new(path);
+    let parent = target.parent().context("missing managed file parent")?;
     let directory = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
         .open(parent)?;
     let pinned = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-    let mut file = tempfile::NamedTempFile::new_in(&pinned)?;
-    let target = pinned.join(
-        Path::new(path)
-            .file_name()
-            .context("missing managed filename")?,
-    );
+    let target = pinned.join(target.file_name().context("missing managed filename")?);
+    Ok((target, pinned, directory))
+}
+
+fn publish(path: &str, bytes: &[u8], uid: u32, gid: u32, mode: u32) -> Result<Published> {
+    let (target, pinned, directory) = pin(path)?;
+    let mut file = tempfile::NamedTempFile::new_in(pinned)?;
     file.write_all(bytes)?;
     // SAFETY: the descriptor is an open file owned by this function.
     if unsafe { libc::fchown(file.as_file().as_raw_fd(), uid, gid) } != 0 {

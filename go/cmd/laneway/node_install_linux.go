@@ -86,11 +86,12 @@ type managedNodeRelay struct {
 }
 
 // Legacy managed identities keep their original lifecycle until upgraded.
-func tryNativeManagedInstall(args []string) (bool, error) {
-	if manifest, err := loadManagedNodeManifest(managedNodeManifestPath); err == nil && manifest.Runtime != managedRustRuntime {
+func tryNativeManagedNode(operation string, args []string) (bool, error) {
+	manifest, err := loadManagedNodeManifest(managedNodeManifestPath)
+	if (err == nil && manifest.Runtime != managedRustRuntime) || (err != nil && operation != "install") {
 		return false, nil
 	}
-	return tryNativeCommand([]string{"install-node"}, args)
+	return tryNativeCommand([]string{operation + "-node"}, args)
 }
 
 func runNodeInstall(args []string) error {
