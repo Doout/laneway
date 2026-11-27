@@ -57,7 +57,7 @@ test('sign-in, enrollment, route approval, and rule creation flow end to end', a
 
 test('pending-route links apply the query filter and primary navigation works from the keyboard', async ({ page }) => {
   await page.goto('/routes?state=pending')
-  await expect(page.getByRole('button', { name: 'Needs attention' })).toHaveClass(/is-active/)
+  await expect(page.getByRole('button', { name: 'Needs attention' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('tbody tr')).toHaveCount(1)
   await expect(page.getByRole('table').getByText('Kubernetes API')).toBeVisible()
 

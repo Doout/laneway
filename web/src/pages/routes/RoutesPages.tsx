@@ -27,6 +27,7 @@ import { useControlPlane, type ControllerNode, type ControllerRoute } from '../.
 import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
 import { controllerRoutes, isPendingControllerRoute } from '../../lib/live-records'
 import { attributed, persistedRoutes, readDemoState, updateDemoState } from '../../lib/persisted-demo-state'
+import { SummaryStrip } from '../live/shared'
 import './routes-pages.css'
 
 type RouteFormState = {
@@ -134,9 +135,14 @@ export function RoutesListPage() {
       title="Routes"
       action={canManageRoutes ? <Button variant="primary" to="/routes/new"><RouteIcon aria-hidden="true" size={17} />Create route</Button> : undefined}
     />
-    <div className="routes-health-strip" aria-label="Route inventory summary"><div><strong>{approvedCount}</strong><span>{live ? 'Approved routes' : 'Healthy routes'}</span></div><div><strong>{pendingCount}</strong><span>Approval queue</span></div><div><strong>{thirdSummaryCount}</strong><span>{live ? 'Withdrawn routes' : 'Relay fallback'}</span></div><div><strong>{live ? inventory?.network?.configuration_epoch ?? '—' : 418}</strong><span>Configuration epoch</span></div></div>
+    <SummaryStrip label="Route inventory summary" items={[
+      { label: live ? 'Approved routes' : 'Healthy routes', value: approvedCount },
+      { label: 'Approval queue', value: pendingCount, tone: pendingCount ? 'warning' : undefined },
+      { label: live ? 'Withdrawn routes' : 'Relay fallback', value: thirdSummaryCount },
+      { label: 'Configuration epoch', value: live ? inventory?.network?.configuration_epoch ?? '—' : 418 },
+    ]} />
     <Toolbar filters={<>
-      <div className="routes-segments" aria-label="Route state"><button className={state === 'all' ? 'is-active' : ''} onClick={() => changeState('all')}>All</button><button className={state === approvedState ? 'is-active' : ''} onClick={() => changeState(approvedState)}>{live ? 'Approved' : 'Healthy'}</button><button className={state === 'Pending approval' ? 'is-active' : ''} onClick={() => changeState('Pending approval')}>Needs attention</button></div>
+      <div className="routes-segments" role="group" aria-label="Route state"><button type="button" aria-pressed={state === 'all'} onClick={() => changeState('all')}>All</button><button type="button" aria-pressed={state === approvedState} onClick={() => changeState(approvedState)}>{live ? 'Approved' : 'Healthy'}</button><button type="button" aria-pressed={state === 'Pending approval'} onClick={() => changeState('Pending approval')}>Needs attention</button></div>
       <FilterSelect label="Filter by mode" value={mode} onChange={setMode}>
         <option value="all">All modes</option>
         <option value="NAT">NAT</option>
@@ -147,7 +153,7 @@ export function RoutesListPage() {
     </>}>
       <SearchField label="Search routes" placeholder="Search name, prefix, or next hop" value={query} onChange={setQuery} />
     </Toolbar>
-    <div className="routes-workspace"><section className="routes-panel routes-inventory"><DataTable
+    <div className="routes-workspace"><section className="routes-inventory"><DataTable
         rows={visibleRoutes}
         rowKey={route => route.id}
         columns={[

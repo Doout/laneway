@@ -1,13 +1,21 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { KeyRound, MonitorDot, Network, Plus } from 'lucide-react'
 import { ActionPanel, Button, Callout, DetailLayout, EmptyState, EntityTitle, Field, FilterSelect, FormStack, IdentityBlock, PageHeader, RecordList, Section, Status, TokenBox, Toolbar, SearchField } from '../../components/ui'
 import { controllerOrigin, useControlPlane, type ControllerNetwork, type ControllerNode, type ControllerRoute, type IssuedEnrollmentToken } from '../../lib/control-plane'
 import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
 import { durableNodeEnrollmentCommand, userEnrollmentCommand } from '../../lib/enrollment-commands'
-import { NodeMap } from './NodeMap'
 import { NodePresence, useNodePresence } from './NodePresence'
 import { ErrorMessage, Missing, NetworkWorkspaceTabs, emptyNodes, exitNodeCapability, nodeState, routeState, subnetRouterCapability, time, type NetworkWorkspaceView, type RecordVisibility } from './shared'
+
+const NodeMap = lazy(async () => {
+  try {
+    const module = await import('./NodeMap')
+    return { default: module.NodeMap }
+  } catch {
+    return { default: () => <div role="alert"><p>The node map could not be loaded.</p><Button onClick={() => window.location.reload()}>Reload map</Button></div> }
+  }
+})
 
 export function NetworksPage() {
   const { inventory, hasPermission, request, refresh } = useControlPlane()
@@ -91,7 +99,9 @@ export function NetworksPage() {
       <ErrorMessage value={networkError} /><footer className="button-row"><Button type="submit" variant="primary" disabled={networkPending}>{networkPending ? 'Creating…' : 'Create network'}</Button><Button type="button" variant="quiet" disabled={networkPending} onClick={() => setCreatingNetwork(false)}>Cancel</Button></footer>
     </form> : null}
     {inventory?.network ? <>
-      {workspaceView === 'map' ? <NodeMap networks={inventory.networks} /> : null}
+      {workspaceView === 'map' && <Suspense fallback={<p role="status">Loading node map…</p>}>
+        <NodeMap networks={inventory.networks} />
+      </Suspense>}
       {workspaceView === 'networks' ? <section className="network-groups" aria-labelledby="network-groups-title"><header><h2 id="network-groups-title">{inventory.networks.length} {inventory.networks.length === 1 ? 'Network' : 'Networks'}</h2></header><div className="network-group-list">{inventory.networks.map((network) => { const nodes = currentNodes.filter((node) => node.network_id === network.network_id); const exits = networkExits.filter((route) => route.network_id === network.network_id); return <article key={network.network_id}><span className="network-group-list__icon"><Network aria-hidden="true" size={18} /></span><div><strong>{network.name}</strong><code>{network.ipv4_pool}</code></div><div className="network-group-list__stats"><span><strong>{nodes.length}</strong><small>Nodes</small></span><span><strong>{exits.length}</strong><small>{exits.length === 1 ? 'Exit' : 'Exits'}</small></span></div></article> })}</div></section> : null}
       {workspaceView === 'nodes' ? <section className="network-nodes" aria-labelledby="network-nodes-title">
         <header className="network-nodes__header"><div><h2 id="network-nodes-title">Nodes</h2></div></header>

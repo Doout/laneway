@@ -1,8 +1,9 @@
-import { ArrowRight, MonitorDot, RadioTower, Route, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { ArrowRight, MonitorDot, RadioTower, Route, TriangleAlert } from 'lucide-react'
 import { Button, Callout, PageHeader, Status } from '../../components/ui'
 import { useControlPlane } from '../../lib/control-plane'
 import { controllerNodes, isPendingControllerRoute } from '../../lib/live-records'
 import { persistedNodes } from '../../lib/persisted-demo-state'
+import { SummaryStrip } from '../live/shared'
 import './overview.css'
 
 const attempts = [
@@ -40,12 +41,12 @@ export function OverviewPage() {
     {inventoryError ? <Callout tone="danger">{inventoryError}</Callout> : null}
     {inventoryPending ? <div className="overview-loading" role="status">Refreshing inventory…</div> : null}
 
-    {!live || inventory ? <section className="overview-metrics" aria-label="Network inventory summary">
-      <div><MonitorDot aria-hidden="true" size={17} /><span><strong>{nodeCount}</strong>{live ? 'Nodes' : 'Active nodes'}</span></div>
-      <div><Route aria-hidden="true" size={17} /><span><strong>{routeCount}</strong>Routes</span></div>
-      <div><RadioTower aria-hidden="true" size={17} /><span><strong>{relayCount}</strong>Enabled relays</span></div>
-      <div><ShieldCheck aria-hidden="true" size={17} /><span><strong>{ruleCount}</strong>Enabled rules</span></div>
-    </section> : null}
+    {!live || inventory ? <SummaryStrip label="Network inventory summary" items={[
+      { label: live ? 'Nodes' : 'Active nodes', value: nodeCount },
+      { label: 'Routes', value: routeCount },
+      { label: 'Enabled relays', value: relayCount },
+      { label: 'Enabled rules', value: ruleCount },
+    ]} /> : null}
 
     {live ? pendingRouteItem ? <section className="attention-panel">
       <div className="panel-heading"><h2>Needs attention</h2><span className="attention-count">{pendingRoutes}</span></div>
@@ -57,9 +58,9 @@ export function OverviewPage() {
           <div className="topology-map" aria-label={`${leftNode} to ${rightNode}`}>
             <div className="topology-grid" aria-hidden="true" />
             <div className="topology-node topology-node--client"><span className="topology-node__icon"><MonitorDot size={20} /></span><strong>{leftNode}</strong><small>{leftAddress}</small></div>
-            <div className="topology-line topology-line--first"><i /></div>
+            <div className="topology-line" aria-hidden="true" />
             <div className="topology-node topology-node--relay"><span className="topology-node__icon"><RadioTower size={20} /></span><strong>Direct</strong><small>QUIC</small></div>
-            <div className="topology-line topology-line--second"><i /></div>
+            <div className="topology-line" aria-hidden="true" />
             <div className="topology-node topology-node--destination"><span className="topology-node__icon"><Route size={20} /></span><strong>{rightNode}</strong><small>{rightAddress}</small></div>
           </div><div className="topology-path-strip">
             <span><small>Path</small><strong>Direct QUIC</strong></span><i aria-hidden="true" /><span><small>Round trip</small><strong>24 ms</strong></span><i aria-hidden="true" /><span><small>Tunnel</small><strong>WireGuard</strong></span><i aria-hidden="true" /><span><small>Fallback</small><strong>relay-us-east</strong></span>
@@ -67,8 +68,8 @@ export function OverviewPage() {
         </section>
 
         <section className="attempts-panel">
-          <div className="panel-heading"><h2>Connection attempts</h2><Button to="/audit" variant="quiet">View audit</Button></div>
-          <div className="attempts-table-wrap"><table className="attempts-table"><thead><tr><th>Source</th><th>Destination</th><th>Selected path</th><th>Latency</th><th>Time</th></tr></thead><tbody>{attempts.map(attempt => <tr key={`${attempt.node}-${attempt.time}`}><td><strong>{attempt.node}</strong></td><td>{attempt.destination}</td><td><Status tone={attempt.tone}>{attempt.path}</Status></td><td><code>{attempt.latency}</code></td><td>{attempt.time}</td></tr>)}</tbody></table></div>
+          <div className="panel-heading"><h2 id="connection-attempts">Connection attempts</h2><Button to="/audit" variant="quiet">View audit</Button></div>
+          <div className="attempts-table-wrap" role="region" aria-labelledby="connection-attempts" tabIndex={0}><table className="attempts-table"><thead><tr><th>Source</th><th>Destination</th><th>Selected path</th><th>Latency</th><th>Time</th></tr></thead><tbody>{attempts.map(attempt => <tr key={`${attempt.node}-${attempt.time}`}><td><strong>{attempt.node}</strong></td><td>{attempt.destination}</td><td><Status tone={attempt.tone}>{attempt.path}</Status></td><td><code>{attempt.latency}</code></td><td>{attempt.time}</td></tr>)}</tbody></table></div>
         </section>
       </div>
 

@@ -332,11 +332,11 @@ describe('shipped live application authorization', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderPath('/overview')
-    expect(await screen.findByText('Controller inventory')).toBeVisible()
-    expect(screen.getByText('current nodes and enabled relays')).toBeVisible()
-    expect(screen.getByText('current routes and enabled rules')).toBeVisible()
-    expect(screen.getByText('Current nodes')).toBeVisible()
-    expect(screen.getByText('Current routes')).toBeVisible()
+    const overviewSummary = await screen.findByLabelText('Network inventory summary')
+    for (const label of ['Current nodes', 'Current routes', 'Enabled relays', 'Enabled rules']) {
+      const metric = within(overviewSummary).getByText(label).parentElement!
+      expect(within(metric).getByText('1')).toBeVisible()
+    }
     expect(screen.queryByText('Online')).not.toBeInTheDocument()
     expect(screen.queryByText('active nodes and relays')).not.toBeInTheDocument()
 
@@ -362,8 +362,8 @@ describe('shipped live application authorization', () => {
 
     renderPath('/overview')
     const overviewSummary = await screen.findByLabelText('Network inventory summary')
-    expect(within(overviewSummary).getAllByText('—')).toHaveLength(3)
-    expect(within(overviewSummary).getAllByText('Not authorized')).toHaveLength(3)
+    expect(within(overviewSummary).getAllByText('—')).toHaveLength(4)
+    expect(within(overviewSummary).getAllByText('Not authorized')).toHaveLength(4)
 
     fireEvent.click(screen.getByRole('link', { name: /^Infrastructure$/ }))
     expect(await screen.findByText('Relay inventory unavailable')).toBeVisible()

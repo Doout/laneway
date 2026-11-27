@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
+import { ArrowLeft, ChevronDown, Plug, Settings2 } from 'lucide-react'
 import { Button, Callout, Field, FormStack, PageHeader, Status } from '../../components/ui'
 import { useControlPlane } from '../../lib/control-plane'
 import { TwingateResources } from './TwingateResources'
@@ -26,6 +27,7 @@ export function TwingatePage() {
   const [connection, setConnection] = useState<TwingateConnection>()
   const [tenant, setTenant] = useState('')
   const [apiToken, setApiToken] = useState('')
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [action, setAction] = useState<Action>()
   const [loadAttempt, setLoadAttempt] = useState(0)
   const [loadError, setLoadError] = useState('')
@@ -55,6 +57,7 @@ export function TwingatePage() {
       const saved = await request<TwingateConnection>(path, { method, body })
       setConnection(saved)
       if (next !== 'test') {
+        setSettingsOpen(false)
         setConnectionRevision((current) => current + 1)
         setTenant(saved.tenant ?? '')
         setApiToken('')
@@ -73,39 +76,48 @@ export function TwingatePage() {
     void apply('save', { tenant: tenant.trim(), api_token: apiToken.trim() })
   }
 
-  return <>
-    <PageHeader title="Twingate" action={<Button to="/infrastructure">Infrastructure</Button>} />
-    {connection?.tenant ? <TwingateResources key={connectionRevision} /> : null}
-    {loadError ? <>
-      <div role="alert"><Callout tone="danger">{loadError}</Callout></div>
+  const verifiedAt = connection?.verified_at_unix_seconds != null
+    ? new Date(connection.verified_at_unix_seconds * 1000) : undefined
+
+  return <div className="twingate-page">
+    <PageHeader title="Twingate" action={<Button to="/infrastructure" variant="quiet"><ArrowLeft size={15} aria-hidden="true" />Infrastructure</Button>} />
+    {loadError ? <div className="twingate-feedback" role="alert">
+      <Callout tone="danger">{loadError}</Callout>
       <Button onClick={() => { setLoadError(''); setLoadAttempt(loadAttempt + 1) }}>Retry</Button>
-    </> : !connection ? <p role="status">Loading Twingate connection…</p> :
-      <div className="twingate-connection"><FormStack onSubmit={save}>
-        <div className="button-row">
-          <Status tone={connection.tenant ? 'positive' : 'muted'}>{connection.tenant ? 'Saved' : 'Disconnected'}</Status>
-          {connection.tenant ? <strong>{connection.tenant}.twingate.com</strong> : null}
+    </div> : !connection ? <p role="status">Loading Twingate connection…</p> : <>
+      <section aria-labelledby="twingate-connection-title" className="twingate-connection">
+        <div className="twingate-connection__summary">
+          <span className="twingate-connection__icon" aria-hidden="true"><Plug size={19} /></span>
+          <div className="twingate-connection__identity">
+            <h2 id="twingate-connection-title">{connection.tenant ? connection.tenant + '.twingate.com' : 'Connect a Twingate network'}</h2>
+            <div className="twingate-connection__meta">
+              <Status tone={connection.tenant ? 'positive' : 'muted'}>{connection.tenant ? 'Saved' : 'Disconnected'}</Status>
+              {verifiedAt && <span>Last verified <time dateTime={verifiedAt.toISOString()}>{verifiedAt.toLocaleString()}</time></span>}
+            </div>
+          </div>
+          {connection.tenant && <Button className="twingate-settings" aria-label="Connection settings" title="Connection settings" aria-expanded={settingsOpen} aria-controls="twingate-settings" onClick={() => setSettingsOpen(!settingsOpen)}>
+            <Settings2 className="twingate-settings__icon" size={17} aria-hidden="true" /><span>Connection settings</span><ChevronDown className="twingate-settings__chevron" size={14} aria-hidden="true" />
+          </Button>}
         </div>
-        {connection.verified_at_unix_seconds !== null ? <p>
-          Last verified <time dateTime={new Date(connection.verified_at_unix_seconds * 1000).toISOString()}>
-            {new Date(connection.verified_at_unix_seconds * 1000).toLocaleString()}
-          </time>
-        </p> : null}
-        <Field label="Twingate network" hint="Enter the name before .twingate.com.">
-          <input autoCapitalize="none" autoComplete="off" disabled={Boolean(action)} maxLength={63} onChange={(event) => setTenant(event.target.value)} placeholder="acme" required spellCheck={false} value={tenant} />
-        </Field>
-        <Field label={connection.tenant ? 'New API token' : 'API token'} hint={<>Generate a Read only token in Twingate under Settings → API. <a href="https://www.twingate.com/docs/api-overview#getting-started" rel="noreferrer" target="_blank">Token setup guide</a></>}>
-          <input autoComplete="new-password" disabled={Boolean(action)} maxLength={4096} onChange={(event) => setApiToken(event.target.value)} required type="password" value={apiToken} />
-        </Field>
-        {error ? <div role="alert"><Callout tone="danger">{error}</Callout></div> : null}
-        {notice ? <p role="status">{notice}</p> : null}
-        <div className="button-row">
-          <Button disabled={Boolean(action) || !tenant.trim() || !apiToken.trim()} type="submit" variant="primary">{action === 'save' ? 'Testing and saving…' : 'Test and save'}</Button>
-          {connection.tenant ? <>
-            <Button disabled={Boolean(action)} onClick={() => void apply('test')}>{action === 'test' ? 'Testing…' : 'Test saved connection'}</Button>
-            <Button disabled={Boolean(action)} onClick={() => void apply('disconnect')} variant="quiet">{action === 'disconnect' ? 'Disconnecting…' : 'Disconnect'}</Button>
-          </> : null}
-        </div>
-      </FormStack></div>
-    }
-  </>
+        <div id="twingate-settings" hidden={Boolean(connection.tenant) && !settingsOpen}><FormStack onSubmit={save}>
+          <Field label="Twingate network" hint="Enter the name before .twingate.com.">
+            <input autoCapitalize="none" autoComplete="off" disabled={Boolean(action)} maxLength={63} onChange={(event) => setTenant(event.target.value)} placeholder="acme" required spellCheck={false} value={tenant} />
+          </Field>
+          <Field label={connection.tenant ? 'New API token' : 'API token'} hint={<>Generate a Read only token in Twingate under Settings → API. <a href="https://www.twingate.com/docs/api-overview#getting-started" rel="noreferrer" target="_blank">Token setup guide</a></>}>
+            <input autoComplete="new-password" disabled={Boolean(action)} maxLength={4096} onChange={(event) => setApiToken(event.target.value)} required type="password" value={apiToken} />
+          </Field>
+          <div className="button-row">
+            <Button disabled={Boolean(action) || !tenant.trim() || !apiToken.trim()} type="submit" variant="primary">{action === 'save' ? 'Testing and saving…' : 'Test and save'}</Button>
+            {connection.tenant ? <>
+              <Button disabled={Boolean(action)} onClick={() => void apply('test')}>{action === 'test' ? 'Testing…' : 'Test saved connection'}</Button>
+              <Button disabled={Boolean(action)} onClick={() => void apply('disconnect')} variant="quiet">{action === 'disconnect' ? 'Disconnecting…' : 'Disconnect'}</Button>
+            </> : null}
+          </div>
+        </FormStack></div>
+        {error && <div className="twingate-connection__feedback" role="alert"><Callout tone="danger">{error}</Callout></div>}
+        {notice && <p className="twingate-connection__feedback" role="status">{notice}</p>}
+      </section>
+      {connection.tenant && <TwingateResources key={connectionRevision} />}
+    </>}
+  </div>
 }

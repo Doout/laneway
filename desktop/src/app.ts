@@ -14,9 +14,8 @@ const peerLabel = (peer: Peer) => peer.name || shortIdentity(peer.node_id)
 
 const routeRow = (route: Route) => `
   <li class="route-row">
-    <span class="route-icon" aria-hidden="true">↗</span>
     <span><strong>${escapeHtml(route.prefix)}</strong><small>${escapeHtml(route.kind)}</small></span>
-    <code>${escapeHtml(shortIdentity(route.via_node))}</code>
+    ${route.via_node ? `<code title="${escapeHtml(route.via_node)}">${escapeHtml(shortIdentity(route.via_node))}</code>` : ''}
   </li>`
 
 export class LanewayDesktop {
@@ -57,8 +56,10 @@ export class LanewayDesktop {
   }
 
   private render() {
+    const refreshFocused = document.activeElement === this.root.querySelector('#refresh')
     this.root.innerHTML = this.snapshot ? this.renderSnapshot(this.snapshot) : this.renderUnavailable()
     this.bind()
+    if (refreshFocused) this.root.querySelector<HTMLButtonElement>('#refresh')?.focus({ preventScroll: true })
   }
 
   private shell(content: string, status = 'Local daemon') {
@@ -79,11 +80,9 @@ export class LanewayDesktop {
     const message = this.error || 'Looking for the local daemon…'
     return this.shell(`
       <main class="centered-state">
-        <div class="connection-orb connection-orb--muted" aria-hidden="true"></div>
-        <p class="eyebrow">Local connection</p>
         <h1>${this.busy ? 'Connecting' : 'Daemon unavailable'}</h1>
         <p>${escapeHtml(message)}</p>
-        <button class="button button--primary" id="refresh" type="button" ${this.busy ? 'disabled' : ''}>Try again</button>
+        <button class="button button--primary" id="refresh" type="button" aria-disabled="${this.busy}">Try again</button>
         <p class="boundary-note">Laneway only connects to a protected daemon owned by your account.</p>
       </main>`)
   }
@@ -112,22 +111,22 @@ export class LanewayDesktop {
             <h1>${escapeHtml(status.name || 'This device')}</h1>
             <p>${escapeHtml(connection.detail)}</p>
           </div>
-          <button class="icon-button" id="refresh" type="button" aria-label="Refresh local status" title="Refresh" ${this.busy ? 'disabled' : ''}>↻</button>
+          <button class="button" id="refresh" type="button" aria-label="Refresh local status" aria-disabled="${this.busy}"><span aria-hidden="true">↻</span> Refresh</button>
         </section>
         ${error}
 
-        <section class="summary-grid" aria-label="Connection summary">
-          <div><span>Network</span><strong title="${escapeHtml(status.network_id)}">${escapeHtml(shortIdentity(status.network_id))}</strong></div>
-          <div><span>Address</span><strong>${escapeHtml(status.overlay_addresses[0] || 'Not assigned')}</strong></div>
-          <div><span>Path</span><strong>${escapeHtml(fallbackLabel(status.selected_path))}</strong></div>
-          <div><span>Identity lease</span><strong>${escapeHtml(expiryLabel(status.controller.identity_lease_expires_at_unix_seconds))}</strong></div>
-        </section>
+        <dl class="summary-grid" aria-label="Connection summary">
+          <div><dt>Network</dt><dd><code title="${escapeHtml(status.network_id)}">${escapeHtml(shortIdentity(status.network_id))}</code></dd></div>
+          <div><dt>Address</dt><dd>${status.overlay_addresses[0] ? `<code>${escapeHtml(status.overlay_addresses[0])}</code>` : 'Not assigned'}</dd></div>
+          <div><dt>Path</dt><dd>${escapeHtml(fallbackLabel(status.selected_path))}</dd></div>
+          <div><dt>Identity lease</dt><dd>${escapeHtml(expiryLabel(status.controller.identity_lease_expires_at_unix_seconds))}</dd></div>
+        </dl>
 
         <div class="content-grid">
           <section class="panel routes-panel">
             <header class="panel-heading">
-              <div><p class="eyebrow">Reachable now</p><h2>Private routes</h2></div>
-              <span>${allRoutes.length}</span>
+              <h2>Private routes</h2>
+              <span class="panel-context">${allRoutes.length} active</span>
             </header>
             ${allRoutes.length > 0
               ? `<ul class="route-list">${allRoutes.map(routeRow).join('')}</ul>`
@@ -135,24 +134,21 @@ export class LanewayDesktop {
           </section>
 
           <aside class="panel session-panel">
-            <div class="panel-heading"><div><p class="eyebrow">Routing mode</p><h2>Exit</h2></div></div>
+            <header class="panel-heading"><h2>Exit</h2></header>
             <p>${escapeHtml(exitSummary)}</p>
-            <div class="exit-readout">
-              <span>Current exit</span>
-              <strong>${selectedExitPeer ? escapeHtml(peerLabel(selectedExitPeer)) : selectedExit ? escapeHtml(shortIdentity(selectedExit)) : 'None'}</strong>
-            </div>
             <dl class="session-facts">
+              <div class="exit-readout"><dt>Current exit</dt><dd>${selectedExitPeer ? escapeHtml(peerLabel(selectedExitPeer)) : selectedExit ? escapeHtml(shortIdentity(selectedExit)) : 'None'}</dd></div>
               <div><dt>Interface</dt><dd>${escapeHtml(status.interface || 'Not active')}</dd></div>
               <div><dt>Relay</dt><dd title="${escapeHtml(status.relay)}">${escapeHtml(status.relay || 'Not active')}</dd></div>
               <div><dt>Certificate</dt><dd>${escapeHtml(expiryLabel(status.controller.certificate_not_after_unix_seconds))}</dd></div>
               <div><dt>Version</dt><dd>${escapeHtml(status.product_version || 'Unknown')}</dd></div>
             </dl>
-            <div class="capability-summary" aria-label="Desktop capabilities">
-              <span><i class="capability-dot capability-dot--ready"></i>Status and private routes</span>
-              <span><i class="capability-dot ${exitAvailable ? 'capability-dot--ready' : ''}"></i>${exitAvailable ? 'Exit control available' : 'Exit control not available'}</span>
-              <span><i class="capability-dot ${snapshot.capabilities.snapshot_coherence ? 'capability-dot--ready' : ''}"></i>${snapshot.capabilities.snapshot_coherence ? 'Restart-safe snapshot' : 'Legacy snapshot; restart detection unavailable'}</span>
-              <span><i class="capability-dot"></i>${snapshot.capabilities.connection_control ? 'Connection control available' : 'Connect and profiles not available'}</span>
-            </div>
+            <ul class="capability-summary" aria-label="Desktop capabilities">
+              <li><i class="capability-dot capability-dot--ready" aria-hidden="true"></i>Status and private routes</li>
+              <li><i class="capability-dot ${exitAvailable ? 'capability-dot--ready' : ''}" aria-hidden="true"></i>${exitAvailable ? 'Exit control available' : 'Exit control not available'}</li>
+              <li><i class="capability-dot ${snapshot.capabilities.snapshot_coherence ? 'capability-dot--ready' : ''}" aria-hidden="true"></i>${snapshot.capabilities.snapshot_coherence ? 'Restart-safe snapshot' : 'Legacy snapshot; restart detection unavailable'}</li>
+              <li><i class="capability-dot ${snapshot.capabilities.connection_control ? 'capability-dot--ready' : ''}" aria-hidden="true"></i>${snapshot.capabilities.connection_control ? 'Connection control available' : 'Connect and profiles not available'}</li>
+            </ul>
           </aside>
         </div>
       </main>

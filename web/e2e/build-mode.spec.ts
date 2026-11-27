@@ -13,7 +13,7 @@ const permissions = [
   'network.list', 'network.read', 'network.create', 'enrollment.issue', 'bootstrap_bundle.create',
   'node.read', 'node.manage', 'route.read', 'route.manage', 'acl.read', 'acl.manage', 'relay.read',
   'relay.manage', 'certificate.read', 'certificate.revoke', 'audit.read', 'audit.read_global', 'principal.manage',
-  'session.manage_others', 'recovery.manage', 'root_token.rotate',
+  'session.manage_others', 'recovery.manage', 'root_token.rotate', 'integration.manage',
 ]
 
 type Network = {
@@ -126,7 +126,7 @@ test('compiled artifact preserves its declared authentication boundary', async (
   await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/laneway-mark.svg')
   await expect(page.locator('link[rel="apple-touch-icon"]')).toHaveAttribute('href', '/apple-touch-icon.png')
   await expect(page.locator('link[rel="manifest"]')).toHaveAttribute('href', '/site.webmanifest')
-  await expect(page.locator('.brand-mark')).toHaveAttribute('src', '/laneway-mark.svg')
+  await expect(page.locator('.brand-mark:visible')).toHaveAttribute('src', '/laneway-mark.svg')
   expect(await page.evaluate(() => [window.localStorage.getItem('laneway-console-admin-token'), window.sessionStorage.getItem('laneway-console-operator')])).toEqual([null, null])
 
   if (expectedMode === 'live') {
@@ -320,13 +320,101 @@ test('compiled live artifact keeps the workspace usable on a compact viewport an
   await expect(page.getByRole('button', { name: 'Use light theme' })).toBeVisible()
   expect(await page.evaluate(() => ({ theme: document.documentElement.dataset.theme, stored: window.localStorage.getItem('laneway-console-theme') }))).toEqual({ theme: 'dark', stored: 'dark' })
 
-  await page.getByRole('link', { name: 'Networks', exact: true }).click()
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Navigation' }).getByRole('link', { name: 'Networks', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Networks', exact: true })).toBeVisible()
   await page.getByRole('navigation', { name: 'Network workspace views' }).getByRole('link', { name: 'Nodes' }).click()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
-  await page.getByRole('link', { name: 'People' }).click()
+  await page.getByRole('button', { name: 'Menu', exact: true }).click()
+  await page.getByRole('dialog', { name: 'Navigation' }).getByRole('link', { name: 'People' }).click()
   await expect(page.getByRole('heading', { name: 'People' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0)
+})
+
+test('compiled live Twingate inventory keeps resource details readable and keyboard selectable', async ({ page }) => {
+  test.skip(expectedMode !== 'live', 'Live artifact contract')
+  const name = 'Production Kubernetes API for east region'
+  const address = 'cluster-control-plane.production.east.example.internal'
+  const alias = 'production-api.example.internal'
+  const network = 'East production network'
+  const tcp = 'TCP 443, 6443, 30000–32767'
+  const udp = 'UDP all ports'
+  await mockManagementApi(page, [controllerNetwork])
+  await page.route('**/v1/admin/integrations/twingate', (route) =>
+    route.fulfill({ headers: sessionHeaders(), json: { tenant: 'east', verified_at_unix_seconds: 1700000000 } }))
+  await page.route('**/v1/admin/integrations/twingate/resources', (route) => route.fulfill({
+    headers: sessionHeaders(),
+    json: {
+      total_count: 1, next_cursor: null,
+      resources: [{
+        id: 'resource-east', name, alias, kind: 'KubernetesResource', active: true,
+        address: { value: address }, remote_network: { name: network },
+        protocols: {
+          tcp: { policy: 'RESTRICTED', ports: [{ start: 443, end: 443 }, { start: 6443, end: 6443 }, { start: 30000, end: 32767 }] },
+          udp: { policy: 'ALLOW_ALL', ports: [] }, allow_icmp: true,
+        },
+      }],
+    },
+  }))
+
+  await signIn(page)
+  await page.getByRole('link', { name: 'Infrastructure', exact: true }).click()
+  await page.getByRole('link', { name: /Twingate/ }).click()
+  const inventory = page.getByRole('region', { name: 'Resources', exact: true })
+  const checkbox = inventory.getByRole('checkbox', { name: `Select ${name}` })
+  const row = inventory.getByRole('row').filter({ hasText: name })
+  await expect(page.getByRole('heading', { name: 'east.twingate.com' })).toBeVisible()
+  const values = [name, 'Kubernetes', address, alias, network, tcp, udp, 'ICMP', 'Active']
+  for (const value of values) await expect(row.getByText(value, { exact: true })).toBeVisible()
+  await page.evaluate(() => document.fonts.ready)
+
+  for (const theme of ['light', 'dark']) {
+    if (theme === 'dark') await page.getByRole('button', { name: 'Use dark theme' }).click()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme)
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 })
+      const details = await row.evaluate((element, values) => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+        const bounds: Record<string, { top: number; bottom: number }> = {}
+        const clipped: string[] = []
+        while (walker.nextNode()) {
+          const node = walker.currentNode
+          const value = node.textContent?.trim() ?? ''
+          const cell = node.parentElement?.closest('td')
+          if (!values.includes(value) || !cell) continue
+          const range = document.createRange()
+          range.selectNodeContents(node)
+          const text = range.getBoundingClientRect()
+          bounds[value] = { top: text.top, bottom: text.bottom }
+          // A text range retains its full width even when CSS clips it with an ellipsis.
+          for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+            const rect = parent.getBoundingClientRect()
+            if (parent === cell || getComputedStyle(parent).overflowX !== 'visible') {
+              if (text.left < rect.left - 1 || text.right > rect.right + 1) clipped.push(value)
+            }
+            if (parent === cell) break
+          }
+        }
+        return { bounds, clipped, pageWidth: document.documentElement.scrollWidth, firstRowOffset: element.getBoundingClientRect().top + window.scrollY }
+      }, values)
+      const context = `${theme} at ${width}px`
+      expect(Object.keys(details.bounds).sort(), context).toEqual([...values].sort())
+      if (width === 390) expect(details.firstRowOffset, context).toBeLessThan(300)
+      expect(details.clipped, context).toEqual([])
+      expect(details.pageWidth, context).toBeLessThanOrEqual(width)
+      for (const [first, second] of [[name, 'Kubernetes'], [address, alias], [tcp, udp], [udp, 'ICMP']]) {
+        expect(details.bounds[second].top, context).toBeGreaterThanOrEqual(details.bounds[first].bottom - 1)
+      }
+
+      await checkbox.focus()
+      await page.keyboard.press('Space')
+      await expect(checkbox).toBeChecked()
+      await expect(inventory.getByRole('button', { name: 'Copy 1 selected' })).toBeVisible()
+      await page.keyboard.press('Space')
+      await expect(checkbox).not.toBeChecked()
+      await expect(inventory.getByText('0 selected', { exact: true })).toBeVisible()
+    }
+  }
 })
 
 test('a two-tab logout wins over a racing session rotation', async ({ context }) => {

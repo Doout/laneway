@@ -27,6 +27,7 @@ import { controllerOrigin, useControlPlane } from '../../lib/control-plane'
 import { userEnrollmentCommand } from '../../lib/enrollment-commands'
 import { controllerUsers } from '../../lib/live-records'
 import { attributed, persistedUsers, readDemoState, updateDemoState } from '../../lib/persisted-demo-state'
+import { SummaryStrip } from '../live/shared'
 import './users.css'
 
 const userToken = 'lnw_user_01J8PLATFORM_7gN2mK6xV4qC'
@@ -62,17 +63,20 @@ export function UsersListPage() {
 
   return <div className="users-page">
     <PageHeader title="Users" action={canIssueEnrollment ? <Button to="/users/new" variant="primary"><KeyRound size={17} />Issue access</Button> : undefined} />
-    <div className="users-health-strip" aria-label="User access summary">
-      <div><strong>{activeCount}</strong><span>Active enrollments</span></div><div><strong>{live ? records.length : records.reduce((total, user) => total + user.devices, 0)}</strong><span>{live ? 'Enrollment nodes' : 'Enrolled devices'}</span></div><div><strong>{ephemeralCount}</strong><span>{live ? 'Ephemeral enrollment nodes' : 'Ephemeral enrollments'}</span></div>{live ? <div><strong>{records.length - activeCount}</strong><span>Inactive enrollments</span></div> : null}
-    </div>
+    <SummaryStrip label="User access summary" items={[
+      { label: 'Active enrollments', value: activeCount },
+      { label: live ? 'Enrollment nodes' : 'Enrolled devices', value: live ? records.length : records.reduce((total, user) => total + user.devices, 0) },
+      { label: live ? 'Ephemeral enrollment nodes' : 'Ephemeral enrollments', value: ephemeralCount },
+      ...(live ? [{ label: 'Inactive enrollments', value: records.length - activeCount }] : []),
+    ]} />
     <div className="users-table-space">
       <Toolbar filters={<>
-        <div className="users-segments" aria-label="Enrollment type"><button className={kind === 'all' ? 'is-active' : ''} onClick={() => setKind('all')}>All</button><button className={kind === 'Remembered' ? 'is-active' : ''} onClick={() => setKind('Remembered')}>Remembered</button><button className={kind === 'Ephemeral' ? 'is-active' : ''} onClick={() => setKind('Ephemeral')}>Ephemeral</button></div>
+        <div className="users-segments" role="group" aria-label="Enrollment type"><button type="button" aria-pressed={kind === 'all'} onClick={() => setKind('all')}>All</button><button type="button" aria-pressed={kind === 'Remembered'} onClick={() => setKind('Remembered')}>Remembered</button><button type="button" aria-pressed={kind === 'Ephemeral'} onClick={() => setKind('Ephemeral')}>Ephemeral</button></div>
         <FilterSelect label="Filter by state" value={state} onChange={setState}><option value="all">Any state</option><option>Active</option><option>Expired</option><option>Revoked</option></FilterSelect>
         <span className="users-result-count" aria-live="polite">{filteredUsers.length} shown</span>
       </>}><SearchField label="Search user enrollments" placeholder={`Search name, network, or ${live ? 'node' : 'enrollment'} ID`} value={query} onChange={setQuery} /></Toolbar>
       <div className="users-workspace">
-        <section className="users-panel users-inventory" aria-label="User access inventory"><DataTable
+        <section className="users-inventory" aria-label="User access inventory"><DataTable
           rows={filteredUsers}
           rowKey={user => user.id}
           empty={<EmptyState icon={<Users />} title="No enrollments match" description="No records match the current filters." action={<Button onClick={() => { setQuery(''); setKind('all'); setState('all') }}><RotateCcw size={16} />Reset filters</Button>} />}

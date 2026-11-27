@@ -26,6 +26,7 @@ import { useControlPlane, type ControllerACLRule } from '../../lib/control-plane
 import { isCanonicalIpPrefix } from '../../lib/ip-prefix'
 import { controllerRules } from '../../lib/live-records'
 import { attributed, persistedAccessRules, readDemoState, updateDemoState } from '../../lib/persisted-demo-state'
+import { SummaryStrip } from '../live/shared'
 import './access-pages.css'
 
 type RuleFormState = {
@@ -142,9 +143,14 @@ export function AccessRulesPage() {
       title="Access rules"
       action={canManageRules ? <Button variant="primary" to="/access/new"><ShieldCheck aria-hidden="true" size={17} />New rule</Button> : undefined}
     />
-    <div className="access-health-strip" aria-label="Access policy summary"><div><strong>{enabledCount}</strong><span>Enabled rules</span></div><div><strong>{records.length - enabledCount}</strong><span>Disabled rules</span></div><div><strong>{records.filter(rule => rule.action === 'Allow').length}</strong><span>Accept rules</span></div><div><strong>{live ? inventory?.network?.configuration_epoch ?? '—' : 418}</strong><span>Configuration epoch</span></div></div>
+    <SummaryStrip label="Access policy summary" items={[
+      { label: 'Enabled rules', value: enabledCount },
+      { label: 'Disabled rules', value: records.length - enabledCount },
+      { label: 'Accept rules', value: records.filter(rule => rule.action === 'Allow').length },
+      { label: 'Configuration epoch', value: live ? inventory?.network?.configuration_epoch ?? '—' : 418 },
+    ]} />
     <Toolbar filters={<>
-      <div className="access-segments" aria-label="Rule action"><button className={action === 'all' ? 'is-active' : ''} onClick={() => setAction('all')}>All</button><button className={action === 'allow' ? 'is-active' : ''} onClick={() => setAction('allow')}>Accept</button><button className={action === 'deny' ? 'is-active' : ''} onClick={() => setAction('deny')}>Deny</button></div>
+      <div className="access-segments" role="group" aria-label="Rule action"><button type="button" aria-pressed={action === 'all'} onClick={() => setAction('all')}>All</button><button type="button" aria-pressed={action === 'allow'} onClick={() => setAction('allow')}>Accept</button><button type="button" aria-pressed={action === 'deny'} onClick={() => setAction('deny')}>Deny</button></div>
       <FilterSelect label="Filter by state" value={enabled} onChange={setEnabled}>
         <option value="all">All states</option>
         <option value="enabled">Enabled</option>
@@ -154,7 +160,7 @@ export function AccessRulesPage() {
     </>}>
       <SearchField label="Search access rules" placeholder={live ? 'Search description or selector' : 'Search description, selector, or destination'} value={query} onChange={setQuery} />
     </Toolbar>
-    <div className="access-workspace"><section className="access-panel access-inventory"><DataTable
+    <div className="access-workspace"><section className="access-inventory"><DataTable
         rows={visibleRules}
         rowKey={rule => rule.id}
         columns={[

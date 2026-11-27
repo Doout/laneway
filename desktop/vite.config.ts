@@ -4,6 +4,8 @@ import { defineConfig } from 'vitest/config'
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url))
 
 export default defineConfig({
+  // Ship the license notices alongside the fonts bundled from the console.
+  publicDir: fileURLToPath(new URL('../web/public/fonts/', import.meta.url)),
   build: {
     sourcemap: false,
     target: 'es2022',

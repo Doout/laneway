@@ -1,4 +1,4 @@
-.applications-page, .application-consent-page { display: grid; gap: 20px; }
+.applications-page, .application-consent-page { display: grid; gap: 16px; }
 .applications-page > .page-header, .application-consent-page > .page-header { margin-bottom: 0; }
 .applications-page .section { min-width: 0; }
 .applications-page .data-table th:nth-child(1) { width: 25%; }
@@ -7,22 +7,22 @@
 .applications-page .data-table th:nth-child(4) { width: 12%; }
 .applications-page .data-table th:nth-child(5) { width: 22%; }
 .application-name { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
-.application-name > span:first-child { display: grid; flex: 0 0 auto; place-items: center; width: 35px; height: 35px; color: var(--primary); background: var(--primary-soft); border: 1px solid var(--primary-border); border-radius: 9px; }
+.application-name > span:first-child { display: grid; flex: 0 0 auto; place-items: center; width: 30px; height: 30px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }
 .application-name strong, .application-name small, .application-table-detail { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .application-name small, .application-table-detail { margin-top: 2px; color: var(--faint); font-size: .7rem; }
-.button-row.compact { flex-wrap: nowrap; justify-content: flex-end; }
-.application-secret { display: grid; gap: 13px; padding: 16px; background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent); border-radius: 14px; box-shadow: var(--shadow-sm); }
+.applications-page .button-row.compact { flex-wrap: wrap; justify-content: flex-end; }
+.application-secret { display: grid; gap: 13px; padding: 16px; background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent); border-radius: var(--radius); }
 .application-secret > div:first-child { display: flex; align-items: center; gap: 10px; }
 .application-secret p { margin: 2px 0 0; font-size: .75rem; }
 .application-secret .token-box { margin: 0; }
 .application-secret > .button { justify-self: end; }
 .application-consent-layout { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(260px, .65fr); gap: 18px; align-items: start; }
-.application-consent-card, .application-consent-summary { min-width: 0; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; box-shadow: var(--shadow-sm); }
+.application-consent-card, .application-consent-summary { min-width: 0; padding: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .application-consent-summary { position: sticky; top: 82px; }
 .application-consent-summary p { margin: 18px 0 0; font-size: .78rem; }
 .application-consent-summary code { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .application-consent-identity { display: flex; align-items: center; gap: 13px; min-width: 0; margin-bottom: 24px; }
-.application-consent-identity > span { display: grid; flex: 0 0 auto; place-items: center; width: 46px; height: 46px; color: var(--primary); background: var(--primary-soft); border: 1px solid var(--primary-border); border-radius: 12px; }
+.application-consent-identity > span { display: grid; flex: 0 0 auto; place-items: center; width: 38px; height: 38px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }
 .application-consent-identity h2 { margin: 0 0 3px; overflow-wrap: anywhere; }
 .application-consent-identity a, .application-consent-identity small { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: .75rem; }
 .application-consent-identity.compact { margin-bottom: 12px; }
@@ -40,14 +40,14 @@ label.application-scope-row { cursor: pointer; }
 .application-scopes small { margin-top: 2px; color: var(--muted); font-size: .72rem; line-height: 1.4; }
 .application-consent-actions { display: flex; justify-content: flex-end; gap: 9px; }
 .application-registration-consent { width: min(100%, 1040px); margin-inline: auto; }
-.application-registration-panel { min-width: 0; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow-sm); }
-.application-registration-header { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 15px; align-items: center; padding: 24px 26px; border-bottom: 1px solid var(--border); }
-.application-registration-icon { display: grid; place-items: center; width: 52px; height: 52px; color: var(--primary); background: var(--primary-soft); border: 1px solid var(--primary-border); border-radius: 13px; }
+.application-registration-panel { min-width: 0; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.application-registration-header { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 12px; align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.application-registration-icon { display: grid; place-items: center; width: 36px; height: 36px; color: var(--muted); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }
 .application-registration-header p { margin: 0 0 3px; color: var(--muted); font-size: .72rem; font-weight: 600; }
-.application-registration-header h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; overflow-wrap: anywhere; }
+.application-registration-header h1 { margin: 0; font-size: var(--font-heading-size, 1.5rem); overflow-wrap: anywhere; }
 .application-registration-header a { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--muted); font-size: .75rem; }
 .application-registration-body { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, .85fr); }
-.application-registration-permissions, .application-registration-details { min-width: 0; padding: 24px 26px; }
+.application-registration-permissions, .application-registration-details { min-width: 0; padding: 16px 18px; }
 .application-registration-details { background: var(--surface-raised); border-left: 1px solid var(--border); }
 .application-registration-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
 .application-registration-section-heading h2, .application-registration-details h2 { margin: 0; font-size: .95rem; letter-spacing: -.01em; }
@@ -62,7 +62,7 @@ label.application-scope-row { cursor: pointer; }
 .application-registration-details ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
 .application-registration-details code { display: block; max-width: 100%; color: var(--text); font-size: .72rem; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
 .application-registration-url > span { white-space: nowrap; }
-.application-registration-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 16px 26px; border-top: 1px solid var(--border); }
+.application-registration-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--border); }
 .application-registration-boundary { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; align-items: start; color: var(--muted); }
 .application-registration-boundary svg { margin-top: 1px; color: var(--accent); }
 .application-registration-boundary p { margin: 0; max-width: 620px; font-size: .72rem; line-height: 1.45; }
