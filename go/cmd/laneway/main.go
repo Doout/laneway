@@ -606,6 +606,11 @@ func firstCertificatePEM(contents []byte) (*x509.Certificate, error) {
 }
 
 func runLocal(command string, args []string) error {
+	if flagProvided(args, "socket") {
+		if handled, err := tryNativeCommand([]string{command}, args); handled || err != nil {
+			return err
+		}
+	}
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	path := fs.String("config", "/etc/laneway/laneway.toml", "configuration file")
 	socket := fs.String("socket", "", "local daemon Unix socket (bypasses configuration loading)")
@@ -777,6 +782,14 @@ func runConfigInspectControllerInitialNetwork(args []string) error {
 }
 
 func runPKI(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "init", "intermediate", "verify-authority", "node", "relay", "controller":
+			if handled, err := tryNativeCommand([]string{"pki"}, args); handled || err != nil {
+				return err
+			}
+		}
+	}
 	if len(args) == 0 {
 		return errors.New("usage: laneway pki <init|intermediate|verify-authority|node|relay|controller>")
 	}

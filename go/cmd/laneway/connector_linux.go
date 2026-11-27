@@ -37,6 +37,12 @@ func runConnector(args []string) error {
 		return errors.New("usage: laneway connector <activate|bootstrap-seal|bootstrap-activate|configure|run|validate>")
 	}
 	switch args[0] {
+	case "activate", "bootstrap-seal", "bootstrap-activate", "configure", "run", "validate":
+		if handled, err := tryNativeCommand([]string{"connector"}, args); handled || err != nil {
+			return err
+		}
+	}
+	switch args[0] {
 	case "configure":
 		fs := flag.NewFlagSet("connector configure", flag.ContinueOnError)
 		stateDir := fs.String("state-dir", "/var/lib/laneway/connector", "persistent Connector state directory")

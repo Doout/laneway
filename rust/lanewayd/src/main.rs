@@ -8,7 +8,26 @@ use lanewayd_rs::{Agent, Config};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<ExitCode> {
-    let mut args = env::args_os().skip(1);
+    let mut args = env::args_os();
+    let executable = args.next().unwrap_or_default();
+    #[cfg(target_os = "linux")]
+    if std::path::Path::new(&executable)
+        .file_name()
+        .is_some_and(|name| name == "laneway")
+    {
+        let args = args.collect::<Vec<_>>();
+        if matches!(args.as_slice(), [flag] if flag == "version" || flag == "--version" || flag == "-version")
+        {
+            println!(
+                "{}",
+                option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        return client_cli::run_installed(args).map(|()| ExitCode::SUCCESS);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = executable;
     let first = args.next();
     let result = match first.as_deref().and_then(|arg| arg.to_str()) {
         #[cfg(any(target_os = "linux", target_os = "macos"))]

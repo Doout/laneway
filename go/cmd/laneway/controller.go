@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -69,6 +70,24 @@ func (f remoteFlags) client() (*controllerclient.Client, error) {
 	return controllerclient.New(options)
 }
 
+// Keep the legacy flag spellings and help output while the packaged CLI
+// dispatches the regular resource commands to the native client.
+func tryNativeController(command string, args []string, actions ...string) (bool, error) {
+	if len(actions) != 0 && (len(args) == 0 || !slices.Contains(actions, args[0])) {
+		return false, nil
+	}
+	return tryNativeCommand([]string{"controller", command}, args)
+}
+
+func tryNativeCommand(prefix, args []string) (bool, error) {
+	for _, arg := range args {
+		if arg == "--help" || (strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--")) {
+			return false, nil
+		}
+	}
+	return tryNativeClient(append(prefix, args...)...)
+}
+
 func runController(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: laneway controller <overview|administrator|network|enrollment-token|bootstrap-bundle|route|acl|node|certificate|relay|audit> ...")
@@ -102,6 +121,9 @@ func runController(args []string) error {
 }
 
 func runControllerBootstrapBundle(args []string) error {
+	if handled, err := tryNativeController("bootstrap-bundle", args, "create"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 || args[0] != "create" {
 		return errors.New("usage: laneway controller bootstrap-bundle create --payload-file PATH --expires-at UNIX [controller options]")
 	}
@@ -141,6 +163,9 @@ func runControllerBootstrapBundle(args []string) error {
 }
 
 func runControllerCertificate(args []string) error {
+	if handled, err := tryNativeController("certificate", args, "revoke", "list"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 || (args[0] != "revoke" && args[0] != "list") {
 		return errors.New("usage: laneway controller certificate <revoke|list> [options]")
 	}
@@ -203,6 +228,9 @@ func runControllerCertificate(args []string) error {
 }
 
 func runControllerRelay(args []string) error {
+	if handled, err := tryNativeController("relay", args, "register", "update", "disable", "list"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("usage: laneway controller relay <register|update|disable|list> [options]")
 	}
@@ -320,6 +348,9 @@ func runControllerRelay(args []string) error {
 }
 
 func runControllerNetwork(args []string) error {
+	if handled, err := tryNativeController("network", args, "create", "list", "get"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("usage: laneway controller network <create|get|list> [options]")
 	}
@@ -413,6 +444,9 @@ func runControllerNetwork(args []string) error {
 }
 
 func runControllerEnrollmentToken(args []string) error {
+	if handled, err := tryNativeController("enrollment-token", args, "issue"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 || args[0] != "issue" {
 		return errors.New("usage: laneway controller enrollment-token issue --network-id ID --label LABEL [--class durable|ephemeral|remembered] [--session-lifetime 8h] [--expires-in 1h] [connection options]")
 	}
@@ -471,6 +505,9 @@ func runControllerEnrollmentToken(args []string) error {
 }
 
 func runControllerRoute(args []string) error {
+	if handled, err := tryNativeController("route", args, "advertise", "assign", "approve", "withdraw", "list"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("usage: laneway controller route <advertise|assign|withdraw|approve|list> [options]")
 	}
@@ -725,6 +762,9 @@ func resolveControllerNode(ctx context.Context, client *controllerclient.Client,
 }
 
 func runControllerACL(args []string) error {
+	if handled, err := tryNativeController("acl", args, "add", "delete", "list"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("usage: laneway controller acl <add|delete|list> [options]")
 	}
@@ -824,6 +864,9 @@ func runControllerACL(args []string) error {
 }
 
 func runControllerNode(args []string) error {
+	if handled, err := tryNativeController("node", args, "list", "revoke", "capabilities"); handled || err != nil {
+		return err
+	}
 	if len(args) == 0 || (args[0] != "revoke" && args[0] != "capabilities" && args[0] != "list") {
 		return errors.New("usage: laneway controller node <revoke|capabilities|list> [options]")
 	}
@@ -898,6 +941,9 @@ func runControllerNode(args []string) error {
 }
 
 func runControllerAudit(args []string) error {
+	if handled, err := tryNativeController("audit", args); handled || err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("controller audit", flag.ContinueOnError)
 	remote := addRemoteFlags(fs, false, true)
 	networkText := fs.String("network-id", "", "network ID")
