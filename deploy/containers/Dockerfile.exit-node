@@ -42,19 +42,22 @@ RUN apk add --no-cache \
     && addgroup -g 65532 laneway \
     && adduser -D -H -u 65532 -G laneway laneway \
     && install -d -o 65532 -g 65532 -m 0700 /var/lib/laneway /run/laneway
-COPY --from=build /out/laneway /usr/local/bin/laneway
 RUN apk add --no-cache --virtual .cap-tools libcap-setcap=2.78-r0 \
     && setcap cap_net_admin=ep /bin/setpriv \
     && apk del .cap-tools
 USER 65532:65532
 
 FROM base AS go-exit
+COPY --from=build /out/laneway /usr/local/bin/laneway
 COPY --from=go-healthcheck /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
 ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]
 
 FROM base AS rust-exit
 COPY --from=node-binary /lanewayd-rs /usr/local/bin/lanewayd-rs
+USER 0:0
+RUN ln -s lanewayd-rs /usr/local/bin/laneway
+USER 65532:65532
 COPY --chmod=0755 deploy/containers/run-rust-exit /usr/local/bin/run-rust-exit
 ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/run-rust-exit"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]

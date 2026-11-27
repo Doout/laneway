@@ -11,6 +11,7 @@ if [[ "$(id -u)" != "0" ]]; then
 fi
 required_commands=(ip nft grep sed)
 [[ -n "${LANEWAY_NODE_TEST_STREAM_PROBE:-}" ]] || required_commands+=(rustc)
+[[ -n "${LANEWAY_NODE_TEST_INSPECT_PROBE:-}" ]] || required_commands+=(cargo)
 [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" && "${LANEWAY_NODE_WIREGUARD_NATIVE:-1}" == "1" ]] || required_commands+=(cargo)
 [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]] || required_commands+=(go)
 for command in "${required_commands[@]}"; do
@@ -224,7 +225,7 @@ wait_relay_sessions() {
   local expected="$1"
   for _ in $(seq 1 240); do
     local sessions
-    sessions="$(ip netns exec "${relay_ns}" "${work_dir}/netprobe" metric \
+    sessions="$(ip netns exec "${relay_ns}" "${work_dir}/netprobe-inspect" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
     if [[ "${sessions}" == "${expected}" ]]; then
       return 0
@@ -317,6 +318,13 @@ if [[ -n "${LANEWAY_NODE_TEST_STREAM_PROBE:-}" ]]; then
 else
   rustc --edition 2024 -O "${repo_root}/integration/netprobe-stream.rs" -o "${work_dir}/netprobe-stream"
 fi
+if [[ -n "${LANEWAY_NODE_TEST_INSPECT_PROBE:-}" ]]; then
+  install -m 0755 "$LANEWAY_NODE_TEST_INSPECT_PROBE" "${work_dir}/netprobe-inspect"
+else
+  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+    --target-dir "${repo_root}/rust/target" -p lanewayd-rs --bin laneway-inspect-probe
+  install -m 0755 "${repo_root}/rust/target/debug/laneway-inspect-probe" "${work_dir}/netprobe-inspect"
+fi
 if [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]]; then
   for fixture in laneway lanewayd laneway-relay netprobe rustnodecontroller; do
     install -m 0755 "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR}/${fixture}" "${work_dir}/${fixture}"
@@ -334,6 +342,10 @@ fi
 if [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" ]]; then
   runtime_dir="${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR}"
   install -m 0755 "${runtime_dir}/lanewayd-rs" "${work_dir}/rust-node"
+  if [[ -f "${runtime_dir}/laneway" ]]; then
+    mkdir "${work_dir}/native-cli"
+    install -m 0755 "${runtime_dir}/laneway" "${work_dir}/native-cli/laneway"
+  fi
   if [[ "${node_controller}" == "rust" ]]; then
     install -m 0755 "${runtime_dir}/laneway-controller-rs" "${work_dir}/rust-controller"
     install -m 0755 "${runtime_dir}/laneway-relay-rs" "${work_dir}/rust-relay"
@@ -1029,12 +1041,16 @@ if [[ -n "${packaged_node}" ]]; then
 fi
 
 echo "==> Rust node bootstraps and renews its certificate at the ${node_controller} controller"
-old_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/rust.crt")"
+if [[ ! -x "${work_dir}/native-cli/laneway" ]]; then
+  mkdir "${work_dir}/native-cli"
+  ln "${work_dir}/rust-node" "${work_dir}/native-cli/laneway"
+fi
+old_info="$("${work_dir}/netprobe-inspect" certificate-info -cert "${work_dir}/pki/rust.crt")"
 old_serial="${old_info##* serial=}"
 [[ "${old_serial}" =~ ^[0-9a-f]{2,64}$ ]]
 initial_key_hash="$(sha256sum "${work_dir}/pki/rust.key")"
 start_process "${rust_ns}" "${work_dir}/rust.log" env RUST_LOG=info \
-  "${work_dir}/rust-node" --config "${work_dir}/rust.toml"
+  "${work_dir}/native-cli/laneway" node run -config "${work_dir}/rust.toml"
 rust_pid="${last_pid}"
 if [[ "${node_controller}" == "go" ]]; then
   wait_log "${controller_pid}" "${work_dir}/controller.log" "holding initial node configuration request"
@@ -1055,7 +1071,7 @@ if [[ "$(grep -c 'native Rust Laneway agent started' "${work_dir}/rust.log")" -l
   tail -25 "${work_dir}/rust.log" >&2
   exit 1
 fi
-new_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/rust.crt")"
+new_info="$("${work_dir}/netprobe-inspect" certificate-info -cert "${work_dir}/pki/rust.crt")"
 [[ "${new_info% serial=*}" == "${old_info% serial=*}" && "${new_info##* serial=}" != "${old_serial}" ]]
 [[ "$(sha256sum "${work_dir}/pki/rust.key")" == "${initial_key_hash}" ]]
 echo "==> revoking the superseded Rust certificate before testing routed traffic"
@@ -1078,7 +1094,7 @@ fi
 if [[ "${test_dns}" == "1" ]]; then
   echo "==> the Rust node serves only its scoped private catalog over UDP"
   dns_probe() {
-    ip netns exec "${rust_ns}" "${work_dir}/netprobe" dns -address "${private_dns_listen}" "$@"
+    ip netns exec "${rust_ns}" "${work_dir}/netprobe-inspect" dns -address "${private_dns_listen}" "$@"
   }
   dns_name="n-${rust_id}.${network_id}.laneway.internal"
   dns_probe -name "${dns_name}" -answer "${rust_address}"
@@ -1265,7 +1281,7 @@ for _ in $(seq 1 200); do
 done
 ip netns exec "${gateway_ns}" nft list table inet laneway | grep -q '192.168.77.0/24'
 relay_forwarded_packets() {
-  ip netns exec "${relay_ns}" "${work_dir}/netprobe" metric \
+  ip netns exec "${relay_ns}" "${work_dir}/netprobe-inspect" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total
 }
 if [[ "${node_controller}" == "rust" ]]; then
@@ -1403,7 +1419,7 @@ if [[ "${node_controller}" == "rust" ]]; then
 fi
 
 echo "==> certificate revocation closes the established gateway path"
-gateway_info="$("${work_dir}/netprobe" certificate-info -cert "${work_dir}/pki/gateway.crt")"
+gateway_info="$("${work_dir}/netprobe-inspect" certificate-info -cert "${work_dir}/pki/gateway.crt")"
 gateway_serial="$(printf '%s\n' "${gateway_info}" | sed -n 's/.* serial=\([0-9a-f]*\)$/\1/p')"
 if [[ ! "${gateway_serial}" =~ ^[0-9a-f]{2,64}$ ]]; then
   echo "ERROR: failed to extract the gateway certificate serial" >&2

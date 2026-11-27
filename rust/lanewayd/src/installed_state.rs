@@ -127,6 +127,12 @@ struct StoredExit {
     #[cfg(target_os = "linux")]
     #[serde(default)]
     failure_mode: String,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    dns_servers: Vec<std::net::IpAddr>,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    local_lan_bypasses: Vec<ipnet::IpNet>,
 }
 
 #[derive(Default, Deserialize)]
@@ -214,6 +220,8 @@ enum InstalledRole<'a> {
     Connector(&'a Path),
     ExitGateway,
     #[cfg(target_os = "linux")]
+    Persistent,
+    #[cfg(target_os = "linux")]
     SharedHost,
 }
 
@@ -265,6 +273,18 @@ impl Config {
             );
         }
         stored.convert(tls, InstalledRole::ExitGateway)
+    }
+
+    /// Load an existing controller-managed Go node without modifying its files.
+    #[cfg(target_os = "linux")]
+    pub fn load_persistent_node(path: &Path) -> Result<Self> {
+        let stored = Stored::read(path)?;
+        let tls = TlsConfig {
+            certificate: stored.tls.certificate.clone(),
+            private_key: stored.tls.private_key.clone(),
+            ca: stored.tls.ca.clone(),
+        };
+        stored.convert(tls, InstalledRole::Persistent)
     }
 
     #[cfg(target_os = "linux")]
@@ -336,9 +356,19 @@ impl Stored {
         let shared_host = matches!(role, InstalledRole::SharedHost);
         #[cfg(not(target_os = "linux"))]
         let shared_host = false;
+        #[cfg(target_os = "linux")]
+        let persistent = matches!(role, InstalledRole::Persistent);
+        #[cfg(not(target_os = "linux"))]
+        let persistent = false;
         let (userspace, state_dir, supported) = match role {
             InstalledRole::Connector(directory) => (true, directory, modern || legacy),
             InstalledRole::ExitGateway => (false, self.state_dir.as_path(), legacy),
+            #[cfg(target_os = "linux")]
+            InstalledRole::Persistent => (
+                self.connector.userspace,
+                self.state_dir.as_path(),
+                !self.exit.serve || (nat && !self.routing.output_interface.is_empty()),
+            ),
             #[cfg(target_os = "linux")]
             InstalledRole::SharedHost => (
                 false,
@@ -359,12 +389,11 @@ impl Stored {
             self.mode == "node"
                 && supported
                 && self.wireguard.enabled == shared_host
-                && !self.exit.enabled
-                && self.exit.selected_node_id.is_empty()
+                && (persistent || (!self.exit.enabled && self.exit.selected_node_id.is_empty()))
                 && (self.exit.lease_generation != 0) == shared_host
                 && self.peers.is_empty()
                 && self.node.overlay_addresses.is_empty()
-                && self.routing.advertise.is_empty(),
+                && (persistent || self.routing.advertise.is_empty()),
             "saved configuration does not match the requested node role"
         );
         ensure!(
@@ -384,7 +413,7 @@ impl Stored {
             .context("invalid installed controller QUIC endpoint")?;
         let relay = canonical_host_port(&self.node.relay_address)
             .context("invalid saved relay endpoint")?;
-        let relay_name = if shared_host && self.tls.server_name.is_empty() {
+        let relay_name = if (shared_host || persistent) && self.tls.server_name.is_empty() {
             relay
                 .rsplit_once(':')
                 .context("invalid shared-host relay")?
@@ -424,6 +453,48 @@ impl Stored {
                 self.direct.listen
             };
             listen.parse().context("invalid saved UDP bind address")?
+        };
+        let forwarding = if userspace || (persistent && !self.exit.serve) {
+            ForwardingConfig::default()
+        } else {
+            ForwardingConfig {
+                exit_gateway: true,
+                exit_gateway_controller_sources: true,
+                exit_output_interface: Some(self.routing.output_interface.clone()),
+                ..ForwardingConfig::default()
+            }
+        };
+        #[cfg(target_os = "linux")]
+        let forwarding = {
+            let mut forwarding = forwarding;
+            if persistent {
+                forwarding.subnet_router = !userspace && !self.routing.advertise.is_empty();
+                for prefix in self.routing.advertise {
+                    let prefix = prefix.parse()?;
+                    forwarding.subnet_routes.push(SubnetForwardConfig {
+                        prefix,
+                        mode: if nat {
+                            ForwardMode::Nat
+                        } else {
+                            ForwardMode::Routed
+                        },
+                        output_interface: self.routing.output_interface.clone(),
+                    });
+                }
+                let exit = &mut forwarding.exit_client;
+                exit.enabled = self.exit.enabled;
+                exit.authorized = self.exit.enabled;
+                exit.selected_node = Some(self.exit.selected_node_id).filter(|id| !id.is_empty());
+                exit.failure_mode = match self.exit.failure_mode.as_str() {
+                    "" => ExitFailureMode::Unspecified,
+                    "open" => ExitFailureMode::Open,
+                    "closed" => ExitFailureMode::Closed,
+                    _ => anyhow::bail!("invalid exit.failure_mode"),
+                };
+                exit.local_lan_bypass = self.exit.local_lan_bypasses;
+                exit.dns_servers = self.exit.dns_servers;
+            }
+            forwarding
         };
         let config = Config {
             foreground_routes: None,
@@ -492,16 +563,7 @@ impl Stored {
             },
             routes: vec![],
             direct_peers: vec![],
-            forwarding: if userspace {
-                ForwardingConfig::default()
-            } else {
-                ForwardingConfig {
-                    exit_gateway: true,
-                    exit_gateway_controller_sources: true,
-                    exit_output_interface: Some(self.routing.output_interface),
-                    ..ForwardingConfig::default()
-                }
-            },
+            forwarding,
             diagnostics: DiagnosticsConfig::default(),
         };
         config.validate()?;

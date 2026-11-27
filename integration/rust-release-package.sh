@@ -63,6 +63,7 @@ tar -xzf "$archive" -C "$probe_dir"
 package=$probe_dir/laneway
 control_root=$probe_dir/control-tool-install
 DESTDIR="$control_root" PREFIX=/usr/local sh "$package/install.sh" --control-tools >/dev/null
+cmp "$package/bin/laneway" "$package/sbin/lanewayd-rs"
 cmp "$package/bin/laneway" "$control_root/usr/local/bin/laneway"
 test -x "$control_root/usr/local/share/laneway/deploy/compose/install-control-plane.sh"
 test -f "$control_root/usr/local/share/laneway/deploy/compose/compose.rust.yaml"

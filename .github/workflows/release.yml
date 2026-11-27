@@ -154,7 +154,6 @@ jobs:
           name: laneway-linux-${{ matrix.arch }}
           path: dist
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: matrix.check == 'fleet-update'
         with:
           name: release-fixture-${{ matrix.arch }}
           path: ${{ runner.temp }}
@@ -179,18 +178,19 @@ jobs:
           CHECK: ${{ matrix.check }}
         run: |
           archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
+          tar -xzf "$RUNNER_TEMP/activation-fixture.tar.gz" -C "$RUNNER_TEMP"
           case "$CHECK" in
             systemd)
               fixtures="$RUNNER_TEMP/laneway-go-fixtures"
               mkdir "$fixtures"
-              CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway-relay ./integration/netprobe ./integration/rustnodecontroller
+              CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway ./cmd/laneway-relay ./integration/netprobe ./integration/rustnodecontroller
               rustc --edition 2024 -O integration/netprobe-stream.rs -o "$fixtures/netprobe-stream"
               sudo env PATH="$PATH" LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$fixtures" \
                 LANEWAY_NODE_TEST_STREAM_PROBE="$fixtures/netprobe-stream" \
+                LANEWAY_NODE_TEST_INSPECT_PROBE="$RUNNER_TEMP/activation-fixture/laneway-inspect-probe" \
                 bash integration/rust-release-systemd.sh "$archive" \
                 "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}" ;;
             fleet-update)
-              tar -xzf "$RUNNER_TEMP/activation-fixture.tar.gz" -C "$RUNNER_TEMP"
               sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "$archive" \
                 "$RUNNER_TEMP/activation-fixture" ;;
             *) exit 1 ;;

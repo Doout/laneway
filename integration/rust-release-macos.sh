@@ -69,6 +69,7 @@ done
 [ "$(readlink "$package/bin/lane")" = laneway ]
 [ "$(cat "$package/macos-runtime")" = rust-v1 ]
 cmp -s "$package/bin/laneway" "$standalone"
+cmp -s "$package/bin/laneway" "$package/bin/lanewayd-rs"
 sh "$root/scripts/verify-rust-macos-runtime.sh" "$package/bin/lanewayd-rs" "$arch"
 [ "$(cat "$package/VERSION")" = "$version" ]
 [ "$("$package/bin/laneway" version)" = "$version" ]

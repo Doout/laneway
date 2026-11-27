@@ -10,23 +10,26 @@ use tracing_subscriber::EnvFilter;
 fn main() -> Result<ExitCode> {
     let mut args = env::args_os();
     let executable = args.next().unwrap_or_default();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if std::path::Path::new(&executable)
         .file_name()
-        .is_some_and(|name| name == "laneway")
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "laneway" | "lane" | "laneway_darwin_arm64" | "laneway_darwin_amd64"
+            )
+        })
     {
         let args = args.collect::<Vec<_>>();
         if matches!(args.as_slice(), [flag] if flag == "version" || flag == "--version" || flag == "-version")
         {
-            println!(
-                "{}",
-                option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
-            );
+            println!("{}", build_version());
             return Ok(ExitCode::SUCCESS);
         }
         return client_cli::run_installed(args).map(|()| ExitCode::SUCCESS);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = executable;
     let first = args.next();
     let result = match first.as_deref().and_then(|arg| arg.to_str()) {
@@ -102,10 +105,7 @@ fn run_daemon() -> Result<()> {
         Some("--version" | "-version")
     ) && env::args_os().nth(2).is_none()
     {
-        println!(
-            "{}",
-            option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
-        );
+        println!("{}", build_version());
         return Ok(());
     }
     let arguments = arguments()?;
@@ -144,12 +144,20 @@ fn recover() -> Result<()> {
     Ok(())
 }
 
-async fn run(arguments: Arguments) -> Result<()> {
+fn build_version() -> &'static str {
+    option_env!("LANEWAY_PRODUCT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+}
+
+async fn run(arguments: Arguments) -> Result<()> {
+    init_tracing();
     if arguments.profile == Profile::WireGuard {
         #[cfg(target_os = "linux")]
         {

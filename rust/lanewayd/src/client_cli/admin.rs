@@ -25,29 +25,29 @@ pub(super) const EXIT_NODE: u64 = 1 << 4;
 #[derive(Args)]
 pub(super) struct Connection {
     #[arg(long, global = true)]
-    controller: Option<String>,
+    pub(super) controller: Option<String>,
     #[arg(long, global = true, default_value = "/etc/laneway/ca.crt")]
-    ca: PathBuf,
+    pub(super) ca: PathBuf,
     #[arg(long, global = true)]
-    server_name: Option<String>,
+    pub(super) server_name: Option<String>,
     #[arg(long, global = true)]
-    controller_network_id: Option<Id>,
+    pub(super) controller_network_id: Option<Id>,
     #[arg(long, global = true)]
-    controller_service_id: Option<Id>,
+    pub(super) controller_service_id: Option<Id>,
 }
 
 #[derive(Args)]
 pub(super) struct Bearer {
     #[arg(long, default_value = "/etc/laneway/admin.token")]
-    admin_token_file: PathBuf,
+    pub(super) admin_token_file: PathBuf,
 }
 
 #[derive(Args)]
 pub(super) struct NodeIdentity {
     #[arg(long, default_value = "/etc/laneway/node.crt")]
-    cert: PathBuf,
+    pub(super) cert: PathBuf,
     #[arg(long, default_value = "/etc/laneway/node.key")]
-    key: PathBuf,
+    pub(super) key: PathBuf,
 }
 
 #[derive(Args)]
@@ -771,7 +771,15 @@ pub(super) struct Client {
 
 impl Client {
     pub(super) fn new(connection: Connection, auth: Auth) -> Result<Self> {
-        let origin = https_origin(
+        Self::with_dial_address(connection, auth, None)
+    }
+
+    pub(super) fn with_dial_address(
+        connection: Connection,
+        auth: Auth,
+        dial: Option<std::net::SocketAddr>,
+    ) -> Result<Self> {
+        let mut origin = https_origin(
             connection
                 .controller
                 .as_deref()
@@ -823,14 +831,27 @@ impl Client {
                 )
             }
         };
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .use_preconfigured_tls(config)
             .https_only(true)
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .timeout(Duration::from_secs(30))
-            .build()?;
+            .timeout(Duration::from_secs(30));
+        if let Some(dial) = dial {
+            let host = origin.host_str().context("missing controller host")?;
+            if host.parse::<std::net::IpAddr>().is_ok() {
+                origin
+                    .set_ip_host(dial.ip())
+                    .map_err(|()| anyhow::anyhow!("invalid controller dial IP"))?;
+            } else {
+                http = http.resolve(host, dial);
+            }
+            origin
+                .set_port(Some(dial.port()))
+                .map_err(|()| anyhow::anyhow!("invalid controller dial port"))?;
+        }
+        let http = http.build()?;
         Ok(Self {
             origin,
             http,

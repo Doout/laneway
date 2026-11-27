@@ -1,5 +1,4 @@
 use std::{
-    env,
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, BufRead, Read, Seek, Write},
@@ -47,7 +46,7 @@ pub(crate) fn run(source: PathBuf, args: impl Iterator<Item = OsString>) -> Resu
             }
             let status = Command::new("/usr/bin/sudo")
                 .arg("--")
-                .arg(env::current_exe()?)
+                .arg(&companion)
                 .arg("_mac-setup")
                 .arg(&source)
                 .arg("--yes")

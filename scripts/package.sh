@@ -4,8 +4,15 @@ set -eu
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 project_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 version=${VERSION-dev}
-package_goos=${PACKAGE_GOOS:-$(cd "$project_dir/go" && go env GOOS)}
-package_goarch=${PACKAGE_GOARCH:-$(cd "$project_dir/go" && go env GOARCH)}
+package_goos=${PACKAGE_GOOS:-$(uname -s | tr '[:upper:]' '[:lower:]')}
+package_goarch=${PACKAGE_GOARCH:-}
+if [ -z "$package_goarch" ]; then
+  case "$(uname -m)" in
+    x86_64) package_goarch=amd64 ;;
+    arm64|aarch64) package_goarch=arm64 ;;
+    *) package_goarch=$(uname -m) ;;
+  esac
+fi
 package_rust_runtime_dir=${PACKAGE_RUST_RUNTIME_DIR:-}
 package_rust_macos=${PACKAGE_RUST_MACOS:-}
 
@@ -64,13 +71,11 @@ else
 	cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 fi
 
-ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$version -X main.nativeClientCommands=1"
-(
-  cd "$project_dir/go"
-  CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \
-    go build -trimpath -ldflags "$ldflags" -o "$package_dir/bin/laneway" ./cmd/laneway
-	ln -s laneway "$package_dir/bin/lane"
-)
+case "$package_goos" in
+  linux) install -m 0755 "$package_rust_runtime_dir/lanewayd-rs" "$package_dir/bin/laneway" ;;
+  darwin) install -m 0755 "$package_rust_macos" "$package_dir/bin/laneway" ;;
+esac
+ln -s laneway "$package_dir/bin/lane"
 
 cp "$project_dir/README.md" "$package_dir/README.md"
 cp "$project_dir/LICENSE-MIT" "$project_dir/LICENSE-APACHE" "$package_dir/"

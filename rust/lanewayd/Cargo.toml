@@ -15,6 +15,10 @@ path = "src/main.rs"
 name = "laneway-update-rs"
 path = "src/managed_update_main.rs"
 
+[[bin]]
+name = "laneway-inspect-probe"
+path = "src/inspect_probe_main.rs"
+
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
