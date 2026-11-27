@@ -18,7 +18,11 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
 RUN mkdir -p /out/connector-state /out/connector-run && chown 65532:65532 /out/connector-state /out/connector-run
 
-FROM rust:1.91-alpine@sha256:45c1c35cd364b8055e9e86f8ecd3e8c874b2dcb658d8a4f94b5d111aa0d651a2 AS rust-runtime
+FROM rust:1.91-alpine@sha256:45c1c35cd364b8055e9e86f8ecd3e8c874b2dcb658d8a4f94b5d111aa0d651a2 AS connector-layout
+RUN mkdir -p /out/bin /out/connector-state /out/connector-run \
+    && ln -s lanewayd-rs /out/bin/laneway
+
+FROM connector-layout AS rust-runtime
 ARG VERSION=dev
 RUN apk add --no-cache musl-dev
 WORKDIR /src
@@ -27,11 +31,6 @@ COPY api/ ./api/
 RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
       -p lanewayd-rs --bin lanewayd-rs
-
-RUN mkdir -p /out/bin /out/connector-state /out/connector-run \
-    && chown 65532:65532 /out/connector-state /out/connector-run \
-    && cp /src/rust/target/release/lanewayd-rs /out/bin/lanewayd-rs \
-    && ln -s lanewayd-rs /out/bin/laneway
 
 FROM scratch AS node-binary
 COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /lanewayd-rs
@@ -50,10 +49,11 @@ CMD ["connector", "run"]
 
 FROM scratch AS rust-connector
 LABEL io.laneway.connector-runtime="rust"
-COPY --from=rust-runtime /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=rust-runtime /out/bin/ /usr/local/bin/
-COPY --from=rust-runtime --chown=65532:65532 /out/connector-state /var/lib/laneway
-COPY --from=rust-runtime --chown=65532:65532 /out/connector-run /run/laneway
+COPY --from=connector-layout /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=connector-layout /out/bin/ /usr/local/bin/
+COPY --from=node-binary /lanewayd-rs /usr/local/bin/lanewayd-rs
+COPY --from=connector-layout --chown=65532:65532 /out/connector-state /var/lib/laneway
+COPY --from=connector-layout --chown=65532:65532 /out/connector-run /run/laneway
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
     CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
 USER 65532:65532

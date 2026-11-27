@@ -180,8 +180,13 @@ copy_binary() {
   containers+=("$container")
   docker cp "$container:$source" "$binaries/$destination"
 }
-copy_binary "$controller_image" /laneway-controller-rs controller
-copy_binary "$relay_image" /laneway-relay-rs relay
+if [[ -n ${LANEWAY_CONNECTOR_FIXTURE_BINARIES:-} ]]; then
+  install -m 0755 "$LANEWAY_CONNECTOR_FIXTURE_BINARIES/laneway-controller-rs" "$binaries/controller"
+  install -m 0755 "$LANEWAY_CONNECTOR_FIXTURE_BINARIES/laneway-relay-rs" "$binaries/relay"
+else
+  copy_binary "$controller_image" /laneway-controller-rs controller
+  copy_binary "$relay_image" /laneway-relay-rs relay
+fi
 copy_binary "$rust_image" /usr/local/bin/lanewayd-rs laneway
 lab="$(docker run -d --network none -v "$root:/src:ro" -v "$binaries:/fixture:ro" \
   -v "$state:/state" "$lab_image" bash /src/integration/rust-lab/connector-cutover.sh --fixture "$carrier")"

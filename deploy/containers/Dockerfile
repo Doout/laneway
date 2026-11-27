@@ -26,7 +26,9 @@ RUN test "${BINARY}" = laneway-controller && \
     -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
     -o /out/laneway ./cmd/laneway-controller
 
-FROM rust:1.91-alpine@sha256:45c1c35cd364b8055e9e86f8ecd3e8c874b2dcb658d8a4f94b5d111aa0d651a2 AS build-admin
+FROM rust:1.91-alpine@sha256:45c1c35cd364b8055e9e86f8ecd3e8c874b2dcb658d8a4f94b5d111aa0d651a2 AS admin-base
+
+FROM admin-base AS build-admin
 ARG VERSION=dev
 RUN apk add --no-cache musl-dev ca-certificates
 WORKDIR /src
@@ -35,6 +37,9 @@ COPY api/ ./api/
 RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
       -p lanewayd-rs --bin lanewayd-rs
+
+FROM scratch AS node-binary
+COPY --from=build-admin /src/rust/target/release/lanewayd-rs /lanewayd-rs
 
 FROM build-base AS build-relay
 ARG BINARY=laneway-relay
@@ -61,7 +66,7 @@ COPY --from=build-relay /out/laneway /usr/local/bin/laneway
 
 # The operator CLI is the default; Go service images are explicit fixtures.
 FROM scratch AS admin
-COPY --from=build-admin /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build-admin /src/rust/target/release/lanewayd-rs /usr/local/bin/laneway
+COPY --from=admin-base /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=node-binary /lanewayd-rs /usr/local/bin/laneway
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/laneway"]

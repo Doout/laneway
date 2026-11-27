@@ -204,7 +204,10 @@ jobs:
 
   compose:
     name: Hardened Compose contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      PREVIEW_VERSION: &preview-version "0.0.1"
+      PREVIEW_ARCH: amd64
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -226,28 +229,57 @@ jobs:
           ./integration/administrator-lifecycle.sh
           sudo ./integration/lane-prepare.sh
           sudo env PATH="$PATH" ./integration/lane-recovery.sh
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with: &preview-builder
+          version: v0.36.1
+          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+      - name: Restore the Linux package preview binaries
+        id: preview-cache
+        uses: actions/cache/restore@v4
+        with: &preview-cache-inputs
+          path: ${{ runner.temp }}/laneway-rust
+          key: >-
+            rust-linux-preview-v1-${{ env.PREVIEW_ARCH }}-${{ env.PREVIEW_VERSION }}-${{ hashFiles('rust/**', 'api/proto/**',
+            'deploy/containers/Dockerfile.rust-release*', 'deploy/examples/*rust*.toml',
+            'deploy/compose/generated/config/exit-node.toml.example', 'testvectors/local-api/**') }}
+      - name: Build the shared Rust runtime on a cache miss
+        if: steps.preview-cache.outputs.cache-hit != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/containers/Dockerfile.rust-release
+          target: artifacts
+          platforms: linux/amd64
+          build-args: VERSION=${{ env.PREVIEW_VERSION }}
+          outputs: type=local,dest=${{ runner.temp }}/laneway-rust
+          cache-from: type=gha,scope=rust-release-deps-amd64,timeout=1m
       - name: Build pinned release image families
         run: |
-          docker build --file deploy/containers/Dockerfile \
+          docker buildx build --load --file deploy/containers/Dockerfile \
             --target controller --build-arg VERSION=ci \
             --tag laneway-controller:ci .
-          docker build --file deploy/containers/Dockerfile \
+          docker buildx build --load --file deploy/containers/Dockerfile \
             --target relay --build-arg VERSION=ci \
             --tag laneway-relay:ci .
-          docker build --file deploy/containers/Dockerfile \
-            --target admin --build-arg VERSION=ci \
+          docker buildx build --load --file deploy/containers/Dockerfile \
+            --target admin --build-arg VERSION="$PREVIEW_VERSION" \
+            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" \
             --tag laneway-admin:ci .
-          docker build --file deploy/containers/Dockerfile.exit-node \
-            --build-arg VERSION=ci --tag laneway-exit-node:ci .
+          docker buildx build --load --file deploy/containers/Dockerfile.exit-node \
+            --build-arg VERSION="$PREVIEW_VERSION" --build-context "node-binary=$RUNNER_TEMP/laneway-rust" \
+            --tag laneway-exit-node:ci .
           test "$(docker run --rm --network none laneway-controller:ci -version)" = ci
           test "$(docker run --rm --network none laneway-relay:ci -version)" = ci
-          test "$(docker run --rm --network none laneway-admin:ci version)" = ci
-          test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = ci
+          test "$(docker run --rm --network none laneway-admin:ci version)" = "$PREVIEW_VERSION"
+          test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = "$PREVIEW_VERSION"
       - name: Verify fresh Rust Connector enrollment and restart
+        env:
+          LANEWAY_CONNECTOR_FIXTURE_BINARIES: ${{ runner.temp }}/laneway-rust
         run: |
-          docker build --file deploy/containers/Dockerfile.connector \
-            --target rust-connector --build-arg VERSION=ci --tag lane-edge:ci .
-          test "$(docker run --rm --network none lane-edge:ci version)" = ci
+          docker buildx build --load --file deploy/containers/Dockerfile.connector \
+            --target rust-connector --build-arg VERSION="$PREVIEW_VERSION" \
+            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" --tag lane-edge:ci .
+          test "$(docker run --rm --network none lane-edge:ci version)" = "$PREVIEW_VERSION"
           test "$(docker image inspect --format '{{index .Config.Labels "io.laneway.connector-runtime"}}' lane-edge:ci)" = rust
           if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then
             echo "the Rust connector image unexpectedly contains a runnable shell" >&2
@@ -257,7 +289,6 @@ jobs:
           ./integration/connector-bootstrap.sh lane-edge:ci
           ./integration/connector-upgrade.sh lane-edge:ci
           docker build --tag laneway-rust-lab:local integration/rust-lab
-          bash integration/rust-lab/connector-cutover.sh --prime-cache
           bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci
           bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci tcp-fallback
 
@@ -354,7 +385,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 29
     env:
-      PREVIEW_VERSION: "0.0.1"
+      PREVIEW_VERSION: *preview-version
+      PREVIEW_ARCH: ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
@@ -368,18 +400,11 @@ jobs:
           go-version: "1.26.11"
           cache-dependency-path: go/go.sum
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        with:
-          version: v0.36.1
-          driver-opts: image=moby/buildkit:buildx-stable-1@sha256:2f5adac4ecd194d9f8c10b7b5d7bceb5186853db1b26e5abd3a657af0b7e26ec
+        with: *preview-builder
       - name: Reuse unchanged preview binaries
         id: preview-cache
         uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/laneway-rust
-          key: >-
-            rust-linux-preview-v1-${{ matrix.arch }}-${{ env.PREVIEW_VERSION }}-${{ hashFiles('rust/**', 'api/proto/**',
-            'deploy/containers/Dockerfile.rust-release*', 'deploy/examples/*rust*.toml',
-            'deploy/compose/generated/config/exit-node.toml.example', 'testvectors/local-api/**') }}
+        with: *preview-cache-inputs
       - name: Build the native preview without publishing
         if: steps.preview-cache.outputs.cache-hit != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
