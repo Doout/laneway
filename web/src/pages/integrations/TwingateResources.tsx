@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Checkbox, CheckboxIndicator } from '@ui-sdk/react/checkbox'
 import { Check, ChevronLeft, ChevronRight, Copy, RefreshCw } from 'lucide-react'
 import { Button, Callout, DataTable, Status, type DataColumn } from '../../components/ui'
@@ -55,7 +55,8 @@ function resourceError(failure: unknown) {
   return failure instanceof Error ? failure.message : 'Twingate resources could not be loaded.'
 }
 
-export function TwingateResources({ onSetupGateway, onRefresh }: {
+export function TwingateResources({ onSetupGateway, renderAccess, onRefresh }: {
+  renderAccess: (resource: TwingateResource) => ReactNode
   onSetupGateway?: (resource: TwingateResource) => void
   onRefresh: () => void
 }) {
@@ -116,7 +117,6 @@ export function TwingateResources({ onSetupGateway, onRefresh }: {
           </Checkbox>
           <span><strong>{row.name}</strong><small>{resourceTypes[row.kind] ?? row.kind}</small></span>
         </label>
-        {onSetupGateway && supportsSshGateway(row) && <Button className="twingate-resource-gateway" variant="quiet" disabled={pending || Boolean(error)} aria-label={`Set up SSH gateway for ${row.name}`} onClick={() => onSetupGateway(row)}>Set up SSH gateway</Button>}
       </>,
     },
     {
@@ -137,6 +137,11 @@ export function TwingateResources({ onSetupGateway, onRefresh }: {
         return allowed.length ? <div className="twingate-traffic">{allowed.map((label) => <span key={label}>{label}</span>)}</div> : 'None'
       },
     },
+    { key: 'access', label: 'Laneway access', render: (row) => <div className="twingate-resource-access">
+      {renderAccess(row)}
+      {onSetupGateway && supportsSshGateway(row) && <Button variant="quiet" disabled={pending || Boolean(error)}
+        aria-label={`Set up SSH access for ${row.name}`} onClick={() => onSetupGateway(row)}>Set up SSH access</Button>}
+    </div> },
     { key: 'state', label: 'Status', render: (row) => <Status tone={row.active ? 'positive' : 'muted'}>{row.active ? 'Active' : 'Inactive'}</Status> },
   ]
 

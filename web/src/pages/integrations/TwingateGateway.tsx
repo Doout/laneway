@@ -160,7 +160,7 @@ function GatewayForm({ resource, disabled, onCancel, onEnable }: {
     {error && <div role="alert"><Callout tone="danger">{error}</Callout></div>}
     <div className="button-row">
       {error && <Button disabled={disabled} onClick={() => { setNetworkError(''); setAttempt((current) => current + 1) }}>Reload networks and clients</Button>}
-      <Button type="submit" variant="primary" disabled={disabled || !canEnable || Boolean(error)}>Enable gateway</Button>
+      <Button type="submit" variant="primary" disabled={disabled || !canEnable || Boolean(error)}>Enable access</Button>
       <Button disabled={disabled} variant="quiet" onClick={onCancel}>Cancel</Button>
     </div>
   </FormStack>
@@ -204,9 +204,10 @@ export function TwingateGateway() {
   const [action, setAction] = useState<GatewayAction['kind']>()
   const [refresh, setRefresh] = useState(0)
   const [disableGatewayId, setDisableGatewayId] = useState<string>()
-  const [clientEdit, setClientEdit] = useState<GatewayClientEdit>()
+  const [clientEdit, setClientEdit] = useState<GatewayClientEdit & { resourceName: string }>()
   const readController = useRef<AbortController>(null)
   const heading = useRef<HTMLHeadingElement>(null)
+  const formHeading = useRef<HTMLHeadingElement>(null)
   const active = status !== undefined && status.state !== 'disabled'
   const config = savedConfig(status)
   const gatewayNetworkId = status?.network_id ?? ''
@@ -232,7 +233,7 @@ export function TwingateGateway() {
         if (watch) setResource(undefined)
       } catch (failure) {
         if (controller.signal.aborted) return
-        setStatusError(errorMessage(failure, 'Gateway status could not be loaded.'))
+        setStatusError(errorMessage(failure, 'Bridge status could not be loaded.'))
       }
       if (watch) timer = setTimeout(() => void poll(true), pollIntervalMs)
     }
@@ -245,8 +246,8 @@ export function TwingateGateway() {
   }, [action, active, refresh, request])
 
   useEffect(() => {
-    if (resource || clientEdit) heading.current?.focus()
-  }, [clientEdit, resource])
+    if (resource || clientEdit || disableGatewayId) formHeading.current?.focus()
+  }, [clientEdit, resource, disableGatewayId])
 
   async function apply(next: GatewayAction) {
     const method = next.kind === 'disable' ? 'DELETE' : 'PUT'
@@ -265,7 +266,7 @@ export function TwingateGateway() {
       setClientEdit(undefined)
       heading.current?.focus()
     } catch (failure) {
-      const fallback = { enable: 'Gateway setup failed.', update: 'Permitted client could not be changed.', disable: 'Gateway removal failed.' }
+      const fallback = { enable: 'Bridge setup failed.', update: 'Permitted client could not be changed.', disable: 'Bridge removal failed.' }
       setWriteError(errorMessage(failure, fallback[next.kind]))
     } finally {
       setAction(undefined)
@@ -280,71 +281,88 @@ export function TwingateGateway() {
   const networkName = inventory?.networks.find((network) => network.network_id === status?.network_id)?.name
   const client = inventory?.nodes.find((node) => node.node_id === status?.client_node_id) ??
     gatewayClients?.nodes?.find((node) => node.node_id === status?.client_node_id)
-  const destination = status?.destination && status.tcp_port !== null ? `${status.destination}:${status.tcp_port}` : null
-  const detail = status?.detail ?? (active && !status.runtime_available ? 'The managed gateway worker is unavailable.' : null)
+  const detail = status?.detail ?? (active && !status.runtime_available ? 'The bridge worker is unavailable.' : null)
   const editing = clientEdit && state === 'ready' && clientEdit.gatewayId === gatewayId && clientEdit.previousClientId === config?.client_node_id
 
-  const gatewayPanel = <section key="gateway" className="twingate-gateway" aria-labelledby="twingate-gateway-title">
-    <header className="twingate-gateway__header">
-      <h2 id="twingate-gateway-title" ref={heading} tabIndex={-1}>Managed SSH gateway</h2>
-      <div role="status">
-        {busyLabel ? <Status tone="warning">{busyLabel}</Status> :
-          statusError ? <Status tone="danger">Status unavailable</Status> :
-          state ? <Status tone={statusTones[state]}>{statusLabels[state]}</Status> :
-          <Status tone="muted">Checking…</Status>}
-      </div>
-    </header>
-    {active && <div className="twingate-gateway__details">
-      {destination && <dl className="twingate-gateway__metadata">
-        <div><dt>SSH destination</dt><dd><code>{destination}</code></dd></div>
-        <div><dt>Laneway network</dt><dd>{networkName ?? status.network_id}</dd></div>
-        <div><dt>Permitted client</dt><dd>{client?.name ?? status.client_node_id}</dd></div>
-      </dl>}
-      {detail && <Callout tone={state === 'degraded' ? 'warning' : 'neutral'}>{detail}</Callout>}
-      {gatewayId && gatewayId === disableGatewayId && state !== 'removing' ? <div>
-        <p className="twingate-gateway__description">Disable access to this destination and remove the managed gateway?</p>
-        <div className="button-row">
-          <Button variant="danger" disabled={controlsDisabled} onClick={() => void apply({ kind: 'disable', gatewayId })}>Confirm disable</Button>
-          <Button variant="quiet" onClick={() => setDisableGatewayId(undefined)}>Cancel</Button>
-        </div>
-      </div> : !editing && <div className="button-row">
-        {state === 'ready' && config && gatewayId && <Button disabled={controlsDisabled} onClick={() => {
-          setWriteError('')
-          setClientEdit({ gatewayId, previousClientId: config.client_node_id })
-        }}>Change permitted client</Button>}
-        {state === 'degraded' && config && status.runtime_available && <Button disabled={controlsDisabled} onClick={() => void apply({ kind: 'enable', body: config })}>Retry setup</Button>}
-        {gatewayId && (state === 'removing' ? <Button disabled={controlsDisabled} onClick={() => void apply({ kind: 'disable', gatewayId })}>Retry removal</Button> :
-          <Button disabled={controlsDisabled} onClick={() => setDisableGatewayId(gatewayId)}>Disable gateway</Button>)}
-      </div>}
-    </div>}
-    {editing && config && clientEdit && <GatewayClientForm
-      key={clientEdit.gatewayId}
-      config={config}
-      disabled={controlsDisabled}
-      onCancel={() => { setClientEdit(undefined); setWriteError(''); heading.current?.focus() }}
-      onSave={(body) => void apply({ kind: 'update', body, ...clientEdit })}
-    />}
-    {status?.state === 'disabled' && !resource && !action && !statusError && <p className="twingate-gateway__description twingate-gateway__hint">
-      {status.runtime_available ? 'Set up a gateway from an active private IPv4 network resource that allows TCP.' : 'Managed gateways are unavailable on this controller.'}
-    </p>}
-    {state === 'disabled' && resource && <GatewayForm
-      key={resource.id}
-      resource={resource}
-      disabled={!canSetUp}
-      onCancel={() => { setResource(undefined); setWriteError('') }}
-      onEnable={(body) => void apply({ kind: 'enable', body })}
-    />}
-    {statusError && <div className="twingate-feedback" role="alert">
-      <Callout tone="danger">{statusError}</Callout>
-      <Button onClick={() => setRefresh((current) => current + 1)}>Check gateway status</Button>
-    </div>}
-    {writeError && <div className="twingate-feedback" role="alert"><Callout tone="danger">{writeError}</Callout></div>}
-  </section>
+  function resourceAccess(row: TwingateResource) {
+    if (!status || statusError) return <span>Access unknown</span>
+    if (!active || row.id !== status.resource_id) return <span className="twingate-access-muted">No bridge access</span>
 
-  const inventoryPanel = <TwingateResources
-    key="inventory"
-    onRefresh={() => setRefresh((current) => current + 1)}
-    onSetupGateway={canSetUp ? (next) => { setWriteError(''); setResource(next) } : undefined}
-  />
-  return active || resource || action ? [gatewayPanel, inventoryPanel] : [inventoryPanel, gatewayPanel]
+    const host = row.address.value.replace(/\/32$/, '')
+    const ready = state === 'ready' && status.runtime_available && config && row.active &&
+      status.destination === host && allowsSshPort(row, config.tcp_port)
+    return <>
+      <strong>{client?.name ?? status.client_node_id ?? 'Client unavailable'}</strong>
+      <small>{networkName ?? status.network_id} · SSH{config && ` · TCP ${config.tcp_port}`}</small>
+      {ready ? <details className="twingate-instructions">
+        <summary>Connection instructions</summary>
+        <p>On the permitted client, connect to Laneway and use your SSH username for this host.</p>
+        <code>ssh -p {config.tcp_port} USERNAME@{host}</code>
+        <p>Using a rootless client? Set the SSH application's proxy to SOCKS5 at your Laneway listener (default <code>127.0.0.1:1080</code>). Use your local proxy credentials there, then sign in to the host with your SSH credentials.</p>
+      </details> : <small>SSH access unavailable</small>}
+      {state === 'ready' && config && gatewayId && <Button variant="quiet" disabled={controlsDisabled} onClick={() => {
+        setResource(undefined)
+        setWriteError('')
+        setClientEdit({ gatewayId, previousClientId: config.client_node_id, resourceName: row.name })
+      }}>Edit access</Button>}
+      {gatewayId && state !== 'removing' && <Button variant="quiet" disabled={controlsDisabled} onClick={() => {
+        setClientEdit(undefined)
+        setDisableGatewayId(gatewayId)
+      }}>Remove access</Button>}
+    </>
+  }
+
+  return <>
+    <TwingateResources renderAccess={resourceAccess} onRefresh={() => setRefresh((current) => current + 1)}
+      onSetupGateway={canSetUp ? (next) => { setWriteError(''); setResource(next) } : undefined} />
+
+    {((state === 'disabled' && resource) || (editing && config)) && <section className="twingate-gateway" aria-labelledby="twingate-access-title">
+      <header className="twingate-gateway__header"><h2 id="twingate-access-title" ref={formHeading} tabIndex={-1}>
+        SSH access to {resource?.name ?? clientEdit?.resourceName}
+      </h2></header>
+      {state === 'disabled' && resource && <GatewayForm key={resource.id} resource={resource} disabled={!canSetUp}
+        onCancel={() => { setResource(undefined); setWriteError('') }} onEnable={(body) => void apply({ kind: 'enable', body })} />}
+      {editing && config && <GatewayClientForm key={clientEdit.gatewayId} config={config} disabled={controlsDisabled}
+        onCancel={() => { setClientEdit(undefined); setWriteError('') }} onSave={(body) => void apply({ kind: 'update', body, ...clientEdit })} />}
+    </section>}
+    {gatewayId && disableGatewayId === gatewayId && state !== 'removing' && <section className="twingate-gateway twingate-confirm-removal" aria-labelledby="twingate-removal-title">
+      <h2 id="twingate-removal-title" tabIndex={-1} ref={formHeading}>Remove bridge access?</h2>
+      <p>This withdraws SSH access to {status?.destination}:{status?.tcp_port} and removes the Twingate bridge.</p>
+      <div className="button-row">
+        <Button variant="danger" disabled={controlsDisabled} onClick={() => void apply({ kind: 'disable', gatewayId })}>Confirm removal</Button>
+        <Button variant="quiet" onClick={() => setDisableGatewayId(undefined)}>Cancel</Button>
+      </div>
+    </section>}
+    {writeError && <div className="twingate-feedback" role="alert"><Callout tone="danger">{writeError}</Callout></div>}
+    <section className="twingate-gateway" aria-labelledby="twingate-gateway-title">
+      <header className="twingate-gateway__header">
+        <h2 id="twingate-gateway-title" ref={heading} tabIndex={-1}>Twingate bridge</h2>
+        <div role="status">
+          {busyLabel ? <Status tone="warning">{busyLabel}</Status> :
+            statusError ? <Status tone="danger">Status unavailable</Status> :
+            state === 'ready' && !status?.runtime_available ? <Status tone="warning">Worker unavailable</Status> :
+            state ? <Status tone={statusTones[state]}>{statusLabels[state]}</Status> :
+            <Status tone="muted">Checking…</Status>}
+        </div>
+      </header>
+      {state === 'ready' && !statusError && status?.runtime_available && <p className="twingate-gateway__description twingate-gateway__hint">
+        Connector online. The bridge reached the configured TCP port on its latest check.
+      </p>}
+      {state === 'disabled' && !statusError && <p className="twingate-gateway__description twingate-gateway__hint">
+        {status?.runtime_available ? 'Set up SSH access on an eligible resource below.' : 'The bridge worker is unavailable on this controller.'}
+      </p>}
+      {active && <div className="twingate-bridge-maintenance">
+        {detail && <Callout tone={state === 'degraded' ? 'warning' : 'neutral'}>{detail}</Callout>}
+        {state === 'degraded' && config && status.runtime_available && <Button disabled={controlsDisabled}
+          onClick={() => void apply({ kind: 'enable', body: config })}>Retry setup</Button>}
+        {gatewayId && (state === 'removing' ? <Button disabled={controlsDisabled} onClick={() => void apply({ kind: 'disable', gatewayId })}>Retry removal</Button> :
+          <Button variant="quiet" disabled={controlsDisabled} onClick={() => { setClientEdit(undefined); setDisableGatewayId(gatewayId) }}>Remove bridge</Button>)}
+      </div>}
+      {statusError && <div className="twingate-feedback" role="alert">
+        <Callout tone="danger">{statusError}</Callout>
+        <Button onClick={() => setRefresh((current) => current + 1)}>Check bridge status</Button>
+      </div>}
+    </section>
+
+  </>
 }

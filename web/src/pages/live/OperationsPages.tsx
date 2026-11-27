@@ -46,7 +46,7 @@ export function InfrastructurePage() {
           </section>
           {hasPermission('integration.manage') ? <section className="operations-group" aria-labelledby="operations-integrations-title">
             <header className="operations-group-heading"><h2 id="operations-integrations-title">Network integrations</h2></header>
-            <div className="operations-link-list"><ResourceLink to="/infrastructure/integrations/twingate" icon={<Plug size={16} />} title="Twingate" meta="Configure and test the Admin API connection" /></div>
+            <div className="operations-link-list"><ResourceLink to="/infrastructure/integrations/twingate" icon={<Plug size={16} />} title="Twingate" meta="Resource access and bridge health" /></div>
           </section> : null}
         </aside>
       </div>

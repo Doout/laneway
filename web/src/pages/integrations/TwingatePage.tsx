@@ -103,10 +103,10 @@ export function TwingatePage() {
           <Field label="Twingate network" hint="Enter the name before .twingate.com.">
             <input autoCapitalize="none" autoComplete="off" disabled={Boolean(action)} maxLength={63} onChange={(event) => setTenant(event.target.value)} placeholder="acme" required spellCheck={false} value={tenant} />
           </Field>
-          <Field label={connection.tenant ? 'New API token' : 'API token'} hint={<>Create a token under Settings → API in Twingate. Select <strong>Read only</strong> for inventory or <strong>Read, Write &amp; Provision</strong> for managed gateways. <a href="https://www.twingate.com/docs/api-overview#getting-started" rel="noreferrer" target="_blank">Token setup guide</a></>}>
+          <Field label={connection.tenant ? 'New API token' : 'API token'} hint={<>Create a token under Settings → API in Twingate. Select <strong>Read only</strong> for inventory or <strong>Read, Write &amp; Provision</strong> for the Twingate bridge. <a href="https://www.twingate.com/docs/api-overview#getting-started" rel="noreferrer" target="_blank">Token setup guide</a></>}>
             <input autoComplete="new-password" disabled={Boolean(action)} maxLength={4096} onChange={(event) => setApiToken(event.target.value)} required type="password" value={apiToken} />
           </Field>
-          {connection.tenant && <p className="twingate-gateway__description">You can replace the token for this network. Disable any active gateway before switching networks or disconnecting Twingate.</p>}
+          {connection.tenant && <p className="twingate-gateway__description">You can replace the token for this network. Remove the bridge before switching networks or disconnecting Twingate.</p>}
           <div className="button-row">
             <Button disabled={Boolean(action) || !tenant.trim() || !apiToken.trim()} type="submit" variant="primary">{action === 'save' ? 'Testing and saving…' : 'Test and save'}</Button>
             {connection.tenant ? <>
