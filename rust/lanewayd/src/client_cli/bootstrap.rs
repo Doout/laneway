@@ -44,7 +44,7 @@ pub(super) struct Metadata {
     valid_until_unix_seconds: u64,
     pub(super) network_id: String,
     pub(super) controller: Controller,
-    relays: Vec<Relay>,
+    pub(super) relays: Vec<Relay>,
     pub(super) trust: Trust,
     protocol: Protocol,
     #[serde(default)]
@@ -60,12 +60,29 @@ pub(super) struct Controller {
     pub(super) service_id: String,
 }
 
+impl Controller {
+    pub(super) fn config(&self) -> lanewayd_rs::ControllerConfig {
+        lanewayd_rs::ControllerConfig {
+            topology_reporting: false,
+            auto_renew_certificate: false,
+            disable_status_reporting: false,
+            private_dns_listen: None,
+            endpoint: self.enrollment_endpoint.clone(),
+            quic_endpoint: Some(self.quic_endpoint.clone()),
+            server_name: self.server_name.clone(),
+            service_id: self.service_id.clone(),
+            poll_interval: Duration::from_secs(5),
+            timeout: Duration::from_secs(30),
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Relay {
+pub(super) struct Relay {
     name: String,
-    endpoint: String,
-    service_id: String,
+    pub(super) endpoint: String,
+    pub(super) service_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -156,7 +173,7 @@ fn client(deadline: Duration, redirects: Policy) -> Result<Client> {
     Ok(builder.build()?)
 }
 
-pub(super) async fn fetch(domain: &str) -> Result<Metadata> {
+pub(super) fn discovery_url(domain: &str) -> Result<Url> {
     let mut url = origin(&if domain.contains("://") {
         domain.to_owned()
     } else {
@@ -168,6 +185,11 @@ pub(super) async fn fetch(domain: &str) -> Result<Metadata> {
         "bootstrap requires a DNS name authenticated by public Web PKI"
     );
     url.set_path(DISCOVERY_PATH);
+    Ok(url)
+}
+
+pub(super) async fn fetch(domain: &str) -> Result<Metadata> {
+    let url = discovery_url(domain)?;
     let mut response = client(Duration::from_secs(15), Policy::none())?
         .get(url)
         .header(header::ACCEPT, "application/json")

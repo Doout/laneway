@@ -124,16 +124,6 @@ func runConnect(args []string) error {
 	if err := connectPlatformPreflight(); err != nil {
 		return err
 	}
-	if authority == "" {
-		var err error
-		authority, err = defaultUserProfileAuthority()
-		if errors.Is(err, os.ErrNotExist) {
-			return errors.New("no saved login; run 'laneway login DOMAIN' or specify DOMAIN for an ephemeral connection")
-		}
-		if err != nil {
-			return err
-		}
-	}
 	var rustRuntime string
 	if options.rust {
 		var err error
@@ -153,6 +143,44 @@ func runConnect(args []string) error {
 	dns, err := parseConnectAddresses(options.dns)
 	if err != nil {
 		return fmt.Errorf("--dns: %w", err)
+	}
+	if rustRuntime != "" && nativeClientCommands == "1" {
+		nativeArgs := []string{"--failure-mode", options.failureMode}
+		if *remembered {
+			nativeArgs = append(nativeArgs, "--remembered")
+		}
+		if *ephemeral {
+			nativeArgs = append(nativeArgs, "--ephemeral")
+		}
+		if *tokenFile != "" {
+			nativeArgs = append(nativeArgs, "--token-file", *tokenFile)
+		}
+		if options.exitSelector != "" {
+			nativeArgs = append(nativeArgs, "--exit", options.exitSelector)
+		}
+		for _, route := range routes {
+			nativeArgs = append(nativeArgs, "--route", route.String())
+		}
+		for _, bypass := range localLAN {
+			nativeArgs = append(nativeArgs, "--local-lan", bypass.String())
+		}
+		for _, resolver := range dns {
+			nativeArgs = append(nativeArgs, "--dns", resolver.String())
+		}
+		if authority != "" {
+			nativeArgs = append(nativeArgs, "--", authority)
+		}
+		return execNativeConnect(rustRuntime, nativeArgs)
+	}
+	if authority == "" {
+		var err error
+		authority, err = defaultUserProfileAuthority()
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("no saved login; run 'laneway login DOMAIN' or specify DOMAIN for an ephemeral connection")
+		}
+		if err != nil {
+			return err
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

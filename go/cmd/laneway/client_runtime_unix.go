@@ -5,13 +5,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 )
-
-// Release packaging enables native commands when the matching runtime is present.
-// The standalone client and control-tools-only installations continue to work
-// without a sibling runtime.
-var nativeClientCommands string
 
 func nativeClientRuntime() (string, error) {
 	if nativeClientCommands != "1" {
@@ -38,4 +34,18 @@ func tryNativeClient(args ...string) (bool, error) {
 		return false, err
 	}
 	return true, syscall.Exec(runtime, append([]string{runtime, "_client"}, args...), os.Environ())
+}
+
+// The protected system runtime is resolved and version-checked by the caller.
+func execNativeConnect(executable string, args []string) error {
+	environment := os.Environ()
+	if runtime.GOOS == "linux" {
+		environment = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"}
+		for _, name := range []string{"HOME", "XDG_CONFIG_HOME", "LANEWAY_PROFILE_DIR", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy"} {
+			if value, present := os.LookupEnv(name); present {
+				environment = append(environment, name+"="+value)
+			}
+		}
+	}
+	return syscall.Exec(executable, append([]string{executable, "_client", "connect"}, args...), environment)
 }

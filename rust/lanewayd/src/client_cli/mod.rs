@@ -1,5 +1,7 @@
 //! Native implementations used by the packaged Laneway CLI.
 mod bootstrap;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod connect;
 mod enrollment;
 mod profiles;
 
@@ -30,6 +32,9 @@ enum Command {
         #[arg(long)]
         token_file: Option<PathBuf>,
     },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    /// Connect using a saved login or an ephemeral invitation.
+    Connect(connect::Options),
     /// Remove a saved user login.
     Logout { domain: String },
     #[command(hide = true)]
@@ -67,6 +72,12 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
         Command::Login { domain, token_file } => {
             runtime()?.block_on(enrollment::login(&domain, token_file.as_deref()))
         }
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Command::Connect(options) => tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?
+            .block_on(connect::run(options)),
         Command::Logout { domain } => profiles::Store::from_environment().logout(&domain),
         Command::Profile { operation } => runtime()?.block_on(profiles::run(operation)),
         Command::SubmitEnrollment => runtime()?.block_on(enrollment::run()),

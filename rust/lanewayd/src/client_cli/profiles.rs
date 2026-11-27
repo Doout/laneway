@@ -40,23 +40,23 @@ pub(super) struct Profile {
     pub(super) controller_service_id: String,
     pub(super) node_id: String,
     name: String,
-    generation: String,
+    pub(super) generation: String,
     created_at: String,
 }
 
 #[derive(Serialize)]
-struct Files {
+pub(super) struct Files {
     directory: PathBuf,
-    ca: PathBuf,
-    certificate: PathBuf,
-    private_key: PathBuf,
+    pub(super) ca: PathBuf,
+    pub(super) certificate: PathBuf,
+    pub(super) private_key: PathBuf,
     wireguard_key: PathBuf,
 }
 
 #[derive(Serialize)]
-struct Saved {
-    profile: Profile,
-    files: Files,
+pub(super) struct Saved {
+    pub(super) profile: Profile,
+    pub(super) files: Files,
 }
 
 #[derive(Deserialize)]
@@ -179,7 +179,7 @@ impl Store {
         Ok(self.load(authority)?.is_some())
     }
 
-    fn load(&self, authority: &str) -> Result<Option<Saved>> {
+    pub(super) fn load(&self, authority: &str) -> Result<Option<Saved>> {
         let directory = self.path(authority);
         match private::check_directory(&directory) {
             Ok(()) => {}
@@ -225,7 +225,7 @@ impl Store {
         Ok(Some(Saved { profile, files }))
     }
 
-    fn default_authority(&self) -> Result<Option<String>> {
+    pub(super) fn default_authority(&self) -> Result<Option<String>> {
         match private::check_directory(&self.root) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -313,45 +313,24 @@ impl Store {
         private::write(&directory.join(MANIFEST), &manifest).context("publish saved login")
     }
 
-    async fn renew(
+    pub(super) async fn renew(
         &self,
         authority: &str,
         generation: &str,
         metadata: &super::bootstrap::Metadata,
     ) -> Result<Saved> {
         use crate::rootless_cli::enroll::wireguard_public_key;
-        use lanewayd_rs::{ControllerConfig, TlsConfig, renew_saved_login};
-        use std::time::Duration;
+        use lanewayd_rs::{TlsConfig, renew_saved_login};
 
         let _lock = self.lock(authority)?;
         let saved = self.load(authority)?.context("saved login is missing")?;
         if saved.profile.generation != generation {
             return Ok(saved);
         }
-        ensure!(
-            metadata.network_id == saved.profile.network_id
-                && metadata.controller.service_id == saved.profile.controller_service_id,
-            "controller identity changed; refusing to renew the saved login"
-        );
-        let ca = read_bounded(&saved.files.ca, MAX_CREDENTIAL)?;
-        ensure!(
-            std::str::from_utf8(&ca)?.trim() == metadata.trust.ca_pem.trim(),
-            "controller CA changed; refusing to renew the saved login"
-        );
+        let ca = saved.confirm_binding(metadata)?;
         let mut wireguard = zeroize::Zeroizing::new([0; 32]);
         getrandom::fill(wireguard.as_mut()).context("generate replacement WireGuard key")?;
-        let settings = ControllerConfig {
-            topology_reporting: false,
-            auto_renew_certificate: false,
-            disable_status_reporting: true,
-            private_dns_listen: None,
-            endpoint: metadata.controller.enrollment_endpoint.clone(),
-            quic_endpoint: Some(metadata.controller.quic_endpoint.clone()),
-            server_name: metadata.controller.server_name.clone(),
-            service_id: metadata.controller.service_id.clone(),
-            poll_interval: Duration::from_secs(5),
-            timeout: Duration::from_secs(30),
-        };
+        let settings = metadata.controller.config();
         let tls = TlsConfig {
             ca: saved.files.ca,
             certificate: saved.files.certificate,
@@ -389,6 +368,40 @@ impl Store {
             "logged out of {authority}; the controller identity remains revocable by its NodeID"
         );
         Ok(())
+    }
+}
+
+impl Saved {
+    pub(super) fn renewal_at(&self, now: u64) -> Result<u64> {
+        let bytes = read_bounded(&self.files.certificate, MAX_CREDENTIAL)?;
+        let leaf = rustls_pemfile::certs(&mut io::Cursor::new(&bytes))
+            .next()
+            .transpose()?
+            .context("saved login has no certificate")?;
+        let (_, cert) = x509_parser::parse_x509_certificate(&leaf)
+            .map_err(|_| anyhow::anyhow!("invalid saved login certificate"))?;
+        let start: u64 = cert.validity().not_before.timestamp().try_into()?;
+        let end: u64 = cert.validity().not_after.timestamp().try_into()?;
+        ensure!(end > start, "invalid saved login certificate lifetime");
+        ensure!(
+            now < end,
+            "saved login certificate expired; log in again with a new token"
+        );
+        Ok(start + (end - start) * 2 / 3)
+    }
+
+    pub(super) fn confirm_binding(&self, metadata: &super::bootstrap::Metadata) -> Result<Vec<u8>> {
+        ensure!(
+            metadata.network_id == self.profile.network_id
+                && metadata.controller.service_id == self.profile.controller_service_id,
+            "controller identity changed; refusing to renew the saved login"
+        );
+        let ca = read_bounded(&self.files.ca, MAX_CREDENTIAL)?;
+        ensure!(
+            std::str::from_utf8(&ca)?.trim() == metadata.trust.ca_pem.trim(),
+            "controller CA changed; refusing to renew the saved login"
+        );
+        Ok(ca)
     }
 }
 
