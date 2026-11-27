@@ -1,3 +1,4 @@
+mod client_cli;
 mod rootless_cli;
 
 use std::{env, future::Future, num::NonZeroU64, path::PathBuf, process::ExitCode};
@@ -16,6 +17,7 @@ fn main() -> Result<ExitCode> {
         Some("_deployment-update") => {
             lanewayd_rs::deployment_update::run(&args.collect::<Vec<_>>())
         }
+        Some("_client") => client_cli::run(args),
         Some("_rootless") => rootless_cli::run(&args.collect::<Vec<_>>()),
         Some("healthcheck") => {
             return Ok(laneway_healthcheck::run(

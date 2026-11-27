@@ -164,7 +164,7 @@ func runNodeInstall(args []string) error {
 	}
 
 	discoveryCtx, cancelDiscovery := context.WithTimeout(context.Background(), 20*time.Second)
-	metadata, err := bootstrap.Fetch(discoveryCtx, authority)
+	metadata, err := fetchBootstrap(discoveryCtx, authority)
 	cancelDiscovery()
 	if err != nil {
 		return err

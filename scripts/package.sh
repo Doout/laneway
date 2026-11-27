@@ -64,7 +64,7 @@ else
 	cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 fi
 
-ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$version"
+ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=$version -X main.nativeClientCommands=1"
 (
   cd "$project_dir/go"
   CGO_ENABLED=0 GOOS="$package_goos" GOARCH="$package_goarch" \

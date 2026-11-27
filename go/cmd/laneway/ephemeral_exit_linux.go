@@ -80,7 +80,7 @@ func runEphemeralExitPrepare(args []string) error {
 		return errors.New("invitation has an invalid shape")
 	}
 	discoveryCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	metadata, err := bootstrap.Fetch(discoveryCtx, *authority)
+	metadata, err := fetchBootstrap(discoveryCtx, *authority)
 	cancel()
 	if err != nil {
 		return err

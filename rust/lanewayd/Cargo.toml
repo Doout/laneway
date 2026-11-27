@@ -38,6 +38,7 @@ quinn.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "http2"] }
 rpassword = "7"
 rustls.workspace = true
+rustls-native-certs = "0.8.5"
 webpki = { package = "rustls-webpki", version = "0.103.13" }
 rustls-pemfile.workspace = true
 serde.workspace = true

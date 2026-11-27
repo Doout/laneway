@@ -14,6 +14,9 @@ func addPlatformCommands(root *cobra.Command) {
 	addRootlessCommands(root)
 	addUpdateCommand(root)
 	id := command("id", "Generate a random Laneway ID", func([]string) error {
+		if handled, err := tryNativeClient("id"); handled || err != nil {
+			return err
+		}
 		id, err := identity.NewID()
 		if err != nil {
 			return err

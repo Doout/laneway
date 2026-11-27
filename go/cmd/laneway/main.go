@@ -20,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Doout/laneway/go/internal/bootstrap"
 	"github.com/Doout/laneway/go/internal/config"
 	"github.com/Doout/laneway/go/internal/controllerclient"
 	"github.com/Doout/laneway/go/internal/identity"
@@ -341,7 +340,7 @@ func runJoin(args []string) error {
 			return errors.New("bootstrap enrollment refuses a code in argv; use the prompt or --token-file")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		metadata, err := bootstrap.Fetch(ctx, *bootstrapAuthority)
+		metadata, err := fetchBootstrap(ctx, *bootstrapAuthority)
 		cancel()
 		if err != nil {
 			return err
