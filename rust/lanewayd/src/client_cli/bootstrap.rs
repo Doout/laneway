@@ -38,14 +38,14 @@ pub(super) enum Operation {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Metadata {
+pub(super) struct Metadata {
     schema_version: u32,
     generated_at_unix_seconds: u64,
     valid_until_unix_seconds: u64,
-    network_id: String,
-    controller: Controller,
+    pub(super) network_id: String,
+    pub(super) controller: Controller,
     relays: Vec<Relay>,
-    trust: Trust,
+    pub(super) trust: Trust,
     protocol: Protocol,
     #[serde(default)]
     artifacts: Option<Vec<Artifact>>,
@@ -53,11 +53,11 @@ struct Metadata {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Controller {
-    enrollment_endpoint: String,
-    quic_endpoint: String,
-    server_name: String,
-    service_id: String,
+pub(super) struct Controller {
+    pub(super) enrollment_endpoint: String,
+    pub(super) quic_endpoint: String,
+    pub(super) server_name: String,
+    pub(super) service_id: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -70,8 +70,8 @@ struct Relay {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Trust {
-    ca_pem: String,
+pub(super) struct Trust {
+    pub(super) ca_pem: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -85,7 +85,7 @@ struct Protocol {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Artifact {
+pub(super) struct Artifact {
     os: String,
     arch: String,
     url: String,
@@ -156,7 +156,7 @@ fn client(deadline: Duration, redirects: Policy) -> Result<Client> {
     Ok(builder.build()?)
 }
 
-async fn fetch(domain: &str) -> Result<Metadata> {
+pub(super) async fn fetch(domain: &str) -> Result<Metadata> {
     let mut url = origin(&if domain.contains("://") {
         domain.to_owned()
     } else {
@@ -252,7 +252,7 @@ fn dns_name(host: &str) -> bool {
 }
 
 impl Metadata {
-    fn decode(bytes: &[u8], now: u64) -> Result<Self> {
+    pub(super) fn decode(bytes: &[u8], now: u64) -> Result<Self> {
         ensure!(
             bytes.len() <= MAX_DOCUMENT,
             "bootstrap metadata exceeds size limit"
@@ -326,7 +326,7 @@ impl Metadata {
         Ok(metadata)
     }
 
-    fn current_artifact(&self) -> Result<&Artifact> {
+    pub(super) fn current_artifact(&self) -> Result<&Artifact> {
         let os = if cfg!(target_os = "macos") {
             "darwin"
         } else {

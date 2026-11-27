@@ -545,7 +545,7 @@ fn validate_host_port(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn valid_overlay(raw: &[u8]) -> bool {
+pub(crate) fn valid_overlay(raw: &[u8]) -> bool {
     let address = match raw.len() {
         4 => IpAddr::from(<[u8; 4]>::try_from(raw).expect("validated IPv4 length")),
         16 => {
@@ -561,7 +561,7 @@ fn valid_overlay(raw: &[u8]) -> bool {
     !address.is_unspecified() && !address.is_multicast()
 }
 
-fn new_csr(name: &str) -> Result<(KeyPair, Vec<u8>)> {
+pub(crate) fn new_csr(name: &str) -> Result<(KeyPair, Vec<u8>)> {
     let key = KeyPair::generate_for(&PKCS_ED25519).context("generate connector certificate key")?;
     let mut parameters = CertificateParams::default();
     parameters.distinguished_name.push(DnType::CommonName, name);
@@ -571,7 +571,7 @@ fn new_csr(name: &str) -> Result<(KeyPair, Vec<u8>)> {
     Ok((key, csr.der().to_vec()))
 }
 
-fn wireguard_public_key(private: [u8; 32]) -> [u8; 32] {
+pub(crate) fn wireguard_public_key(private: [u8; 32]) -> [u8; 32] {
     x25519_dalek::x25519(private, x25519_dalek::X25519_BASEPOINT_BYTES)
 }
 
@@ -599,7 +599,7 @@ fn roots(pem: &[u8]) -> Result<RootCertStore> {
     Ok(roots)
 }
 
-fn chain_pem(chain: Option<CertificateChain>) -> Result<Vec<u8>> {
+pub(crate) fn chain_pem(chain: Option<CertificateChain>) -> Result<Vec<u8>> {
     let chain = chain.context("controller omitted the connector certificate chain")?;
     ensure!(
         !chain.certificates_der.is_empty(),

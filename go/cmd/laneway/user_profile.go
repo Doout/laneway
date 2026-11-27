@@ -65,6 +65,13 @@ func runLogin(args []string) error {
 	if authority == "" {
 		return errors.New("usage: laneway login DOMAIN [--token-file PATH]")
 	}
+	nativeArgs := []string{"login"}
+	if *tokenFile != "" {
+		nativeArgs = append(nativeArgs, "--token-file", *tokenFile)
+	}
+	if handled, err := tryNativeClient(append(nativeArgs, "--", authority)...); handled || err != nil {
+		return err
+	}
 	if _, _, err := loadUserProfile(authority); err == nil {
 		return fmt.Errorf("already logged in to %s; use 'laneway logout %s' before replacing this identity", authority, authority)
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -111,6 +118,9 @@ func runLogout(args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("usage: laneway logout DOMAIN")
 	}
+	if handled, err := tryNativeClient("logout", "--", fs.Arg(0)); handled || err != nil {
+		return err
+	}
 	directory := profilePath(fs.Arg(0))
 	info, err := os.Lstat(directory)
 	if err != nil {
@@ -143,6 +153,10 @@ func profilePath(authority string) string {
 }
 
 func defaultUserProfileAuthority() (string, error) {
+	var authority string
+	if handled, err := nativeProfile("default", nil, &authority); handled || err != nil {
+		return authority, err
+	}
 	root := userProfileRoot()
 	if err := requireSafeDirectory(root); err != nil {
 		return "", err
@@ -191,6 +205,24 @@ func defaultUserProfileAuthority() (string, error) {
 }
 
 func saveUserProfile(profile userProfile, ca, certificate, privateKey, wireGuardKey []byte) error {
+	if runtime, err := nativeClientRuntime(); err != nil {
+		return err
+	} else if runtime != "" {
+		input, err := json.Marshal(struct {
+			Profile      userProfile `json:"profile"`
+			CA           []byte      `json:"ca"`
+			Certificate  []byte      `json:"certificate"`
+			PrivateKey   []byte      `json:"private_key"`
+			WireGuardKey []byte      `json:"wireguard_key"`
+		}{profile, ca, certificate, privateKey, wireGuardKey})
+		if err != nil {
+			return err
+		}
+		defer clear(input)
+		ctx, cancel := commandContext()
+		defer cancel()
+		return nativeProfileOn(ctx, runtime, "save", input, nil)
+	}
 	if len(wireGuardKey) != wireguard.KeySize {
 		return errors.New("saved login contains an invalid WireGuard private key")
 	}
@@ -260,7 +292,27 @@ func saveUserProfile(profile userProfile, ca, certificate, privateKey, wireGuard
 	return nil
 }
 
+type nativeSavedLogin struct {
+	Profile userProfile `json:"profile"`
+	Files   struct {
+		Directory    string `json:"directory"`
+		CA           string `json:"ca"`
+		Certificate  string `json:"certificate"`
+		PrivateKey   string `json:"private_key"`
+		WireGuardKey string `json:"wireguard_key"`
+	} `json:"files"`
+}
+
+func (saved nativeSavedLogin) files() userProfileFiles {
+	f := saved.Files
+	return userProfileFiles{f.Directory, f.CA, f.Certificate, f.PrivateKey, f.WireGuardKey}
+}
+
 func loadUserProfile(authority string) (userProfile, userProfileFiles, error) {
+	var saved nativeSavedLogin
+	if handled, err := nativeProfile("load", nil, &saved, authority); handled || err != nil {
+		return saved.Profile, saved.files(), err
+	}
 	directory := profilePath(authority)
 	if err := requireSafeDirectory(directory); err != nil {
 		return userProfile{}, userProfileFiles{}, err
@@ -357,6 +409,19 @@ func profileRenewalDue(certificatePath string, now time.Time) (bool, time.Time, 
 }
 
 func renewUserProfile(ctx context.Context, profile userProfile, files userProfileFiles, metadata bootstrap.Metadata) (userProfile, userProfileFiles, error) {
+	if runtime, err := nativeClientRuntime(); err != nil {
+		return profile, files, err
+	} else if runtime != "" {
+		input, err := json.Marshal(metadata)
+		if err != nil {
+			return profile, files, err
+		}
+		var saved nativeSavedLogin
+		if err := nativeProfileOn(ctx, runtime, "renew", input, &saved, profile.Authority, profile.Generation); err != nil {
+			return profile, files, err
+		}
+		return saved.Profile, saved.files(), nil
+	}
 	currentPEM, err := readProtectedProfileFile(files.certificate, 256<<10)
 	if err != nil {
 		return profile, files, err

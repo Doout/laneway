@@ -1,8 +1,9 @@
 //! Native implementations used by the packaged Laneway CLI.
 mod bootstrap;
 mod enrollment;
+mod profiles;
 
-use std::ffi::OsString;
+use std::{ffi::OsString, path::PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -23,6 +24,19 @@ enum Command {
     },
     /// Generate a random Laneway ID.
     Id,
+    /// Save a renewable user login.
+    Login {
+        domain: String,
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+    },
+    /// Remove a saved user login.
+    Logout { domain: String },
+    #[command(hide = true)]
+    Profile {
+        #[command(subcommand)]
+        operation: profiles::Operation,
+    },
     #[command(hide = true)]
     SubmitEnrollment,
     #[command(hide = true)]
@@ -50,6 +64,11 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
             }
         }
         Command::Bootstrap { operation } => runtime()?.block_on(bootstrap::run(operation)),
+        Command::Login { domain, token_file } => {
+            runtime()?.block_on(enrollment::login(&domain, token_file.as_deref()))
+        }
+        Command::Logout { domain } => profiles::Store::from_environment().logout(&domain),
+        Command::Profile { operation } => runtime()?.block_on(profiles::run(operation)),
         Command::SubmitEnrollment => runtime()?.block_on(enrollment::run()),
         Command::Discover { domain } => runtime()?.block_on(bootstrap::discover(&domain)),
     }
