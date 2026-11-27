@@ -1339,13 +1339,25 @@ fn route_snapshot_matches(actual: &[String], expected: &[&PolicyRoute], protocol
                 Err(_) => return false,
             },
         };
-        let allowed = ["via", "dev", "proto", "scope", "src"];
-        let mut index = 1;
-        while index < fields.len() {
-            if !allowed.contains(&fields[index]) || index + 1 >= fields.len() {
+        let attributes = fields[1..].chunks_exact(2);
+        if !attributes.remainder().is_empty() {
+            return false;
+        }
+        let mut seen = BTreeSet::new();
+        for attribute in attributes {
+            let key = attribute[0];
+            let value = attribute[1];
+            if !seen.insert(key) {
                 return false;
             }
-            index += 2;
+            match key {
+                "via" | "dev" | "proto" | "scope" | "src" => (),
+                // IPv6 FIB routes use priority 1024 and medium preference
+                // when neither field was supplied during installation.
+                "metric" if prefix.addr().is_ipv6() && value == "1024" => (),
+                "pref" if prefix.addr().is_ipv6() && value == "medium" => (),
+                _ => return false,
+            }
         }
         if field_after(&fields, "proto") != Some(protocol.as_str()) {
             return false;
@@ -1392,8 +1404,11 @@ pub async fn run_exit_fixture(
         config.relay.address = Some(std::net::SocketAddr::new(*bypass, 4433));
     }
     config.tcp_fallback = None;
+    config.direct_peers.clear();
     config.forwarding = forwarding;
-    config.routes = routes;
+    if !routes.is_empty() {
+        config.routes = routes;
+    }
     // Unlike Agent::new, the lab owns the existing tunnel and credentials.
     config.validate()?;
     use tokio::signal::unix::{SignalKind, signal};
@@ -1411,6 +1426,27 @@ pub async fn run_exit_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_ipv6_routes_accept_only_kernel_default_metric_and_preference() {
+        let route = PolicyRoute {
+            family: "-6",
+            prefix: "::/1".parse().unwrap(),
+            arguments: vec!["::/1".into(), "dev".into(), "lane0".into()],
+        };
+        let actual = "::/1 dev lane0 proto 251 metric 1024 pref medium";
+        assert!(route_snapshot_matches(&[actual.into()], &[&route], 251));
+        assert!(!route_snapshot_matches(
+            &[actual.replace("1024", "512")],
+            &[&route],
+            251
+        ));
+        assert!(!route_snapshot_matches(
+            &[actual.replace("medium", "high")],
+            &[&route],
+            251
+        ));
+    }
 
     fn kernel_config() -> Arc<Config> {
         let mut config: Config = toml::from_str(

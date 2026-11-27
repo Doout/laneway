@@ -35,8 +35,8 @@ pub(super) fn run(options: Options) -> Result<()> {
             }
         }
     };
-    let mut config = match Config::load(&path) {
-        Ok(config) => config,
+    let (mut config, wireguard) = match Config::load(&path) {
+        Ok(config) => (config, None),
         Err(native) => Config::load_persistent_node(&path).with_context(|| {
             format!("load persistent node configuration {} as Rust TOML ({native:#}) or legacy node TOML", path.display())
         })?,
@@ -44,8 +44,22 @@ pub(super) fn run(options: Options) -> Result<()> {
     if let Some(listen) = options.diagnostics {
         config.diagnostics.listen = Some(listen);
     }
+    if let Some(key) = wireguard {
+        let node = lanewayd_rs::WireGuardNode::new(config, &key, None)?;
+        return run_until(options.check_config, |shutdown| node.run_until(shutdown));
+    }
     let agent = lanewayd_rs::Agent::new(config)?;
-    if options.check_config {
+    run_until(options.check_config, |shutdown| agent.run_until(shutdown))
+}
+
+fn run_until<F>(
+    check: bool,
+    start: impl FnOnce(std::pin::Pin<Box<dyn Future<Output = ()>>>) -> F,
+) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
+    if check {
         println!("configuration is valid");
         return Ok(());
     }
@@ -53,5 +67,5 @@ pub(super) fn run(options: Options) -> Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async { agent.run_until(crate::shutdown_signal()?).await })
+        .block_on(async { start(Box::pin(crate::shutdown_signal()?)).await })
 }
