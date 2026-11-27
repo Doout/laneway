@@ -66,6 +66,10 @@ describe('shipped live application authorization', () => {
       const url = String(input)
       if (url.endsWith('/auth/session')) return Promise.resolve(response(session(['integration.manage'], { username: 'owner', role: 'owner', all_networks: true, network_ids: [] })))
       if (url === endpoint) return Promise.resolve(managementResponse({ tenant: 'team', verified_at_unix_seconds: 1_700_000_000 }))
+      if (url === endpoint + '/gateway') return Promise.resolve(managementResponse({
+        state: 'disabled', gateway_id: null, network_id: null, client_node_id: null,
+        resource_id: null, destination: null, tcp_port: null, runtime_available: false, detail: null,
+      }))
       if (url === endpoint + '/resources') return Promise.resolve(managementResponse({ resources: [fixture], total_count: 2, next_cursor: 'opaque+/=' }))
       if (url === endpoint + '/resources?after=opaque%2B%2F%3D') return Promise.resolve(managementResponse({
         resources: [{ ...fixture, id: 'resource-2', name: 'Analytics', active: false }], total_count: 2, next_cursor: null,

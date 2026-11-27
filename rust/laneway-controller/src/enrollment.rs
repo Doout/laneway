@@ -59,7 +59,7 @@ fn new_id() -> Result<Id> {
     getrandom::fill(&mut bytes)?;
     Ok(Id::new(bytes)?)
 }
-fn audit(
+pub(crate) fn audit(
     tx: &Transaction<'_>,
     net: Id,
     actor: Option<Id>,
@@ -72,7 +72,7 @@ fn audit(
         VALUES(randomblob(16),?1,?2,?3,?4,?5,?6,?7,?8)",params![net.as_bytes(),if actor.is_some(){"node"}else{"system"},actor.as_ref().map(Id::as_bytes),action,target.0,target.1.as_bytes(),details.to_string(),now])?;
     Ok(())
 }
-fn bump(tx: &Transaction<'_>, net: Id) -> Result<()> {
+pub(crate) fn bump(tx: &Transaction<'_>, net: Id) -> Result<()> {
     ensure!(tx.execute("UPDATE networks SET configuration_epoch=configuration_epoch+1 WHERE id=? AND configuration_epoch<9223372036854775807",[net.as_bytes()])?==1,EnrollError::Conflict);
     Ok(())
 }

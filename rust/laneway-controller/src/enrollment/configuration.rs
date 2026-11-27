@@ -117,6 +117,7 @@ impl SessionStore {
                     .map(|r| r.via_node_id.clone())
                     .collect()
             };
+            crate::gateway_overlay::apply_policy(&tx, peer.net, &mut policy)?;
             let response = NodeConfiguration {
                 configuration_epoch: epoch,
                 overlay_addresses: subject.overlay_addresses.clone(),
@@ -161,6 +162,7 @@ impl SessionStore {
     }
 }
 pub(super) fn maintain_configuration(tx: &Transaction<'_>, net: Id, now: i64) -> Result<()> {
+    crate::gateway_overlay::expire_publications(tx, net, now)?;
     maintenance::expire_routes(tx, net, now)?;
     maintenance::expire(tx, now)?;
     maintenance::expire_exits(tx, now)
@@ -197,6 +199,7 @@ pub(super) fn configuration_deadline(
         .checked_add(i64::try_from(validity)?)
         .context("invalid configuration validity")?
         .min(next.unwrap_or(i64::MAX))
+        .min(crate::gateway_overlay::publication_deadline(tx, net)?)
         .min(i64::try_from(health.not_after_unix_seconds)?);
     ensure!(end > now, "configuration expired during maintenance");
     Ok(end)

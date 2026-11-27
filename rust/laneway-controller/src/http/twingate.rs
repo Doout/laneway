@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 #[derive(Clone, Copy)]
 pub(super) enum Route {
     Connection,
+    Gateway,
     Test,
     Resources,
 }
@@ -23,12 +24,16 @@ impl Route {
             ["", "v1", "admin", "integrations", "twingate"] => Some(Self::Connection),
             ["", "v1", "admin", "integrations", "twingate", "test"] => Some(Self::Test),
             ["", "v1", "admin", "integrations", "twingate", "resources"] => Some(Self::Resources),
+            ["", "v1", "admin", "integrations", "twingate", "gateway"] => Some(Self::Gateway),
             _ => None,
         }
     }
 }
 
 enum Action {
+    GatewayRead,
+    GatewayEnable,
+    GatewayDisable,
     Read,
     Save,
     Test,
@@ -85,6 +90,9 @@ pub(super) async fn handle(
 ) -> Result<Reply, Failure> {
     let head = req.method() == Method::HEAD;
     let action = match (route, req.method()) {
+        (Route::Gateway, &Method::GET | &Method::HEAD) => Action::GatewayRead,
+        (Route::Gateway, &Method::PUT) => Action::GatewayEnable,
+        (Route::Gateway, &Method::DELETE) => Action::GatewayDisable,
         (Route::Connection, &Method::GET | &Method::HEAD) => Action::Read,
         (Route::Connection, &Method::PUT) => Action::Save,
         (Route::Connection, &Method::DELETE) => Action::Disconnect,
@@ -99,7 +107,7 @@ pub(super) async fn handle(
             )
             .reply(id, head);
             let allowed = match route {
-                Route::Connection => "GET, HEAD, PUT, DELETE",
+                Route::Connection | Route::Gateway => "GET, HEAD, PUT, DELETE",
                 Route::Test => "POST",
                 Route::Resources => "GET, HEAD",
             };
@@ -121,6 +129,78 @@ pub(super) async fn handle(
         csrf,
     });
     let result = match action {
+        Action::GatewayRead | Action::GatewayEnable | Action::GatewayDisable => {
+            let configured = state.bootstrap_discovery.is_some() && state.issuer.is_some();
+            let database = state.database.clone();
+            let expected = req
+                .headers()
+                .get(header::IF_MATCH)
+                .map(|value| {
+                    value
+                        .to_str()
+                        .ok()
+                        .and_then(|h| h.strip_prefix('"')?.strip_suffix('"'))
+                        .filter(|tag| (1..=65).contains(&tag.len()))
+                        .map(str::to_owned)
+                        .ok_or(TwingateError::GatewayChanged)
+                })
+                .transpose();
+            let result = match action {
+                Action::GatewayEnable => {
+                    actor.run(&state, true, |_| ()).await?;
+                    let expected = expected.map_err(failure)?;
+                    let input: twingate::gateway::Selection =
+                        form::bounded_json_form(req, 4096).await?;
+                    let checked = actor
+                        .run(&state, true, |store| store.saved())
+                        .await?
+                        .list
+                        .map_err(failure)?;
+                    if state
+                        .bootstrap_discovery
+                        .as_ref()
+                        .is_some_and(|d| Some(d.network_id()) != input.network_id.parse().ok())
+                    {
+                        return Err(failure(TwingateError::GatewayRoute));
+                    }
+                    let _check = state
+                        .twingate_checks
+                        .try_acquire()
+                        .map_err(|_| QUERY_BUSY)?;
+                    let candidate = twingate::gateway::prepare(
+                        &database,
+                        &checked,
+                        input,
+                        configured,
+                        expected.as_deref(),
+                    )
+                    .await
+                    .map_err(failure)?;
+                    actor
+                        .run(&state, true, move |store| {
+                            store.request_gateway(&checked, candidate)?;
+                            store.gateway_status(&database, configured)
+                        })
+                        .await?
+                }
+                Action::GatewayDisable => {
+                    actor
+                        .run(&state, true, move |store| {
+                            store.remove_gateway(expected?.as_deref())?;
+                            store.gateway_status(&database, configured)
+                        })
+                        .await?
+                }
+                _ => {
+                    actor
+                        .run(&state, false, move |store| {
+                            store.gateway_status(&database, configured)
+                        })
+                        .await?
+                }
+            };
+            return json_reply(result, id, head);
+        }
         Action::Resources => {
             let checked = actor
                 .run(&state, false, |store| store.saved())
@@ -258,6 +338,42 @@ fn failure(error: TwingateError) -> Failure {
             "ERROR_CODE_MALFORMED",
             "The saved connection changed during the request. Refresh and try again.",
             true,
+        ),
+        TwingateError::GatewayConflict => Failure(
+            S::CONFLICT,
+            "ERROR_CODE_MALFORMED",
+            "Disable the managed gateway and wait for removal before changing this configuration.",
+            false,
+        ),
+        TwingateError::GatewayChanged => Failure(
+            S::PRECONDITION_FAILED,
+            "ERROR_CODE_MALFORMED",
+            "The gateway changed. Refresh and confirm the change to the current gateway.",
+            false,
+        ),
+        TwingateError::GatewayBusy => Failure(
+            S::CONFLICT,
+            "ERROR_CODE_RESOURCE_EXHAUSTED",
+            "The managed gateway is being updated. Refresh and retry.",
+            true,
+        ),
+        TwingateError::GatewayUnsupported => Failure(
+            S::UNPROCESSABLE_ENTITY,
+            "ERROR_CODE_MALFORMED",
+            "Select an active IPv4 resource and a permitted TCP port.",
+            false,
+        ),
+        TwingateError::GatewayUnavailable => Failure(
+            S::SERVICE_UNAVAILABLE,
+            "ERROR_CODE_INTERNAL",
+            "A healthy gateway worker and a tenant bootstrap profile are required.",
+            true,
+        ),
+        TwingateError::GatewayRoute => Failure(
+            S::CONFLICT,
+            "ERROR_CODE_MALFORMED",
+            "Check the selected client and overlapping routes in this network.",
+            false,
         ),
         TwingateError::Storage => Failure(
             S::SERVICE_UNAVAILABLE,

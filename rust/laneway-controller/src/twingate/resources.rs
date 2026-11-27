@@ -15,6 +15,7 @@ query LanewayResources($first: Int!, $after: String) {
       node {
         __typename id name alias isActive
         address { value }
+        ... on NetworkResource { routingMode }
         remoteNetwork { name }
         protocols {
           tcp { policy ports { start end } }
@@ -61,6 +62,11 @@ struct Resource {
     kind: String,
     #[serde(rename(deserialize = "isActive"))]
     active: bool,
+    #[serde(
+        rename(deserialize = "routingMode"),
+        skip_serializing_if = "Option::is_none"
+    )]
+    routing_mode: Option<String>,
     address: Address,
     #[serde(rename(deserialize = "remoteNetwork"))]
     remote_network: RemoteNetwork,

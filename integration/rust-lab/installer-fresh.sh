@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the actual packaged initializer with real Docker and recovery on a lab.
-# Only release download/signature verification and public DNS are fixtures.
+# Release downloads, signature verification, public DNS and the host bridge worker are fixtures.
 set -euo pipefail
 trap 'printf "fresh installer test failed at line %s\n" "$LINENO" >&2' ERR
 marker=/run/.laneway-isolated-compose-lab
@@ -33,6 +33,7 @@ package="$work/package"
 destination="$work/deploy"
 source_dir="$package/deploy/compose"
 mkdir -p "$source_dir" "$package/bin" "$work/release" "$work/bin"
+cp -R "$root/deploy/twingate-gateway" "$package/deploy/"
 for file in compose.yaml compose.rust.yaml bootstrap.sh install-control-plane.sh laneway-control \
   preflight.sh prepare.sh prepare-control-plane.sh prepare-rust.py recovery.sh validate.sh verify-rust-release.sh README.md; do
   cp "$root/deploy/compose/$file" "$source_dir/"
@@ -71,6 +72,7 @@ sed -i -e "s/name: laneway-/name: $project-/" \
   -e '/^    driver: bridge$/a\    internal: true' "$source_dir/compose.yaml"
 sed -i -e "s|^    image: ghcr.io/doout/laneway-controller-rust:.*|    image: $controller_image|" \
   -e "s|^    image: ghcr.io/doout/laneway-relay-rust:.*|    image: $relay_image|" \
+  -e "s|^        source: .*LANEWAY_GATEWAY_SPOOL.*|        source: $work/gateway-spool|" \
   -e "s|:-laneway-controller-state}|:-$fixture_source}|" "$source_dir/compose.rust.yaml"
 
 # Stage only the operator CLI and Compose files via the real archive installer.
@@ -82,6 +84,16 @@ printf '%s\n' 0.0.9104 > "$package/VERSION"
 cp "$root/scripts/install-package.sh" "$package/install.sh"
 DESTDIR="$work/staged" sh "$package/install.sh" --control-tools
 tool_dir="$work/staged/usr/local"
+worker_dir="$tool_dir/share/laneway/deploy/twingate-gateway"
+diff -r "$package/deploy/twingate-gateway" "$worker_dir"
+# Exercise packaged initialization without installing a machine-wide bridge service on the lab host.
+mkdir -p "$work/gateway-spool"
+cat > "$worker_dir/install.sh" <<'EOF'
+#!/bin/sh
+set -eu
+command -v "$LANEWAY_COSIGN_BIN" >/dev/null
+touch "$LANEWAY_INSTALLER_FIXTURE/worker-invoked"
+EOF
 test ! -e "$tool_dir/sbin"
 test ! -e "$tool_dir/lib/systemd"
 export PATH="$work/bin:$tool_dir/bin:$PATH"
@@ -143,6 +155,9 @@ env LANEWAY_NONINTERACTIVE=true LANEWAY_CONFIRM=deploy LANEWAY_PRODUCTION_MODE=t
 
 [[ $(readlink "$control_link") == "$destination/laneway-control" ]]
 grep -Fxq LANEWAY_CONTROL_RUNTIME=rust "$destination/.env"
+if grep -q '^LANEWAY_GATEWAY_SPOOL=' "$destination/.env"; then
+  test -f "$work/worker-invoked"
+fi
 test "$(compose exec -T controller /usr/local/bin/laneway-controller --version)" = 0.0.9104
 test "$(compose exec -T relay /usr/local/bin/laneway-relay --version)" = 0.0.9100
 test "$(docker ps --filter "label=com.docker.compose.project=$project" --format '{{.Image}}' | LC_ALL=C sort)" = \

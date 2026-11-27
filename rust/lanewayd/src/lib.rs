@@ -58,6 +58,14 @@ pub use routing::{PacketMeta, Route, RoutingTable, locally_owned, packet_meta};
 pub use wireguard::{SharedHostExit, WireGuardNode};
 pub use wireguard::{WireGuardDatagram, WireGuardRelay};
 
+/// IP packet budget for userspace TCP over a minimum-size QUIC path.
+///
+/// The 1200-byte UDP payload must also fit the short header (flags, largest
+/// connection ID and packet number), AEAD tag, Quinn's DATAGRAM frame bound
+/// and a Laneway route header. Both relay hops can have a different path MTU.
+pub const TCP_RELAY_IP_MTU: usize =
+    1200 - (1 + 20 + 4 + 16 + 9) - laneway_protocol::PACKET_HEADER_LEN;
+
 /// Run the privileged macOS network helper with the inherited control socket.
 /// No node configuration or credentials are loaded in this process.
 #[cfg(target_os = "macos")]

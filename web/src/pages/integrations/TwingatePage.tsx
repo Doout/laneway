@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { ArrowLeft, ChevronDown, Plug, Settings2 } from 'lucide-react'
 import { Button, Callout, Field, FormStack, PageHeader, Status } from '../../components/ui'
 import { useControlPlane } from '../../lib/control-plane'
-import { TwingateResources } from './TwingateResources'
+import { TwingateGateway } from './TwingateGateway'
 import './twingate.css'
 
 const endpoint = '/v1/admin/integrations/twingate'
@@ -103,9 +103,10 @@ export function TwingatePage() {
           <Field label="Twingate network" hint="Enter the name before .twingate.com.">
             <input autoCapitalize="none" autoComplete="off" disabled={Boolean(action)} maxLength={63} onChange={(event) => setTenant(event.target.value)} placeholder="acme" required spellCheck={false} value={tenant} />
           </Field>
-          <Field label={connection.tenant ? 'New API token' : 'API token'} hint={<>Generate a Read only token in Twingate under Settings → API. <a href="https://www.twingate.com/docs/api-overview#getting-started" rel="noreferrer" target="_blank">Token setup guide</a></>}>
+          <Field label={connection.tenant ? 'New API token' : 'API token'} hint={<>Create a token under Settings → API in Twingate. Select <strong>Read only</strong> for inventory or <strong>Read, Write &amp; Provision</strong> for the Twingate bridge. <a href="https://www.twingate.com/docs/api-overview#getting-started" rel="noreferrer" target="_blank">Token setup guide</a></>}>
             <input autoComplete="new-password" disabled={Boolean(action)} maxLength={4096} onChange={(event) => setApiToken(event.target.value)} required type="password" value={apiToken} />
           </Field>
+          {connection.tenant && <p className="twingate-gateway__description">You can replace the token for this network. Remove the bridge before switching networks or disconnecting Twingate.</p>}
           <div className="button-row">
             <Button disabled={Boolean(action) || !tenant.trim() || !apiToken.trim()} type="submit" variant="primary">{action === 'save' ? 'Testing and saving…' : 'Test and save'}</Button>
             {connection.tenant ? <>
@@ -117,7 +118,7 @@ export function TwingatePage() {
         {error && <div className="twingate-connection__feedback" role="alert"><Callout tone="danger">{error}</Callout></div>}
         {notice && <p className="twingate-connection__feedback" role="status">{notice}</p>}
       </section>
-      {connection.tenant && <TwingateResources key={connectionRevision} />}
+      {connection.tenant && <TwingateGateway key={connectionRevision} />}
     </>}
   </div>
 }

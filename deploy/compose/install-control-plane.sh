@@ -130,6 +130,13 @@ fi
 if command -v docker >/dev/null 2>&1; then
   docker compose version >/dev/null 2>&1 || add_missing "Docker Compose v2"
 fi
+gateway_supported=false
+if [ -d /run/systemd/system ] && [ -c /dev/net/tun ] && [ -S /var/run/docker.sock ]; then
+  gateway_supported=true
+  for command in ip nft nsenter systemctl; do
+    command -v "$command" >/dev/null 2>&1 || add_missing "$command (managed Twingate gateways)"
+  done
+fi
 if [ -n "$missing" ]; then
   echo "Laneway pre-check found missing prerequisites:" >&2
   printf '%s\n' "$missing" | while IFS= read -r item; do printf '  - %s\n' "$item" >&2; done
@@ -312,6 +319,11 @@ else
   confirmation=$REPLY
 fi
 [ "$confirmation" = deploy ] || die "cancelled before changing the deployment"
+if [ "$gateway_supported" = true ]; then
+  LANEWAY_COSIGN_BIN="$cosign_bin" sh "$source_dir/../twingate-gateway/install.sh"
+else
+  echo "Managed Twingate gateways require a local Linux systemd/Docker host with /dev/net/tun." >&2
+fi
 save_answers
 
 if [ "$automatic_issuer" = true ]; then
@@ -372,6 +384,9 @@ env_tmp=$(mktemp "$destination/.env.XXXXXX")
 {
   printf 'LANEWAY_VERSION=%s\n' "$release"
   printf 'LANEWAY_CONTROL_RUNTIME=rust\n'
+  if [ "$gateway_supported" = true ]; then
+    printf 'LANEWAY_GATEWAY_SPOOL=/var/lib/laneway-gateways/spool\n'
+  fi
   printf 'LANEWAY_INSTALL_PROFILE=%s\n' "$install_profile"
   cat "$metadata_dir/settings.env"
   printf 'LANEWAY_BIND_ADDRESS=%s\n' "$bind_address"

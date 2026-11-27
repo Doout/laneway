@@ -211,6 +211,7 @@ type RequestOptions = {
   method?: string
   body?: unknown
   signal?: AbortSignal
+  ifMatch?: string
 }
 
 type ControlPlaneContextValue = {
@@ -676,6 +677,7 @@ export function ControlPlaneProvider({ children }: PropsWithChildren) {
     const method = (options.method ?? 'GET').toUpperCase()
     const headers = new Headers({ Accept: 'application/json' })
     if (options.body !== undefined) headers.set('Content-Type', 'application/json')
+    if (options.ifMatch !== undefined) headers.set('If-Match', options.ifMatch)
     if (!safeMethods.has(method)) {
       if (!csrfRef.current) throw new Error('The browser session has no CSRF token.')
       headers.set('X-Laneway-CSRF', csrfRef.current)

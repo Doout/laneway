@@ -473,6 +473,8 @@ async fn serve(serving: Serving, stop: impl Future<Output = std::io::Result<()>>
         println!("listening quic://{}", ep.local_addr()?);
     }
     let renewal = renewal.map(|worker| tokio::spawn(worker.run()));
+    let gateway_worker = reconcile_gateway(state.clone());
+    tokio::pin!(gateway_worker);
     let topology_expiry = prune_topology(state.clone());
     tokio::pin!(topology_expiry);
     let alerts = async {
@@ -487,6 +489,7 @@ async fn serve(serving: Serving, stop: impl Future<Output = std::io::Result<()>>
         tokio::select! {
             result=&mut control => return result,
             _=&mut topology_expiry => unreachable!("topology expiry loop never returns"),
+            _=&mut gateway_worker => unreachable!("gateway reconciliation loop never returns"),
             _=&mut alerts => unreachable!("alert worker never returns"),
             result=&mut stop => { result?; break; }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
@@ -524,6 +527,39 @@ async fn serve(serving: Serving, stop: impl Future<Output = std::io::Result<()>>
     }
     while tasks.join_next().await.is_some() {}
     Ok(())
+}
+
+async fn reconcile_gateway(state: super::http::State) {
+    #[cfg(unix)]
+    {
+        let mut ticker = tokio::time::interval(Duration::from_secs(5));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let state = state.clone();
+            let runtime = tokio::runtime::Handle::current();
+            // Overlay SQLite transactions and durable journal fsyncs can block.
+            let result = tokio::task::spawn_blocking(move || {
+                runtime.block_on(laneway_controller::twingate::gateway::reconcile(
+                    &state.database,
+                    state.bootstrap_discovery.as_deref(),
+                ))
+            })
+            .await;
+            match result {
+                Ok(Ok(()) | Err(laneway_controller::twingate::Failure::GatewayBusy)) => (),
+                Ok(Err(code)) => {
+                    eprintln!("Managed Twingate gateway reconciliation failed: {code:?}")
+                }
+                Err(_) => eprintln!("Managed Twingate gateway reconciliation task failed"),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = state;
+        std::future::pending::<()>().await;
+    }
 }
 
 async fn prune_topology(state: super::http::State) {

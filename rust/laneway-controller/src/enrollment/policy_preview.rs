@@ -184,6 +184,7 @@ impl<'tx, 'db> Evaluator<'tx, 'db> {
                 &mut snapshot,
             )?;
         }
+        crate::gateway_overlay::apply_policy(self.tx, self.net, &mut snapshot)?;
         let effective = CompiledPolicy::compile(snapshot, self.net, self.epoch)?;
         let mut trace = Vec::new();
         let (accept, matched) = effective.evaluate(

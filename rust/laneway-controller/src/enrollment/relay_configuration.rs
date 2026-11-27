@@ -163,12 +163,14 @@ impl SessionStore {
                 ..Default::default()
             })
         } else {
+            let mut policy = snapshot_policy::compile(&tx, net, epoch)?;
+            crate::gateway_overlay::apply_policy(&tx, net, &mut policy)?;
             let cfg = RelayConfiguration {
                 network_id: net.as_bytes().to_vec(),
                 configuration_epoch: epoch,
                 valid_until_unix_seconds,
                 peers: authorizations(&tx, net, now)?,
-                policy: Some(snapshot_policy::compile(&tx, net, epoch)?),
+                policy: Some(policy),
                 revoked_certificate_serials: revocations(&tx, net, now)?,
                 certificate_health: Some(peer.health.clone()),
             };

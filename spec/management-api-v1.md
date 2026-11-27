@@ -124,6 +124,36 @@ The contract contains exactly 66 operations:
 | `POST` | `/v1/admin/relays/{relay_id}/disable` | Protected mutation |
 | `PUT` | `/v1/admin/relays/{relay_id}` | Protected mutation |
 
+## Twingate console endpoints
+
+The Rust controller serves these console endpoints under
+`/v1/admin/integrations/twingate`. Every operation requires a tenant owner
+session cookie. Writes also require the CSRF cookie, a matching
+`X-Laneway-CSRF` header, and the controller's HTTPS origin.
+
+| Method | Suffix | Operation |
+| --- | --- | --- |
+| `GET` | | Read the saved connection's tenant and verification time. |
+| `PUT` | | Verify and save a JSON object with `tenant` and `api_token`. |
+| `DELETE` | | Disconnect a saved connection after disabling its gateway. |
+| `POST` | `/test` | Recheck the saved connection. |
+| `GET` | `/resources` | List a page of resources. Pass the previous `next_cursor` as `after` to continue. |
+| `GET` | `/gateway` | Read the current gateway configuration and runtime status. |
+| `PUT` | `/gateway` | Enable or retry an SSH gateway using `network_id`, `client_node_id`, `resource_id`, and integer `tcp_port`. |
+| `DELETE` | `/gateway` | Disable the gateway and remove its provider access. |
+
+Gateway replies expose `state`, `gateway_id`, `network_id`, `client_node_id`,
+`resource_id`, `destination`, `tcp_port`, `runtime_available`, and `detail`.
+The identifiers, destination, port, and detail can be null. The states are
+`disabled`, `provisioning`, `ready`, `degraded`, and `removing`. Repeating
+the same `PUT` configuration retries provisioning. To switch the permitted
+client, send the new `client_node_id` with a quoted
+`If-Match: "<gateway_id>:<previous_client_node_id>"` header. To disable a
+configured gateway, pass the quoted gateway ID alone in `If-Match`. Disabling
+an unconfigured gateway returns the disabled status. The saved connection can
+rotate its token for the same Twingate network while a gateway is configured.
+Disable the gateway before disconnecting or switching Twingate networks.
+
 ## Collection pages and mutation semantics
 
 List operations return a bounded snapshot with one collection property and no
@@ -161,8 +191,8 @@ implementation details: clients must not decode, alter, or transfer them
 between scopes. Invalid, empty, repeated, or out-of-scope cursors fail as
 malformed requests rather than silently restarting pagination.
 
-The v1 surface does not claim entity tags, `If-Match` preconditions, or a general
-idempotency-key header. Two operations have narrower documented replay behavior:
+The gateway-specific `If-Match` rules are documented above. Management v1
+otherwise has no entity tags, write preconditions, or idempotency-key header. Two operations have narrower documented replay behavior:
 repeating the same root-token rotation journal step is idempotent, and route
 assignment may return the existing exact active route. These behaviors do not
 create a general retry guarantee for other mutations.

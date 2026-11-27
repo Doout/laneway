@@ -19,6 +19,13 @@ log_file=$test_root/calls.log
 counter_file=$test_root/id-counter
 answers_file=$test_root/installer-state/answers
 mkdir -p "$source_dir" "$mock_bin" "$issuer_dir"
+mkdir -p "$source_dir/../twingate-gateway"
+cat > "$source_dir/../twingate-gateway/install.sh" <<'EOF'
+#!/bin/sh
+set -eu
+command -v "$LANEWAY_COSIGN_BIN" >/dev/null
+printf 'stage Twingate worker\n' >> "$LANEWAY_TEST_LOG"
+EOF
 printf '0.2.8\n' > "$test_root/package/VERSION"
 cp "$repo_dir/deploy/compose/install-control-plane.sh" "$source_dir/install-control-plane.sh"
 cp "$repo_dir/deploy/compose/verify-rust-release.sh" "$source_dir/verify-rust-release.sh"
@@ -205,6 +212,9 @@ test "$(grep -c '^cosign verify ' "$log_file")" -eq 5
 test "$(grep -c '^cosign verify-blob ' "$log_file")" -eq 1
 grep -Fx "stage pki" "$log_file" >/dev/null
 grep -Fx "stage rust" "$log_file" >/dev/null
+if grep -q '^LANEWAY_GATEWAY_SPOOL=' "$destination/.env"; then
+  grep -Fx 'stage Twingate worker' "$log_file" >/dev/null
+fi
 grep -Fx "bootstrap --rust" "$log_file" >/dev/null
 grep -E '^lane backup initial-recovery-[0-9]{8}T[0-9]{6}Z\.age$' "$log_file" >/dev/null
 test "$(stat -c %a "$answers_file")" = 600

@@ -54,6 +54,8 @@ if [ "$control_tools" = true ]; then
   ln -sfn laneway "$bindir/lane"
   install -m 0644 "$script_dir/VERSION" "$sharedir/VERSION"
   cp -R "$script_dir/deploy/compose/." "$sharedir/deploy/compose/"
+  install -d -m 0755 "$sharedir/deploy/twingate-gateway"
+  cp -R "$script_dir/deploy/twingate-gateway/." "$sharedir/deploy/twingate-gateway/"
   echo "Laneway $(cat "$script_dir/VERSION") control-plane tools installed; no host daemon or service unit installed."
   exit 0
 fi

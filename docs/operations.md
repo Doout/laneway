@@ -365,9 +365,47 @@ To invalidate the token itself, revoke it in Twingate.
 
 Owners can review Twingate resources and their addresses, remote networks,
 and traffic policies on the same page. Select rows and copy the shortlist
-for review. Listing or selecting resources does not create routes or grant
-access in Laneway.
+for review.
 
-The Rust controller stores the token in `twingate.json` in the database's
-sibling `<database>.integrations` directory, using mode `0600`. SQLite backups
-exclude this directory. Re-enter the token after restoring to fresh storage.
+### Connect to a resource through the Twingate bridge
+
+The controller host needs a [Twingate gateway worker](../deploy/twingate-gateway/README.md).
+In the Twingate Admin Console, create a **Read, Write & Provision** API token
+and confirm that your Twingate plan includes Service Accounts. Save the token
+under **Connection settings**. A read-only token remains sufficient for
+inventory.
+
+Use **Set up SSH access** in the resource’s **Laneway access** column for a private IPv4 host. Select
+the **Laneway network**, **Permitted client**, and **SSH port**, then choose
+**Enable access**. Laneway provisions a Twingate Service Account for the
+selected resource, starts an unattended Twingate client on the gateway host,
+and restricts Laneway access to the chosen client and TCP port.
+
+An existing approved host route stays active during gateway setup. Before
+withdrawing it, confirm that the gateway worker can reach the resource.
+Laneway publishes the gateway route after the old route is withdrawn.
+
+Under **Infrastructure → Integrations → Twingate**, the **Twingate bridge**
+panel shows bridge health and recovery actions. **Online** means the connector
+has an active path and the worker recently reached the configured TCP port.
+SSH authentication still uses the destination host's credentials.
+
+In **Resources**, the **Laneway access** column shows the permitted client,
+network, and SSH port for the configured resource. Open **Connection instructions**
+and run the command on that client using your SSH username. A
+[rootless Laneway client](rootless.md) requires the SSH application to use
+its authenticated local SOCKS5 proxy. **No bridge access** means the bridge
+does not grant Laneway access to that resource. Twingate's own access rules
+are independent.
+
+Choose **Edit access** to switch the permitted client. Use **Remove access**
+before configuring another resource, changing the Twingate network, or
+disconnecting it. If the resource has disappeared from inventory, **Remove
+bridge** is also available on the bridge panel. You can replace the API token
+for the same Twingate network while the bridge runs.
+
+Laneway keeps per-tenant integration state in the database's sibling
+`<database>.integrations` directory. The API token is written to `twingate.json`
+with mode `0600`. SQLite backups exclude this directory. Re-enter the token
+after restoring to fresh storage and check the gateway before relying on the
+route.
