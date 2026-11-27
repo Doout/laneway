@@ -1,8 +1,8 @@
 use std::{
-    fs::File,
+    fs::{File, Permissions},
     io::{Seek, Write},
     net::IpAddr,
-    os::fd::AsRawFd,
+    os::{fd::AsRawFd, unix::fs::PermissionsExt},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -311,6 +311,7 @@ fn config(
 
 fn anonymous_file(bytes: &[u8]) -> Result<(File, PathBuf)> {
     let mut file = tempfile::tempfile()?;
+    file.set_permissions(Permissions::from_mode(0o600))?;
     file.write_all(bytes)?;
     file.rewind()?;
     let base = if cfg!(target_os = "linux") {
