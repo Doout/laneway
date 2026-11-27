@@ -511,7 +511,7 @@ impl Identity {
     }
 }
 
-fn https_origin(value: &str) -> Result<reqwest::Url> {
+pub(crate) fn https_origin(value: &str) -> Result<reqwest::Url> {
     let url = reqwest::Url::parse(value).context("invalid controller HTTPS origin")?;
     ensure!(
         url.scheme() == "https"
@@ -575,7 +575,7 @@ pub(crate) fn wireguard_public_key(private: [u8; 32]) -> [u8; 32] {
     x25519_dalek::x25519(private, x25519_dalek::X25519_BASEPOINT_BYTES)
 }
 
-fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
+pub(crate) fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
     let chain = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
         .collect::<std::io::Result<Vec<_>>>()
         .context("parse certificate PEM")?;
@@ -583,7 +583,7 @@ fn certificates(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
     Ok(chain)
 }
 
-fn private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
+pub(crate) fn private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
     rustls_pemfile::private_key(&mut std::io::Cursor::new(pem))
         .context("parse connector private key")?
         .context("connector private key is missing")
@@ -695,14 +695,19 @@ pub(crate) async fn submit_enrollment(
 }
 
 #[derive(Debug)]
-struct PinnedController {
+pub(crate) struct PinnedController {
     verifier: Arc<WebPkiServerVerifier>,
     name: ServerName<'static>,
     expected: AuthenticatedIdentity,
 }
 
 impl PinnedController {
-    fn new(ca: &[u8], server_name: &str, network_id: Id, service_id: Id) -> Result<Self> {
+    pub(crate) fn new(
+        ca: &[u8],
+        server_name: &str,
+        network_id: Id,
+        service_id: Id,
+    ) -> Result<Self> {
         Ok(Self {
             verifier: WebPkiServerVerifier::builder(Arc::new(roots(ca)?))
                 .build()

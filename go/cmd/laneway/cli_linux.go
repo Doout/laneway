@@ -42,7 +42,7 @@ func addPlatformCommands(root *cobra.Command) {
 	}
 
 	for _, hidden := range []*cobra.Command{
-		command("join TOKEN", "Enroll a node with a controller", runJoin),
+		command("join TOKEN", "Enroll a node with a controller", runCLIJoin),
 		command("invite", "Issue an invite using a controller configuration", runInvite),
 		command("renew", "Renew this node's controller-issued certificate", runRenew),
 		group("connector", "Activate and run an unprivileged Connector", runConnector,
@@ -102,4 +102,11 @@ func runNodeLocal(args []string) error {
 		return fmt.Errorf("missing local node command")
 	}
 	return runLocal(args[0], args[1:])
+}
+
+func runCLIJoin(args []string) error {
+	if handled, err := tryNativeCommand([]string{"join"}, args); handled || err != nil {
+		return err
+	}
+	return runJoin(args)
 }

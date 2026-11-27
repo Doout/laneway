@@ -14,12 +14,7 @@ fixture() {
   if [ -n "${controller_pid:-}" ]; then kill "$controller_pid" 2>/dev/null || true; fi
   if [ -n "${relay_pid:-}" ]; then kill "$relay_pid" 2>/dev/null || true; fi' EXIT
   trap 'echo "connector fixture failed at line $LINENO" >&2' ERR
-  cd /src/go
-  go build -o "$work/laneway" ./cmd/laneway
-  go build -o "$work/controller" ./integration/rustnodecontroller
-  go build -o "$work/relay" ./cmd/laneway-relay
-
-  cli="$work/laneway"
+  cli=/fixture/laneway
   network=71000000000000000000000000000001
   controller=71000000000000000000000000000002
   relay=71000000000000000000000000000003
@@ -32,29 +27,39 @@ fixture() {
   endpoint=https://localhost:8443
   printf '%s\n' rust-connector-cutover-disposable-admin-token > "$work/admin.token"
   "$cli" pki init -out-dir "$work/pki" >/dev/null
+  "$cli" pki intermediate --ca-cert "$work/pki/ca.crt" --ca-key "$work/pki/ca.key" \
+    --out-cert "$work/pki/issuer.crt" --out-key "$work/pki/issuer.key" >/dev/null
+  "$cli" pki verify-authority --root "$work/pki/ca.crt" --issuer "$work/pki/issuer.crt" \
+    --key "$work/pki/issuer.key" >/dev/null
   for role in controller relay; do
     if [ "$role" = controller ]; then id="$controller"; else id="$relay"; fi
-    "$cli" pki "$role" -ca-cert "$work/pki/ca.crt" -ca-key "$work/pki/ca.key" \
+    "$cli" pki "$role" -ca-cert "$work/pki/issuer.crt" -ca-key "$work/pki/issuer.key" \
       -network-id "$network" -service-id "$id" -dns localhost -ip 127.0.0.1,::1 \
       -out-cert "$work/pki/$role.crt" -out-key "$work/pki/$role.key" >/dev/null
   done
 
-  "$work/controller" -listen '[::]:8443' -quic-listen '[::]:8443' \
-    -database "$work/controller.db" -ca-cert "$work/pki/ca.crt" -ca-key "$work/pki/ca.key" \
-    -controller-cert "$work/pki/controller.crt" -controller-key "$work/pki/controller.key" \
-    -admin-token-file "$work/admin.token" -snapshot-validity 30s >"$work/controller.log" 2>&1 &
+  /fixture/controller init "$work/controller.db" "$work/pki/controller.crt" \
+    connector-lab 100.115.2.0/24 >/dev/null
+  /fixture/controller serve "$work/controller.db" '[::]:8443' \
+    "$work/pki/controller.crt" "$work/pki/controller.key" --listen-on-network \
+    --node-issuer "$work/pki/issuer.crt" "$work/pki/issuer.key" 604800 \
+    --node-client-ca "$work/pki/ca.crt" --node-quic --snapshot-validity 30 \
+    --root-token-file "$work/admin.token" >"$work/controller.log" 2>&1 &
   controller_pid=$!
   for _ in {1..100}; do
-    grep -q 'controller listening' "$work/controller.log" && break
+    grep -q 'listening quic://' "$work/controller.log" && break
     kill -0 "$controller_pid" || { cat "$work/controller.log"; exit 1; }
     sleep 0.1
   done
-  grep -q 'controller listening' "$work/controller.log"
+  grep -q 'listening quic://' "$work/controller.log"
   admin=(--controller "$endpoint" --ca "$work/pki/ca.crt"
     --controller-network-id "$network" --controller-service-id "$controller"
     --admin-token-file "$work/admin.token")
-  "$cli" controller network create --network-id "$network" --name connector-lab \
-    --ipv4-pool 100.115.2.0/24 "${admin[@]}" >/dev/null
+  local networks
+  networks="$("$cli" controller network list "${admin[@]}")"
+  grep -F "\"network_id\": \"$network\"" <<<"$networks" >/dev/null
+  grep -F '"name": "connector-lab"' <<<"$networks" >/dev/null
+  "$cli" controller administrator root-token authentication-check --expect accepted "${admin[@]}"
   "$cli" controller relay register --network-id "$network" --service-id "$relay" \
     --name local-relay --endpoint "$relay_endpoint" "${admin[@]}" >/dev/null
 
@@ -77,14 +82,27 @@ network_id = "$network"
 service_id = "$controller"
 poll_interval = "100ms"
 EOF
-  "$work/relay" -config "$work/relay.toml" >"$work/relay.log" 2>&1 &
+  /fixture/relay --config "$work/relay.toml" >"$work/relay.log" 2>&1 &
   relay_pid=$!
   for _ in {1..100}; do
-    grep -q 'QUIC=.*TCP-fallback=' "$work/relay.log" && break
+    grep -q 'Rust relay listening' "$work/relay.log" && break
     kill -0 "$relay_pid" || { cat "$work/relay.log"; exit 1; }
     sleep 0.1
   done
-  grep -q 'QUIC=.*TCP-fallback=' "$work/relay.log"
+  grep -q 'Rust relay listening' "$work/relay.log"
+
+  # Exercise the administrator image's durable join path without a network interface.
+  "$cli" controller enrollment-token issue --network-id "$network" --label fixture-gateway \
+    --connector "${admin[@]}" | sed -n 's/^[[:space:]]*"enrollment_token": "\([^"]*\)"[,]*$/\1/p' > "$work/join.token"
+  test -s "$work/join.token"
+  "$cli" join --token-file "$work/join.token" --name fixture-gateway \
+    --controller "$endpoint" --ca "$work/pki/ca.crt" --controller-network-id "$network" \
+    --controller-service-id "$controller" --out-cert "$work/gateway.crt" \
+    --out-key "$work/gateway.key" --out-wireguard-key "$work/gateway.wg" >/dev/null
+  rm -- "$work/join.token"
+  "$cli" controller route assign --network-id "$network" --connector fixture-gateway \
+    --to 192.0.2.1 "${admin[@]}" >/dev/null
+  "$cli" controller overview --network-id "$network" "${admin[@]}" | grep -F '192.0.2.1/32 (nat)' >/dev/null
 
   name=test-connector
   token="$("$cli" controller enrollment-token issue --network-id "$network" \
@@ -98,7 +116,15 @@ EOF
       "$network" "$controller" "$relay_endpoint" "$relay" "$ca" | base64 | tr -d '\n'
     printf '\n'
   } > /state/setup.token
-  chown 65532:65532 /state /state/setup.token
+  if [ "${1:-relay-quic}" = tcp-fallback ]; then
+    "$cli" connector bootstrap-seal --out /state/setup.envelope --expires-at "$(($(date +%s) + 600))" \
+      < /state/setup.token > /state/setup.key
+    rm -- /state/setup.token
+    chown 65532:65532 /state/setup.envelope
+  else
+    chown 65532:65532 /state/setup.token
+  fi
+  chown 65532:65532 /state
   echo 'connector fixture ready'
   wait "$controller_pid" "$relay_pid"
 }
@@ -111,11 +137,13 @@ fi
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 lab_image="${LANEWAY_RUST_LAB_IMAGE:-laneway-rust-lab:local}"
+controller_image=laneway-connector-fixture-controller:local
+relay_image=laneway-connector-fixture-relay:local
 if [ "${1:-}" = --prime-cache ]; then
-  # Dependency downloads run before the offline test.
-  docker run --rm --mount "type=bind,src=$root,dst=/src,readonly" \
-    --mount type=volume,src=laneway-rust-lab-gomod,dst=/go/pkg/mod \
-    -w /src/go "$lab_image" go mod download
+  for role in controller relay; do
+    docker build --file "$root/deploy/containers/Dockerfile.rust-relay" \
+      --target "$role-binary" --tag "laneway-connector-fixture-$role:local" "$root"
+  done
   exit
 fi
 if [[ ${1:-} != --fresh || $# -lt 2 || $# -gt 3 ]]; then
@@ -126,6 +154,7 @@ rust_image=$2
 carrier=${3:-relay-quic}
 case "$carrier" in relay-quic|tcp-fallback) ;; *) echo "invalid lab carrier" >&2; exit 1 ;; esac
 state="$(docker volume create --label laneway.test=connector-enrollment)"
+binaries="$(mktemp -d)"
 declare -a containers=()
 stage="starting the isolated controller and relay"
 cleanup() {
@@ -140,14 +169,22 @@ cleanup() {
     docker rm -f "$container" >/dev/null 2>&1 || true
   done
   docker volume rm "$state" >/dev/null
+  rm -rf -- "$binaries"
 }
 trap cleanup EXIT
 
-# The fixture runs inside a container with a differently owned, read-only checkout.
-lab="$(docker run -d --network none -e GOFLAGS=-buildvcs=false -v "$root:/src:ro" \
-  -v "$state:/state" \
-  -v laneway-rust-lab-gomod:/go/pkg/mod -v laneway-rust-lab-gobuild:/gobuild \
-  "$lab_image" bash /src/integration/rust-lab/connector-cutover.sh --fixture "$carrier")"
+# The fixture uses release binaries inside a network-isolated namespace.
+copy_binary() {
+  local image="$1" source="$2" destination="$3" container
+  container="$(docker create "$image" /unused)"
+  containers+=("$container")
+  docker cp "$container:$source" "$binaries/$destination"
+}
+copy_binary "$controller_image" /laneway-controller-rs controller
+copy_binary "$relay_image" /laneway-relay-rs relay
+copy_binary "$rust_image" /usr/local/bin/lanewayd-rs laneway
+lab="$(docker run -d --network none -v "$root:/src:ro" -v "$binaries:/fixture:ro" \
+  -v "$state:/state" "$lab_image" bash /src/integration/rust-lab/connector-cutover.sh --fixture "$carrier")"
 containers+=("$lab")
 for _ in {1..180}; do
   docker logs "$lab" 2>&1 | grep -q 'connector fixture ready' && break
@@ -205,12 +242,22 @@ check_rust_process() {
 
 rust_version="$(docker run --rm --pull never --network none "$rust_image" version)"
 stage="enrolling a new Rust Connector"
-start -e SETUP_TOKEN_FILE=/var/lib/laneway/setup.token
+if [ "$carrier" = tcp-fallback ]; then
+  docker exec "$lab" cat /state/setup.key |
+    docker run --rm -i --pull never --network "container:$lab" --user 65532:65532 \
+      --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+      -v "$state:/var/lib/laneway" "$rust_image" connector bootstrap-activate \
+      --envelope-file /var/lib/laneway/setup.envelope
+  docker exec "$lab" rm -- /state/setup.key /state/setup.envelope
+  start
+else
+  start -e SETUP_TOKEN_FILE=/var/lib/laneway/setup.token
+  docker exec "$lab" rm -- /state/setup.token
+fi
 node_id="$(read_node)"
 [ -n "$node_id" ]
 check_rust_process
 identity="$(identity_bytes)"
-docker exec "$lab" rm -- /state/setup.token
 stage="restarting the Rust Connector with only its saved identity"
 docker stop --time 5 "$active" >/dev/null
 start

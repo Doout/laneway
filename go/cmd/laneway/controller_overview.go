@@ -35,6 +35,9 @@ type controllerOverviewForward struct {
 }
 
 func runControllerOverview(args []string) error {
+	if handled, err := tryNativeController("overview", args); handled || err != nil {
+		return err
+	}
 	fs := flag.NewFlagSet("controller overview", flag.ContinueOnError)
 	remote := addRemoteFlags(fs, false, true)
 	networkText := fs.String("network-id", "", "network ID")

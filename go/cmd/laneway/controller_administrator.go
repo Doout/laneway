@@ -50,6 +50,9 @@ func runControllerAdministrator(args []string) error {
 	}
 	switch args[0] {
 	case "bootstrap", "recover":
+		if handled, err := tryNativeController("administrator", args, "bootstrap", "recover"); handled || err != nil {
+			return err
+		}
 		return runControllerAdministratorPasswordLifecycle(args[0], args[1:])
 	case "root-token":
 		return runControllerAdministratorRootToken(args[1:])
@@ -141,6 +144,12 @@ func runControllerAdministratorRootToken(args []string) error {
 	}
 	if len(args) == 0 {
 		return errors.New("usage: laneway controller administrator root-token <generate|authentication-check|rotation-begin|rotation-complete> ...")
+	}
+	switch args[0] {
+	case "generate", "authentication-check", "rotation-begin", "rotation-complete":
+		if handled, err := tryNativeCommand([]string{"controller", "administrator", "root-token"}, args); handled || err != nil {
+			return err
+		}
 	}
 	switch args[0] {
 	case "generate":
