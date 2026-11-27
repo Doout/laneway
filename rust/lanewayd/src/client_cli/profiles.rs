@@ -5,8 +5,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use base64::{Engine, engine::general_purpose::STANDARD};
-use clap::Subcommand;
 use laneway_private as private;
 use laneway_protocol::{AuthenticatedIdentity, Id, Role, identity_from_certificate_der};
 use serde::{Deserialize, Serialize};
@@ -16,20 +14,6 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 const MANIFEST: &str = "profile.json";
 const MAX_MANIFEST: usize = 64 << 10;
 const MAX_CREDENTIAL: usize = 256 << 10;
-const MAX_INPUT: u64 = 1 << 20;
-
-#[derive(Subcommand)]
-pub(super) enum Operation {
-    Default,
-    Load {
-        authority: String,
-    },
-    Save,
-    Renew {
-        authority: String,
-        generation: String,
-    },
-}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,29 +28,16 @@ pub(super) struct Profile {
     created_at: String,
 }
 
-#[derive(Serialize)]
 pub(super) struct Files {
-    directory: PathBuf,
     pub(super) ca: PathBuf,
     pub(super) certificate: PathBuf,
     pub(super) private_key: PathBuf,
     wireguard_key: PathBuf,
 }
 
-#[derive(Serialize)]
 pub(super) struct Saved {
     pub(super) profile: Profile,
     pub(super) files: Files,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SaveRequest {
-    profile: Profile,
-    ca: String,
-    certificate: String,
-    private_key: String,
-    wireguard_key: String,
 }
 
 pub(super) struct Credentials<'a> {
@@ -74,56 +45,6 @@ pub(super) struct Credentials<'a> {
     pub(super) certificate: &'a [u8],
     pub(super) private_key: &'a [u8],
     pub(super) wireguard_key: &'a [u8],
-}
-
-pub(super) async fn run(operation: Operation) -> Result<()> {
-    let store = Store::from_environment();
-    match operation {
-        Operation::Default => {
-            serde_json::to_writer(io::stdout().lock(), &store.default_authority()?)?
-        }
-        Operation::Load { authority } => {
-            serde_json::to_writer(io::stdout().lock(), &store.load(&authority)?)?
-        }
-        Operation::Renew {
-            authority,
-            generation,
-        } => {
-            let mut bytes = Vec::new();
-            io::stdin().take((256 << 10) + 1).read_to_end(&mut bytes)?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-            let metadata = super::bootstrap::Metadata::decode(&bytes, now)?;
-            let saved = store.renew(&authority, &generation, &metadata).await?;
-            serde_json::to_writer(io::stdout().lock(), &saved)?;
-        }
-        Operation::Save => {
-            let mut bytes = zeroize::Zeroizing::new(Vec::new());
-            io::stdin().take(MAX_INPUT + 1).read_to_end(&mut bytes)?;
-            ensure!(
-                bytes.len() as u64 <= MAX_INPUT,
-                "saved login input exceeds limit"
-            );
-            let request: SaveRequest =
-                serde_json::from_slice(&bytes).context("decode saved login")?;
-            let ca = STANDARD.decode(&request.ca)?;
-            let certificate = STANDARD.decode(&request.certificate)?;
-            let key = zeroize::Zeroizing::new(STANDARD.decode(&request.private_key)?);
-            let wireguard = zeroize::Zeroizing::new(STANDARD.decode(&request.wireguard_key)?);
-            let _lock = store.lock(&request.profile.authority)?;
-            store.save(
-                request.profile,
-                Credentials {
-                    ca: &ca,
-                    certificate: &certificate,
-                    private_key: &key,
-                    wireguard_key: &wireguard,
-                },
-            )?;
-        }
-    }
-    Ok(())
 }
 
 pub(super) struct Store {
@@ -212,7 +133,7 @@ impl Store {
         );
         let generation = directory.join(&profile.generation);
         private::check_directory(&generation)?;
-        let files = Files::new(directory, &generation);
+        let files = Files::new(&generation);
         for path in [
             &files.ca,
             &files.certificate,
@@ -286,7 +207,7 @@ impl Store {
         }
         let staged = builder.tempdir_in(&directory)?;
         private::check_directory(staged.path())?;
-        let files = Files::new(directory.clone(), staged.path());
+        let files = Files::new(staged.path());
         for (path, bytes) in [
             (&files.ca, credentials.ca),
             (&files.certificate, credentials.certificate),
@@ -439,9 +360,8 @@ impl Profile {
 }
 
 impl Files {
-    fn new(directory: PathBuf, generation: &Path) -> Self {
+    fn new(generation: &Path) -> Self {
         Self {
-            directory,
             ca: generation.join("ca.crt"),
             certificate: generation.join("node.crt"),
             private_key: generation.join("node.key"),

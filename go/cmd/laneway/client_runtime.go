@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -100,33 +99,4 @@ func submitClientEnrollment(ctx context.Context, metadata bootstrap.Metadata, co
 		return nil, fmt.Errorf("decode native enrollment response: %w", err)
 	}
 	return response, nil
-}
-
-func nativeProfile(operation string, input []byte, output any, args ...string) (bool, error) {
-	runtime, err := nativeClientRuntime()
-	if runtime == "" || err != nil {
-		return false, err
-	}
-	ctx, cancel := commandContext()
-	defer cancel()
-	err = nativeProfileOn(ctx, runtime, operation, input, output, args...)
-	return true, err
-}
-
-func nativeProfileOn(ctx context.Context, runtime, operation string, input []byte, output any, args ...string) error {
-	cmd := exec.CommandContext(ctx, runtime, append([]string{"_client", "profile", operation, "--"}, args...)...)
-	if len(input) != 0 {
-		cmd.Stdin = bytes.NewReader(input)
-	}
-	data, err := nativeClientOutput(cmd, "saved login")
-	if err != nil || output == nil {
-		return err
-	}
-	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		return os.ErrNotExist
-	}
-	if err := json.Unmarshal(data, output); err != nil {
-		return fmt.Errorf("decode saved login: %w", err)
-	}
-	return nil
 }

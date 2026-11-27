@@ -38,11 +38,6 @@ enum Command {
     /// Remove a saved user login.
     Logout { domain: String },
     #[command(hide = true)]
-    Profile {
-        #[command(subcommand)]
-        operation: profiles::Operation,
-    },
-    #[command(hide = true)]
     SubmitEnrollment,
     #[command(hide = true)]
     Discover { domain: String },
@@ -79,7 +74,6 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<()> {
             .build()?
             .block_on(connect::run(options)),
         Command::Logout { domain } => profiles::Store::from_environment().logout(&domain),
-        Command::Profile { operation } => runtime()?.block_on(profiles::run(operation)),
         Command::SubmitEnrollment => runtime()?.block_on(enrollment::run()),
         Command::Discover { domain } => runtime()?.block_on(bootstrap::discover(&domain)),
     }
