@@ -9,7 +9,8 @@ if [[ "$(id -u)" != "0" ]]; then
   echo "ERROR: the controller/Rust-node gate requires root" >&2
   exit 1
 fi
-required_commands=(ip nft grep sed rustc)
+required_commands=(ip nft grep sed)
+[[ -n "${LANEWAY_NODE_TEST_STREAM_PROBE:-}" ]] || required_commands+=(rustc)
 [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" && "${LANEWAY_NODE_WIREGUARD_NATIVE:-1}" == "1" ]] || required_commands+=(cargo)
 [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]] || required_commands+=(go)
 for command in "${required_commands[@]}"; do
@@ -311,7 +312,11 @@ udp_denied() {
 }
 
 echo "==> preparing the controller, relay and node test binaries"
-rustc --edition 2024 -O "${repo_root}/integration/netprobe-stream.rs" -o "${work_dir}/netprobe-stream"
+if [[ -n "${LANEWAY_NODE_TEST_STREAM_PROBE:-}" ]]; then
+  install -m 0755 "$LANEWAY_NODE_TEST_STREAM_PROBE" "${work_dir}/netprobe-stream"
+else
+  rustc --edition 2024 -O "${repo_root}/integration/netprobe-stream.rs" -o "${work_dir}/netprobe-stream"
+fi
 if [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]]; then
   for fixture in laneway lanewayd laneway-relay netprobe rustnodecontroller; do
     install -m 0755 "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR}/${fixture}" "${work_dir}/${fixture}"
