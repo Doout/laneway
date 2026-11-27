@@ -12,7 +12,7 @@ use clap::{Args, Subcommand};
 use laneway_protocol::Id;
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PKCS_ED25519, PublicKeyData, SanType, SerialNumber,
+    KeyUsagePurpose, PublicKeyData, SanType, SerialNumber,
 };
 use rustls::pki_types::CertificateDer;
 use time::OffsetDateTime;
@@ -20,7 +20,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use zeroize::Zeroizing;
 
 use super::admin::{parse_duration, read_file};
-use crate::rootless_cli::enroll::{certificates, private_key};
+use crate::rootless_cli::enroll::{certificates, generate_ed25519_key, private_key};
 
 const PEM_LIMIT: usize = 1 << 20;
 
@@ -110,7 +110,7 @@ pub(super) fn run(operation: Operation) -> Result<()> {
             validity,
         } => {
             let params = ca_params(&name, validity, BasicConstraints::Unconstrained)?;
-            let key = KeyPair::generate_for(&PKCS_ED25519)?;
+            let key = generate_ed25519_key()?;
             let ca = params.self_signed(&key)?;
             let (certificate, secret) = (out_dir.join("ca.crt"), out_dir.join("ca.key"));
             write_pair(&certificate, &secret, &ca.pem(), &key)?;
@@ -137,7 +137,7 @@ pub(super) fn run(operation: Operation) -> Result<()> {
                     .is_some_and(|constraints| constraints.value.path_len_constraint != Some(0)),
                 "CA cannot issue another CA"
             );
-            let key = KeyPair::generate_for(&PKCS_ED25519)?;
+            let key = generate_ed25519_key()?;
             let mut certificate = params.signed_by(&key, &signer)?.pem();
             append_chain(&mut certificate, &chain);
             let (certificate_path, key_path) = output.paths("intermediate");
@@ -229,7 +229,7 @@ fn issue_leaf(leaf: Leaf, role: &str, id: Id, mut names: Vec<SanType>) -> Result
     let uri = format!("spiffe://laneway/network/{}/{role}/{id}", leaf.network_id);
     names.insert(0, SanType::URI(uri.try_into()?));
     params.subject_alt_names = names;
-    let key = KeyPair::generate_for(&PKCS_ED25519)?;
+    let key = generate_ed25519_key()?;
     let mut certificate = params.signed_by(&key, &signer)?.pem();
     let include = parsed
         .last()
