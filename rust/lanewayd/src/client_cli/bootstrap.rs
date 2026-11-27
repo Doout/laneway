@@ -72,7 +72,7 @@ impl Controller {
             server_name: self.server_name.clone(),
             service_id: self.service_id.clone(),
             poll_interval: Duration::from_secs(5),
-            timeout: Duration::from_secs(30),
+            timeout: Duration::from_secs(10),
         }
     }
 }

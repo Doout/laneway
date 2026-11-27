@@ -170,7 +170,7 @@ func runConnect(args []string) error {
 		if authority != "" {
 			nativeArgs = append(nativeArgs, "--", authority)
 		}
-		return execNativeConnect(rustRuntime, nativeArgs)
+		return runNativeConnect(rustRuntime, nativeArgs)
 	}
 	if authority == "" {
 		var err error

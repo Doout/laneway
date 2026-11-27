@@ -3,10 +3,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"syscall"
+	"time"
 )
 
 func nativeClientRuntime() (string, error) {
@@ -37,7 +42,7 @@ func tryNativeClient(args ...string) (bool, error) {
 }
 
 // The protected system runtime is resolved and version-checked by the caller.
-func execNativeConnect(executable string, args []string) error {
+func runNativeConnect(executable string, args []string) error {
 	environment := os.Environ()
 	if runtime.GOOS == "linux" {
 		environment = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C"}
@@ -47,5 +52,17 @@ func execNativeConnect(executable string, args []string) error {
 			}
 		}
 	}
-	return syscall.Exec(executable, append([]string{executable, "_client", "connect"}, args...), environment)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cmd := exec.CommandContext(ctx, executable, append([]string{"_client", "connect"}, args...)...)
+	defer prepareRustForegroundProcess(cmd)()
+	cmd.Env = environment
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 30 * time.Second
+	err := cmd.Run()
+	if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return nil
+	}
+	return err
 }

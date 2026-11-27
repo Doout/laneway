@@ -330,7 +330,8 @@ impl Store {
         let ca = saved.confirm_binding(metadata)?;
         let mut wireguard = zeroize::Zeroizing::new([0; 32]);
         getrandom::fill(wireguard.as_mut()).context("generate replacement WireGuard key")?;
-        let settings = metadata.controller.config();
+        let mut settings = metadata.controller.config();
+        settings.timeout = std::time::Duration::from_secs(30);
         let tls = TlsConfig {
             ca: saved.files.ca,
             certificate: saved.files.certificate,
