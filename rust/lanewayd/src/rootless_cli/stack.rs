@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
+use lanewayd_rs::{TCP_RELAY_IP_MTU, rootless::MTU};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::{tcp, udp};
@@ -20,7 +21,6 @@ use smoltcp::wire::{
 use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 use tokio::sync::{Notify, mpsc, oneshot};
 
-const MTU: usize = 1280;
 const TCP_BUFFER: usize = 16 * 1024;
 const MAX_TCP: usize = 256;
 const MAX_TCP_ADMISSIONS: usize = 32;
@@ -34,7 +34,8 @@ const EPHEMERAL_COUNT: usize = 16384;
 
 #[derive(Clone)]
 pub struct Stack {
-    commands: mpsc::Sender<Command>,
+    tcp_commands: mpsc::Sender<Command>,
+    udp_commands: mpsc::Sender<Command>,
     local4: Option<IpAddr>,
     local6: Option<IpAddr>,
 }
@@ -119,7 +120,12 @@ impl UdpFlow {
 }
 
 enum Command {
-    Ingress { packet: Vec<u8>, allow_new: bool },
+    Ingress {
+        key: FlowKey,
+        protocol: PacketProtocol,
+        packet: Vec<u8>,
+        allow_new: bool,
+    },
     Tcp(SocketAddr, TcpReady),
     Udp(SocketAddr, oneshot::Sender<io::Result<UdpFlow>>),
     Shutdown(oneshot::Sender<()>),
@@ -132,7 +138,6 @@ impl Stack {
         local_ips: Vec<IpAddr>,
         packets_out: mpsc::Sender<Vec<u8>>,
     ) -> (Self, mpsc::Receiver<Inbound>) {
-        let (commands, receiver) = mpsc::channel(256);
         let (accepted, inbound) = mpsc::channel(64);
         let mut unicast = local_ips
             .iter()
@@ -140,11 +145,18 @@ impl Stack {
             .filter(|ip| IpAddress::from(*ip).is_unicast());
         let local4 = unicast.clone().find(IpAddr::is_ipv4);
         let local6 = unicast.find(IpAddr::is_ipv6);
-        let engine = Engine::new(local4, local6, packets_out, accepted);
-        tokio::spawn(engine.run(receiver));
+        // smoltcp derives TCP segmentation and the advertised MSS from its
+        // interface MTU. Keep UDP on its own interface for full-size datagrams.
+        let start = |mtu| {
+            let (commands, receiver) = mpsc::channel(256);
+            let engine = Engine::new(local4, local6, packets_out.clone(), accepted.clone(), mtu);
+            tokio::spawn(engine.run(receiver));
+            commands
+        };
         (
             Self {
-                commands,
+                tcp_commands: start(TCP_RELAY_IP_MTU),
+                udp_commands: start(MTU),
                 local4,
                 local6,
             },
@@ -161,9 +173,11 @@ impl Stack {
     }
 
     pub async fn shutdown(&self) {
-        let (done, shutdown) = oneshot::channel();
-        let _ = self.commands.send(Command::Shutdown(done)).await;
-        let _ = shutdown.await;
+        for commands in [&self.tcp_commands, &self.udp_commands] {
+            let (done, shutdown) = oneshot::channel();
+            let _ = commands.send(Command::Shutdown(done)).await;
+            let _ = shutdown.await;
+        }
     }
 
     /// Allows an authorized packet to open a new inbound flow.
@@ -183,8 +197,20 @@ impl Stack {
                 "IP packet exceeds MTU",
             ));
         }
-        self.commands
-            .send(Command::Ingress { packet, allow_new })
+        let Some((key, protocol)) = flow_headers(&packet) else {
+            return Ok(());
+        };
+        let commands = match protocol {
+            PacketProtocol::Tcp { .. } => &self.tcp_commands,
+            PacketProtocol::Udp => &self.udp_commands,
+        };
+        commands
+            .send(Command::Ingress {
+                key,
+                protocol,
+                packet,
+                allow_new,
+            })
             .await
             .map_err(|_| closed())
     }
@@ -201,7 +227,7 @@ impl Stack {
         dst: SocketAddr,
     ) -> io::Result<(DuplexStream, SocketAddr)> {
         let (tx, rx) = oneshot::channel();
-        self.commands
+        self.tcp_commands
             .send(Command::Tcp(dst, tx))
             .await
             .map_err(|_| closed())?;
@@ -210,7 +236,7 @@ impl Stack {
 
     pub async fn bind_udp(&self, dst: SocketAddr) -> io::Result<UdpFlow> {
         let (tx, rx) = oneshot::channel();
-        self.commands
+        self.udp_commands
             .send(Command::Udp(dst, tx))
             .await
             .map_err(|_| closed())?;
@@ -283,11 +309,13 @@ impl Engine {
         local6: Option<IpAddr>,
         outgoing: mpsc::Sender<Vec<u8>>,
         accepted: mpsc::Sender<Inbound>,
+        mtu: usize,
     ) -> Self {
         let seed = RandomState::new().build_hasher().finish();
         let mut device = PacketDevice {
             incoming: None,
             outgoing,
+            mtu,
         };
         let mut config = Config::new(HardwareAddress::Ip);
         config.random_seed = seed;
@@ -341,7 +369,7 @@ impl Engine {
             let deadline = self.deadline(blocked);
             tokio::select! {
                 command = commands.recv() => match command {
-                    Some(Command::Ingress { packet, allow_new }) => self.receive(packet, allow_new),
+                    Some(Command::Ingress { key, protocol, packet, allow_new }) => self.receive(key, protocol, packet, allow_new),
                     Some(Command::Tcp(dst, response)) => self.open_tcp(dst, response),
                     Some(Command::Udp(dst, response)) => {
                         if !response.is_closed() {
@@ -508,10 +536,13 @@ impl Engine {
         })
     }
 
-    fn receive(&mut self, packet: Vec<u8>, allow_new: bool) {
-        let Some((key, protocol)) = flow_headers(&packet) else {
-            return;
-        };
+    fn receive(
+        &mut self,
+        key: FlowKey,
+        protocol: PacketProtocol,
+        packet: Vec<u8>,
+        allow_new: bool,
+    ) {
         match protocol {
             PacketProtocol::Tcp { syn } => {
                 if !self.tcp.contains_key(&key) {
@@ -901,29 +932,33 @@ fn flow_headers(packet: &[u8]) -> Option<(FlowKey, PacketProtocol)> {
 }
 
 struct PacketDevice {
+    mtu: usize,
     incoming: Option<Vec<u8>>,
     outgoing: mpsc::Sender<Vec<u8>>,
 }
 
 struct Rx(Vec<u8>);
-struct Tx<'a>(&'a mpsc::Sender<Vec<u8>>);
+struct Tx<'a>(Option<mpsc::Permit<'a, Vec<u8>>>);
 
 impl Device for PacketDevice {
     type RxToken<'a> = Rx;
     type TxToken<'a> = Tx<'a>;
 
     fn receive(&mut self, _: NetworkTime) -> Option<(Rx, Tx<'_>)> {
-        Some((Rx(self.incoming.take()?), Tx(&self.outgoing)))
+        Some((
+            Rx(self.incoming.take()?),
+            Tx(self.outgoing.try_reserve().ok()),
+        ))
     }
 
     fn transmit(&mut self, _: NetworkTime) -> Option<Tx<'_>> {
-        (self.outgoing.capacity() > 0 && !self.outgoing.is_closed()).then_some(Tx(&self.outgoing))
+        Some(Tx(Some(self.outgoing.try_reserve().ok()?)))
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
         let mut capabilities = DeviceCapabilities::default();
         capabilities.medium = Medium::Ip;
-        capabilities.max_transmission_unit = MTU;
+        capabilities.max_transmission_unit = self.mtu;
         capabilities
     }
 }
@@ -938,7 +973,9 @@ impl TxToken for Tx<'_> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, size: usize, f: F) -> R {
         let mut packet = vec![0; size];
         let result = f(&mut packet);
-        let _ = self.0.try_send(packet);
+        if let Some(permit) = self.0 {
+            permit.send(packet);
+        }
         result
     }
 }
@@ -948,6 +985,15 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::time::timeout;
+
+    fn assert_carrier_size(packet: &[u8]) {
+        if matches!(flow_headers(packet), Some((_, PacketProtocol::Tcp { .. }))) {
+            assert!(
+                packet.len() <= 1152,
+                "TCP packet exceeds the test carrier budget"
+            );
+        }
+    }
 
     fn pair(
         local: IpAddr,
@@ -961,12 +1007,14 @@ mod tests {
             let client = client.clone();
             async move {
                 while let Some(packet) = replies.recv().await {
+                    assert_carrier_size(&packet);
                     client.ingress_reply(packet).await.unwrap();
                 }
             }
         });
         tokio::spawn(async move {
             while let Some(packet) = requests.recv().await {
+                assert_carrier_size(&packet);
                 server.ingress(packet).await.unwrap();
             }
         });
@@ -1023,7 +1071,8 @@ mod tests {
         timeout(Duration::from_secs(3), async {
             let mut first = client.bind_udp(requested).await.unwrap();
             let mut second = client.bind_udp(requested).await.unwrap();
-            first.send(b"first").await.unwrap();
+            let datagram = vec![0xa5; udp_max_payload(requested)];
+            first.send(&datagram).await.unwrap();
             let Some(Inbound::Udp {
                 source,
                 destination,
@@ -1034,7 +1083,7 @@ mod tests {
             };
             assert_eq!(source.ip(), "fd00::1".parse::<IpAddr>().unwrap());
             assert_eq!(destination, requested);
-            assert_eq!(flow.recv().await.unwrap(), b"first");
+            assert_eq!(flow.recv().await.unwrap(), datagram);
             second.send(b"second").await.unwrap();
             let Some(Inbound::Udp {
                 source: other_source,
@@ -1136,6 +1185,7 @@ mod tests {
             None,
             outgoing,
             accepted,
+            MTU,
         );
         let expired = engine
             .allocate("100.64.0.2:53".parse().unwrap(), true)

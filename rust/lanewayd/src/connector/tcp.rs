@@ -19,6 +19,7 @@ use tokio::{
 };
 
 use super::{AUTHORITY_CHECK, DIAL_TIMEOUT, Flow, IDLE_TIMEOUT};
+use crate::TCP_RELAY_IP_MTU;
 
 const TCP_WINDOW: usize = 16 * 1024;
 
@@ -26,6 +27,7 @@ pub(super) async fn forward(flow: &mut Flow) -> Result<()> {
     if !flow.authorized() {
         return Ok(());
     }
+    let tcp_mtu = flow.mtu.min(TCP_RELAY_IP_MTU);
     let mut upstream = tokio::select! {
         biased;
         _ = flow.revoked() => return Ok(()),
@@ -35,13 +37,13 @@ pub(super) async fn forward(flow: &mut Flow) -> Result<()> {
                 _ => {
                     // Let the TCP stack reject the SYN as a closed port. Do
                     // not acknowledge a connection the host cannot open.
-                    Stack::new(flow.key.destination.ip(), flow.mtu)?.poll(Some(flow.first.bytes.clone()), flow);
+                    Stack::new(flow.key.destination.ip(), tcp_mtu)?.poll(Some(flow.first.bytes.clone()), flow);
                     return Ok(());
                 }
             }
         }
     };
-    let mut stack = Stack::new(flow.key.destination.ip(), flow.mtu)?;
+    let mut stack = Stack::new(flow.key.destination.ip(), tcp_mtu)?;
     let handle = stack.listen(flow.key.destination)?;
     stack.poll(Some(flow.first.bytes.clone()), flow);
     let mut host_read = true;
@@ -278,7 +280,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tcp_ipv4_and_ipv6_proxy_through_a_real_host_socket() -> Result<()> {
+    async fn tcp_proxies_ipv4_and_ipv6_over_a_minimum_mtu_carrier() -> Result<()> {
+        const PATH_IP_LIMIT: usize = 1152;
         for (source, target) in [
             ("100.96.0.2:41114", "127.0.0.1:0"),
             ("[fd7a::2]:41114", "[::1]:0"),
@@ -287,10 +290,10 @@ mod tests {
             let target = listener.local_addr()?;
             let responder = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await?;
-                let mut request = [0; 8];
+                let mut request = [0; 4096];
                 socket.read_exact(&mut request).await?;
-                ensure!(&request == b"over TCP", "TCP payload was changed");
-                socket.write_all(b"host reply").await?;
+                ensure!(request == [0x25; 4096], "TCP payload was changed");
+                socket.write_all(&[0x5a; 4096]).await?;
                 let mut drain = Vec::new();
                 socket.read_to_end(&mut drain).await?;
                 Ok::<_, anyhow::Error>(())
@@ -310,11 +313,14 @@ mod tests {
                 loop {
                     while let Ok(reply) = fixture.replies.try_recv() {
                         assert_eq!(reply.trigger.peer, peer());
-                        client.step(Some(reply.bytes));
+                        // A QUIC path can drop full overlay-MTU packets in either direction.
+                        if reply.bytes.len() <= PATH_IP_LIMIT {
+                            client.step(Some(reply.bytes));
+                        }
                     }
                     let socket = client.sockets.get_mut::<tcp::Socket>(handle);
                     if !sent && socket.can_send() {
-                        assert_eq!(socket.send_slice(b"over TCP")?, 8);
+                        assert_eq!(socket.send_slice(&[0x25; 4096])?, 4096);
                         socket.close();
                         sent = true;
                     }
@@ -326,10 +332,12 @@ mod tests {
                     }
                     client.step(None);
                     for packet in client.device.output.drain(..) {
-                        fixture.packet(peer(), packet).await?;
+                        if packet.len() <= PATH_IP_LIMIT {
+                            fixture.packet(peer(), packet).await?;
+                        }
                     }
-                    if received.len() >= b"host reply".len() {
-                        assert_eq!(received, b"host reply");
+                    if received.len() >= 4096 {
+                        assert_eq!(received, [0x5a; 4096]);
                         return Ok::<_, anyhow::Error>(());
                     }
                     sleep(Duration::from_millis(5)).await;
