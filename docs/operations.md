@@ -349,3 +349,25 @@ Controller, relay, and `lane-edge` Connector containers run non-root with
 read-only scratch roots. The full Exit Node alone needs `NET_ADMIN` and
 `/dev/net/tun`, inside its own container namespace. Do not give it host
 networking, the Docker socket, or privileged mode.
+
+## Connect Twingate
+
+Sign in as an owner on your Laneway controller or tenant hostname. Open
+**Infrastructure → Network integrations → Twingate**. Enter the network subdomain and a **Read only**
+token from **Settings → API** in the Twingate Admin Console. Choose
+**Test and save**. If the token has IP restrictions, allow the controller's
+outbound address.
+
+Each Laneway tenant has its own connection. Laneway keeps the previous
+connection if verification of a replacement fails. Use **Test saved connection**
+to verify the credentials again, or **Disconnect** to remove them from Laneway.
+To invalidate the token itself, revoke it in Twingate.
+
+Owners can review Twingate resources and their addresses, remote networks,
+and traffic policies on the same page. Select rows and copy the shortlist
+for review. Listing or selecting resources does not create routes or grant
+access in Laneway.
+
+The Rust controller stores the token in `twingate.json` in the database's
+sibling `<database>.integrations` directory, using mode `0600`. SQLite backups
+exclude this directory. Re-enter the token after restoring to fresh storage.

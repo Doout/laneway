@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { CircleGauge, Clock3, Network, Plus, RadioTower, ServerCog, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { Network, Plus, RadioTower, ServerCog, ShieldCheck, TriangleAlert } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { Button, DataTable, EntityTitle, Field, FormStack, PageHeader, Section, Status, type DataColumn } from '../../components/ui'
 import {
@@ -100,7 +100,7 @@ export function InfrastructurePage() {
   }
 
   return (
-    <>
+    <div className="infra-directory">
       <PageHeader
         title="Infrastructure"
         action={(!live || canBootstrapNetwork || canManageRelays) ? <div className="button-row">{(!live || canBootstrapNetwork) && canCreateNetwork ? <Button onClick={() => { setCreatingNetwork(true); setResult('') }} variant="secondary"><Plus aria-hidden="true" size={16} /> Add network</Button> : null}{canManageRelays ? <Button to="/infrastructure/relays/new" variant="primary"><RadioTower aria-hidden="true" size={17} /> Register relay</Button> : null}</div> : undefined}
@@ -120,46 +120,49 @@ export function InfrastructurePage() {
         </section>
       ) : null}
 
-      <div className={`infra-health-strip${live ? ' is-live' : ''}`} aria-label="Infrastructure summary">
-        <div><Network aria-hidden="true" size={16} /><span><strong>{networks.length}</strong><small>Networks</small></span></div>
-        <div><RadioTower aria-hidden="true" size={16} /><span><strong>{relays.length}</strong><small>{live ? `${relays.filter((relay) => relay.enabled).length} enabled` : `${relays.filter((relay) => relay.enabled && relay.reachable).length} healthy`}</small></span></div>
-        {!live ? <div><CircleGauge aria-hidden="true" size={16} /><span><strong>86%</strong><small>Direct paths</small></span></div> : null}
-        {!live ? <div><Clock3 aria-hidden="true" size={16} /><span><strong>24 ms</strong><small>Median latency</small></span></div> : null}
-      </div>
-
       {inventoryPending ? <p className="infra-inventory-message" role="status">Refreshing controller inventory…</p> : null}
       {inventoryError ? <p className="infra-form-error" role="alert">Controller inventory is unavailable: {inventoryError}</p> : null}
 
-      <div className={`infra-topology-grid${live ? ' is-live' : ''}`}>
-        {!live ? <section className="infra-panel infra-topology-panel" aria-labelledby="infra-topology-title">
-          <div className="infra-panel-head"><div><h2 id="infra-topology-title">Network topology</h2></div></div>
-          <div className="infra-topology" role="group" aria-label="Network and relay topology">
-            <svg viewBox="0 0 760 270" preserveAspectRatio="none" aria-hidden="true">
-              <path className="infra-topology-path is-active" d="M105 135 C220 42 335 45 430 112 S602 196 665 135" />
-              <path className="infra-topology-path" d="M105 135 C228 224 348 222 430 159 S590 64 665 135" />
-            </svg>
-            <div className="infra-topology-node infra-control"><ServerCog aria-hidden="true" size={17} /><span><strong>Controller</strong></span></div>
-            <div className="infra-topology-relays">
-              {relays.slice(0, 3).map((relay) => <Link key={relay.id} to={`/infrastructure/relays/${relay.id}`}><span className={`infra-state-light ${relay.enabled && relay.reachable ? 'is-healthy' : 'is-warning'}`} />{relay.name}<small>{relay.sessions} fallback</small></Link>)}
-            </div>
-            <div className="infra-topology-node infra-networks-node"><Network aria-hidden="true" size={17} /><span><strong>{networks.length} private networks</strong><small>{networks.reduce((total, network) => total + network.routes, 0)} published routes</small></span></div>
-          </div>
-          <div className="infra-relay-links" aria-label="Relay inventory">
-            {relays.map((relay) => <Link key={relay.id} to={`/infrastructure/relays/${relay.id}`}><RadioTower aria-hidden="true" size={14} /><span>{relay.name}</span><Status tone={!relay.enabled ? 'muted' : relay.reachable ? 'positive' : 'warning'}>{!relay.enabled ? 'Disabled' : relay.reachable ? 'Reachable' : 'Awaiting probe'}</Status></Link>)}
-          </div>
-        </section> : null}
+      <div className="infra-directory-grid">
+        <Section title="Networks" meta={`${networks.length} configured`}>
+          <DataTable columns={networkColumns} empty={<p className="infra-empty-copy">{live ? 'No network is configured.' : 'No networks remain. Create one before enrolling nodes or publishing routes.'}</p>} rowKey={(row) => row.id} rows={networks} />
+        </Section>
 
         <aside className="infra-panel infra-work-queue" aria-labelledby="infra-work-title">
-          <div className="infra-panel-head"><div><h2 id="infra-work-title">Needs attention</h2></div><span className="infra-queue-count">{workItems.length}</span></div>
-          {workItems.map((item) => <Link key={`${item.kind}-${item.to}`} to={item.to}><span className={`infra-queue-icon ${item.kind === 'relay' ? 'is-danger' : 'is-warning'}`}>{item.kind === 'route' ? <TriangleAlert aria-hidden="true" size={16} /> : item.kind === 'relay' ? <RadioTower aria-hidden="true" size={16} /> : <ServerCog aria-hidden="true" size={16} />}</span><span><strong>{item.title}</strong><small>{item.detail}</small></span><time>{item.age}</time></Link>)}
-          {!workItems.length ? <div className="infra-queue-empty"><ShieldCheck aria-hidden="true" size={18} /><span><strong>No pending routes</strong></span></div> : null}
+          <div className="infra-panel-head">
+            <h2 id="infra-work-title">Needs attention</h2>
+            <span className="infra-queue-count" aria-label={`${workItems.length} work items`}>{workItems.length}</span>
+          </div>
+          {workItems.map((item) => (
+            <Link key={`${item.kind}-${item.to}`} to={item.to}>
+              <span className={`infra-queue-icon ${item.kind === 'relay' ? 'is-danger' : 'is-warning'}`}>{item.kind === 'route' ? <TriangleAlert aria-hidden="true" size={16} /> : item.kind === 'relay' ? <RadioTower aria-hidden="true" size={16} /> : <ServerCog aria-hidden="true" size={16} />}</span>
+              <span><strong>{item.title}</strong><small>{item.detail}</small></span><time>{item.age}</time>
+            </Link>
+          ))}
+          {!workItems.length ? <div className="infra-queue-empty"><ShieldCheck aria-hidden="true" size={16} /><strong>No pending routes</strong></div> : null}
           {canReadAudit ? <Button to="/audit" variant="quiet">Review all activity</Button> : null}
         </aside>
       </div>
 
-      <Section title="Networks">
-        <DataTable columns={networkColumns} empty={<p className="infra-empty-copy">{live ? 'No network is configured.' : 'No networks remain. Create one before enrolling nodes or publishing routes.'}</p>} rowKey={(row) => row.id} rows={networks} />
-      </Section>
-    </>
+      {!live ? <section className="infra-panel" aria-labelledby="infra-topology-title">
+        <div className="infra-panel-head"><h2 id="infra-topology-title">Network topology</h2></div>
+        <div className="infra-topology-steps" role="group" aria-label="Network and relay topology">
+          <div className="infra-topology-step"><ServerCog aria-hidden="true" size={17} /><span><strong>Controller</strong></span></div>
+          <div className="infra-topology-step">
+            <RadioTower aria-hidden="true" size={17} />
+            <div>
+              <strong>Relay fallback</strong>
+              <ul>{relays.map((relay) => (
+                <li key={relay.id}><Link to={`/infrastructure/relays/${relay.id}`}>
+                  <span>{relay.name}<small>{relay.sessions} fallback sessions</small></span>
+                  <Status tone={!relay.enabled ? 'muted' : relay.reachable ? 'positive' : 'warning'}>{!relay.enabled ? 'Disabled' : relay.reachable ? 'Reachable' : 'Awaiting probe'}</Status>
+                </Link></li>
+              ))}</ul>
+            </div>
+          </div>
+          <div className="infra-topology-step"><Network aria-hidden="true" size={17} /><span><strong>{networks.length} private networks</strong><small>{networks.reduce((total, network) => total + network.routes, 0)} published routes</small></span></div>
+        </div>
+      </section> : null}
+    </div>
   )
 }

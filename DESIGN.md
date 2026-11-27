@@ -1,10 +1,14 @@
 # Console design
 
-The admin console supports light and dark themes. Use the tokens in
-[the console stylesheet](web/src/styles.css) and reuse components from
-[the UI library](web/src/components/ui.tsx). Check both themes when changing a
-color or control. The [desktop client](docs/desktop-client.md) has its own
-navigation and manages the local node, rather than the controller.
+The admin console and desktop client share [light and dark theme tokens](web/src/design-tokens.css),
+Inter for interface text, and JetBrains Mono for technical values. Use a
+neutral sidebar, a single divider between rows, and a subtle fill for
+selection. Reserve color for focus, the Laneway mark, and meaningful status.
+
+Build console controls from the [shared React components](web/src/components/ui.tsx).
+These use UI SDK for buttons, form fields, and search inputs. Keep navigation
+links and tables semantic. The [desktop client](docs/desktop-client.md)
+manages the local node and has its own navigation.
 
 ## Navigation and records
 
@@ -14,6 +18,8 @@ navigation and manages the local node, rather than the controller.
   default; give administrators a way to inspect inactive records.
 - Lead with names instead of IDs. Display IP addresses, CIDRs, and IDs in
   monospace. Wrap long values in detail views so they remain readable.
+- Place a resource type or alias on a second line. Keep full traffic policies
+  readable at narrow widths.
 - Keep the selected item's details in view when its list scrolls. Stack the
   list and details on narrow screens. Preserve access to the full value when
   a table shortens it.

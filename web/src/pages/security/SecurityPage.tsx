@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { ArrowRight, Ban, Check, Copy, FileKey2, KeyRound, RotateCw, TicketCheck, X } from 'lucide-react'
+import { Ban, Check, Copy, FileKey2, KeyRound, RotateCw, X } from 'lucide-react'
 import { Button, Callout, Field, PageHeader, Status, TokenBox } from '../../components/ui'
 import { useControlPlane } from '../../lib/control-plane'
 import { attributed, readDemoState, updateDemoState, type AttributedChange } from '../../lib/persisted-demo-state'
@@ -174,7 +174,7 @@ export function SecurityPage() {
   const activeCredentials = tokens.filter((token) => token.state === 'Unredeemed').length
 
   return (
-    <>
+    <div className="security-page">
       <PageHeader title="Security" action={!live ? <Button onClick={() => beginAction({ kind: 'issue' })} variant="primary"><KeyRound aria-hidden="true" size={17} /> Issue credential</Button> : undefined} />
 
       {result ? <div className="security-result" role="status"><Check aria-hidden="true" size={16} />{result.result}{live ? '.' : ` by ${result.actedBy} · ${result.actedAt}.`}</div> : null}
@@ -185,21 +185,41 @@ export function SecurityPage() {
 
       {issuedToken ? <div className="security-issued" role="status"><div className="security-issued__header"><div><span>One-time secret</span><h2>Enrollment token issued</h2></div><Button aria-label="Dismiss issued token" onClick={() => setIssuedToken(null)} variant="quiet"><X aria-hidden="true" size={16} /></Button></div><TokenBox label="Single-use enrollment token" value={issuedToken}><Button onClick={copyToken} variant="secondary">{copied ? <Check aria-hidden="true" size={16} /> : <Copy aria-hidden="true" size={16} />}{copied ? 'Copied' : 'Copy token'}</Button></TokenBox>{copyError ? <p className="security-error" role="alert">{copyError}</p> : null}<Callout tone="warning">Shown once. Store or send it securely; it cannot be recovered.</Callout></div> : null}
 
-      <div className="security-health-strip" aria-label="Security inventory summary"><div>{live ? <FileKey2 aria-hidden="true" size={16} /> : <TicketCheck aria-hidden="true" size={16} />}<span><strong>{live ? certificates.length : activeCredentials}</strong><small>{live ? 'Certificate records' : 'Active credentials'}</small></span></div><div><TicketCheck aria-hidden="true" size={16} /><span><strong>{nonRevokedCertificates}/{certificates.length}</strong><small>{live ? 'Not revoked' : 'Certificates valid'}</small></span></div><div><RotateCw aria-hidden="true" size={16} /><span><strong>{expiringCertificates}</strong><small>{live ? 'Expire within 30 days' : 'Rotation suggested'}</small></span></div></div>
-
       <div className="security-workspace">
         <section className="security-inventory" aria-labelledby="security-inventory-title">
-          <div className="security-panel-head"><div><h2 id="security-inventory-title">Credential inventory</h2></div><div className="security-tabs" role="tablist">{!live ? <button aria-selected={view === 'tokens'} onClick={() => selectView('tokens')} role="tab" type="button">Tokens</button> : null}<button aria-selected={view === 'certificates'} onClick={() => selectView('certificates')} role="tab" type="button">Certificates</button></div></div>
-          <div className="security-list-head"><span>Credential</span><span>Scope</span><span>{view === 'tokens' ? 'Expires' : 'Valid until'}</span><span>State</span></div>
-          {view === 'tokens' ? tokens.map((token) => <button className={`security-list-row${activeToken?.id === token.id ? ' is-selected' : ''}`} key={token.id} onClick={() => setSelectedId(token.id)} type="button"><span className="security-entity"><KeyRound aria-hidden="true" size={16} /><span><strong>{token.label}</strong><small><code>{token.id}</code></small></span></span><span>{token.scope}</span><span>{token.expires}</span><Status tone={token.tone}>{token.state}</Status></button>) : certificates.map((certificate) => <button className={`security-list-row${activeCertificate?.id === certificate.id ? ' is-selected' : ''}`} key={certificate.id} onClick={() => setSelectedId(certificate.id)} type="button"><span className="security-entity"><FileKey2 aria-hidden="true" size={16} /><span><strong>{certificate.name}</strong><small><code>{certificate.id}</code></small></span></span><span>{certificate.purpose}</span><span>{certificate.expires}</span><Status tone={certificate.tone}>{certificate.state}</Status></button>)}
+          <div className="security-panel-head">
+            <h2 id="security-inventory-title">Credential inventory</h2>
+            {!live ? <div className="security-tabs" role="group" aria-label="Credential view">
+              <Button aria-pressed={view === 'tokens'} onClick={() => selectView('tokens')} variant="quiet">Tokens</Button>
+              <Button aria-pressed={view === 'certificates'} onClick={() => selectView('certificates')} variant="quiet">Certificates</Button>
+            </div> : null}
+          </div>
+          <div className="security-view-facts" role="group" aria-label={view === 'tokens' ? 'Token summary' : 'Certificate summary'}>
+            {view === 'tokens' ? <><span><strong>{tokens.length}</strong> tokens</span><span><strong>{activeCredentials}</strong> unredeemed</span></> : <>
+              <span><strong>{nonRevokedCertificates}/{certificates.length}</strong> {live ? 'not revoked' : 'certificates valid'}</span>
+              <span><strong>{expiringCertificates}</strong> {live ? 'expire within 30 days' : 'suggested rotations'}</span>
+            </>}
+          </div>
+          <div className="security-list-head"><span>Credential</span><span>{view === 'tokens' ? 'Expires' : 'Valid until'}</span><span>State</span></div>
+          {view === 'tokens' ? tokens.map((token) => (
+            <Button aria-pressed={activeToken?.id === token.id} className="security-list-row" key={token.id} onClick={() => setSelectedId(token.id)} variant="quiet">
+              <span className="security-entity"><KeyRound aria-hidden="true" size={16} /><span><strong>{token.label}</strong><small>{token.scope}</small></span></span>
+              <span className="security-list-expiry">{token.expires}</span><Status tone={token.tone}>{token.state}</Status>
+            </Button>
+          )) : certificates.map((certificate) => (
+            <Button aria-pressed={activeCertificate?.id === certificate.id} className="security-list-row" key={certificate.id} onClick={() => setSelectedId(certificate.id)} variant="quiet">
+              <span className="security-entity"><FileKey2 aria-hidden="true" size={16} /><span><strong>{certificate.name}</strong><small>{certificate.purpose}</small></span></span>
+              <span className="security-list-expiry">{certificate.expires}</span><Status tone={certificate.tone}>{certificate.state}</Status>
+            </Button>
+          ))}
           {!activeRecord ? <div className="security-empty"><h2>{live ? 'No certificate records' : 'No credentials'}</h2>{!live ? <p>Issue a credential or enroll a node.</p> : null}</div> : null}
         </section>
 
-        <aside className="security-inspector" aria-label="Selected credential detail">
-          {view === 'tokens' && activeToken ? <><div className="security-inspector-head"><span className="security-inspector-icon"><KeyRound aria-hidden="true" size={20} /></span><div><h2>{activeToken.label}</h2><p>{activeToken.type}</p></div><Status tone={activeToken.tone}>{activeToken.state}</Status></div><div className="security-scope-path"><span>Token</span><ArrowRight aria-hidden="true" size={14} /><span>{activeToken.scope}</span></div><dl><div><dt>Token ID</dt><dd><code>{activeToken.id}</code></dd></div><div><dt>Type</dt><dd>{activeToken.type}</dd></div><div><dt>Scope</dt><dd>{activeToken.scope}</dd></div><div><dt>Last used</dt><dd>{activeToken.lastUsed}</dd></div><div><dt>Expires</dt><dd>{activeToken.expires}</dd></div><div><dt>Uses remaining</dt><dd>{activeToken.state === 'Unredeemed' ? '1 of 1' : '0 of 1'}</dd></div></dl><div className="security-impact"><h3>Revocation impact</h3><p>Revoking prevents future enrollment with this token. It does not disconnect identities already enrolled.</p></div>{activeToken.state === 'Unredeemed' ? <Button onClick={() => beginAction({ kind: 'revokeToken', id: activeToken.id, label: activeToken.label })} variant="danger"><Ban aria-hidden="true" size={16} /> Revoke token</Button> : null}</> : null}
+        {activeRecord ? <aside className="security-inspector" aria-label="Selected credential detail">
+          {view === 'tokens' && activeToken ? <><div className="security-inspector-head"><span className="security-inspector-icon"><KeyRound aria-hidden="true" size={20} /></span><div><h2>{activeToken.label}</h2><p>{activeToken.type}</p></div><Status tone={activeToken.tone}>{activeToken.state}</Status></div><dl><div><dt>Token ID</dt><dd><code>{activeToken.id}</code></dd></div><div><dt>Type</dt><dd>{activeToken.type}</dd></div><div><dt>Scope</dt><dd>{activeToken.scope}</dd></div><div><dt>Last used</dt><dd>{activeToken.lastUsed}</dd></div><div><dt>Expires</dt><dd>{activeToken.expires}</dd></div><div><dt>Uses remaining</dt><dd>{activeToken.state === 'Unredeemed' ? '1 of 1' : '0 of 1'}</dd></div></dl><div className="security-impact"><h3>Revocation impact</h3><p>Revoking prevents future enrollment with this token. It does not disconnect identities already enrolled.</p></div>{activeToken.state === 'Unredeemed' ? <Button onClick={() => beginAction({ kind: 'revokeToken', id: activeToken.id, label: activeToken.label })} variant="danger"><Ban aria-hidden="true" size={16} /> Revoke token</Button> : null}</> : null}
           {view === 'certificates' && activeCertificate ? <><div className="security-inspector-head"><span className="security-inspector-icon"><FileKey2 aria-hidden="true" size={20} /></span><div><h2>{activeCertificate.name}</h2><p>{activeCertificate.purpose}</p></div><Status tone={activeCertificate.tone}>{activeCertificate.state}</Status></div><dl><div><dt>Certificate ID</dt><dd><code>{activeCertificate.id}</code></dd></div>{activeCertificate.serial ? <div><dt>Serial</dt><dd><code>{activeCertificate.serial}</code></dd></div> : null}{activeCertificate.nodeId ? <div><dt>Node ID</dt><dd><code>{activeCertificate.nodeId}</code></dd></div> : null}<div><dt>Purpose</dt><dd>{activeCertificate.purpose}</dd></div><div><dt>Valid until</dt><dd>{activeCertificate.expires}</dd></div><div><dt>State</dt><dd>{activeCertificate.state}</dd></div></dl><div className={`security-impact${activeCertificate.state === 'Revoked' ? ' is-danger' : ''}`}><h3>{live ? activeCertificate.state === 'Expired' ? 'Expired certificate' : 'Revocation impact' : 'Rotation impact'}</h3><p>{live ? activeCertificate.state === 'Expired' ? 'This certificate has expired.' : 'Revocation is immediate and cannot be reversed. Sessions using this certificate may disconnect.' : 'The existing certificate remains trusted until replacement distribution is confirmed.'}</p></div>{activeCertificate.state !== 'Revoked' && activeCertificate.state !== 'Expired' ? live ? canRevokeCertificate && activeCertificate.networkId && activeCertificate.serial ? <Button onClick={() => beginAction({ kind: 'revokeCertificate', id: activeCertificate.id, label: activeCertificate.name, networkId: activeCertificate.networkId!, serial: activeCertificate.serial! })} variant="danger"><Ban aria-hidden="true" size={16} /> Revoke certificate</Button> : null : <Button onClick={() => beginAction({ kind: 'rotate', id: activeCertificate.id, label: activeCertificate.name })} variant="secondary"><RotateCw aria-hidden="true" size={16} /> Rotate certificate</Button> : null}</> : null}
-        </aside>
+        </aside> : null}
       </div>
-    </>
+    </div>
   )
 }

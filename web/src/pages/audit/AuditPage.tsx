@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Activity, Check, Copy, Download, KeyRound, RadioTower, Route, ServerOff, ShieldCheck } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Activity, ArrowLeft, Check, Copy, Download, KeyRound, RadioTower, Route, ServerOff } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { auditEvents } from '../../lib/demo-data'
 import { useControlPlane, type ControllerAuditEvent } from '../../lib/control-plane'
@@ -164,6 +164,9 @@ export function AuditPage() {
   const [category, setCategory] = useState('all')
   const [range, setRange] = useState('30')
   const [selectedId, setSelectedId] = useState('')
+  const [mobileInspector, setMobileInspector] = useState(false)
+  const inspectorHeading = useRef<HTMLHeadingElement>(null)
+  const selectedRow = useRef<HTMLButtonElement>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
 
   useEffect(() => {
@@ -208,6 +211,20 @@ export function AuditPage() {
     try { await navigator.clipboard.writeText(selected.id); setCopyState('copied') } catch { setCopyState('error') }
   }
 
+  function inspect(event: AuditViewRecord) {
+    setSelectedId(event.id)
+    setCopyState('idle')
+    if (window.matchMedia?.('(max-width: 680px)').matches) {
+      setMobileInspector(true)
+      requestAnimationFrame(() => inspectorHeading.current?.focus())
+    }
+  }
+
+  function showStream() {
+    setMobileInspector(false)
+    requestAnimationFrame(() => selectedRow.current?.focus())
+  }
+
   const selectedTargetPath = selected ? targetPath(selected) : ''
 
   return (
@@ -218,16 +235,49 @@ export function AuditPage() {
       {inventoryPending ? <p className="audit-message" role="status">Refreshing audit events…</p> : null}
       {inventoryError ? <p className="audit-message is-error" role="alert">Controller audit events are unavailable: {inventoryError}</p> : null}
 
-      <div className={`audit-workspace${selected ? '' : ' is-closed'}`}>
+      <div className={`audit-workspace${selected ? '' : ' is-closed'}${mobileInspector && selected ? ' is-inspecting' : ''}`}>
         <section className="audit-stream" aria-label="Audit event stream">
-          <div className="audit-stream-head"><span>{filteredEvents.length} events</span><span>Newest first</span></div>
+          <header className="audit-stream-head"><h2>Activity <span>{filteredEvents.length}</span></h2><small>Newest first</small></header>
           <div className="audit-stream-scroll">
-            {groupedEvents.map((group) => <div className="audit-day" key={group.day}><h2>{group.day}</h2>{group.events.map((event) => <button aria-current={event.id === selectedId ? 'true' : undefined} className={event.id === selectedId ? 'is-selected' : undefined} key={event.id} onClick={() => { setSelectedId(event.id); setCopyState('idle') }} type="button"><time>{event.time}</time><span className={`audit-event-icon${event.tone === 'warning' ? ' is-warning' : event.tone === 'danger' ? ' is-danger' : ''}`}>{eventIcon(event.actionCode)}</span><span><strong>{event.action}</strong><small>{event.actor} · {event.target}</small></span><em>{event.scope}</em></button>)}</div>)}
-            {!filteredEvents.length ? <div className="audit-empty"><h2>No matching events</h2><p>Change the filters or search.</p></div> : null}
+            {groupedEvents.map(group => <div className="audit-day" key={group.day}>
+              <h3>{group.day}</h3>
+              {group.events.map(event => <button
+                aria-current={event.id === selectedId ? 'true' : undefined}
+                ref={event.id === selectedId ? selectedRow : undefined}
+                key={event.id} onClick={() => inspect(event)} type="button"
+              >
+                <span className={`audit-event-icon is-${event.tone}`}>{eventIcon(event.actionCode)}</span>
+                <span className="audit-event-copy"><strong>{event.action}</strong><small>{event.actor} · {event.target}</small></span>
+                <span className="audit-event-context"><time dateTime={new Date(event.timestampMs).toISOString()}>{event.time}</time><small>{event.scope}</small></span>
+              </button>)}
+            </div>)}
+            {!filteredEvents.length ? <div className="audit-empty"><h3>No matching events</h3><p>Change the filters or search.</p></div> : null}
           </div>
         </section>
-
-        {selected ? <aside className="audit-inspector" aria-label="Selected audit event detail"><div className="audit-inspector-head"><span className="audit-inspector-icon"><ShieldCheck aria-hidden="true" size={20} /></span><div><h2>{selected.action}</h2><p>{selected.scope}</p></div>{!live ? <Status tone={selected.tone}>{selected.outcome ?? ''}</Status> : null}</div><dl><div><dt>Actor</dt><dd>{selected.actor}</dd></div>{selected.actorId ? <div><dt>Actor ID</dt><dd><code>{selected.actorId}</code></dd></div> : null}<div><dt>Recorded</dt><dd>{selected.day} at {selected.time}</dd></div><div><dt>Action code</dt><dd><code>{selected.actionCode}</code></dd></div><div><dt>Target</dt><dd>{selectedTargetPath ? <Link to={selectedTargetPath}>{selected.target}</Link> : selected.target}</dd></div><div><dt>Target ID</dt><dd><code>{selected.targetId || 'Not recorded'}</code></dd></div><div><dt>Event ID</dt><dd><code>{selected.id}</code></dd></div></dl>{Object.keys(selected.payload).length ? <div className="audit-payload"><span>Recorded fields</span><pre>{JSON.stringify(selected.payload, null, 2)}</pre></div> : null}{copyState === 'error' ? <p className="audit-copy-error" role="alert">Clipboard access was blocked. Select the event ID above and copy it manually.</p> : null}<div className="button-row">{selectedTargetPath ? <Button to={selectedTargetPath} variant="primary">Open target</Button> : null}<Button onClick={copyEventId} variant="quiet">{copyState === 'copied' ? <Check aria-hidden="true" size={15} /> : <Copy aria-hidden="true" size={15} />}{copyState === 'copied' ? 'Copied' : 'Copy event ID'}</Button></div></aside> : null}
+        {selected ? <aside className="audit-inspector" aria-label="Selected audit event detail">
+          <button className="audit-back" type="button" onClick={showStream}><ArrowLeft size={16} aria-hidden="true" />All events</button>
+          <header className="audit-inspector-head">
+            <h2 tabIndex={-1} ref={inspectorHeading}>{selected.action}</h2>
+            <div><span>{selected.scope}</span>{!live && selected.outcome ? <Status tone={selected.tone}>{selected.outcome}</Status> : null}</div>
+          </header>
+          <section className="audit-facts"><h3>Activity details</h3><dl>
+            <div><dt>Recorded</dt><dd>{selected.day} at {selected.time}</dd></div>
+            <div><dt>Actor</dt><dd>{selected.actor}</dd></div>
+            {selected.actorId ? <div><dt>Actor ID</dt><dd><code>{selected.actorId}</code></dd></div> : null}
+            <div><dt>Target</dt><dd>{selectedTargetPath ? <Link to={selectedTargetPath}>{selected.target}</Link> : selected.target}</dd></div>
+            <div><dt>Target ID</dt><dd><code>{selected.targetId || 'Not recorded'}</code></dd></div>
+          </dl></section>
+          <section className="audit-facts"><h3>Event record</h3><dl>
+            <div><dt>Action code</dt><dd><code>{selected.actionCode}</code></dd></div>
+            <div><dt>Event ID</dt><dd><code>{selected.id}</code></dd></div>
+          </dl></section>
+          {Object.keys(selected.payload).length ? <div className="audit-payload"><h3>Recorded fields</h3><pre>{JSON.stringify(selected.payload, null, 2)}</pre></div> : null}
+          {copyState === 'error' ? <p className="audit-copy-error" role="alert">Clipboard access was blocked. Select the event ID above and copy it manually.</p> : null}
+          <div className="button-row">
+            {selectedTargetPath ? <Button to={selectedTargetPath}>Open target</Button> : null}
+            <Button onClick={copyEventId} variant="quiet">{copyState === 'copied' ? <Check aria-hidden="true" size={15} /> : <Copy aria-hidden="true" size={15} />}{copyState === 'copied' ? 'Copied' : 'Copy event ID'}</Button>
+          </div>
+        </aside> : null}
       </div>
     </div>
   )

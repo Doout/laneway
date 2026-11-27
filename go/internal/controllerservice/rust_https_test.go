@@ -17,6 +17,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -225,6 +227,15 @@ func TestRustControllerHTTPS(t *testing.T) {
 				t.Fatal("invalid browser session metadata")
 			}
 			delete(resp.body, "idle_expires_at_unix_seconds") // Two successful reads can straddle a second.
+		}
+		// The Unix Rust controller also supports owner-managed Twingate connections.
+		if role == "owner" && runtime.GOOS != "windows" {
+			permissions := a.body["permissions"].([]any)
+			i := slices.Index(permissions, "principal.manage")
+			if i < 0 {
+				t.Fatal("owner is missing principal.manage")
+			}
+			a.body["permissions"] = slices.Insert(permissions, i+1, "integration.manage")
 		}
 		if !reflect.DeepEqual(a.body, b.body) {
 			t.Fatalf("%s session properties or ordered permissions differ", role)

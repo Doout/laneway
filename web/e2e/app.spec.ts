@@ -57,7 +57,7 @@ test('sign-in, enrollment, route approval, and rule creation flow end to end', a
 
 test('pending-route links apply the query filter and primary navigation works from the keyboard', async ({ page }) => {
   await page.goto('/routes?state=pending')
-  await expect(page.getByRole('button', { name: 'Needs attention' })).toHaveClass(/is-active/)
+  await expect(page.getByRole('button', { name: 'Needs attention' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('tbody tr')).toHaveCount(1)
   await expect(page.getByRole('table').getByText('Kubernetes API')).toBeVisible()
 
@@ -141,5 +141,8 @@ test('relay registration confirmation can be canceled and the confirmed relay pe
   await page.getByRole('link', { name: 'Open relay' }).click()
   await expect(page.getByRole('heading', { level: 2, name: 'lhr-relay-01' })).toBeVisible()
   await page.getByRole('link', { name: 'Infrastructure', exact: true }).first().click()
-  await expect(page.getByLabel('Relay inventory').getByText('lhr-relay-01')).toBeVisible()
+  await expect(page).toHaveURL(/\/infrastructure$/)
+  await page.reload()
+  const topology = page.getByRole('group', { name: 'Network and relay topology' })
+  await expect(topology.getByRole('link', { name: /lhr-relay-01/ })).toBeVisible()
 })

@@ -38,6 +38,8 @@ mod recovery;
 mod relay_configuration;
 mod renew;
 mod revocation;
+#[cfg(unix)]
+mod twingate;
 
 const COOKIE: &str = "__Host-laneway_admin_session";
 const CSRF: &str = "__Host-laneway_admin_csrf";
@@ -50,6 +52,8 @@ pub struct State {
     workload_mtls_enabled: bool,
     pub(crate) database: Arc<PathBuf>,
     pub(crate) queries: Arc<Semaphore>,
+    #[cfg(unix)]
+    twingate_checks: Arc<Semaphore>,
     root: Option<Arc<RootCredential>>,
     discovery: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
     logins: Arc<std::sync::Mutex<crate::discovery_limit::Limiter>>,
@@ -89,6 +93,8 @@ impl State {
             bootstrap_discovery: None,
             console: None,
             queries: Arc::new(Semaphore::new(8)),
+            #[cfg(unix)]
+            twingate_checks: Arc::new(Semaphore::new(2)),
             root: root.map(Arc::new),
             discovery: Default::default(),
             logins: Arc::new(std::sync::Mutex::new(
@@ -391,6 +397,10 @@ async fn dispatch(
             }
             _ => {}
         }
+    }
+    #[cfg(unix)]
+    if let Some(route) = twingate::Route::parse(&pieces) {
+        return twingate::handle(req, state, id, route).await;
     }
     if let Some(route) = access_admin::Route::parse(&pieces) {
         return access_admin::handle(req, state, id, route).await;

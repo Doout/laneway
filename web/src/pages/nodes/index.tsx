@@ -5,7 +5,6 @@ import {
   Button,
   Callout,
   ChoiceGroup,
-  ConfirmPanel,
   DataTable,
   DetailLayout,
   EmptyState,
@@ -29,6 +28,7 @@ import { durableNodeEnrollmentCommand } from '../../lib/enrollment-commands'
 import { controllerNodes } from '../../lib/live-records'
 import { attributed, persistedNodes, readDemoState, updateDemoState, type NodeCapabilities } from '../../lib/persisted-demo-state'
 import './nodes.css'
+import './node-workspace.css'
 
 const nodeToken = 'lnw_node_01J8ATLAS_8eK3yF4pM2sQ9vR6'
 const defaultCapabilities: NodeCapabilities = { publish: true, accept: true, exit: false, relay: true }
@@ -70,10 +70,10 @@ export function NodesListPage() {
       return matchesQuery && matchesEnrollment && matchesState
     })
   }, [enrollment, query, records, state])
-  const selected = records.find(node => node.id === selectedId) ?? filteredNodes[0]
+  const selected = filteredNodes.find(node => node.id === selectedId) ?? filteredNodes[0]
   const canIssueEnrollment = !live || Boolean(inventory?.network && hasPermission('enrollment.issue', inventory.network.network_id))
 
-  return <>
+  return <div className="demo-node-directory">
     <PageHeader
       title={`${records.length} Nodes`}
       description={live ? inventory?.network?.name : 'Home network'}
@@ -81,7 +81,7 @@ export function NodesListPage() {
     />
     {inventoryError ? <Callout tone="danger">{inventoryError}</Callout> : null}
     <div className="nodes-segments" role="group" aria-label="Quick node filters">
-      {(live ? ['all', 'Enrolled', 'Lease expired', 'Revoked'] : ['all', 'Connected', 'Relay fallback', 'Enrollment pending', 'Revoked']).map(option => <button type="button" key={option} className={state === option ? 'is-active' : undefined} onClick={() => setState(option)}>{option === 'all' ? 'All nodes' : option}</button>)}
+      {(live ? ['all', 'Enrolled', 'Lease expired', 'Revoked'] : ['all', 'Connected', 'Relay fallback', 'Enrollment pending', 'Revoked']).map(option => <button type="button" key={option} aria-pressed={state === option} className={state === option ? 'is-active' : undefined} onClick={() => setState(option)}>{option === 'all' ? 'All nodes' : option}</button>)}
     </div>
     <Toolbar filters={<>
       <FilterSelect label="Filter by enrollment class" value={enrollment} onChange={setEnrollment}>
@@ -109,8 +109,7 @@ export function NodesListPage() {
           rowClassName={node => node.id === selected?.id ? 'is-selected' : undefined}
           empty={<EmptyState icon={<MonitorDot />} title="No nodes match" description="Clear a filter or try a different name, address, or node ID." action={<Button onClick={() => { setQuery(''); setEnrollment('all'); setState('all') }}><RotateCcw size={16} />Reset filters</Button>} />}
           columns={[
-            { key: 'node', label: 'Node', render: node => <button type="button" className="nodes-row-select" onClick={() => setSelectedId(node.id)}><EntityTitle icon={nodeIcon(node.enrollmentClass)} subtitle={node.id}>{node.name}</EntityTitle></button> },
-            { key: 'class', label: 'Enrollment', render: node => node.enrollmentClass },
+            { key: 'node', label: 'Node', render: node => <button type="button" className="nodes-row-select" aria-pressed={node.id === selected?.id} onClick={() => setSelectedId(node.id)}><EntityTitle icon={nodeIcon(node.enrollmentClass)} subtitle={node.enrollmentClass}>{node.name}</EntityTitle></button> },
             ...(live ? [{ key: 'roles', label: 'Policy roles', render: (node: NodeRecord) => node.capabilityRoles?.join(', ') || 'None' }] : []),
             { key: 'addresses', label: 'Overlay addresses', render: node => <code className="nodes-address">{node.addresses}</code> },
             { key: 'seen', label: live ? 'Created' : 'Last seen', render: node => live ? (() => { const timestamp = inventory?.nodes.find(record => record.node_id === node.id)?.created_at_unix_seconds; return timestamp ? new Date(timestamp * 1000).toLocaleDateString() : '—' })() : node.lastSeen },
@@ -126,7 +125,7 @@ export function NodesListPage() {
         <Button to={selected.name === 'atlas-gateway' ? '/nodes/atlas-gateway' : `/nodes/${selected.id}`} variant="primary">Open node <ArrowRight size={16} /></Button>
       </aside> : null}
     </div>
-  </>
+  </div>
 }
 
 export function AddNodePage() {
@@ -195,7 +194,7 @@ export function AddNodePage() {
     navigate('/nodes/new/token', { state: { id, name: cleanName, nodeClass, networkName, expiry } })
   }
 
-  return <>
+  return <div className="node-editor-workspace">
     <PageHeader title="Add node" description="Create a single-use enrollment token." />
     <FormLayout
       form={<FormStack onSubmit={submit}>
@@ -223,7 +222,7 @@ export function AddNodePage() {
         ['Redemptions', 'One'],
       ]} />}
     />
-  </>
+  </div>
 }
 
 export function NodeTokenPage() {
@@ -255,7 +254,7 @@ export function NodeTokenPage() {
     return <div className="nodes-narrow"><EmptyState icon={<TriangleAlert />} title="Enrollment token unavailable" description="Live enrollment secrets are shown only once, immediately after issuance. Issue a new token to continue." action={<Button to="/nodes/new" variant="primary">Issue a new token</Button>} /></div>
   }
 
-  return <div className="nodes-narrow">
+  return <div className="node-token-workspace">
     <PageHeader title="Node token issued" description={`Enroll ${issued?.name ?? 'the new node'}.`} />
     <Callout tone="warning"><strong>Copy this token now.</strong> It is shown once and expires in {issued?.expiry ?? '24 hours'}.</Callout>
     <div className="nodes-token-space">
@@ -287,8 +286,8 @@ export function NodeDetailPage() {
   const capabilityLabels = (live
     ? [capabilities.publish && 'Publish subnet routes', capabilities.exit && 'Publish default routes']
     : [capabilities.publish && 'Publish subnet routes', capabilities.accept && 'Accept routed traffic', capabilities.exit && 'Publish default routes', capabilities.relay && 'Relay fallback']).filter(Boolean)
-  return <>
-    <PageHeader title="Node detail" action={<Button to="/nodes">Back to nodes</Button>} />
+  return <div className="node-detail-workspace">
+    <PageHeader title="Node detail" />
     <DetailLayout
       identity={<IdentityBlock
         icon={nodeIcon(node.enrollmentClass)}
@@ -312,7 +311,7 @@ export function NodeDetailPage() {
         <div className="nodes-capabilities">{capabilityLabels.length ? capabilityLabels.map(label => <span key={label as string}><Check size={15} />{label}</span>) : <span>No capabilities enabled</span>}</div>
       </Section>
     </DetailLayout>
-  </>
+  </div>
 }
 
 export function NodeCapabilitiesPage() {
@@ -394,9 +393,9 @@ export function NodeCapabilitiesPage() {
     navigate(`/nodes/${activeNode.id}`)
   }
 
-  return <>
+  return <div className="node-editor-workspace">
     <PageHeader title="Edit capabilities" />
-    <div className="nodes-narrow"><FormStack onSubmit={submit}>
+    <FormStack onSubmit={submit}>
       <fieldset className="nodes-check-list"><legend className="sr-only">Node capabilities</legend>
         {([
           ['publish', 'Publish subnet routes', 'Advertise private IP prefixes.'],
@@ -411,8 +410,8 @@ export function NodeCapabilitiesPage() {
       {changed.length ? <Callout tone="warning"><strong>Exact impact:</strong> {changed.map(key => `${key} will be ${activeCapabilities[key] ? 'enabled' : 'disabled'}`).join('; ')}. This changes controller authorization for {node.name}.</Callout> : null}
       <Field label={`Type ${expected} to confirm`} error={confirmation && confirmation !== expected ? 'The confirmation phrase does not match.' : undefined}><input value={confirmation} onChange={event => { setConfirmation(event.target.value); setError('') }} autoComplete="off" /></Field>
       <div className="button-row"><Button type="submit" variant="primary" disabled={!changed.length || confirmation !== expected || pending}><ShieldCheck size={17} />{pending ? 'Saving capabilities…' : 'Save capabilities'}</Button><Button to={`/nodes/${node.id}`} variant="quiet">Cancel</Button></div>
-    </FormStack></div>
-  </>
+    </FormStack>
+  </div>
 }
 
 export function NodeRevokePage() {
@@ -455,9 +454,13 @@ export function NodeRevokePage() {
     }
   }
 
-  if (submitted) return <ConfirmPanel icon={<Check />} title={live ? 'Node revoked' : 'Demo state updated'} description={live ? `The controller revoked ${node.name}'s certificates, released its overlay addresses, and withdrew its advertised and approved routes.` : 'No controller state changed.'}><Button to={`/nodes/${node.id}`} variant="primary">View node</Button></ConfirmPanel>
+  if (submitted) return <div className="node-editor-workspace">
+    <PageHeader title={live ? 'Node revoked' : 'Demo state updated'} description={live ? `The controller revoked ${node.name}'s certificates, released its overlay addresses, and withdrew its advertised and approved routes.` : 'No controller state changed.'} />
+    <Button to={`/nodes/${node.id}`} variant="primary">View node</Button>
+  </div>
 
-  return <ConfirmPanel icon={<TriangleAlert />} title={`Revoke ${node.name}?`} description={live ? 'This permanently revokes the node.' : 'This changes demo state only.'}>
+  return <div className="node-editor-workspace node-revoke">
+    <PageHeader title={`Revoke ${node.name}?`} description={live ? 'This permanently revokes the node.' : 'This changes demo state only.'} />
     {live ? <Callout tone="danger">The controller will revoke its certificates, release its overlay addresses, and withdraw its advertised and approved routes.</Callout> : null}
     <form className="nodes-confirm-form" onSubmit={submit}>
       <Field label={`Type ${expected} to confirm`} error={confirmation && !matches ? 'The node name does not match.' : undefined}>
@@ -466,5 +469,5 @@ export function NodeRevokePage() {
       {error ? <Callout tone="danger">{error}</Callout> : null}
       <div className="button-row"><Button type="submit" variant="danger" disabled={!matches || pending}><Trash2 size={17} />{pending ? 'Revoking node…' : 'Revoke node'}</Button><Button to={`/nodes/${node.id}`} variant="quiet">Cancel</Button></div>
     </form>
-  </ConfirmPanel>
+  </div>
 }

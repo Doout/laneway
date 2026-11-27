@@ -57,13 +57,19 @@ test.describe('tablet navigation', () => {
 test.describe('mobile layout', () => {
   test.use({ viewport: { width: 375, height: 812 } })
 
-  test('inventory and bottom navigation remain inside the viewport', async ({ page }) => {
+  test('menu opens, returns focus, and navigates within the viewport', async ({ page }) => {
     await page.goto('/nodes')
     await expect(page.getByRole('heading', { name: '5 Nodes' })).toBeVisible()
-    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible()
     await expectNoHorizontalPageOverflow(page)
-
-    const navigation = page.getByRole('navigation', { name: 'Primary navigation' })
+    const menu = page.getByRole('button', { name: 'Menu', exact: true })
+    await menu.click()
+    const sheet = page.getByRole('dialog', { name: 'Navigation' })
+    await expect(sheet).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(sheet).toBeHidden()
+    await expect(menu).toBeFocused()
+    await menu.press('Enter')
+    const navigation = sheet.getByRole('navigation', { name: 'Primary navigation' })
     for (const label of ['Overview', 'Nodes', 'Users', 'Infrastructure', 'Access', 'Security', 'Audit']) {
       await expect(navigation.getByRole('link', { name: label, exact: true })).toBeVisible()
     }
@@ -81,6 +87,9 @@ test.describe('mobile layout', () => {
       expect(box.width).toBeGreaterThanOrEqual(44)
       expect(box.height).toBeGreaterThanOrEqual(44)
     }
+    await navigation.getByRole('link', { name: 'Overview', exact: true }).click()
+    await expect(page).toHaveURL(/\/overview$/)
+    await expect(sheet).toBeHidden()
   })
 
   for (const [path, selector] of [

@@ -14,7 +14,7 @@ test('honors the pending route query and exposes the approval queue', () => {
 test('restores the approved route query', () => {
   const { container } = render(<ControlPlaneProvider><MemoryRouter initialEntries={['/routes?state=approved']}><RoutesListPage /></MemoryRouter></ControlPlaneProvider>)
   const view = within(container)
-  expect(view.getByRole('button', { name: 'Healthy' })).toHaveClass('is-active')
+  expect(view.getByRole('button', { name: 'Healthy', pressed: true })).toBeVisible()
   expect(view.getAllByText('Production services')).toHaveLength(2)
   expect(view.queryByText('Kubernetes API')).not.toBeInTheDocument()
 })

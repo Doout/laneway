@@ -809,6 +809,7 @@ export const Permission = {
     APPLICATION_INSTALLATION_READ: 'application_installation.read',
     APPLICATION_INSTALLATION_MANAGE: 'application_installation.manage',
     PRINCIPAL_MANAGE: 'principal.manage',
+    INTEGRATION_MANAGE: 'integration.manage',
     SESSION_MANAGE_OTHERS: 'session.manage_others',
     SERVICE_PRINCIPAL_MANAGE: 'service_principal.manage',
     RECOVERY_MANAGE: 'recovery.manage',

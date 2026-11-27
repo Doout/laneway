@@ -1,9 +1,11 @@
-import { ArrowRight, MonitorDot, RadioTower, Route, ShieldCheck, TriangleAlert } from 'lucide-react'
+import { Activity, ArrowRight, CheckCircle2, Clock3, MonitorDot } from 'lucide-react'
 import { Button, Callout, PageHeader, Status } from '../../components/ui'
 import { useControlPlane } from '../../lib/control-plane'
+import { useInfrastructureState } from '../../lib/infrastructure-state'
 import { controllerNodes, isPendingControllerRoute } from '../../lib/live-records'
-import { persistedNodes } from '../../lib/persisted-demo-state'
-import './overview.css'
+import { persistedAccessRules, persistedNodes, persistedRoutes } from '../../lib/persisted-demo-state'
+import { SummaryStrip } from '../live/shared'
+import { OverviewSection } from './OverviewSection'
 
 const attempts = [
   { node: 'operator-laptop', destination: 'atlas-gateway', path: 'Direct QUIC', latency: '24 ms', time: '10:22:41', tone: 'positive' as const },
@@ -14,69 +16,71 @@ const attempts = [
 
 export function OverviewPage() {
   const { live, inventory, inventoryError, inventoryPending } = useControlPlane()
-  const demoRecords = persistedNodes()
-  const liveRecords = controllerNodes(inventory?.nodes ?? [])
-  const pendingRoutes = live ? inventory?.routes.filter(isPendingControllerRoute).length ?? 0 : 2
-  const nodeCount = live ? liveRecords.length : 18
-  const routeCount = live ? inventory?.routes.length ?? 0 : 12
-  const relayCount = live ? inventory?.relays.filter(relay => relay.enabled).length ?? 0 : 3
-  const ruleCount = live ? inventory?.aclRules.filter(rule => rule.enabled).length ?? 0 : 7
-  const summary = [inventory?.network?.name, pendingRoutes ? `${pendingRoutes} route${pendingRoutes === 1 ? '' : 's'} pending` : undefined]
-    .filter(Boolean)
-    .join(' · ') || undefined
-  const topologyNames = demoRecords.filter(node => node.state !== 'Revoked').slice(0, 3).map(node => node.name)
-  const leftNode = topologyNames[0] ?? 'operator-laptop'
-  const rightNode = topologyNames[1] ?? 'atlas-gateway'
-  const leftAddress = '100.88.0.23'
-  const rightAddress = '10.24.0.0/16'
-  const pendingRouteItem = pendingRoutes ? <Button className="attention-item" to="/routes?state=pending" variant="quiet"><span className="attention-item__icon attention-item__icon--warning"><TriangleAlert size={17} /></span><span><strong>{pendingRoutes} route{pendingRoutes === 1 ? '' : 's'} await approval</strong></span><ArrowRight size={16} /></Button> : null
+  const demoInfrastructure = useInfrastructureState()
+  const nodes = live ? controllerNodes(inventory?.nodes ?? []) : persistedNodes()
+  const currentNodes = nodes.filter(node => node.state !== 'Revoked')
+  const demoRoutes = live ? [] : persistedRoutes()
+  const demoRules = live ? [] : persistedAccessRules()
+  const pendingRoutes = live ? inventory?.routes.filter(isPendingControllerRoute).length ?? 0 : demoRoutes.filter(route => route.state === 'Pending approval').length
+  const fallbackCount = live ? 0 : currentNodes.filter(node => node.state === 'Relay fallback').length
+  const attentionCount = pendingRoutes + fallbackCount
+  const routeCount = live ? inventory?.routes.length ?? 0 : demoRoutes.length
+  const relayCount = (live ? inventory?.relays ?? [] : demoInfrastructure.relays).filter(relay => relay.enabled).length
+  const ruleCount = live ? inventory?.aclRules.filter(rule => rule.enabled).length ?? 0 : demoRules.filter(rule => rule.state === 'Enabled').length
 
   return <>
-    <PageHeader
-      title="Overview"
-      description={summary}
-    />
-
+    <PageHeader title="Overview" description={inventory?.network?.name} />
     {inventoryError ? <Callout tone="danger">{inventoryError}</Callout> : null}
-    {inventoryPending ? <div className="overview-loading" role="status">Refreshing inventory…</div> : null}
-
-    {!live || inventory ? <section className="overview-metrics" aria-label="Network inventory summary">
-      <div><MonitorDot aria-hidden="true" size={17} /><span><strong>{nodeCount}</strong>{live ? 'Nodes' : 'Active nodes'}</span></div>
-      <div><Route aria-hidden="true" size={17} /><span><strong>{routeCount}</strong>Routes</span></div>
-      <div><RadioTower aria-hidden="true" size={17} /><span><strong>{relayCount}</strong>Enabled relays</span></div>
-      <div><ShieldCheck aria-hidden="true" size={17} /><span><strong>{ruleCount}</strong>Enabled rules</span></div>
-    </section> : null}
-
-    {live ? pendingRouteItem ? <section className="attention-panel">
-      <div className="panel-heading"><h2>Needs attention</h2><span className="attention-count">{pendingRoutes}</span></div>
-      {pendingRouteItem}
-    </section> : null : <div className="overview-workspace">
-      <div className="overview-main">
-        <section className="topology-panel">
-          <div className="panel-heading"><h2>Topology</h2><Status tone="positive">Healthy</Status></div>
-          <div className="topology-map" aria-label={`${leftNode} to ${rightNode}`}>
-            <div className="topology-grid" aria-hidden="true" />
-            <div className="topology-node topology-node--client"><span className="topology-node__icon"><MonitorDot size={20} /></span><strong>{leftNode}</strong><small>{leftAddress}</small></div>
-            <div className="topology-line topology-line--first"><i /></div>
-            <div className="topology-node topology-node--relay"><span className="topology-node__icon"><RadioTower size={20} /></span><strong>Direct</strong><small>QUIC</small></div>
-            <div className="topology-line topology-line--second"><i /></div>
-            <div className="topology-node topology-node--destination"><span className="topology-node__icon"><Route size={20} /></span><strong>{rightNode}</strong><small>{rightAddress}</small></div>
-          </div><div className="topology-path-strip">
-            <span><small>Path</small><strong>Direct QUIC</strong></span><i aria-hidden="true" /><span><small>Round trip</small><strong>24 ms</strong></span><i aria-hidden="true" /><span><small>Tunnel</small><strong>WireGuard</strong></span><i aria-hidden="true" /><span><small>Fallback</small><strong>relay-us-east</strong></span>
-          </div>
-        </section>
-
-        <section className="attempts-panel">
-          <div className="panel-heading"><h2>Connection attempts</h2><Button to="/audit" variant="quiet">View audit</Button></div>
-          <div className="attempts-table-wrap"><table className="attempts-table"><thead><tr><th>Source</th><th>Destination</th><th>Selected path</th><th>Latency</th><th>Time</th></tr></thead><tbody>{attempts.map(attempt => <tr key={`${attempt.node}-${attempt.time}`}><td><strong>{attempt.node}</strong></td><td>{attempt.destination}</td><td><Status tone={attempt.tone}>{attempt.path}</Status></td><td><code>{attempt.latency}</code></td><td>{attempt.time}</td></tr>)}</tbody></table></div>
-        </section>
+    {inventoryPending ? <p className="overview-loading" role="status">Refreshing inventory…</p> : null}
+    {!live || inventory ? <div className="overview-board">
+      <SummaryStrip label="Network inventory summary" items={[
+        { label: 'Current nodes', value: currentNodes.length },
+        { label: 'Routes', value: routeCount },
+        { label: 'Enabled relays', value: relayCount },
+        { label: 'Enabled rules', value: ruleCount },
+      ]} />
+      <div className="overview-board__columns">
+        <div className="overview-board__column">
+          <OverviewSection id="overview-attention" title="Needs attention" count={attentionCount}>
+            {pendingRoutes ? <Button className="overview-row" to="/routes?state=pending" variant="quiet">
+              <Clock3 className="overview-row__warning" size={16} aria-hidden="true" />
+              <span>{pendingRoutes} {pendingRoutes === 1 ? 'route awaits' : 'routes await'} approval</span>
+              <ArrowRight size={14} aria-hidden="true" />
+            </Button> : null}
+            {fallbackCount ? <Button className="overview-row" to="/nodes" variant="quiet">
+              <MonitorDot className="overview-row__warning" size={16} aria-hidden="true" />
+              <span>{fallbackCount} {fallbackCount === 1 ? 'node uses' : 'nodes use'} relay fallback</span>
+              <ArrowRight size={14} aria-hidden="true" />
+            </Button> : null}
+            {!attentionCount ? <p className="overview-empty"><CheckCircle2 size={16} aria-hidden="true" />No items to review</p> : null}
+          </OverviewSection>
+          {!live ? <OverviewSection id="overview-path" title="Sample connection">
+            <dl className="overview-path">
+              <div><dt>Source</dt><dd>{attempts[0].node}</dd></div>
+              <div><dt>Destination</dt><dd>{attempts[0].destination}</dd></div>
+              <div><dt>Path</dt><dd>{attempts[0].path}</dd></div>
+              <div><dt>Round trip</dt><dd><code>{attempts[0].latency}</code></dd></div>
+              <div><dt>Tunnel</dt><dd>WireGuard</dd></div>
+              <div><dt>Fallback</dt><dd>relay-us-east</dd></div>
+            </dl>
+          </OverviewSection> : null}
+        </div>
+        {!live ? <OverviewSection id="overview-attempts" title="Connection attempts" action={{ label: 'View audit', to: '/audit' }}>
+          <ul className="overview-list">
+            {attempts.map(attempt => <li className="overview-row" key={attempt.time}>
+              <Activity aria-hidden="true" size={16} />
+              <div className="overview-row__attempt">
+                <span><strong>{attempt.node}</strong><small>to {attempt.destination}</small></span>
+                <Status tone={attempt.tone}>{attempt.path}</Status>
+              </div>
+              <div className="overview-row__timing">
+                <small className="overview-row__latency">{attempt.latency}</small>
+                <time>{attempt.time}</time>
+              </div>
+            </li>)}
+          </ul>
+        </OverviewSection> : null}
       </div>
-
-      <aside className="attention-panel">
-        <div className="panel-heading"><h2>Needs attention</h2><span className="attention-count">{pendingRoutes + 1}</span></div>
-        {pendingRouteItem}
-        <Button className="attention-item" to="/nodes" variant="quiet"><span className="attention-item__icon"><MonitorDot size={17} /></span><span><strong>One node uses relay fallback</strong></span><ArrowRight size={16} /></Button>
-      </aside>
-    </div>}
+    </div> : null}
   </>
 }

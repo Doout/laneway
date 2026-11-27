@@ -1,39 +1,46 @@
 <!doctype html>
 <html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tenants · Laneway Platform</title>
-<style>
-  :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
-  body { margin: 0; background: light-dark(#f5f6f8,#16181c); color: light-dark(#181b20,#edeef2); }
-  main { max-width: 760px; margin: auto; padding: 48px 20px; }
-  header { display: flex; align-items: center; justify-content: space-between; color: light-dark(#464d59,#b6bcc7); }
-  h1 { font-size: 2.25rem; margin: .5rem 0 1.5rem; }
-  section { background: light-dark(white,#202329); border: 1px solid light-dark(#d9dde4,#424751); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
-  h2 { font-size: 1rem; margin: 0 0 12px; }
-  table { width: 100%; border-collapse: collapse; text-align: left; }
-  th, td { padding: 10px 8px; border-bottom: 1px solid light-dark(#e4e6eb,#424751); overflow-wrap: anywhere; }
-  a { color: light-dark(#0056ad,#88bcff); }
-  form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
-  label { display: grid; gap: 6px; flex: 1 1 12rem; min-width: 0; }
-  input, button { box-sizing: border-box; border-radius: 6px; border: 1px solid light-dark(#adb5c1,#596170); padding: 8px 10px; font: inherit; }
-  button { background: #005bb9; color: white; cursor: pointer; }
-  p { margin: 12px 0 0; font-size: .875rem; }
-</style>
-<main>
-  <header>Laneway Platform <form method="post" action="/platform/sign-out"><button type="submit">Sign out</button></form></header>
-  <h1>Tenants</h1>
-  <section>
-    <h2>Tenant directory</h2>
-    <table><thead><tr><th scope="col">Hostname</th><th scope="col">Status</th></tr></thead>
-    <tbody><!-- tenants --></tbody></table>
-  </section>
-  <section>
-    <h2>Add tenant</h2>
-    <form method="post" action="/tenants">
-      <label>Subdomain <input name="slug" required maxlength="63" pattern="[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?" autocapitalize="none" spellcheck="false" placeholder="acme"></label>
-      <button type="submit">Reserve name</button>
-    </form>
-    <p>Reserve a name first. An operator reviews and stages the instance before it goes live.</p>
-  </section>
-</main>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tenants · Laneway Platform</title>
+  <style><!-- platform styles --></style>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="app-bar-inner">
+      <!-- platform brand -->
+      <form method="post" action="/platform/sign-out">
+        <button type="submit">Sign out</button>
+      </form>
+    </div>
+  </header>
+  <main class="workspace">
+    <h1 id="tenants-heading">Tenants</h1>
+    <div class="workspace-grid">
+      <div class="directory">
+        <table aria-labelledby="tenants-heading">
+          <thead>
+            <tr><th scope="col">Hostname</th><th scope="col">Status</th></tr>
+          </thead>
+          <tbody><!-- tenants --></tbody>
+          <tbody class="empty-directory">
+            <tr><td colspan="2">No tenants yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <section class="tenant-intake" aria-labelledby="intake-heading">
+        <h2 id="intake-heading">Add tenant</h2>
+        <form class="form-stack" method="post" action="/tenants">
+          <label>
+            Subdomain
+            <input name="slug" required maxlength="63" pattern="[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?" autocapitalize="none" spellcheck="false" aria-describedby="intake-hint">
+          </label>
+          <p id="intake-hint" class="hint">An operator reviews and stages the tenant before it goes live.</p>
+          <button class="primary-button" type="submit">Reserve name</button>
+        </form>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

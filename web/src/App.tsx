@@ -1,7 +1,7 @@
 import { Navigate, Outlet, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
 import { ThemeProvider } from './components/Theme'
-import { Button, PageHeader } from './components/ui'
+import { AccessDeniedPage, CheckingSession, InventoryUnavailablePage, LoadingInventory, NotFoundPage } from './components/RouteFeedback'
 import { AccessRuleDetailPage, AccessRuleFormPage, AccessRulesPage } from './pages/access'
 import { AuditPage } from './pages/audit/AuditPage'
 import { AuthenticationUnavailablePage, SetupRequiredPage, SignInPage } from './pages/auth/SignInPage'
@@ -22,14 +22,10 @@ import { SecurityPage } from './pages/security/SecurityPage'
 import { IssueUserAccessPage, UserDetailPage, UsersListPage, UserTokenPage } from './pages/users'
 import { isNetworkScopedAdministratorPermission, useControlPlane, type AdministratorPermission } from './lib/control-plane'
 
-function LoadingAuthentication() {
-  return <main className="auth-page"><p role="status">Checking administrator session…</p></main>
-}
-
 function LandingPage() {
   const { authState, live } = useControlPlane()
   if (!live || authState === 'authenticated') return <Navigate to="/overview" replace />
-  if (authState === 'checking') return <LoadingAuthentication />
+  if (authState === 'checking') return <CheckingSession />
   if (authState === 'bootstrap_required') return <Navigate to="/setup" replace />
   if (authState === 'unavailable') return <AuthenticationUnavailablePage />
   return <Navigate to="/sign-in" replace />
@@ -39,16 +35,12 @@ function RequireControllerSession() {
   const { authState, authenticated, live } = useControlPlane()
   const location = useLocation()
   if (!live) return <Outlet />
-  if (authState === 'checking') return <LoadingAuthentication />
+  if (authState === 'checking') return <CheckingSession />
   if (authState === 'bootstrap_required') return <Navigate to="/setup" replace />
   if (authState === 'unavailable') return <AuthenticationUnavailablePage />
   return authenticated
     ? <Outlet />
     : <Navigate to="/sign-in" replace state={{ from: location.pathname + location.search + location.hash }} />
-}
-
-function AccessDeniedPage() {
-  return <PageHeader title="Access denied" action={<Button to="/overview" variant="primary">Return to overview</Button>} />
 }
 
 function RequirePermission({ permission }: { permission: AdministratorPermission }) {
@@ -58,15 +50,11 @@ function RequirePermission({ permission }: { permission: AdministratorPermission
   if (!hasPermission('network.list')) return <AccessDeniedPage />
   if (!inventory) {
     return inventoryError
-      ? <PageHeader title="Inventory unavailable" action={<Button to="/overview" variant="primary">Return to overview</Button>} />
-      : <main className="auth-page"><p role="status">Loading authorized inventory…</p></main>
+      ? <InventoryUnavailablePage />
+      : <LoadingInventory />
   }
   const networkId = inventory.network?.network_id
   return networkId && hasPermission(permission, networkId) ? <Outlet /> : <AccessDeniedPage />
-}
-
-function NotFoundPage() {
-  return <PageHeader title="Page not found" action={<Button to="/overview" variant="primary">Return to overview</Button>} />
 }
 
 export function App() {

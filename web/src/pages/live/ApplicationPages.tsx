@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { AppWindow, Check, ExternalLink, KeyRound, Link2, Network, ShieldCheck, Trash2, X } from 'lucide-react'
-import { Button, DataTable, EmptyState, Field, FilterSelect, PageHeader, Section, Status, TokenBox } from '../../components/ui'
+import { Button, EmptyState, Field, FilterSelect, PageHeader, Status, TokenBox } from '../../components/ui'
 import { useControlPlane, type AdministratorPermission, type ControllerNetwork } from '../../lib/control-plane'
 import { ErrorMessage } from './shared'
 import './applications.css'
@@ -139,19 +139,12 @@ export function ApplicationRegistrationConsentPage() {
   if (!value) return <><PageHeader title="Registration unavailable" /><ErrorMessage value={error} /></>
   const permissionCount = value.manifest.scopes.length
   const callbackCount = value.manifest.redirect_uris.length
-  return <div className="application-consent-page application-registration-consent">
-    <section className="application-registration-panel" aria-labelledby="application-registration-title">
-      <header className="application-registration-header">
-        <span className="application-registration-icon"><AppWindow aria-hidden="true" size={25} /></span>
-        <div>
-          <p>Application registration</p>
-          <h1 id="application-registration-title">Register {value.manifest.name}?</h1>
-          <a href={value.manifest.homepage_uri} target="_blank" rel="noreferrer">
-            {callbackHost(value.manifest.homepage_uri)} <ExternalLink aria-hidden="true" size={13} />
-          </a>
-        </div>
-      </header>
-
+  return <div className="application-consent-page">
+    <PageHeader title={`Register ${value.manifest.name}?`} />
+    <a className="application-publisher" href={value.manifest.homepage_uri} target="_blank" rel="noreferrer">
+      <AppWindow aria-hidden="true" size={16} />{callbackHost(value.manifest.homepage_uri)}<ExternalLink aria-hidden="true" size={13} />
+    </a>
+    <div className="application-registration-panel">
       <div className="application-registration-body">
         <section className="application-registration-permissions" aria-labelledby="application-permissions-title">
           <div className="application-registration-section-heading">
@@ -193,7 +186,7 @@ export function ApplicationRegistrationConsentPage() {
           <Button variant="primary" disabled={submitting} onClick={() => void decide('approve')}><Check size={16} />Register application</Button>
         </div>
       </footer>
-    </section>
+    </div>
   </div>
 }
 
@@ -251,17 +244,35 @@ export function ApplicationInstallPage() {
   if (pending) return <PageHeader title="Connect application" description="Loading authorization request…" />
   if (!value) return <><PageHeader title="Authorization unavailable" /><ErrorMessage value={error} /></>
   return <div className="application-consent-page">
-    <PageHeader title={`Connect ${value.application.name}`} description="Choose the network this application can access." />
-    <div className="application-consent-layout">
-      <section className="application-consent-card">
-        <Field label="Network"><select value={networkID} onChange={(event) => setNetworkID(event.target.value)} disabled={!networks.length}>{networks.length ? networks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name} · {network.ipv4_pool}</option>) : <option value="">No manageable networks</option>}</select></Field>
-        <h3>Requested access</h3><ScopeList scopes={value.scopes} selected={grantedScopes} disabled={unavailableScopes} onChange={selectScope} />
-      </section>
-      <aside className="application-consent-summary"><div className="application-consent-identity compact"><span><Link2 aria-hidden="true" size={21} /></span><div><h2>{value.application.name}</h2><small>{callbackHost(value.redirect_uri)}</small></div></div><p>This creates one service identity limited to the selected network and the access shown here.</p></aside>
+    <PageHeader title={`Connect ${value.application.name}`} />
+    <div className="application-publisher"><Link2 aria-hidden="true" size={16} />{callbackHost(value.redirect_uri)}</div>
+    <div className="application-registration-panel">
+      <div className="application-registration-body">
+        <section className="application-registration-permissions" aria-labelledby="application-access-heading">
+          <div className="application-registration-section-heading"><h2 id="application-access-heading">Requested access</h2><span>{grantedScopes.length} selected</span></div>
+          <ScopeList scopes={value.scopes} selected={grantedScopes} disabled={unavailableScopes} onChange={selectScope} />
+        </section>
+        <aside className="application-registration-details" aria-labelledby="application-install-heading">
+          <h2 id="application-install-heading">Connection details</h2>
+          <Field label="Network"><select value={networkID} onChange={(event) => setNetworkID(event.target.value)} disabled={!networks.length}>{networks.length ? networks.map((network) => <option key={network.network_id} value={network.network_id}>{network.name} · {network.ipv4_pool}</option>) : <option value="">No manageable networks</option>}</select></Field>
+          <dl><div><dt>OAuth redirect URL</dt><dd><BreakableURL value={value.redirect_uri} /></dd></div></dl>
+        </aside>
+      </div>
+      <ErrorMessage value={error} />
+      <footer className="application-registration-footer">
+        <div className="application-registration-boundary"><ShieldCheck aria-hidden="true" size={17} /><p>This creates one service identity limited to the selected network and the access shown here.</p></div>
+        <div className="application-consent-actions"><Button variant="quiet" disabled={submitting || !networkID} onClick={() => void decide('cancel')}>Cancel</Button><Button variant="primary" disabled={submitting || !networkID || !grantedScopes.length} onClick={() => void decide('approve')}>Allow access</Button></div>
+      </footer>
     </div>
-    <ErrorMessage value={error} />
-    <div className="application-consent-actions"><Button variant="quiet" disabled={submitting || !networkID} onClick={() => void decide('cancel')}><X size={16} />Cancel</Button><Button variant="primary" disabled={submitting || !networkID || !grantedScopes.length} onClick={() => void decide('approve')}><ShieldCheck size={16} />Allow access</Button></div>
   </div>
+}
+
+function PermissionDetails({ scopes }: { scopes: string[] }) {
+  if (!scopes.length) return <small>No permissions</small>
+  return <details className="application-permission-details">
+    <summary>{scopes.length} {scopes.length === 1 ? 'permission' : 'permissions'}</summary>
+    <ul>{scopes.map(scope => <li key={scope}>{scopeCopy[scope]?.label ?? scope}</li>)}</ul>
+  </details>
 }
 
 export function ApplicationsPage() {
@@ -321,26 +332,34 @@ export function ApplicationsPage() {
 
   const applicationsByID = new Map(applications.map((application) => [application.application_id, application]))
   return <div className="applications-page">
-    <PageHeader title="Applications" description="Applications registered with Laneway and the networks they can access." />
+    <PageHeader title="Applications" />
     <ErrorMessage value={error} />
     {secret ? <div className="application-secret"><div><KeyRound aria-hidden="true" size={20} /><div><strong>Save this client secret now</strong><p>It will not be shown again.</p></div></div><TokenBox label="Client secret" value={secret} /><Button variant="quiet" onClick={() => setSecret('')}>Done</Button></div> : null}
-    {canReadApplications ? <Section title="Registered applications" meta={pending ? 'Loading…' : `${applications.length} total`}>
-      <DataTable columns={[
-        { key: 'application', label: 'Application', render: (application: RegisteredApplication) => <span className="application-name"><span><AppWindow size={18} /></span><span><strong>{application.name}</strong><small>{callbackHost(application.homepage_uri)}</small></span></span> },
-        { key: 'client', label: 'Client ID', render: (application: RegisteredApplication) => <code title={application.client_id}>{application.client_id}</code> },
-        { key: 'access', label: 'Can request', render: (application: RegisteredApplication) => `${application.scopes.length} ${application.scopes.length === 1 ? 'permission' : 'permissions'}` },
-        { key: 'state', label: 'State', render: (application: RegisteredApplication) => <Status tone={application.enabled ? 'positive' : 'muted'}>{application.enabled ? 'Enabled' : 'Disabled'}</Status> },
-        { key: 'actions', label: '', align: 'end', render: (application: RegisteredApplication) => canManageApplications ? application.enabled ? <div className="button-row compact"><Button variant="quiet" onClick={() => void rotate(application)}><KeyRound size={14} />New secret</Button><Button variant="quiet" onClick={() => void disable(application)}><Trash2 size={14} />Disable</Button></div> : <Button variant="danger" onClick={() => void remove(application)}><Trash2 size={14} />Delete</Button> : null },
-      ]} rows={applications} rowKey={(application) => application.application_id} empty={<EmptyState icon={<AppWindow />} title="No registered applications" description="Applications appear here after an owner approves registration." />} />
-    </Section> : null}
-    <Section title="Network access" meta={networkID ? `${installations.filter((item) => item.enabled).length} active` : undefined} action={readableNetworks.length ? <FilterSelect label="Network" value={networkID} onChange={setNetworkID}>{readableNetworks.map((network: ControllerNetwork) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</FilterSelect> : undefined}>
-      <DataTable columns={[
-        { key: 'application', label: 'Application', render: (installation: ApplicationInstallation) => <span><strong>{applicationsByID.get(installation.application_id)?.name ?? 'Registered application'}</strong><small className="application-table-detail">{installation.application_id}</small></span> },
-        { key: 'identity', label: 'Service identity', render: (installation: ApplicationInstallation) => <code title={installation.service_principal_id}>{installation.service_principal_id}</code> },
-        { key: 'access', label: 'Granted access', render: (installation: ApplicationInstallation) => `${installation.scopes.length} ${installation.scopes.length === 1 ? 'permission' : 'permissions'}` },
-        { key: 'state', label: 'State', render: (installation: ApplicationInstallation) => <Status tone={installation.enabled ? 'positive' : 'muted'}>{installation.enabled ? 'Connected' : 'Removed'}</Status> },
-        { key: 'actions', label: '', align: 'end', render: (installation: ApplicationInstallation) => installation.enabled && hasPermission('application_installation.manage', installation.network_id) ? <Button variant="quiet" onClick={() => void revoke(installation)}>Remove</Button> : null },
-      ]} rows={installations} rowKey={(installation) => installation.installation_id} empty={<EmptyState icon={<Network />} title={readableNetworks.length ? 'No applications connected' : 'No readable networks'} />} />
-    </Section>
+    {canReadApplications ? <section className="application-inventory" aria-labelledby="application-registrations-heading">
+      <header><h2 id="application-registrations-heading">Registered applications</h2><span>{pending ? 'Loading…' : applications.length}</span></header>
+      {applications.length ? <ul>{applications.map(application => <li key={application.application_id}>
+        <AppWindow aria-hidden="true" size={18} />
+        <div className="application-record"><strong>{application.name}</strong><span>{callbackHost(application.homepage_uri)}</span><code>Client ID · {application.client_id}</code></div>
+        <PermissionDetails scopes={application.scopes} />
+        <Status tone={application.enabled ? 'positive' : 'muted'}>{application.enabled ? 'Enabled' : 'Disabled'}</Status>
+        {canManageApplications ? <div className="application-row-actions">{application.enabled ? <>
+          <Button variant="quiet" onClick={() => void rotate(application)}><KeyRound aria-hidden="true" size={14} />New secret</Button>
+          <Button variant="quiet" onClick={() => void disable(application)}>Disable</Button>
+        </> : <Button variant="danger" onClick={() => void remove(application)}><Trash2 aria-hidden="true" size={14} />Delete</Button>}</div> : null}
+      </li>)}</ul> : !pending ? <EmptyState icon={<AppWindow />} title="No registered applications" description="Applications appear here after an owner approves registration." /> : null}
+    </section> : null}
+    <section className="application-inventory" aria-labelledby="application-installations-heading">
+      <header><h2 id="application-installations-heading">Network access</h2>
+        {networkID && !pending ? <span>{installations.filter(item => item.enabled).length} active</span> : null}
+        {readableNetworks.length ? <FilterSelect label="Network" value={networkID} onChange={setNetworkID}>{readableNetworks.map((network: ControllerNetwork) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</FilterSelect> : null}
+      </header>
+      {installations.length ? <ul>{installations.map(installation => <li key={installation.installation_id}>
+        <Network aria-hidden="true" size={18} />
+        <div className="application-record"><strong>{applicationsByID.get(installation.application_id)?.name ?? 'Registered application'}</strong><code>Application ID · {installation.application_id}</code><code>Service identity · {installation.service_principal_id}</code></div>
+        <PermissionDetails scopes={installation.scopes} />
+        <Status tone={installation.enabled ? 'positive' : 'muted'}>{installation.enabled ? 'Connected' : 'Removed'}</Status>
+        {installation.enabled && hasPermission('application_installation.manage', installation.network_id) ? <div className="application-row-actions"><Button variant="quiet" onClick={() => void revoke(installation)}>Remove</Button></div> : null}
+      </li>)}</ul> : pending ? <p role="status">Loading network access…</p> : <EmptyState icon={<Network />} title={readableNetworks.length ? 'No applications connected' : 'No readable networks'} />}
+    </section>
   </div>
 }

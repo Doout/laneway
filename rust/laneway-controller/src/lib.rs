@@ -45,6 +45,8 @@ mod session_lifecycle;
 pub use session_lifecycle::IssuedSession;
 mod sessions;
 pub mod topology;
+#[cfg(unix)]
+pub mod twingate;
 pub use nodes::Node;
 pub use sessions::{ListError, SessionError, SessionReply, SessionStore};
 

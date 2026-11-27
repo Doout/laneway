@@ -77,6 +77,10 @@ export function NodeMap({ networks }: { networks: ControllerNetwork[] }) {
   const selectedRoutes = snapshot.routes.filter((route) => route.node_id === selectedId && route.state === 'approved' && routeState(route).actionable)
 
   return <section className="node-map" aria-label="Node locations">
+    <header className="node-map__header">
+      <h2>Node locations</h2>
+      <span aria-live="polite">{loading ? 'Loading locations…' : `${located} located · ${visible.length - located} unknown`}</span>
+    </header>
     <div className="node-map__toolbar">
       <SearchField label="Find a node on the map" placeholder="Find a node" value={query} onChange={setQuery} />
       <FilterSelect label="Map network" value={networkFilter} onChange={setNetworkFilter}><option value="all">All networks</option>{networks.filter((network) => hasPermission('node.read', network.network_id)).map((network) => <option key={network.network_id} value={network.network_id}>{network.name}</option>)}</FilterSelect>
@@ -94,16 +98,16 @@ export function NodeMap({ networks }: { networks: ControllerNetwork[] }) {
             <title>{group.nodes.map(({ node }) => node.name).join(', ')}</title>
           </g>)}
         </svg>
-        <div className="node-map__caption"><span>{loading ? 'Loading locations…' : `${located} located · ${visible.length - located} unknown`}</span><span>Approximate public-IP locations · Map: Natural Earth{snapshot.provider === 'db-ip' && <> · <a href="https://db-ip.com" target="_blank" rel="noreferrer">IP geolocation by DB-IP</a></>}</span></div>
+        <div className="node-map__caption"><span>Approximate public-IP locations · Map: Natural Earth{snapshot.provider === 'db-ip' && <> · <a href="https://db-ip.com" target="_blank" rel="noreferrer">IP geolocation by DB-IP</a></>}</span></div>
         {!snapshot.automatic && !loading && <p className="node-map__note">Automatic lookup is off. Configure a local City database or set locations manually.</p>}
         {snapshot.limited && <p className="node-map__note">Showing the first 1,000 nodes per network.</p>}
       </div>
-      <div className="node-map__list" aria-label="Map nodes">
+      <section className="node-map__list" aria-label="Map nodes"><h3>Nodes</h3>
         {!visible.length && !loading ? <p>No current nodes match.</p> : visible.map(({ node, location }) => <button key={node.node_id} type="button" aria-pressed={selectedId === node.node_id} onClick={() => setSelectedId(node.node_id)}>
           <strong>{node.name}</strong><span>{location?.location?.label ?? 'Location unknown'}{location?.source === 'manual' ? ' · Manual' : location?.stale ? ' · Stale' : ''}</span>
           <small>{networks.find((network) => network.network_id === node.network_id)?.name}</small>
         </button>)}
-      </div>
+      </section>
     </div>
     {selected ? <div className="node-map__detail">
       <div><h2>{selected.node.name}</h2><NodePresence record={selected.location} unavailable={false} /><p>{selected.location?.source === 'manual' ? 'Manual location' : selected.location?.location ? `Approximate IP location${selected.location.location.accuracy_km ? ` · ±${selected.location.location.accuracy_km} km` : ''}` : 'No location available'}</p>{selected.location?.observed_at_unix_seconds ? <p>Updated {time(selected.location.observed_at_unix_seconds)}{selected.location.stale ? ' · Stale' : ''}</p> : null}

@@ -48,6 +48,8 @@ const PERMISSIONS: &[(&str, u8)] = &[
     ("audit.read", 3),
     ("audit.read_global", 1),
     ("principal.manage", 1),
+    #[cfg(unix)]
+    ("integration.manage", 1),
     ("session.manage_others", 1),
     ("service_principal.manage", 1),
     ("application.read", 1),

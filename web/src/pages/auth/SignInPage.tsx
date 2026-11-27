@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
-import { LockKeyhole, RefreshCw } from 'lucide-react'
+import { RefreshCw } from 'lucide-react'
 import { Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { Button, Callout, Field } from '../../components/ui'
 import { ThemeToggle } from '../../components/Theme'
@@ -8,20 +8,25 @@ import { useControlPlane } from '../../lib/control-plane'
 import { safeReturnPath } from '../../lib/safe-navigation'
 import './auth.css'
 
-function AuthFrame({ title, children }: { title: string; children: ReactNode }) {
-  return <main className="auth-page">
-    <section className="auth-stage" aria-labelledby="auth-title">
-      <ThemeToggle className="auth-theme-toggle" />
-      <div className="auth-brand" aria-label="Laneway">
+function AuthFrame({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
+  return <div className="auth-page">
+    <header className="auth-bar">
+      <div className="auth-brand">
         <BrandMark className="auth-brand__mark" />
         <span>Laneway</span>
       </div>
-      <div className="auth-layout">
-        <div className="auth-intro"><h1 id="auth-title">{title}</h1></div>
+      <ThemeToggle />
+    </header>
+    <main className="auth-content" aria-labelledby="auth-title">
+      <header className="auth-intro">
+        <h1 id="auth-title">{title}</h1>
+        {description ? <p>{description}</p> : null}
+      </header>
+      <div className="auth-stage">
         {children}
       </div>
-    </section>
-  </main>
+    </main>
+  </div>
 }
 
 function useReturnPath() {
@@ -33,12 +38,12 @@ function useReturnPath() {
 export function AuthenticationUnavailablePage() {
   const { authError, authPending, retryAuthentication } = useControlPlane()
   return <AuthFrame title="Controller unavailable">
-    <section className="auth-panel">
+    <div className="auth-panel">
       <div role="alert"><Callout tone="danger">{authError || 'Authentication is unavailable.'}</Callout></div>
-      <Button className="auth-submit" type="button" variant="primary" disabled={authPending} onClick={() => void retryAuthentication()}>
-        <RefreshCw aria-hidden="true" size={17} /> Retry
-      </Button>
-    </section>
+      <div className="auth-actions"><Button type="button" variant="primary" disabled={authPending} onClick={() => void retryAuthentication()}>
+        <RefreshCw aria-hidden="true" size={15} /> {authPending ? 'Retrying…' : 'Retry'}
+      </Button></div>
+    </div>
   </AuthFrame>
 }
 
@@ -49,12 +54,12 @@ export function SetupRequiredPage() {
   if (authState === 'unavailable') return <AuthenticationUnavailablePage />
   if (authState === 'anonymous') return <Navigate to="/sign-in" replace />
   return <AuthFrame title="Setup required">
-    <section className="auth-panel">
+    <div className="auth-panel">
       <p>Complete administrator setup on the control node.</p>
-      <Button className="auth-submit" type="button" variant="primary" onClick={() => void retryAuthentication()}>
-        <RefreshCw aria-hidden="true" size={17} /> Retry
-      </Button>
-    </section>
+      <div className="auth-actions"><Button type="button" variant="primary" onClick={() => void retryAuthentication()}>
+        <RefreshCw aria-hidden="true" size={15} /> Retry
+      </Button></div>
+    </div>
   </AuthFrame>
 }
 
@@ -91,7 +96,7 @@ export function SignInPage() {
     if (accepted) navigate(destination, { replace: true })
   }
 
-  return <AuthFrame title="Sign in to Laneway">
+  return <AuthFrame title="Sign in to Laneway" description="Use your controller administrator credentials.">
     <form className="auth-panel" noValidate onSubmit={handleSubmit}>
       <Field label="Username" error={usernameError}>
         <input
@@ -115,7 +120,7 @@ export function SignInPage() {
       </Field>
       {authError ? <div role="alert"><Callout tone="danger">{authError}</Callout></div> : null}
       <Button className="auth-submit" type="submit" variant="primary" disabled={authPending}>
-        <LockKeyhole aria-hidden="true" size={17} /> {authPending ? 'Signing in…' : 'Sign in'}
+        {authPending ? 'Signing in…' : 'Sign in'}
       </Button>
     </form>
   </AuthFrame>

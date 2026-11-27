@@ -9,12 +9,14 @@ import {
   ShieldCheck,
   Users,
 } from 'lucide-react'
-import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { isNetworkScopedAdministratorPermission, useControlPlane, type AdministratorPermission } from '../lib/control-plane'
 import { isPendingControllerRoute } from '../lib/live-records'
 import { ThemeToggle } from './Theme'
+import { MobileNavigation } from './MobileNavigation'
 import { BrandMark } from './BrandMark'
+import { WorkspaceBreadcrumbs } from './WorkspaceBreadcrumbs'
 
 const navigation = [
   {
@@ -42,44 +44,7 @@ const navigation = [
   },
 ]
 
-const sectionLabels: Record<string, string> = {
-  overview: 'Overview',
-  nodes: 'Nodes',
-  users: 'User access',
-  routes: 'Routes',
-  access: 'Access rules',
-  infrastructure: 'Infrastructure',
-  security: 'Security',
-  audit: 'Audit log',
-}
-
-const detailLabels: Record<string, string> = {
-  new: 'New',
-  capabilities: 'Capabilities',
-  revoke: 'Revoke',
-  approve: 'Approval',
-  edit: 'Edit',
-  networks: 'Networks',
-  relays: 'Relays',
-}
-
-function Breadcrumbs({ pathname }: { pathname: string }) {
-  const segments = pathname.split('/').filter(Boolean)
-  const section = segments[0] ?? 'overview'
-  const tail = segments.slice(1).map(segment => detailLabels[segment] ?? decodeURIComponent(segment).replaceAll('-', ' '))
-
-  return (
-    <nav className="breadcrumbs" aria-label="Breadcrumb">
-      <Link to="/overview">Laneway</Link>
-      <span aria-hidden="true">/</span>
-      <Link to={`/${section}`}>{sectionLabels[section] ?? section}</Link>
-      {tail.map((label, index) => <span className="breadcrumbs__tail" key={`${label}-${index}`}><span aria-hidden="true">/</span><span>{label}</span></span>)}
-    </nav>
-  )
-}
-
 export function AppShell() {
-  const location = useLocation()
   const navigate = useNavigate()
   const { live, session, inventory, inventoryError, inventoryPending, authPending, authError, hasPermission, refresh, signOut } = useControlPlane()
   const networkName = inventory?.network?.name
@@ -95,34 +60,37 @@ export function AppShell() {
     if (await signOut()) navigate('/sign-in', { replace: true })
   }
 
+  const navigationMenu = <nav className="sidebar-nav" aria-label="Primary navigation">
+    {navigation.map(group => {
+      const visibleItems = group.items.filter(item => {
+        const permission = item.permission as AdministratorPermission
+        if (!live) return true
+        if (!isNetworkScopedAdministratorPermission(permission)) return hasPermission(permission)
+        const networkId = inventory?.network?.network_id
+        return Boolean(networkId && hasPermission(permission, networkId))
+      })
+      if (!visibleItems.length) return null
+      return <section className="sidebar-nav__group" key={group.label}>
+        <h2>{group.label}</h2>
+        {visibleItems.map(item => {
+          const Icon = item.icon
+          const accessibleLabel = item.to === '/routes' && pendingRoutes > 0
+            ? `${item.label}, ${pendingRoutes} routes need review`
+            : item.label
+          return <NavLink aria-label={accessibleLabel} title={item.label} key={item.to} to={item.to} className={({ isActive }) => clsx('sidebar-nav__item', isActive && 'is-active')}>
+            <Icon aria-hidden="true" size={17} />
+            <span>{item.label}</span>
+            {item.to === '/routes' && pendingRoutes > 0 ? <em aria-label={`${pendingRoutes} routes need review`}>{pendingRoutes}</em> : null}
+          </NavLink>
+        })}
+      </section>
+    })}
+  </nav>
+
   return <div className="app-shell">
     <aside className="sidebar">
       <Link to="/overview" className="wordmark" aria-label="Laneway overview"><BrandMark /><span>Laneway</span></Link>
-      <nav className="sidebar-nav" aria-label="Primary navigation">
-        {navigation.map(group => {
-          const visibleItems = group.items.filter(item => {
-            const permission = item.permission as AdministratorPermission
-            if (!live) return true
-            if (!isNetworkScopedAdministratorPermission(permission)) return hasPermission(permission)
-            const networkId = inventory?.network?.network_id
-            return Boolean(networkId && hasPermission(permission, networkId))
-          })
-          if (!visibleItems.length) return null
-          return <section className="sidebar-nav__group" key={group.label}>
-          <h2>{group.label}</h2>
-          {visibleItems.map(item => {
-            const Icon = item.icon
-            const accessibleLabel = item.to === '/routes' && pendingRoutes > 0
-              ? `${item.label}, ${pendingRoutes} routes need review`
-              : item.label
-            return <NavLink aria-label={accessibleLabel} key={item.to} to={item.to} className={({ isActive }) => clsx('sidebar-nav__item', isActive && 'is-active')}>
-              <Icon aria-hidden="true" size={17} />
-              <span>{item.label}</span>
-              {item.to === '/routes' && pendingRoutes > 0 ? <em aria-label={`${pendingRoutes} routes need review`}>{pendingRoutes}</em> : null}
-            </NavLink>
-          })}
-        </section>})}
-      </nav>
+      {navigationMenu}
       {live && networkName ? <div className="sidebar-environment">
         <span className="sidebar-environment__icon"><Network aria-hidden="true" size={17} /></span>
         <span><strong>{networkName}</strong></span>
@@ -131,8 +99,10 @@ export function AppShell() {
 
     <div className="app-frame">
       <header className="command-bar">
-        <Breadcrumbs pathname={location.pathname} />
+        <MobileNavigation>{navigationMenu}</MobileNavigation>
+        <WorkspaceBreadcrumbs />
         <div className="command-bar__tools">
+          {!live ? <div className="demo-notice" role="note" aria-label="Demo data notice"><strong>Demo data</strong></div> : null}
           {live ? <button className="refresh-button" type="button" onClick={() => void refresh()} disabled={inventoryPending} aria-label="Refresh controller inventory"><RefreshCw aria-hidden="true" size={15} /></button> : null}
           <ThemeToggle />
           {live && session ? <div className="administrator-identity" aria-label="Signed in administrator"><strong>{session.username}</strong><span>{session.role}</span></div> : null}
@@ -142,9 +112,7 @@ export function AppShell() {
 
       {live && authError ? <div className="session-error" role="alert">{authError}</div> : null}
 
-      {!live ? <div className="demo-notice" role="note" aria-label="Demo data notice">
-        <strong>Demo data</strong>
-      </div> : inventoryError ? <div className="demo-notice demo-notice--danger" role="alert"><strong>Console unavailable</strong><span>{inventoryError}</span></div> : null}
+      {live && inventoryError ? <div className="demo-notice demo-notice--danger" role="alert"><strong>Console unavailable</strong><span>{inventoryError}</span></div> : null}
 
       <main className="page">
         {live && inventoryError

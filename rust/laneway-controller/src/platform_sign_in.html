@@ -1,27 +1,31 @@
 <!doctype html>
 <html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sign in · Laneway Platform</title>
-<style>
-  :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
-  body { margin: 0; background: light-dark(#f5f6f8,#16181c); color: light-dark(#181b20,#edeef2); }
-  main { max-width: 360px; margin: 12vh auto 0; padding: 24px; }
-  header { color: light-dark(#464d59,#b6bcc7); font-weight: 600; }
-  h1 { font-size: 1.75rem; margin: .5rem 0 1.5rem; }
-  form, label { display: grid; gap: 8px; }
-  form { gap: 16px; background: light-dark(white,#202329); border: 1px solid light-dark(#d9dde4,#424751); border-radius: 12px; padding: 20px; }
-  input, button { min-width: 0; border: 1px solid light-dark(#adb5c1,#596170); border-radius: 6px; padding: 9px 10px; font: inherit; }
-  button { background: #005bb9; color: white; cursor: pointer; }
-  p { margin: 0; color: light-dark(#a51d22,#ff9c9f); }
-</style>
-<main>
-  <header>Laneway Platform</header>
-  <h1>Sign in</h1>
-  <form method="post" action="/platform/sign-in">
-    <!-- error -->
-    <label>Username <input name="username" autocomplete="username" autocapitalize="none" required maxlength="64"></label>
-    <label>Password <input type="password" name="password" autocomplete="current-password" required maxlength="128"></label>
-    <button type="submit">Sign in</button>
-  </form>
-</main>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Laneway Platform</title>
+  <style><!-- platform styles --></style>
+</head>
+<body>
+  <header class="app-bar">
+    <div class="app-bar-inner">
+      <!-- platform brand -->
+    </div>
+  </header>
+  <main class="sign-in">
+    <h1>Sign in</h1>
+    <form class="form-stack" method="post" action="/platform/sign-in">
+      <label>
+        Username
+        <input name="username" autocomplete="username" autocapitalize="none" required maxlength="64">
+      </label>
+      <label>
+        Password
+        <input type="password" name="password" autocomplete="current-password" required maxlength="128">
+      </label>
+      <!-- error -->
+      <button class="primary-button" type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

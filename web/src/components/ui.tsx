@@ -1,9 +1,19 @@
-import { cloneElement, isValidElement, useId, type ButtonHTMLAttributes, type FormEvent, type ReactElement, type ReactNode } from 'react'
+import { cloneElement, isValidElement, type ComponentProps, type FormEvent, type ReactNode } from 'react'
+import { Button as SdkButton } from '@ui-sdk/react/button'
+import { Field as SdkField, FieldControl, FieldDescription, FieldError, FieldLabel, FieldLegend, FieldSet } from '@ui-sdk/react/field'
+import { Input } from '@ui-sdk/react/input'
 import { Link } from 'react-router-dom'
 import { ChevronRight, Search } from 'lucide-react'
 import clsx from 'clsx'
 
 export type ButtonVariant = 'primary' | 'secondary' | 'quiet' | 'danger'
+
+type ButtonProps = Omit<ComponentProps<typeof SdkButton>, 'render' | 'className' | 'children'> & {
+  children: ReactNode
+  className?: string
+  variant?: ButtonVariant
+  to?: string
+}
 
 export function Button({
   children,
@@ -11,10 +21,10 @@ export function Button({
   to,
   className,
   ...props
-}: ButtonHTMLAttributes<HTMLButtonElement> & { children: ReactNode; variant?: ButtonVariant; to?: string }) {
+}: ButtonProps) {
   const classes = clsx('button', `button--${variant}`, className)
   if (to) return <Link className={classes} to={to}>{children}</Link>
-  return <button type={props.type ?? 'button'} className={classes} {...props}>{children}</button>
+  return <SdkButton type={props.type ?? 'button'} className={classes} {...props}>{children}</SdkButton>
 }
 
 export function PageHeader({
@@ -52,7 +62,7 @@ export function Toolbar({ children, filters }: { children?: ReactNode; filters?:
 }
 
 export function SearchField({ label, placeholder, value, onChange }: { label: string; placeholder: string; value?: string; onChange?: (value: string) => void }) {
-  return <label className="search-field"><Search aria-hidden="true" size={18} /><span className="sr-only">{label}</span><input type="search" placeholder={placeholder} value={value} onChange={event => onChange?.(event.target.value)} /></label>
+  return <label className="search-field"><Search aria-hidden="true" size={18} /><span className="sr-only">{label}</span><Input type="search" placeholder={placeholder} value={value} onValueChange={onChange} /></label>
 }
 
 export function FilterSelect({ label, children, value, onChange }: { label: string; children: ReactNode; value?: string; onChange?: (value: string) => void }) {
@@ -105,32 +115,24 @@ export function FormStack({ children, onSubmit }: { children: ReactNode; onSubmi
 
 type FieldControlProps = {
   id?: string
-  'aria-describedby'?: string
   'aria-invalid'?: boolean | 'true' | 'false' | 'grammar' | 'spelling'
 }
 
 export function Field({ label, hint, error, children }: { label: ReactNode; hint?: ReactNode; error?: ReactNode; children: ReactNode }) {
-  const generatedId = useId()
-  const control = isValidElement<FieldControlProps>(children) ? children as ReactElement<FieldControlProps> : null
-  const controlId = control?.props.id ?? `${generatedId}-control`
-  const hintId = `${generatedId}-hint`
-  const errorId = `${generatedId}-error`
-  const hasHint = hint !== undefined && hint !== null
+  const control = isValidElement<FieldControlProps>(children) ? children : null
   const hasError = error !== undefined && error !== null && error !== ''
-  const describedBy = [control?.props['aria-describedby'], hasHint ? hintId : null, hasError ? errorId : null].filter(Boolean).join(' ') || undefined
-  const enhancedControl = control
-    ? cloneElement(control, {
-        id: controlId,
-        'aria-describedby': describedBy,
-        'aria-invalid': hasError ? true : control.props['aria-invalid'],
-      })
-    : children
-
-  return <div className="field"><label htmlFor={control ? controlId : undefined}>{label}</label>{enhancedControl}{hasHint ? <small id={hintId}>{hint}</small> : null}{hasError ? <small className="field__error" id={errorId} role="alert">{error}</small> : null}</div>
+  return (
+    <SdkField className="field" invalid={hasError}>
+      <FieldLabel>{label}</FieldLabel>
+      {control ? <FieldControl id={control.props.id} render={hasError ? cloneElement(control, { 'aria-invalid': true }) : control} /> : children}
+      {hint != null && <FieldDescription render={<small />}>{hint}</FieldDescription>}
+      {hasError && <FieldError role="alert" className="field__error" render={<small />}>{error}</FieldError>}
+    </SdkField>
+  )
 }
 
 export function ChoiceGroup({ label, options, value, onChange }: { label: string; options: Array<{ value: string; label: string; description?: string; disabled?: boolean }>; value: string; onChange: (value: string) => void }) {
-  return <fieldset className="choice-group"><legend>{label}</legend><div className="choice-group__options">{options.map(option => <button key={option.value} className="choice" type="button" aria-pressed={value === option.value} disabled={option.disabled} onClick={() => onChange(option.value)}><strong>{option.label}</strong>{option.description ? <small>{option.description}</small> : null}</button>)}</div></fieldset>
+  return <FieldSet className="choice-group"><FieldLegend>{label}</FieldLegend><div className="choice-group__options">{options.map(option => <SdkButton key={option.value} className="choice" type="button" aria-pressed={value === option.value} disabled={option.disabled} onClick={() => onChange(option.value)}><strong>{option.label}</strong>{option.description ? <small>{option.description}</small> : null}</SdkButton>)}</div></FieldSet>
 }
 
 export function ReviewPanel({ title, rows, children }: { title: string; rows: Array<[string, ReactNode]>; children?: ReactNode }) {

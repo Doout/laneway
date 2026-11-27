@@ -375,7 +375,16 @@ fn directory(state: &State) -> Result<String> {
         };
         writeln!(rows, "<tr><td>{name}</td><td>{status}</td></tr>")?;
     }
-    Ok(include_str!("platform.html").replace("<!-- tenants -->", &rows))
+    Ok(platform_page(include_str!("platform.html")).replace("<!-- tenants -->", &rows))
+}
+
+fn platform_page(template: &str) -> String {
+    template
+        .replace("<!-- platform styles -->", include_str!("platform.css"))
+        .replace(
+            "<!-- platform brand -->",
+            include_str!("platform_brand.html"),
+        )
 }
 
 async fn serve(state: State, address: SocketAddr) -> Result<()> {
@@ -561,7 +570,7 @@ fn sign_in(failed: bool) -> Response<Full<Bytes>> {
         } else {
             StatusCode::OK
         },
-        include_str!("platform_sign_in.html").replace("<!-- error -->", message),
+        platform_page(include_str!("platform_sign_in.html")).replace("<!-- error -->", message),
     )
 }
 

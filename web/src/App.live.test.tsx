@@ -28,6 +28,81 @@ describe('shipped live application authorization', () => {
     expect(screen.queryByRole('link', { name: 'Security' })).not.toBeInTheDocument()
   })
 
+  it.each([
+    { path: '/infrastructure', followLink: true },
+    { path: '/integrations/twingate', followLink: false },
+  ])('shows Twingate under Infrastructure from $path', async ({ path, followLink }) => {
+    vi.stubEnv('MODE', 'live')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list', 'integration.manage'], { username: 'owner', role: 'owner', all_networks: true, network_ids: [] })))
+      if (url.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [] }))
+      if (url.endsWith('/admin/integrations/twingate')) return Promise.resolve(managementResponse({ tenant: null, verified_at_unix_seconds: null }))
+      throw new Error(`Unexpected request ${url}`)
+    }))
+
+    renderPath(path)
+    if (followLink) {
+      expect(await screen.findByRole('heading', { name: 'Network integrations' })).toBeVisible()
+      const link = screen.getByRole('link', { name: /^Twingate/ })
+      expect(link).toHaveAttribute('href', '/infrastructure/integrations/twingate')
+      fireEvent.click(link)
+    }
+    expect(await screen.findByLabelText('Twingate network')).toBeVisible()
+    const nav = screen.getByRole('navigation', { name: 'Primary navigation' })
+    expect(within(nav).getByRole('link', { name: 'Infrastructure' })).toHaveAttribute('aria-current', 'page')
+    expect(within(nav).queryByRole('link', { name: 'Twingate' })).not.toBeInTheDocument()
+  })
+
+  it('lists saved Twingate resources, carries the cursor, and lets owners select rows', async () => {
+    vi.stubEnv('MODE', 'live')
+    const endpoint = '/v1/admin/integrations/twingate'
+    const fixture = {
+      id: 'resource-1', name: 'Registry', alias: 'registry.internal',
+      address: { value: '10.22.0.5' }, remote_network: { name: 'Lab' }, active: true, kind: 'NetworkResource',
+      protocols: { tcp: { policy: 'RESTRICTED', ports: [{ start: 443, end: 443 }] }, udp: { policy: 'RESTRICTED', ports: [] }, allow_icmp: false },
+    }
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/auth/session')) return Promise.resolve(response(session(['integration.manage'], { username: 'owner', role: 'owner', all_networks: true, network_ids: [] })))
+      if (url === endpoint) return Promise.resolve(managementResponse({ tenant: 'team', verified_at_unix_seconds: 1_700_000_000 }))
+      if (url === endpoint + '/resources') return Promise.resolve(managementResponse({ resources: [fixture], total_count: 2, next_cursor: 'opaque+/=' }))
+      if (url === endpoint + '/resources?after=opaque%2B%2F%3D') return Promise.resolve(managementResponse({
+        resources: [{ ...fixture, id: 'resource-2', name: 'Analytics', active: false }], total_count: 2, next_cursor: null,
+      }))
+      throw new Error(`Unexpected request ${url}`)
+    }))
+
+    renderPath('/infrastructure/integrations/twingate')
+    expect(await screen.findByText('Registry')).toBeVisible()
+    expect(screen.getByText('10.22.0.5')).toBeVisible()
+    expect(screen.getByText('TCP 443')).toBeVisible()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select Registry' }))
+    expect(screen.getByRole('button', { name: 'Copy 1 selected' })).toBeVisible()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+    expect(await screen.findByText('Analytics')).toBeVisible()
+    expect(screen.getByText('Inactive')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Next page' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }))
+    expect(await screen.findByRole('checkbox', { name: 'Select Registry' })).toBeChecked()
+  })
+
+  it('hides network integrations from administrators without integration access', async () => {
+    vi.stubEnv('MODE', 'live')
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith('/auth/session')) return Promise.resolve(response(session(['network.list'])))
+      if (url.includes('/networks?')) return Promise.resolve(managementResponse({ networks: [] }))
+      throw new Error(`Unexpected request ${url}`)
+    }))
+
+    renderPath('/infrastructure')
+    expect(await screen.findByRole('heading', { name: 'Infrastructure' })).toBeVisible()
+    expect(screen.queryByRole('heading', { name: 'Network integrations' })).not.toBeInTheDocument()
+  })
+
   it('rejects an inventory record whose network provenance differs from the selected scope', async () => {
     vi.stubEnv('MODE', 'live')
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
@@ -257,11 +332,11 @@ describe('shipped live application authorization', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     renderPath('/overview')
-    expect(await screen.findByText('Controller inventory')).toBeVisible()
-    expect(screen.getByText('current nodes and enabled relays')).toBeVisible()
-    expect(screen.getByText('current routes and enabled rules')).toBeVisible()
-    expect(screen.getByText('Current nodes')).toBeVisible()
-    expect(screen.getByText('Current routes')).toBeVisible()
+    const overviewSummary = await screen.findByLabelText('Network inventory summary')
+    for (const label of ['Current nodes', 'Current routes', 'Enabled relays', 'Enabled rules']) {
+      const metric = within(overviewSummary).getByText(label).parentElement!
+      expect(within(metric).getByText('1')).toBeVisible()
+    }
     expect(screen.queryByText('Online')).not.toBeInTheDocument()
     expect(screen.queryByText('active nodes and relays')).not.toBeInTheDocument()
 
@@ -287,8 +362,8 @@ describe('shipped live application authorization', () => {
 
     renderPath('/overview')
     const overviewSummary = await screen.findByLabelText('Network inventory summary')
-    expect(within(overviewSummary).getAllByText('—')).toHaveLength(3)
-    expect(within(overviewSummary).getAllByText('Not authorized')).toHaveLength(3)
+    expect(within(overviewSummary).getAllByText('—')).toHaveLength(4)
+    expect(within(overviewSummary).getAllByText('Not authorized')).toHaveLength(4)
 
     fireEvent.click(screen.getByRole('link', { name: /^Infrastructure$/ }))
     expect(await screen.findByText('Relay inventory unavailable')).toBeVisible()
