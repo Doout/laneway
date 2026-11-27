@@ -17,8 +17,8 @@ if [ "$(uname -s)" = Darwin ]; then
   [ -z "$destination_root" ] || { echo "DESTDIR is not supported by the macOS client installer" >&2; exit 1; }
   [ "$(id -u)" -eq 0 ] || { echo "run this installer with sudo" >&2; exit 1; }
   [ "$(cat "$script_dir/macos-runtime")" = rust-v1 ] || { echo 'expected the macOS Rust package' >&2; exit 1; }
-  "$script_dir/bin/laneway" configure --yes
-  "$script_dir/bin/laneway" configure --check
+  "$script_dir/bin/lanewayd-rs" _mac-setup "$script_dir/bin/laneway" --yes
+  "$script_dir/bin/lanewayd-rs" _mac-setup "$script_dir/bin/laneway" --check
   ln -sfn laneway "$bindir/lane"
   echo "Laneway $(cat "$script_dir/VERSION") macOS client installed."
   echo "Run as your normal user: laneway login DOMAIN"

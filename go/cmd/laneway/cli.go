@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 
 	"github.com/Doout/laneway/go/internal/adminauth"
 	"github.com/Doout/laneway/go/internal/buildinfo"
@@ -114,7 +115,14 @@ func group(use, summary string, fallback commandHandler, children ...*cobra.Comm
 	return cmd
 }
 
-func runNodeDispatch(args []string) error { return runNode(args) }
+func runNodeDispatch(args []string) error {
+	if len(args) > 0 && (args[0] == "install" || args[0] == "uninstall" || args[0] == "renew") {
+		if handled, err := tryNativeManagedNode(args[0], args[1:]); handled || err != nil {
+			return err
+		}
+	}
+	return runNode(args)
+}
 
 func routeCommand(use, summary string) *cobra.Command {
 	return group(use, summary, runControllerRoute,
@@ -259,6 +267,11 @@ func controlNoArgs(use, summary string, forwarded ...string) *cobra.Command {
 }
 
 func runControl(args []string) error {
+	if runtime.GOOS == "linux" {
+		if handled, err := tryNativeCommand([]string{"control"}, args); handled || err != nil {
+			return err
+		}
+	}
 	path, err := controlCommandPath()
 	if err != nil {
 		return err

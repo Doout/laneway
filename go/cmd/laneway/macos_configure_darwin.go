@@ -50,6 +50,22 @@ func runMacConfigure(args []string) error {
 			}
 		}
 	}
+	if nativeClientCommands == "1" && os.Geteuid() != 0 {
+		runtime, err := nativeClientRuntime()
+		if err != nil {
+			return err
+		}
+		if runtime != "" {
+			command := []string{runtime, "_mac-setup", source}
+			if *checkOnly {
+				command = append(command, "--check")
+			}
+			if *yes {
+				command = append(command, "--yes")
+			}
+			return syscall.Exec(runtime, command, os.Environ())
+		}
+	}
 	status := func() error {
 		if err := macConfigurationStatus(source); err != nil {
 			return err

@@ -85,6 +85,15 @@ type managedNodeRelay struct {
 	endpoint  string
 }
 
+// Legacy managed identities keep their original lifecycle until upgraded.
+func tryNativeManagedNode(operation string, args []string) (bool, error) {
+	manifest, err := loadManagedNodeManifest(managedNodeManifestPath)
+	if (err == nil && manifest.Runtime != managedRustRuntime) || (err != nil && operation != "install") {
+		return false, nil
+	}
+	return tryNativeCommand([]string{operation + "-node"}, args)
+}
+
 func runNodeInstall(args []string) error {
 	fs := flag.NewFlagSet("node install", flag.ContinueOnError)
 	tokenFile := fs.String("token-file", "", "protected file containing the durable node invite")

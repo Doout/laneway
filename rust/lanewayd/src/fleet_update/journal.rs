@@ -150,7 +150,7 @@ impl Journal {
     }
 }
 
-pub(super) fn verify_file(file: &File, forbidden_bits: u32) -> Result<()> {
+pub(crate) fn verify_file(file: &File, forbidden_bits: u32) -> Result<()> {
     let metadata = file.metadata()?;
     ensure!(
         metadata.is_file()
@@ -187,7 +187,7 @@ pub(super) fn sync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn protect_parents(path: &Path) -> Result<()> {
+pub(crate) fn protect_parents(path: &Path) -> Result<()> {
     ensure!(
         path.is_absolute(),
         "protected updater paths must be absolute"

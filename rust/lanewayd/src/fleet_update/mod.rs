@@ -1,8 +1,9 @@
 //! Root-owned, opt-in updater for Linux Rust nodes and Docker Connectors.
 mod activate;
 pub(crate) mod connector;
-mod journal;
-mod release;
+pub(crate) mod journal;
+pub(crate) use crate::signed_release as release;
+use release::{checked_command, clean_command, stable_tag};
 #[cfg(test)]
 mod tests;
 
@@ -27,7 +28,6 @@ use std::{
 };
 use tokio::{
     io::AsyncReadExt,
-    process::Command,
     time::{sleep, timeout},
 };
 
@@ -619,38 +619,7 @@ fn reconcile_report(
     ))
 }
 
-fn stable_tag(value: &str) -> Result<String> {
-    let value = if value.starts_with('v') {
-        value.to_owned()
-    } else {
-        format!("v{value}")
-    };
-    ensure!(
-        valid_version(&value),
-        "expected an exact stable release version"
-    );
-    Ok(value)
-}
-
-fn clean_command(path: impl AsRef<Path>) -> Command {
-    let mut command = Command::new(path.as_ref());
-    command
-        .env_clear()
-        .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
-        .current_dir("/")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    command
-}
-
-async fn checked_command(mut command: Command, deadline: Duration) -> Result<()> {
-    let status = timeout(deadline, command.stdout(Stdio::null()).status()).await??;
-    ensure!(status.success(), "local command did not succeed");
-    Ok(())
-}
-
-async fn installed_version(path: &Path) -> Result<String> {
+pub(crate) async fn installed_version(path: &Path) -> Result<String> {
     timeout(Duration::from_secs(10), async {
         let mut child = clean_command(path)
             .arg("--version")

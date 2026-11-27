@@ -12,6 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 
+mod client;
 mod docker;
 
 const CONTROL: &str = "/usr/local/sbin/laneway-control";
@@ -65,6 +66,67 @@ pub fn run(args: &[OsString]) -> Result<()> {
                 Some(target) => update_deployment(target, args).await,
             }
         })
+}
+
+/// Update the signed host package or delegate to its deployment updater.
+pub fn update_client_command(source: &Path, args: &[OsString]) -> Result<()> {
+    let (target, args) = args
+        .split_first()
+        .filter(|(first, _)| !first.as_encoded_bytes().starts_with(b"-"))
+        .map_or((None, args), |(target, args)| (Some(target), args));
+    if matches!(args, [arg] if target.is_none() && (arg == "--help" || arg == "-h")) {
+        println!(
+            "usage: laneway update [client [--yes] | server [vMAJOR.MINOR.PATCH] | connector [NAME]]"
+        );
+        return Ok(());
+    }
+    let scope = client::Scope::detect(source)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let target = match target {
+            Some(target) if target == "client" => Target::Client,
+            Some(target) if target == "server" => Target::Server,
+            Some(target) if target == "connector" => Target::Connector,
+            Some(target) => {
+                bail!("unknown update target {target:?}; choose client, server or connector")
+            }
+            None if scope.is_user() => Target::Client,
+            None if running_in_container() => return Err(container_error("detect")),
+            None => detect_update_target().await?,
+        };
+        if target == Target::Client {
+            match args {
+                [] => (),
+                [arg]
+                    if matches!(
+                        arg.to_str(),
+                        Some(
+                            "--yes"
+                                | "-yes"
+                                | "--yes=true"
+                                | "-yes=true"
+                                | "--yes=false"
+                                | "-yes=false"
+                        )
+                    ) => {}
+                [arg] if arg == "--help" || arg == "-h" => {
+                    println!("usage: laneway update client [--yes]");
+                    return Ok(());
+                }
+                _ => bail!("usage: laneway update client [--yes]"),
+            }
+            if !scope.is_user() && running_in_container() {
+                return Err(container_error("client-check"));
+            }
+            client::update(scope).await
+        } else if running_in_container() {
+            Err(container_error(target.name()))
+        } else {
+            update_deployment(target, args).await
+        }
+    })
 }
 
 fn container_error(operation: &str) -> anyhow::Error {

@@ -10,6 +10,7 @@ if [[ "$(id -u)" != "0" ]]; then
   exit 1
 fi
 required_commands=(ip nft grep sed)
+[[ -n "${LANEWAY_NODE_TEST_STREAM_PROBE:-}" ]] || required_commands+=(rustc)
 [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" && "${LANEWAY_NODE_WIREGUARD_NATIVE:-1}" == "1" ]] || required_commands+=(cargo)
 [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]] || required_commands+=(go)
 for command in "${required_commands[@]}"; do
@@ -284,10 +285,10 @@ attach_wireguard_uplink() {
 udp_success() {
   local port="$1" message="$2"
   start_process "${lan_ns}" "${work_dir}/${message}-server.log" \
-    "${work_dir}/netprobe" udp-server -listen "192.168.77.2:${port}"
+    "${work_dir}/netprobe-stream" udp-server -listen "192.168.77.2:${port}"
   local server_pid="${last_pid}"
   wait_log "${server_pid}" "${work_dir}/${message}-server.log" "ready=udp-server"
-  ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
     -target "192.168.77.2:${port}" -message "${message}" -timeout 5s
   wait "${server_pid}"
   unset "active_processes[${server_pid}]"
@@ -297,10 +298,10 @@ udp_success() {
 udp_denied() {
   local port="$1" message="$2"
   start_process "${lan_ns}" "${work_dir}/${message}-server.log" \
-    "${work_dir}/netprobe" udp-server -listen "192.168.77.2:${port}"
+    "${work_dir}/netprobe-stream" udp-server -listen "192.168.77.2:${port}"
   local server_pid="${last_pid}"
   wait_log "${server_pid}" "${work_dir}/${message}-server.log" "ready=udp-server"
-  if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+  if ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
       -target "192.168.77.2:${port}" -message "${message}" -timeout 2s; then
     echo "ERROR: traffic unexpectedly passed during ${message}" >&2
     return 1
@@ -311,6 +312,11 @@ udp_denied() {
 }
 
 echo "==> preparing the controller, relay and node test binaries"
+if [[ -n "${LANEWAY_NODE_TEST_STREAM_PROBE:-}" ]]; then
+  install -m 0755 "$LANEWAY_NODE_TEST_STREAM_PROBE" "${work_dir}/netprobe-stream"
+else
+  rustc --edition 2024 -O "${repo_root}/integration/netprobe-stream.rs" -o "${work_dir}/netprobe-stream"
+fi
 if [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]]; then
   for fixture in laneway lanewayd laneway-relay netprobe rustnodecontroller; do
     install -m 0755 "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR}/${fixture}" "${work_dir}/${fixture}"
@@ -836,14 +842,14 @@ EOF
       verify_systemd_transport "${transport}"
     fi
     start_process "${gateway_ns}" "${work_dir}/wg-probe-${transport}.log" \
-      "${work_dir}/netprobe" udp-echo-server -listen "${gateway_address}:9791"
+      "${work_dir}/netprobe-stream" udp-echo-server -listen "${gateway_address}:9791"
     echo_pid="${last_pid}"
     wait_log "${echo_pid}" "${work_dir}/wg-probe-${transport}.log" "ready=udp-echo-server"
     for _ in $(seq 1 12); do
-      if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+      if ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
         -target "${gateway_address}:9791" -message "wireguard-${transport}" -timeout 1s; then break; fi
     done
-    ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+    ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
       -target "${gateway_address}:9791" -message "wireguard-${transport}-verified" -timeout 5s
     ip netns exec "${rust_ns}" wg show lane0 latest-handshakes | awk '$2 > 0 { found = 1 } END { exit !found }'
     if [[ "${transport}" == quic && "${wireguard_native}" == "1" ]]; then
@@ -865,7 +871,7 @@ EOF
         ip netns exec "${rust_ns}" nft list table inet "${wg_table}" >&2 || true
         exit 1
       fi
-      if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+      if ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
         -target "${gateway_address}:9791" -message policy-denied -timeout 2s; then
         echo "ERROR: decrypted traffic bypassed the new WireGuard policy" >&2
         exit 1
@@ -891,17 +897,17 @@ EOF
       done
       [[ "${policy_restored}" == "1" ]]
       start_process "${rust_ns}" "${work_dir}/wg-reverse-probe.log" \
-        "${work_dir}/netprobe" udp-echo-server -listen "${rust_address}:9794"
+        "${work_dir}/netprobe-stream" udp-echo-server -listen "${rust_address}:9794"
       reverse_pid="${last_pid}"
       wait_log "${reverse_pid}" "${work_dir}/wg-reverse-probe.log" "ready=udp-echo-server"
       # A legacy peer resets its WireGuard session on any configuration
       # update. Initiating from that peer rekeys without waiting for its timer.
       for _ in $(seq 1 12); do
-        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
           -target "${rust_address}:9794" -message policy-rekeyed -timeout 1s; then break; fi
       done
       stop_process "${reverse_pid}"
-      ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+      ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
         -target "${gateway_address}:9791" -message policy-restored-verified -timeout 5s
       [[ "$(ip -n "${rust_ns}" -j link show dev lane0 | jq -er '.[0].ifindex')" == "${wg_ifindex}" ]]
 
@@ -913,7 +919,7 @@ EOF
       ip netns exec "${rust_ns}" nft list table inet laneway_rs_exit |
         grep -F "ip saddr ${gateway_address}" >/dev/null
       start_process "${lan_ns}" "${work_dir}/wg-nat-probe.log" \
-        "${work_dir}/netprobe" udp-server -listen 203.0.113.2:9793 -max-packets 16 -timeout 90s
+        "${work_dir}/netprobe-stream" udp-server -listen 203.0.113.2:9793 -max-packets 16 -timeout 90s
       nat_pid="${last_pid}"
       wait_log "${nat_pid}" "${work_dir}/wg-nat-probe.log" "ready=udp-server"
       # Point only this disposable destination at the Go peer's existing
@@ -922,7 +928,7 @@ EOF
         allowed-ips "${rust_overlay},203.0.113.2/32"
       ip -n "${gateway_ns}" route add 203.0.113.2/32 dev lane0
       for _ in $(seq 1 8); do
-        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
           -target 203.0.113.2:9793 -source-port 57801 -message native-wireguard-nat -timeout 1s; then break; fi
       done
       grep -Eq 'remote=203\.0\.113\.1:[0-9]+ payload=native-wireguard-nat' "${work_dir}/wg-nat-probe.log"
@@ -940,16 +946,16 @@ EOF
           wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "draining established WireGuard exit flows" 640
         fi
         ip netns exec "${rust_ns}" nft list table inet "${wg_table}" | grep -E 'ct state.*jump inbound' >/dev/null
-        ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+        ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
           -target 203.0.113.2:9793 -source-port 57801 -message drained-existing-flow -timeout 4s
-        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+        if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
           -target 203.0.113.2:9793 -source-port 57802 -message drained-new-flow -timeout 2s; then
           echo "ERROR: a new flow escaped the WireGuard drain" >&2
           exit 1
         fi
         ip netns exec "${rust_ns}" nft delete table inet lab_drain
         for _ in $(seq 1 12); do
-          if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+          if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
             -target 203.0.113.2:9793 -source-port 57802 -message recovered-new-flow -timeout 1s; then break; fi
         done
         grep -F 'payload=recovered-new-flow' "${work_dir}/wg-nat-probe.log" >/dev/null
@@ -969,7 +975,7 @@ EOF
         echo "ERROR: withdrawn WireGuard exit left NAT rules installed" >&2
         exit 1
       fi
-      if ip netns exec "${gateway_ns}" "${work_dir}/netprobe" udp-client \
+      if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
         -target 203.0.113.2:9793 -message withdrawn-wireguard-nat -timeout 2s; then
         echo "ERROR: withdrawn WireGuard Exit still forwards underlay traffic" >&2
         exit 1
@@ -981,7 +987,7 @@ EOF
       # A 1280-byte inner IPv4 packet produces 1312 bytes of ciphertext,
       # which must not hit the legacy 1280-byte raw-IP record ceiling.
       printf -v full_payload '%01252d' 0
-      ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+      ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
         -target "${gateway_address}:9791" -message "${full_payload}" -timeout 5s >/dev/null
       echo "verified full-MTU WireGuard ciphertext over TCP"
       ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node revoke \
@@ -991,7 +997,7 @@ EOF
       else
         wait_log "${bridge_pid}" "${work_dir}/wg-rust-${transport}.log" "controller rejected node authority"
       fi
-      if ip netns exec "${rust_ns}" "${work_dir}/netprobe" udp-client \
+      if ip netns exec "${rust_ns}" "${work_dir}/netprobe-stream" udp-client \
         -target "${gateway_address}:9791" -message revoked-wireguard -timeout 2s; then
         echo "ERROR: revoked ephemeral identity still exchanged kernel packets" >&2
         exit 1

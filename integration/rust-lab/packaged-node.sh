@@ -231,10 +231,10 @@ check_foreground_packaged_node() {
     ! ip -n "$rust_ns" rule show | grep -q 'lookup 51820'
   fi
 
-  start_process "$peer_ns" "$peer_log" "$work_dir/netprobe" udp-server -listen "$address:9777"
+  start_process "$peer_ns" "$peer_log" "$work_dir/netprobe-stream" udp-server -listen "$address:9777"
   peer_pid=$last_pid
   wait_log "$peer_pid" "$peer_log" ready=udp-server
-  ip netns exec "$rust_ns" "$work_dir/netprobe" udp-client -target "$address:9777" -message "foreground-$role" -timeout 15s
+  ip netns exec "$rust_ns" "$work_dir/netprobe-stream" udp-client -target "$address:9777" -message "foreground-$role" -timeout 15s
   wait "$peer_pid"
   unset "active_processes[$peer_pid]"
   if [[ $role == exit ]]; then grep -Fq 'remote=192.168.77.1:' "$peer_log"; fi
@@ -298,10 +298,10 @@ EOF
   [[ $(awk '/^Uid:/ {print $3}' "/proc/$pid/status") == "$(id -u laneway)" ]]
   /usr/local/sbin/laneway-healthcheck-rs -unix /run/laneway/lanewayd.sock
 
-  start_process "$gateway_ns" "$work_dir/managed-node-udp.log" "$work_dir/netprobe" udp-server -listen "$gateway_address:9777"
+  start_process "$gateway_ns" "$work_dir/managed-node-udp.log" "$work_dir/netprobe-stream" udp-server -listen "$gateway_address:9777"
   peer_pid=$last_pid
   wait_log "$peer_pid" "$work_dir/managed-node-udp.log" ready=udp-server
-  ip netns exec "$rust_ns" "$work_dir/netprobe" udp-client -target "$gateway_address:9777" -message managed-node -timeout 15s
+  ip netns exec "$rust_ns" "$work_dir/netprobe-stream" udp-client -target "$gateway_address:9777" -message managed-node -timeout 15s
   wait "$peer_pid"
   unset "active_processes[$peer_pid]"
   # Uninstall may remove its own state, not unrelated files in the state directory.
@@ -407,10 +407,10 @@ EOF
   [[ ${before% serial=*} == "${after% serial=*}" && ${before##* serial=} != "${after##* serial=}" ]]
   [[ $(sha256sum "$key") == "$key_hash" && $(stat -c '%u:%g:%a' "$cert") == "$(id -u laneway):$(id -g laneway):400" ]]
 
-  start_process "$gateway_ns" "$work_dir/installed-node-udp.log" "$work_dir/netprobe" udp-server -listen "$gateway_address:9777"
+  start_process "$gateway_ns" "$work_dir/installed-node-udp.log" "$work_dir/netprobe-stream" udp-server -listen "$gateway_address:9777"
   probe_pid=$last_pid
   wait_log "$probe_pid" "$work_dir/installed-node-udp.log" ready=udp-server
-  ip netns exec "$rust_ns" "$work_dir/netprobe" udp-client -target "$gateway_address:9777" -message packaged-node -timeout 15s
+  ip netns exec "$rust_ns" "$work_dir/netprobe-stream" udp-client -target "$gateway_address:9777" -message packaged-node -timeout 15s
   wait "$probe_pid"
   unset "active_processes[$probe_pid]"
   "$installed/sbin/laneway-healthcheck-rs" -unix "$socket"
