@@ -57,8 +57,11 @@ fi
   go build -o "${work_dir}/lanewayd" ./cmd/laneway
   go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
   go build -o "${work_dir}/laneway-controller" ./cmd/laneway-controller
-  go build -o "${work_dir}/netprobe" ./integration/netprobe
 )
+
+cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+  --target-dir "${work_dir}/rust-target" -p lanewayd-rs --bin laneway-inspect-probe --features network-fixtures
+install -m 0755 "${work_dir}/rust-target/debug/laneway-inspect-probe" "${work_dir}/netprobe-native"
 
 ip netns add "${namespace}"
 ip -n "${namespace}" link set lo up

@@ -764,8 +764,8 @@ pub(super) enum Auth {
 }
 
 pub(super) struct Client {
-    origin: Url,
-    http: reqwest::Client,
+    pub(super) origin: Url,
+    pub(super) http: reqwest::Client,
     bearer: Option<Zeroizing<String>>,
 }
 

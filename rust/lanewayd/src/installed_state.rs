@@ -471,6 +471,7 @@ impl Stored {
                 forwarding.subnet_router = !userspace && !self.routing.advertise.is_empty();
                 for prefix in self.routing.advertise {
                     let prefix = prefix.parse()?;
+                    forwarding.owned_prefixes.push(prefix);
                     forwarding.subnet_routes.push(SubnetForwardConfig {
                         prefix,
                         mode: if nat {

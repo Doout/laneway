@@ -183,11 +183,12 @@ jobs:
             systemd)
               fixtures="$RUNNER_TEMP/laneway-go-fixtures"
               mkdir "$fixtures"
-              CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway ./cmd/laneway-relay ./integration/netprobe ./integration/rustnodecontroller
+              CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway ./cmd/laneway-relay ./integration/rustnodecontroller
               rustc --edition 2024 -O integration/netprobe-stream.rs -o "$fixtures/netprobe-stream"
               sudo env PATH="$PATH" LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$fixtures" \
                 LANEWAY_NODE_TEST_STREAM_PROBE="$fixtures/netprobe-stream" \
                 LANEWAY_NODE_TEST_INSPECT_PROBE="$RUNNER_TEMP/activation-fixture/laneway-inspect-probe" \
+                LANEWAY_NODE_TEST_ENROLL_PROBE="$RUNNER_TEMP/activation-fixture/prior-node" \
                 bash integration/rust-release-systemd.sh "$archive" \
                 "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}" ;;
             fleet-update)

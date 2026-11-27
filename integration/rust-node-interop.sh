@@ -53,9 +53,9 @@ trap cleanup EXIT INT TERM
   go build -o "${work_dir}/laneway" ./cmd/laneway
   go build -o "${work_dir}/go-node" ./cmd/laneway
   go build -o "${work_dir}/go-relay" ./cmd/laneway-relay
-  go build -o "${work_dir}/netprobe" ./integration/netprobe
 )
 cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-relay
+cp "${repo_root}/rust/target/debug/laneway-inspect-probe" "${work_dir}/netprobe"
 cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
 cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/rust-relay"
 

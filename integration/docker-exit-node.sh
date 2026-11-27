@@ -33,6 +33,7 @@ relay_image="${prefix}-relay:dev"
 admin_image="${prefix}-admin:dev"
 node_image="${prefix}-node:dev"
 probe_image="${prefix}-probe:dev"
+probe_container="${prefix}-probe-export"
 client_volume="${prefix}-client-state"
 gateway_volume="${prefix}-gateway-state"
 
@@ -116,7 +117,7 @@ cleanup() {
       fi
     done
   fi
-  for container in "${external_name}" "${nat_name}" "${client_name}" "${gateway_name}" "${relay_name}" "${controller_name}"; do
+  for container in "${probe_container}" "${external_name}" "${nat_name}" "${client_name}" "${gateway_name}" "${relay_name}" "${controller_name}"; do
     owned_container "${container}" && docker rm -f "${container}" >/dev/null 2>&1
   done
   for network in "${internet_network}" "${egress_network}" "${control_network}"; do
@@ -189,13 +190,11 @@ docker build --quiet --label "${owner}" --target relay -t "${relay_image}" -f "$
 docker build --quiet --label "${owner}" --target admin -t "${admin_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
 docker build --quiet --label "${owner}" --target go-exit -t "${node_image}" -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
 mkdir -p "${work_dir}/probe-context"
-(cd "${repo_root}/go" && CGO_ENABLED=0 go build -trimpath -o "${work_dir}/probe-context/netprobe" ./integration/netprobe)
-cat >"${work_dir}/probe-context/Dockerfile" <<'EOF'
-FROM scratch
-COPY netprobe /netprobe
-ENTRYPOINT ["/netprobe"]
-EOF
-docker build --quiet --label "${owner}" -t "${probe_image}" "${work_dir}/probe-context" >/dev/null
+docker build --quiet --label "${owner}" --target network-probe -t "${probe_image}" \
+  -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
+docker create --name "$probe_container" --label "$owner" "${probe_image}" >/dev/null
+docker cp "$probe_container:/netprobe" "${work_dir}/probe-context/netprobe"
+docker rm "$probe_container" >/dev/null
 
 echo "==> create uniquely owned Docker networks and state volumes"
 docker network create --label "${owner}" --opt com.docker.network.container_iface_prefix=ctl "${control_network}" >/dev/null

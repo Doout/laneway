@@ -48,7 +48,7 @@ tar -xzOf "$archive" "$member" > "$probe_dir/rust/laneway"
 for name in laneway-controller-rs laneway-relay-rs lanewayd-rs; do
   tar -xzOf "$archive" "laneway/sbin/$name" > "$probe_dir/rust/$name"
 done
-for fixture in laneway laneway-relay netprobe rustnodecontroller; do
+for fixture in laneway laneway-relay rustnodecontroller; do
   if [[ -n ${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-} ]]; then
     install -m 0755 "$LANEWAY_NODE_TEST_GO_FIXTURE_DIR/$fixture" "$probe_dir/go/$fixture"
   else

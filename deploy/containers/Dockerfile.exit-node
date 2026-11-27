@@ -26,6 +26,14 @@ RUN LANEWAY_PRODUCT_VERSION="${VERSION}" \
     cargo build --locked --release --manifest-path rust/Cargo.toml \
       -p lanewayd-rs --bin lanewayd-rs
 
+FROM rust-runtime AS probe-build
+RUN cargo build --locked --release --manifest-path rust/Cargo.toml \
+      -p lanewayd-rs --bin laneway-inspect-probe
+
+FROM scratch AS network-probe
+COPY --from=probe-build /src/rust/target/release/laneway-inspect-probe /netprobe
+ENTRYPOINT ["/netprobe"]
+
 FROM scratch AS node-binary
 COPY --from=rust-runtime /src/rust/target/release/lanewayd-rs /lanewayd-rs
 

@@ -76,3 +76,8 @@ fn product_version() -> &'static str {
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod deployment_update;
+
+#[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+pub use config::{ExitClientConfig, ExitFailureMode};
+#[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+pub use kernel::run_exit_fixture;

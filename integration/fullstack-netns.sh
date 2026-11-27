@@ -58,7 +58,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for binary in laneway lanewayd laneway-relay laneway-controller netprobe; do
+for binary in laneway lanewayd laneway-relay laneway-controller netprobe-native; do
   if [[ ! -x "${work_dir}/${binary}" ]]; then
     echo "ERROR: missing integration binary ${work_dir}/${binary}" >&2
     exit 1
@@ -230,10 +230,10 @@ run_kernel_udp_benchmark() {
   if [[ -z "${LANEWAY_KERNEL_BENCHMARK_OUTPUT:-}" ]]; then
     return 0
   fi
-  start_process "${server_namespace}" "${log}" "${work_dir}/netprobe" udp-echo-server -listen "${listen}"
+  start_process "${server_namespace}" "${log}" "${work_dir}/netprobe-native" udp-echo-server -listen "${listen}"
   local benchmark_server_pid="${last_pid}"
   wait_log "${benchmark_server_pid}" "${log}" "ready=udp-echo-server"
-  ip netns exec "${client_namespace}" "${work_dir}/netprobe" udp-bench-client \
+  ip netns exec "${client_namespace}" "${work_dir}/netprobe-native" udp-bench-client \
     -target "${target}" -scenario "${scenario}" \
     -scope production-kernel-tun-routes-nat-nftables \
     -duration "${LANEWAY_KERNEL_BENCHMARK_DURATION:-1s}" \
@@ -394,38 +394,38 @@ EOF
   fi
 
   echo "==> real application packet crosses both kernel TUNs and the QUIC relay"
-  start_process "${node_b}" "${case_dir}/overlay-server.log" "${work_dir}/netprobe" udp-server -listen 100.96.0.2:9101
+  start_process "${node_b}" "${case_dir}/overlay-server.log" "${work_dir}/netprobe-native" udp-server -listen 100.96.0.2:9101
   local server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/overlay-server.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target 100.96.0.2:9101 -message overlay
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target 100.96.0.2:9101 -message overlay
   wait "${server_pid}"
   grep -q 'remote=100.96.0.1:' "${case_dir}/overlay-server.log"
 
   echo "==> real IPv6 application packet crosses both kernel TUNs and the QUIC relay"
-  start_process "${node_b}" "${case_dir}/overlay6-server.log" "${work_dir}/netprobe" udp-server -listen '[fd42:96::2]:9104'
+  start_process "${node_b}" "${case_dir}/overlay6-server.log" "${work_dir}/netprobe-native" udp-server -listen '[fd42:96::2]:9104'
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/overlay6-server.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target '[fd42:96::2]:9104' -message overlay6
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target '[fd42:96::2]:9104' -message overlay6
   wait "${server_pid}"
   grep -q 'remote=\[fd42:96::1\]:' "${case_dir}/overlay6-server.log"
   run_kernel_udp_benchmark "${node_b}" "${node_a}" 100.96.0.2:9191 100.96.0.2:9191 \
     native-laneway-relay-quic-kernel "${case_dir}/overlay-benchmark-server.log"
 
   echo "==> real subnet packet is NATed at the Laneway gateway"
-  start_process "${lan_host}" "${case_dir}/nat-server.log" "${work_dir}/netprobe" udp-server -listen 192.168.50.2:9102
+  start_process "${lan_host}" "${case_dir}/nat-server.log" "${work_dir}/netprobe-native" udp-server -listen 192.168.50.2:9102
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/nat-server.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target 192.168.50.2:9102 -message subnet-nat
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target 192.168.50.2:9102 -message subnet-nat
   wait "${server_pid}"
   grep -q 'remote=192.168.50.1:' "${case_dir}/nat-server.log"
   run_kernel_udp_benchmark "${lan_host}" "${node_a}" 192.168.50.2:9192 192.168.50.2:9192 \
     subnet-nat-kernel "${case_dir}/nat-benchmark-server.log"
 
   echo "==> real IPv6 subnet packet is NAT66-masqueraded at the Laneway gateway"
-  start_process "${lan_host}" "${case_dir}/nat6-server.log" "${work_dir}/netprobe" udp-server -listen '[fd42:50::2]:9105'
+  start_process "${lan_host}" "${case_dir}/nat6-server.log" "${work_dir}/netprobe-native" udp-server -listen '[fd42:50::2]:9105'
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/nat6-server.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target '[fd42:50::2]:9105' -message subnet-nat6
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target '[fd42:50::2]:9105' -message subnet-nat6
   wait "${server_pid}"
   grep -q 'remote=\[fd42:50::1\]:' "${case_dir}/nat6-server.log"
 
@@ -437,20 +437,20 @@ EOF
   start_process "${node_b}" "${case_dir}/b-routed.log" "${work_dir}/lanewayd" -config "${case_dir}/b.toml"
   node_b_pid="${last_pid}"
   wait_log "${node_b_pid}" "${case_dir}/b-routed.log" "interface=lane0"
-  start_process "${lan_host}" "${case_dir}/routed-server.log" "${work_dir}/netprobe" udp-server -listen 192.168.50.2:9103
+  start_process "${lan_host}" "${case_dir}/routed-server.log" "${work_dir}/netprobe-native" udp-server -listen 192.168.50.2:9103
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/routed-server.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target 192.168.50.2:9103 -message subnet-routed
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target 192.168.50.2:9103 -message subnet-routed
   wait "${server_pid}"
   grep -q 'remote=100.96.0.1:' "${case_dir}/routed-server.log"
   run_kernel_udp_benchmark "${lan_host}" "${node_a}" 192.168.50.2:9193 192.168.50.2:9193 \
     subnet-routed-kernel "${case_dir}/routed-benchmark-server.log"
 
   echo "==> the IPv6 subnet flow preserves its overlay source in routed mode"
-  start_process "${lan_host}" "${case_dir}/routed6-server.log" "${work_dir}/netprobe" udp-server -listen '[fd42:50::2]:9106'
+  start_process "${lan_host}" "${case_dir}/routed6-server.log" "${work_dir}/netprobe-native" udp-server -listen '[fd42:50::2]:9106'
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/routed6-server.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target '[fd42:50::2]:9106' -message subnet-routed6
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target '[fd42:50::2]:9106' -message subnet-routed6
   wait "${server_pid}"
   grep -q 'remote=\[fd42:96::1\]:' "${case_dir}/routed6-server.log"
 
@@ -551,10 +551,10 @@ EOF
   wait_log "${client_pid}" "${case_dir}/client.log" "interface=lane0"
   wait_log "${gateway_pid}" "${case_dir}/gateway.log" "interface=lane0"
 
-  start_process "${client}" "${case_dir}/exit-client.log" "${work_dir}/netprobe" exit-client -interface lane0 -transport-bypass 10.251.0.1 -ipv6
+  start_process "${client}" "${case_dir}/exit-client.log" "${work_dir}/netprobe-native" exit-client -interface lane0 -transport-bypass 10.251.0.1 -ipv6
   local exit_client_pid="${last_pid}"
   wait_log "${exit_client_pid}" "${case_dir}/exit-client.log" "ready=exit-client"
-  start_process "${gateway}" "${case_dir}/exit-gateway.log" "${work_dir}/netprobe" exit-gateway -input lane0 -output wan0 -overlay-source 100.97.0.1/32 -overlay-source6 fd42:97::1/128
+  start_process "${gateway}" "${case_dir}/exit-gateway.log" "${work_dir}/netprobe-native" exit-gateway -input lane0 -output wan0 -overlay-source 100.97.0.1/32 -overlay-source6 fd42:97::1/128
   local exit_gateway_pid="${last_pid}"
   wait_log "${exit_gateway_pid}" "${case_dir}/exit-gateway.log" "ready=exit-gateway"
 
@@ -566,20 +566,20 @@ EOF
   ip -n "${client}" -6 route show table 51820 exact ::/1 | grep -q 'dev lane0'
   ip -n "${client}" -6 route show table 51820 exact 8000::/1 | grep -q 'dev lane0'
   echo "==> selected exit carries a real external packet and gateway-NATs it"
-  start_process "${external}" "${case_dir}/external-server.log" "${work_dir}/netprobe" udp-server -listen 198.18.0.2:9201
+  start_process "${external}" "${case_dir}/external-server.log" "${work_dir}/netprobe-native" udp-server -listen 198.18.0.2:9201
   local server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/external-server.log" "ready=udp-server"
-  ip netns exec "${client}" "${work_dir}/netprobe" udp-client -target 198.18.0.2:9201 -message exit-flow
+  ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client -target 198.18.0.2:9201 -message exit-flow
   wait "${server_pid}"
   grep -q 'remote=198.18.0.1:' "${case_dir}/external-server.log"
   run_kernel_udp_benchmark "${external}" "${client}" 198.18.0.2:9292 198.18.0.2:9292 \
     exit-nat-kernel "${case_dir}/exit-benchmark-server.log"
 
   echo "==> selected IPv6 exit carries a real external packet and NAT66-masquerades it"
-  start_process "${external}" "${case_dir}/external6-server.log" "${work_dir}/netprobe" udp-server -listen '[fd42:18::2]:9202'
+  start_process "${external}" "${case_dir}/external6-server.log" "${work_dir}/netprobe-native" udp-server -listen '[fd42:18::2]:9202'
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/external6-server.log" "ready=udp-server"
-  ip netns exec "${client}" "${work_dir}/netprobe" udp-client -target '[fd42:18::2]:9202' -message exit6-flow
+  ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client -target '[fd42:18::2]:9202' -message exit6-flow
   wait "${server_pid}"
   grep -q 'remote=\[fd42:18::1\]:' "${case_dir}/external6-server.log"
 
@@ -709,7 +709,7 @@ EOF
 
   local promoted=0 metric_value=""
   for _ in $(seq 1 200); do
-    metric_value="$(ip netns exec "${node_a}" "${work_dir}/netprobe" metric -url http://127.0.0.1:6061/metrics -name laneway_path_switches_total 2>/dev/null || true)"
+    metric_value="$(ip netns exec "${node_a}" "${work_dir}/netprobe-native" metric -url http://127.0.0.1:6061/metrics -name laneway_path_switches_total 2>/dev/null || true)"
     if [[ "${metric_value:-0}" =~ ^[0-9]+$ ]] && (( metric_value > 0 )); then
       promoted=1
       break
@@ -730,15 +730,15 @@ EOF
   fi
 
   local forwarded_before forwarded_after
-  forwarded_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  forwarded_before="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
   echo "==> kernel packet crosses the promoted direct path through both simulated NATs"
-  start_process "${node_b}" "${case_dir}/direct-server.log" "${work_dir}/netprobe" udp-server -listen 100.98.0.2:9301
+  start_process "${node_b}" "${case_dir}/direct-server.log" "${work_dir}/netprobe-native" udp-server -listen 100.98.0.2:9301
   local server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/direct-server.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target 100.98.0.2:9301 -message direct-nat -once -timeout 3s
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target 100.98.0.2:9301 -message direct-nat -once -timeout 3s
   wait "${server_pid}"
   sleep 0.1
-  forwarded_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
+  forwarded_after="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
   if [[ "${forwarded_after}" != "${forwarded_before}" ]]; then
     echo "ERROR: direct application packet traversed relay: before=${forwarded_before} after=${forwarded_after}" >&2
     return 1
@@ -1049,15 +1049,15 @@ EOF
   echo "==> encrypted WireGuard packets carry dual-stack traffic over relay QUIC"
   wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-quic "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-quic "${node_b_pid}" "${case_dir}/b.log"
-  start_process "${node_b}" "${case_dir}/relay-quic4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9601"
+  start_process "${node_b}" "${case_dir}/relay-quic4.log" "${work_dir}/netprobe-native" udp-server -listen "${overlay_b4%/*}:9601"
   local server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/relay-quic4.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9601" -message wireguard-relay-quic4
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target "${overlay_b4%/*}:9601" -message wireguard-relay-quic4
   wait "${server_pid}"
-  start_process "${node_a}" "${case_dir}/relay-quic6.log" "${work_dir}/netprobe" udp-server -listen "[${overlay_a6%/*}]:9602"
+  start_process "${node_a}" "${case_dir}/relay-quic6.log" "${work_dir}/netprobe-native" udp-server -listen "[${overlay_a6%/*}]:9602"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/relay-quic6.log" "ready=udp-server"
-  ip netns exec "${node_b}" "${work_dir}/netprobe" udp-client -target "[${overlay_a6%/*}]:9602" -message wireguard-relay-quic6
+  ip netns exec "${node_b}" "${work_dir}/netprobe-native" udp-client -target "[${overlay_a6%/*}]:9602" -message wireguard-relay-quic6
   wait "${server_pid}"
   run_kernel_udp_benchmark "${node_b}" "${node_a}" "${overlay_b4%/*}:9611" "${overlay_b4%/*}:9611" \
     wireguard-relay-quic-kernel "${case_dir}/wireguard-relay-quic-benchmark.log"
@@ -1075,15 +1075,15 @@ EOF
   wait_selected_path "${node_a}" "${case_dir}/a.toml" wireguard-relay-tcp "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" wireguard-relay-tcp "${node_b_pid}" "${case_dir}/b.log"
   record_carrier_transition wireguard-quic-to-tcp wireguard-relay-quic wireguard-relay-tcp "${transition_started_ms}"
-  start_process "${node_b}" "${case_dir}/relay-tcp4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9603"
+  start_process "${node_b}" "${case_dir}/relay-tcp4.log" "${work_dir}/netprobe-native" udp-server -listen "${overlay_b4%/*}:9603"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/relay-tcp4.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9603" -message wireguard-relay-tcp4
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target "${overlay_b4%/*}:9603" -message wireguard-relay-tcp4
   wait "${server_pid}"
-  start_process "${node_b}" "${case_dir}/relay-tcp6.log" "${work_dir}/netprobe" udp-server -listen "[${overlay_b6%/*}]:9604"
+  start_process "${node_b}" "${case_dir}/relay-tcp6.log" "${work_dir}/netprobe-native" udp-server -listen "[${overlay_b6%/*}]:9604"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/relay-tcp6.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "[${overlay_b6%/*}]:9604" -message wireguard-relay-tcp6
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target "[${overlay_b6%/*}]:9604" -message wireguard-relay-tcp6
   wait "${server_pid}"
   run_kernel_udp_benchmark "${node_b}" "${node_a}" "${overlay_b4%/*}:9612" "${overlay_b4%/*}:9612" \
     wireguard-relay-tcp-kernel "${case_dir}/wireguard-relay-tcp-benchmark.log"
@@ -1103,25 +1103,25 @@ EOF
   wait_selected_path "${node_a}" "${case_dir}/a.toml" direct-wireguard "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" direct-wireguard "${node_b_pid}" "${case_dir}/b.log"
   record_carrier_transition wireguard-quic-to-direct wireguard-relay-quic direct-wireguard "${transition_started_ms}"
-  start_process "${node_b}" "${case_dir}/direct4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9605"
+  start_process "${node_b}" "${case_dir}/direct4.log" "${work_dir}/netprobe-native" udp-server -listen "${overlay_b4%/*}:9605"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/direct4.log" "ready=udp-server"
   local relay_before relay_after
-  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9605" -message direct-wireguard4
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target "${overlay_b4%/*}:9605" -message direct-wireguard4
   wait "${server_pid}"
   sleep 0.1
-  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: direct WireGuard application packet traversed the relay" >&2
     return 1
   fi
-  start_process "${node_a}" "${case_dir}/direct6.log" "${work_dir}/netprobe" udp-server -listen "[${overlay_a6%/*}]:9606"
+  start_process "${node_a}" "${case_dir}/direct6.log" "${work_dir}/netprobe-native" udp-server -listen "[${overlay_a6%/*}]:9606"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/direct6.log" "ready=udp-server"
-  ip netns exec "${node_b}" "${work_dir}/netprobe" udp-client -target "[${overlay_a6%/*}]:9606" -message direct-wireguard6
+  ip netns exec "${node_b}" "${work_dir}/netprobe-native" udp-client -target "[${overlay_a6%/*}]:9606" -message direct-wireguard6
   wait "${server_pid}"
   run_kernel_udp_benchmark "${node_b}" "${node_a}" "${overlay_b4%/*}:9613" "${overlay_b4%/*}:9613" \
     direct-wireguard-kernel "${case_dir}/direct-wireguard-benchmark.log"
@@ -1147,10 +1147,10 @@ EOF
   fi
   ip -n "${node_a}" address show dev lane0 | grep -Fq "${overlay_a4}"
   ip -n "${node_a}" address show dev lane0 | grep -Fq "${overlay_a6}"
-  start_process "${node_b}" "${case_dir}/demoted4.log" "${work_dir}/netprobe" udp-server -listen "${overlay_b4%/*}:9607"
+  start_process "${node_b}" "${case_dir}/demoted4.log" "${work_dir}/netprobe-native" udp-server -listen "${overlay_b4%/*}:9607"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/demoted4.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client -target "${overlay_b4%/*}:9607" -message demoted-relay-quic
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client -target "${overlay_b4%/*}:9607" -message demoted-relay-quic
   wait "${server_pid}"
 
   echo "==> controller-approved WireGuard exit carries Internet traffic over relay QUIC"
@@ -1207,11 +1207,11 @@ EOF
     return 1
   fi
   ip -n "${node_a}" route show table 51820 exact 10.254.0.0/24 | grep -q 'dev eth0'
-  start_process "${internet}" "${case_dir}/exit-relay-quic.log" "${work_dir}/netprobe" \
+  start_process "${internet}" "${case_dir}/exit-relay-quic.log" "${work_dir}/netprobe-native" \
     udp-server -listen 198.51.100.2:9701
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/exit-relay-quic.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client \
     -target 198.51.100.2:9701 -message wireguard-exit-relay-quic
   wait "${server_pid}"
   grep -q 'remote=198.51.100.1:' "${case_dir}/exit-relay-quic.log"
@@ -1221,18 +1221,18 @@ EOF
   ip netns exec "${node_b}" nft delete table inet laneway_wg_direct_reject
   wait_selected_path "${node_a}" "${case_dir}/a.toml" direct-wireguard "${node_a_pid}" "${case_dir}/a.log"
   wait_selected_path "${node_b}" "${case_dir}/b.toml" direct-wireguard "${node_b_pid}" "${case_dir}/b.log"
-  start_process "${internet}" "${case_dir}/exit-direct.log" "${work_dir}/netprobe" \
+  start_process "${internet}" "${case_dir}/exit-direct.log" "${work_dir}/netprobe-native" \
     udp-server -listen 198.51.100.2:9702
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/exit-direct.log" "ready=udp-server"
-  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client \
     -target 198.51.100.2:9702 -message wireguard-exit-direct
   wait "${server_pid}"
   grep -q 'remote=198.51.100.1:' "${case_dir}/exit-direct.log"
   sleep 0.1
-  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: direct Node-to-Exit application packet traversed the relay" >&2
@@ -1248,11 +1248,11 @@ EOF
   node_a_pid="${last_pid}"
   wait_log "${node_a_pid}" "${case_dir}/a-crash-restart.log" "interface=lane0"
   wait_selected_path "${node_a}" "${case_dir}/a.toml" direct-wireguard "${node_a_pid}" "${case_dir}/a-crash-restart.log"
-  start_process "${internet}" "${case_dir}/exit-crash-restart.log" "${work_dir}/netprobe" \
+  start_process "${internet}" "${case_dir}/exit-crash-restart.log" "${work_dir}/netprobe-native" \
     udp-server -listen 198.51.100.2:9703
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/exit-crash-restart.log" "ready=udp-server"
-  ip netns exec "${node_a}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${node_a}" "${work_dir}/netprobe-native" udp-client \
     -target 198.51.100.2:9703 -message wireguard-exit-crash-restart
   wait "${server_pid}"
   grep -q 'remote=198.51.100.1:' "${case_dir}/exit-crash-restart.log"
@@ -1597,10 +1597,10 @@ EOF
   ip -n "${user}" link show lane0 >/dev/null
 
   start_process "${node}" "${case_dir}/relay-traffic.log" \
-    "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9801"
+    "${work_dir}/netprobe-native" udp-server -listen "${node_overlay}:9801"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/relay-traffic.log" "ready=udp-server"
-  ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${user}" "${work_dir}/netprobe-native" udp-client \
     -target "${node_overlay}:9801" -message connect-relay -timeout 12s
   wait "${server_pid}"
 
@@ -1608,16 +1608,16 @@ EOF
   wait_log_long "${connect_pid}" "${connect_log}" "path=direct"
   echo "==> restored peer reachability promotes the same foreground User away from the capped relay"
   start_process "${node}" "${case_dir}/promoted-direct-traffic.log" \
-    "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9802"
+    "${work_dir}/netprobe-native" udp-server -listen "${node_overlay}:9802"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/promoted-direct-traffic.log" "ready=udp-server"
-  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
-  ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${user}" "${work_dir}/netprobe-native" udp-client \
     -target "${node_overlay}:9802" -message connect-promoted-direct -timeout 12s
   wait "${server_pid}"
   sleep 0.1
-  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: promoted foreground User application packet still traversed the relay" >&2
@@ -1658,10 +1658,10 @@ EOF
   wait_log "${connect_pid}" "${recovery_log}" "path=relay-quic"
   rm -f -- "${recovery_token}"
   start_process "${node}" "${case_dir}/recovery-traffic.log" \
-    "${work_dir}/netprobe" udp-server -listen "${node_overlay}:9821"
+    "${work_dir}/netprobe-native" udp-server -listen "${node_overlay}:9821"
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/recovery-traffic.log" "ready=udp-server"
-  ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${user}" "${work_dir}/netprobe-native" udp-client \
     -target "${node_overlay}:9821" -message connect-recovery -timeout 12s
   wait "${server_pid}"
   stop_process "${connect_pid}"
@@ -1707,10 +1707,10 @@ EOF
   fi
 
   start_process "${internet}" "${case_dir}/exit-relay-traffic.log" \
-    "${work_dir}/netprobe" udp-server -listen 198.51.101.2:9831
+    "${work_dir}/netprobe-native" udp-server -listen 198.51.101.2:9831
   external_pid="${last_pid}"
   wait_log "${external_pid}" "${case_dir}/exit-relay-traffic.log" "ready=udp-server"
-  ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${user}" "${work_dir}/netprobe-native" udp-client \
     -target 198.51.101.2:9831 -message connect-exit-relay -timeout 12s
   wait "${external_pid}"
   grep -q 'remote=198.51.101.1:' "${case_dir}/exit-relay-traffic.log"
@@ -1718,17 +1718,17 @@ EOF
   ip netns exec "${user}" nft delete table inet laneway_connect_exit_direct_block
   wait_log_long "${exit_pid}" "${exit_log}" "path=direct"
   start_process "${internet}" "${case_dir}/exit-direct-traffic.log" \
-    "${work_dir}/netprobe" udp-server -listen 198.51.101.2:9832
+    "${work_dir}/netprobe-native" udp-server -listen 198.51.101.2:9832
   external_pid="${last_pid}"
   wait_log "${external_pid}" "${case_dir}/exit-direct-traffic.log" "ready=udp-server"
-  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_before="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
-  ip netns exec "${user}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${user}" "${work_dir}/netprobe-native" udp-client \
     -target 198.51.101.2:9832 -message connect-exit-direct -timeout 12s
   wait "${external_pid}"
   grep -q 'remote=198.51.101.1:' "${case_dir}/exit-direct-traffic.log"
   sleep 0.1
-  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_after="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_forwarded_packets_total)"
   if [[ "${relay_after}" != "${relay_before}" ]]; then
     echo "ERROR: promoted foreground Exit packet still traversed the relay" >&2
@@ -2057,16 +2057,16 @@ EOF
   fi
 
   echo "==> controller-approved subnet route carries a real NATed application packet"
-  start_process "${lan_host}" "${case_dir}/nat-server.log" "${work_dir}/netprobe" udp-server -listen 192.168.60.2:9401
+  start_process "${lan_host}" "${case_dir}/nat-server.log" "${work_dir}/netprobe-native" udp-server -listen 192.168.60.2:9401
   local server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/nat-server.log" "ready=udp-server"
-  ip netns exec "${client}" "${work_dir}/netprobe" udp-client -target 192.168.60.2:9401 -message controller-subnet
+  ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client -target 192.168.60.2:9401 -message controller-subnet
   wait "${server_pid}"
   grep -q 'remote=192.168.60.1:' "${case_dir}/nat-server.log"
 
   echo "==> live node renews into a staged pair and promotes it while stopped"
   local old_certificate_info old_serial renew_output renewed_certificate_info
-  old_certificate_info="$("${work_dir}/netprobe" certificate-info -cert "${case_dir}/client.crt")"
+  old_certificate_info="$("${work_dir}/netprobe-native" certificate-info -cert "${case_dir}/client.crt")"
   old_serial="$(printf '%s\n' "${old_certificate_info}" | sed -n 's/.* serial=\([0-9a-f]*\)$/\1/p')"
   if [[ "${old_certificate_info}" != *"network=${network_id}"* || \
         "${old_certificate_info}" != *"node=${client_id}"* || ! "${old_serial}" =~ ^[0-9a-f]{2,64}$ ]]; then
@@ -2086,7 +2086,7 @@ EOF
     printf '%s\n' "${renew_output}" >&2
     return 1
   fi
-  renewed_certificate_info="$("${work_dir}/netprobe" certificate-info -cert "${case_dir}/client.next.crt")"
+  renewed_certificate_info="$("${work_dir}/netprobe-native" certificate-info -cert "${case_dir}/client.next.crt")"
   if [[ "${renewed_certificate_info}" != *"network=${network_id}"* || \
         "${renewed_certificate_info}" != *"node=${client_id}"* || \
         "${renewed_certificate_info}" == *"serial=${old_serial}" ]]; then
@@ -2107,7 +2107,7 @@ EOF
   stop_process "${client_pid}"
   local previous_session_removed=0 relay_sessions
   for _ in $(seq 1 200); do
-    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
     if [[ "${relay_sessions}" == "1" ]]; then
       previous_session_removed=1
@@ -2132,9 +2132,9 @@ EOF
   wait_log "${client_pid}" "${case_dir}/client-renewed.log" "interface=lane0"
   local renewed_connected=0 renewed_connections
   for _ in $(seq 1 200); do
-    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
-    renewed_connections="$(ip netns exec "${client}" "${work_dir}/netprobe" metric \
+    renewed_connections="$(ip netns exec "${client}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6061/metrics -name laneway_node_connections_total 2>/dev/null || true)"
     if [[ "${relay_sessions}" == "2" && "${renewed_connections:-0}" =~ ^[0-9]+$ ]] && \
        (( renewed_connections > 0 )); then
@@ -2149,11 +2149,11 @@ EOF
     return 1
   fi
   # Keep the echo server available for retries if the first reply is lost.
-  start_process "${lan_host}" "${case_dir}/renewed-server.log" "${work_dir}/netprobe" \
+  start_process "${lan_host}" "${case_dir}/renewed-server.log" "${work_dir}/netprobe-native" \
     udp-server -listen 192.168.60.2:9403 -max-packets 0
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/renewed-server.log" "ready=udp-server"
-  ip netns exec "${client}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client \
     -target 192.168.60.2:9403 -message renewed-subnet
   stop_process "${server_pid}"
   grep -q 'remote=192.168.60.1:' "${case_dir}/renewed-server.log"
@@ -2163,7 +2163,7 @@ EOF
     --network-id "${network_id}" --serial "${old_serial}" --reason superseded-by-renewal \
     "${admin_connection[@]}" >"${case_dir}/old-certificate-revocation.json"
   sleep 1
-  relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+  relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions)"
   if [[ "${relay_sessions}" != "2" ]]; then
     echo "ERROR: revoking the old serial closed the renewed session (sessions=${relay_sessions})" >&2
@@ -2192,11 +2192,11 @@ EOF
   old_client_pid="${last_pid}"
   wait_log "${old_client_pid}" "${case_dir}/old-client.log" "interface=lane0"
   for _ in $(seq 1 200); do
-    old_connections="$(ip netns exec "${old_client}" "${work_dir}/netprobe" metric \
+    old_connections="$(ip netns exec "${old_client}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6064/metrics -name laneway_node_connections_total 2>/dev/null || true)"
-    old_quic_failures="$(ip netns exec "${old_client}" "${work_dir}/netprobe" metric \
+    old_quic_failures="$(ip netns exec "${old_client}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6064/metrics -name laneway_node_quic_failures_total 2>/dev/null || true)"
-    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
     if [[ "${old_connections}" == "0" && "${old_quic_failures:-0}" =~ ^[0-9]+$ ]] && \
        (( old_quic_failures > 0 )) && [[ "${relay_sessions}" == "2" ]]; then
@@ -2211,11 +2211,11 @@ EOF
     sed -n '1,260p' "${case_dir}/old-client.log" >&2
     return 1
   fi
-  start_process "${lan_host}" "${case_dir}/renewed-after-revoke-server.log" "${work_dir}/netprobe" \
+  start_process "${lan_host}" "${case_dir}/renewed-after-revoke-server.log" "${work_dir}/netprobe-native" \
     udp-server -listen 192.168.60.2:9404 -max-packets 0
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/renewed-after-revoke-server.log" "ready=udp-server"
-  ip netns exec "${client}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client \
     -target 192.168.60.2:9404 -message renewed-after-old-revoke
   stop_process "${server_pid}"
   grep -q 'remote=192.168.60.1:' "${case_dir}/renewed-after-revoke-server.log"
@@ -2224,10 +2224,10 @@ EOF
   ip netns exec "${controller}" "${work_dir}/laneway" controller acl delete \
     --rule-id "${acl_id}" "${admin_connection[@]}" >"${case_dir}/acl-delete.json"
   sleep 1
-  start_process "${lan_host}" "${case_dir}/denied-server.log" "${work_dir}/netprobe" udp-server -listen 192.168.60.2:9402
+  start_process "${lan_host}" "${case_dir}/denied-server.log" "${work_dir}/netprobe-native" udp-server -listen 192.168.60.2:9402
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/denied-server.log" "ready=udp-server"
-  if ip netns exec "${client}" "${work_dir}/netprobe" udp-client \
+  if ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client \
       -target 192.168.60.2:9402 -message should-be-denied -timeout 2s; then
     echo "ERROR: controller default-deny ACL was not applied" >&2
     return 1
@@ -2321,11 +2321,11 @@ EOF
   grep -q '"failure_mode":"closed"' "${case_dir}/client-state/exit-intent-v1.json"
 
   echo "==> selected exit carries a real packet through daemon-installed gateway NAT"
-  start_process "${lan_host}" "${case_dir}/exit-nat-server.log" "${work_dir}/netprobe" \
+  start_process "${lan_host}" "${case_dir}/exit-nat-server.log" "${work_dir}/netprobe-native" \
     udp-server -listen 192.168.60.2:9501
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/exit-nat-server.log" "ready=udp-server"
-  ip netns exec "${client}" "${work_dir}/netprobe" udp-client \
+  ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client \
     -target 192.168.60.2:9501 -message controller-exit
   wait "${server_pid}"
   grep -q 'remote=192.168.60.1:' "${case_dir}/exit-nat-server.log"
@@ -2373,7 +2373,7 @@ EOF
   stop_process "${gateway_pid}"
   local relay_reduced=0 relay_sessions
   for _ in $(seq 1 200); do
-    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
     if [[ "${relay_sessions}" == "1" ]]; then
       relay_reduced=1
@@ -2388,11 +2388,11 @@ EOF
   sleep 2
   ip -n "${client}" -4 rule show priority 11000 | grep -q 'lookup 51820'
   ip -n "${client}" route show table 51820 exact 0.0.0.0/1 | grep -q 'dev lane0'
-  start_process "${lan_host}" "${case_dir}/closed-denied-server.log" "${work_dir}/netprobe" \
+  start_process "${lan_host}" "${case_dir}/closed-denied-server.log" "${work_dir}/netprobe-native" \
     udp-server -listen 192.168.60.2:9502
   server_pid="${last_pid}"
   wait_log "${server_pid}" "${case_dir}/closed-denied-server.log" "ready=udp-server"
-  if ip netns exec "${client}" "${work_dir}/netprobe" udp-client \
+  if ip netns exec "${client}" "${work_dir}/netprobe-native" udp-client \
       -target 192.168.60.2:9502 -message closed-must-not-leak -timeout 2s; then
     echo "ERROR: fail-closed packet escaped after exit path loss" >&2
     return 1
@@ -2405,7 +2405,7 @@ EOF
   gateway_pid="${last_pid}"
   wait_log "${gateway_pid}" "${case_dir}/gateway-restart-closed.log" "interface=lane0"
   for _ in $(seq 1 200); do
-    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
     if [[ "${relay_sessions}" == "2" ]] && ip netns exec "${gateway}" nft list table inet laneway_exit >/dev/null 2>&1; then
       break
@@ -2495,7 +2495,7 @@ EOF
     --node-id "${gateway_id}" --reason fullstack-decommission "${admin_connection[@]}" >"${case_dir}/node-revocation.json"
   local revoked=0 relay_sessions
   for _ in $(seq 1 200); do
-    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe" metric \
+    relay_sessions="$(ip netns exec "${relay}" "${work_dir}/netprobe-native" metric \
       -url http://127.0.0.1:6060/metrics -name laneway_relay_sessions 2>/dev/null || true)"
     if [[ "${relay_sessions}" == "1" ]]; then
       revoked=1

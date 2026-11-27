@@ -137,7 +137,7 @@ locally staged unsigned binaries; the signed release matrix is still pending.
 
 The release gate also redeems a real one-use invitation through Rust HTTPS discovery and
 enrollment, rejects a replay, and forwards traffic using the configuration
-and protected credentials produced by the packaged Go enrollment CLI. It
+and protected credentials produced by the packaged Rust CLI. It
 checks that the archived bootstrap matches the one exercised by the test.
 The unsigned Linux CI previews use the same gate. After signing a tagged
 release, the publish job checks the manifest using the bootstrap's exact
@@ -413,9 +413,9 @@ Closing either process ends the tunnel: the helper withdraws routes when the
 client closes its socket, and the client stops if the privileged child exits.
 The release workflow builds the native binary for
 Apple Silicon and Intel and includes `bin/lanewayd-rs` in each macOS archive
-covered by the release's signed checksums. The standalone Go CLI remains an
-operator tool; installing an endpoint requires the full archive. No separate
-Go helper is installed.
+covered by the release's signed checksums. The archive and standalone CLI
+use the native binary. Installing system networking requires the full
+archive, which sets up the protected helper.
 
 On an isolated Mac, run the release's `install.sh` as a normal user. The
 installer verifies the tag's signed manifest and archive checksum before
@@ -644,8 +644,8 @@ On a fresh Rust control plane, the optional Compose profile uses that pinned
 image. Enroll it, render the packaged Exit Node template with the network and
 service identities, then request and approve its exit route. The container
 runs as a non-root user with only `NET_ADMIN`; Compose invokes the Rust daemon's
-`healthcheck` subcommand for readiness. The Go CLI is used only for one-shot
-administration.
+`healthcheck` subcommand for readiness. The image's Rust CLI also handles
+one-shot administration.
 
 
 ### Ephemeral exit control

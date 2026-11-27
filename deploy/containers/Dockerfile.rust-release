@@ -63,7 +63,7 @@ RUN --network=none set -eu; \
     case "$target" in x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) ;; *) exit 1;; esac; \
     export LANEWAY_PRODUCT_VERSION="$FLEET_PRIOR_VERSION"; \
     cargo build --offline --locked --release --manifest-path rust/Cargo.toml \
-      --target "$target" -p lanewayd-rs --bin lanewayd-rs --bin laneway-inspect-probe; \
+      --target "$target" -p lanewayd-rs --bin lanewayd-rs --bin laneway-inspect-probe --features network-fixtures; \
     mkdir -p /fixture/activation-fixture; \
     install -m 0755 "rust/target/$target/release/lanewayd-rs" /fixture/activation-fixture/prior-node; \
     install -m 0755 "rust/target/$target/release/laneway-inspect-probe" /fixture/activation-fixture/laneway-inspect-probe; \

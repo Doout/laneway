@@ -1,4 +1,12 @@
 //! Read-only network assertions used by the disposable integration labs.
+#[path = "inspect_probe_main/benchmark.rs"]
+mod benchmark;
+#[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+#[path = "inspect_probe_main/kernel.rs"]
+mod kernel;
+#[path = "inspect_probe_main/stream.rs"]
+mod stream;
+
 use std::{
     fs::File,
     io::Read,
@@ -22,12 +30,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(feature = "network-fixtures")]
+    EndpointHealth {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        node_id: laneway_protocol::Id,
+        #[arg(long)]
+        public_ip: Option<IpAddr>,
+        #[arg(long)]
+        location: Option<String>,
+        #[arg(long)]
+        product_version: Option<String>,
+    },
     Metric {
         #[arg(long, default_value = "http://127.0.0.1:6060/metrics")]
         url: reqwest::Url,
         #[arg(long)]
         name: String,
     },
+    UdpBenchClient(benchmark::Options),
+    #[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+    ExitClient(kernel::ExitClient),
+    #[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+    ExitGateway(kernel::ExitGateway),
     CertificateInfo {
         #[arg(long)]
         cert: PathBuf,
@@ -48,8 +74,41 @@ enum Command {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .and_then(|arg| {
+            arg.to_str().map(|command| {
+                matches!(
+                    command,
+                    "tcp-server" | "tcp-client" | "udp-server" | "udp-client" | "udp-echo-server"
+                )
+            })
+        })
+        .unwrap_or(false)
+    {
+        return stream::run().map_err(|error| anyhow::anyhow!("{error}"));
+    }
     match Cli::parse_from(std::env::args_os().map(normalize)).command {
+        #[cfg(feature = "network-fixtures")]
+        Command::EndpointHealth {
+            database,
+            node_id,
+            public_ip,
+            location,
+            product_version,
+        } => endpoint_health(
+            &database,
+            node_id,
+            public_ip,
+            location.as_deref(),
+            product_version.as_deref(),
+        ),
         Command::Metric { url, name } => metric(url, &name).await,
+        Command::UdpBenchClient(options) => benchmark::run(options).await,
+        #[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+        Command::ExitClient(options) => kernel::client(options).await,
+        #[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+        Command::ExitGateway(options) => kernel::gateway(options).await,
         Command::CertificateInfo { cert } => certificate(&cert),
         Command::Dns {
             address,
@@ -198,4 +257,35 @@ fn dns(
         }
         _ => anyhow::bail!("unexpected private DNS answer count"),
     }
+}
+
+#[cfg(feature = "network-fixtures")]
+fn endpoint_health(
+    database: &Path,
+    node: laneway_protocol::Id,
+    ip: Option<IpAddr>,
+    location: Option<&str>,
+    version: Option<&str>,
+) -> Result<()> {
+    use rusqlite::{Connection, OpenFlags, params};
+
+    let db = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let carrier: String = db.query_row(
+        "SELECT s.carrier_state FROM endpoint_status_latest s
+        JOIN node_locations l ON l.node_id=s.node_id
+        WHERE s.node_id=?1 AND s.platform='linux' AND s.configuration_state='current'
+          AND s.route_state='ready' AND s.expires_at>unixepoch() AND l.observed_at>unixepoch()-30
+          AND (?2 IS NULL OR l.public_ip=?2)
+          AND (?3 IS NULL OR json_extract(l.automatic_json,'$.label')=?3)
+          AND (?4 IS NULL OR s.product_version=?4)",
+        params![
+            node.as_bytes().as_slice(),
+            ip.map(|ip| ip.to_string()),
+            location,
+            version
+        ],
+        |row| row.get(0),
+    )?;
+    println!("{carrier}");
+    Ok(())
 }

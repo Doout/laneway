@@ -1372,6 +1372,42 @@ fn route_snapshot_matches(actual: &[String], expected: &[&PolicyRoute], protocol
     normalized == expected
 }
 
+/// Apply the native Exit routes or NAT to a tunnel owned by the packet lab.
+#[cfg(all(target_os = "linux", feature = "network-fixtures"))]
+#[doc(hidden)]
+pub async fn run_exit_fixture(
+    interface: &str,
+    forwarding: crate::ForwardingConfig,
+    routes: Vec<crate::RouteConfig>,
+    ready: &str,
+) -> Result<()> {
+    ensure!(
+        laneway_private::is_root() && std::env::var("LANEWAY_RUN_PRIVILEGED").as_deref() == Ok("1"),
+        "the Exit fixture requires an explicitly authorized privileged lab"
+    );
+    let mut config: Config =
+        toml::from_str(include_str!("../../../deploy/examples/node-rust.toml"))?;
+    config.tun.name = interface.to_owned();
+    if let Some(bypass) = forwarding.exit_client.transport_bypass.first() {
+        config.relay.address = Some(std::net::SocketAddr::new(*bypass, 4433));
+    }
+    config.tcp_fallback = None;
+    config.forwarding = forwarding;
+    config.routes = routes;
+    // Unlike Agent::new, the lab owns the existing tunnel and credentials.
+    config.validate()?;
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut state = KernelManager::apply(Arc::new(config))?;
+    println!("ready={ready}");
+    tokio::select! {
+        _ = interrupt.recv() => {}
+        _ = terminate.recv() => {}
+    }
+    state.restore()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

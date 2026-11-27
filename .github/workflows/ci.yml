@@ -428,11 +428,12 @@ jobs:
           archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
           fixtures="$RUNNER_TEMP/laneway-go-fixtures"
           mkdir "$fixtures"
-          CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway ./cmd/laneway-relay ./integration/netprobe ./integration/rustnodecontroller
+          CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway ./cmd/laneway-relay ./integration/rustnodecontroller
           rustc --edition 2024 -O integration/netprobe-stream.rs -o "$fixtures/netprobe-stream"
           sudo env PATH="$PATH" LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$fixtures" \
             LANEWAY_NODE_TEST_STREAM_PROBE="$fixtures/netprobe-stream" \
             LANEWAY_NODE_TEST_INSPECT_PROBE="$RUNNER_TEMP/laneway-rust/activation-fixture/laneway-inspect-probe" \
+            LANEWAY_NODE_TEST_ENROLL_PROBE="$RUNNER_TEMP/laneway-rust/activation-fixture/prior-node" \
             bash integration/rust-release-systemd.sh "$archive" "$PACKAGE_GOARCH" "$PREVIEW_VERSION"
           sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "$archive" \
             "$RUNNER_TEMP/laneway-rust/activation-fixture"

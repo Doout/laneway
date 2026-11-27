@@ -322,11 +322,18 @@ if [[ -n "${LANEWAY_NODE_TEST_INSPECT_PROBE:-}" ]]; then
   install -m 0755 "$LANEWAY_NODE_TEST_INSPECT_PROBE" "${work_dir}/netprobe-inspect"
 else
   cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
-    --target-dir "${repo_root}/rust/target" -p lanewayd-rs --bin laneway-inspect-probe
+    --target-dir "${repo_root}/rust/target" -p lanewayd-rs --bin laneway-inspect-probe --features network-fixtures
   install -m 0755 "${repo_root}/rust/target/debug/laneway-inspect-probe" "${work_dir}/netprobe-inspect"
 fi
+if [[ -n "${LANEWAY_NODE_TEST_ENROLL_PROBE:-}" ]]; then
+  install -m 0755 "$LANEWAY_NODE_TEST_ENROLL_PROBE" "${work_dir}/enroll-probe"
+elif [[ "${test_wireguard}" == 1 ]]; then
+  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+    --target-dir "${repo_root}/rust/target" -p lanewayd-rs --bin lanewayd-rs --features network-fixtures
+  install -m 0755 "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/enroll-probe"
+fi
 if [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]]; then
-  for fixture in laneway lanewayd laneway-relay netprobe rustnodecontroller; do
+  for fixture in laneway lanewayd laneway-relay rustnodecontroller; do
     install -m 0755 "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR}/${fixture}" "${work_dir}/${fixture}"
   done
 else
@@ -335,7 +342,6 @@ else
     go build -o "${work_dir}/laneway" ./cmd/laneway
     go build -o "${work_dir}/lanewayd" ./cmd/laneway
     go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
-    go build -o "${work_dir}/netprobe" ./integration/netprobe
     go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller
   )
 fi
@@ -461,10 +467,11 @@ if [[ "${test_invitation}:${managed_invitation}" == "0:0" ]]; then
   [[ -n "${rust_token}" ]] || { echo "ERROR: Rust enrollment token was not returned" >&2; exit 1; }
   (umask 077; printf '%s\n' "${rust_token}" >"${work_dir}/rust.token")
   if [[ "${test_wireguard}" == "1" ]]; then
-    rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/netprobe" enroll-exit --token-file "${work_dir}/rust.token" \
+    rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/enroll-probe" _client enroll-exit --token-file "${work_dir}/rust.token" \
       --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
-      --network-id "${network_id}" --service-id "${controller_service}" \
-      --name rust-controller-node --out-prefix "${work_dir}/pki/rust")"
+      --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+      --name rust-controller-node --out-cert "${work_dir}/pki/rust.crt" \
+      --out-key "${work_dir}/pki/rust.key" --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
   else
     rust_join="$(ip netns exec "${rust_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/rust.token" \
       --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
@@ -1325,7 +1332,7 @@ fi
 echo "==> live Rust node reports its authenticated carrier and routes; the controller observes its source"
 reported_carrier=""
 for _ in $(seq 1 150); do
-  reported_carrier="$("${work_dir}/netprobe" endpoint-health -database "${work_dir}/controller.db" \
+  reported_carrier="$("${work_dir}/netprobe-inspect" endpoint-health -database "${work_dir}/controller.db" \
     -node-id "${rust_id}" "${health_location[@]}" 2>/dev/null || true)"
   if [[ "${reported_carrier}" == "relay_quic" ]]; then
     break
