@@ -425,12 +425,14 @@ for node_name in "${client_name}" "${gateway_name}"; do
       devices: .HostConfig.Devices
     }
   ')"
+  # setpriv draws NET_ADMIN from the file capability before setting
+  # no_new_privs. Check the entrypoint here and the actual process below.
   if ! jq -e '
     .[0].Config.User == "65532:65532" and
     .[0].HostConfig.Privileged == false and
     .[0].HostConfig.NetworkMode != "host" and
     (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
-    ((.[0].HostConfig.SecurityOpt // []) | map(sub(":true$"; ""))) == ["no-new-privileges"] and
+    (.[0].HostConfig.SecurityOpt // []) == [] and
     .[0].Config.Entrypoint == ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"] and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and

@@ -779,6 +779,12 @@ impl QuicControl {
         }
     }
 
+    pub(crate) async fn close(&self) {
+        self.endpoint
+            .close(0_u32.into(), b"controller snapshot complete");
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.endpoint.wait_idle()).await;
+    }
+
     fn next_request_id(&self) -> u64 {
         loop {
             let id = self

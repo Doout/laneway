@@ -127,7 +127,13 @@ async fn get_initial_configuration(
     tls::validate_local(tls, network, node)?;
     let certificate = tls::local_certificate_health(tls)?;
     let client = QuicControl::rootless(&options).await?;
-    match client.poll(0, generation).await? {
+    let result = client.poll(0, generation).await;
+    if generation.is_some() {
+        // The controller permits one live claim. Drive CONNECTION_CLOSE on
+        // the socket before the bootstrap runtime and network namespace end.
+        client.close().await;
+    }
+    match result? {
         PollResult::Modified(configuration) => {
             let snapshot = Snapshot::compile_for(
                 (*configuration).clone(),
