@@ -206,7 +206,8 @@ fi
 grep -Fx 'LANEWAY_CONTROLLER_SERVER_NAME=lane.example.test' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_NETWORK_ID=000102030405060708090a0b0c0d0e0f' "$destination/.env" >/dev/null
-test "$(grep -c '^cosign verify ' "$log_file")" -eq 5
+test "$(grep -c '^cosign verify ' "$log_file")" -eq 3
+grep -Fx 'LANEWAY_ADMIN_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$destination/.env" >/dev/null
 test "$(grep -c '^cosign verify-blob ' "$log_file")" -eq 1
 grep -Fx "stage pki" "$log_file" >/dev/null
 grep -Fx "stage rust" "$log_file" >/dev/null
