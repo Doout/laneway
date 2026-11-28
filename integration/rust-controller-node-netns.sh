@@ -981,6 +981,20 @@ if [[ -n "${packaged_node}" ]]; then
   exit 0
 fi
 
+# This authority gate measures traffic through the relay. Control-plane
+# snapshots can automatically enable direct paths for the two Rust nodes.
+# Block only their direct UDP traffic inside the disconnected fixture.
+ip netns exec "${rust_ns}" nft add table inet lab_relay_only
+ip netns exec "${rust_ns}" nft add chain inet lab_relay_only output \
+  '{ type filter hook output priority 0; policy accept; }'
+ip netns exec "${rust_ns}" nft add rule inet lab_relay_only output \
+  ip daddr "{10.254.0.4,${gateway_location_ip}}" udp drop
+ip netns exec "${gateway_ns}" nft add table inet lab_relay_only
+ip netns exec "${gateway_ns}" nft add chain inet lab_relay_only output \
+  '{ type filter hook output priority 0; policy accept; }'
+ip netns exec "${gateway_ns}" nft add rule inet lab_relay_only output \
+  ip daddr "{10.254.0.3,${location_node_ip}}" udp drop
+
 echo "==> Rust node bootstraps and renews its certificate at the Rust controller"
 if [[ ! -x "${work_dir}/native-cli/laneway" ]]; then
   mkdir "${work_dir}/native-cli"
@@ -1223,9 +1237,13 @@ if [[ "${test_topology}" == "1" ]]; then
   topology | jq -e '.retention_seconds == 120 and (.edges | length == 0)' >/dev/null
 fi
 udp_success 9701 rust-route-allowed
-forwarded_after="$(relay_forwarded_packets)"
+for _ in $(seq 1 40); do
+  forwarded_after="$(relay_forwarded_packets)"
+  if (( forwarded_after >= forwarded_before + 2 )); then break; fi
+  sleep 0.05
+done
 if (( forwarded_after < forwarded_before + 2 )); then
-  echo "ERROR: the request and reply did not use the Rust relay" >&2
+  echo "ERROR: relay forwarded ${forwarded_before} packets before the probe and ${forwarded_after} after it" >&2
   exit 1
 fi
 if [[ "${test_topology}" == "1" ]]; then
