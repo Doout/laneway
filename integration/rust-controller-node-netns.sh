@@ -985,15 +985,15 @@ fi
 # snapshots can automatically enable direct paths for the two Rust nodes.
 # Block only their direct UDP traffic inside the disconnected fixture.
 ip netns exec "${rust_ns}" nft add table inet lab_relay_only
-ip netns exec "${rust_ns}" nft add chain inet lab_relay_only output \
-  '{ type filter hook output priority 0; policy accept; }'
-ip netns exec "${rust_ns}" nft add rule inet lab_relay_only output \
-  ip daddr "{10.254.0.4,${gateway_location_ip}}" udp drop
+ip netns exec "${rust_ns}" nft add chain inet lab_relay_only input \
+  '{ type filter hook input priority 0; policy accept; }'
+ip netns exec "${rust_ns}" nft add rule inet lab_relay_only input \
+  ip saddr "{10.254.0.4,${gateway_location_ip}}" meta l4proto udp drop
 ip netns exec "${gateway_ns}" nft add table inet lab_relay_only
-ip netns exec "${gateway_ns}" nft add chain inet lab_relay_only output \
-  '{ type filter hook output priority 0; policy accept; }'
-ip netns exec "${gateway_ns}" nft add rule inet lab_relay_only output \
-  ip daddr "{10.254.0.3,${location_node_ip}}" udp drop
+ip netns exec "${gateway_ns}" nft add chain inet lab_relay_only input \
+  '{ type filter hook input priority 0; policy accept; }'
+ip netns exec "${gateway_ns}" nft add rule inet lab_relay_only input \
+  ip saddr "{10.254.0.3,${location_node_ip}}" meta l4proto udp drop
 
 echo "==> Rust node bootstraps and renews its certificate at the Rust controller"
 if [[ ! -x "${work_dir}/native-cli/laneway" ]]; then

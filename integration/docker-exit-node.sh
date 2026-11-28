@@ -420,6 +420,8 @@ configure = true
 address = "${relay_ip}:4433"
 server_name = "${relay_name}"
 service_id = "${relay_service}"
+idle_timeout = "12s"
+keepalive = "4s"
 reconnect_min = "100ms"
 reconnect_max = "1s"
 quic_recovery_interval = "1s"
@@ -583,12 +585,16 @@ wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" direct
 run_external_flow docker-exit-direct
 
 echo "==> restrictive peer UDP forces capped relay fallback while controller remains healthy"
+# Direct QUIC and relay QUIC share the node socket. Drop only peer traffic
+# on ingress, where the sender sees packet loss instead of a local I/O error.
+client_ip="$(control_ip "${client_name}")"
+gateway_ip="$(control_ip "${gateway_name}")"
 node_net_admin_exec "${client_name}" nft add table inet laneway_test_direct_block
-node_net_admin_exec "${client_name}" nft add chain inet laneway_test_direct_block output '{ type filter hook output priority filter; policy accept; }'
-node_net_admin_exec "${client_name}" nft add rule inet laneway_test_direct_block output udp dport 4434 drop
+node_net_admin_exec "${client_name}" nft add chain inet laneway_test_direct_block input '{ type filter hook input priority filter; policy accept; }'
+node_net_admin_exec "${client_name}" nft add rule inet laneway_test_direct_block input ip saddr "${gateway_ip}" udp dport 4435 drop
 node_net_admin_exec "${gateway_name}" nft add table inet laneway_test_direct_block
-node_net_admin_exec "${gateway_name}" nft add chain inet laneway_test_direct_block output '{ type filter hook output priority filter; policy accept; }'
-node_net_admin_exec "${gateway_name}" nft add rule inet laneway_test_direct_block output udp dport 4435 drop
+node_net_admin_exec "${gateway_name}" nft add chain inet laneway_test_direct_block input '{ type filter hook input priority filter; policy accept; }'
+node_net_admin_exec "${gateway_name}" nft add rule inet laneway_test_direct_block input ip saddr "${client_ip}" udp dport 4434 drop
 wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" relay-quic
 run_external_flow docker-exit-relay
 
@@ -601,7 +607,7 @@ saturation_target="$(docker inspect -f "{{with index .NetworkSettings.Networks \
 node_net_admin_exec "${gateway_name}" ip route replace "${saturation_target}/32" via "${nat_egress_ip}" dev wan0
 docker exec "${client_name}" /test/netprobe udp-bench-client -target "${saturation_target}:9202" \
   -scenario docker-exit-relay-saturation -scope controller-authorized-double-nat \
-  -duration 750ms -size 1200 -pps 3000 -flows 1 >/dev/null
+  -duration 1s -size 512 -pps 3000 -flows 1 >/dev/null
 throttled="$(docker run --rm --label "${owner}" --network "container:${relay_name}" "${probe_image}" \
   metric -url http://127.0.0.1:6060/metrics -name laneway_relay_throttled_packets_total)"
 [[ "${throttled}" =~ ^[0-9]+$ && "${throttled}" -gt 0 ]] || { echo "ERROR: relay did not expose saturation drops" >&2; exit 1; }
