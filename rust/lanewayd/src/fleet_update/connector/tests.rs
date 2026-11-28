@@ -42,6 +42,10 @@ fn inspection_rejects_a_different_runtime_and_unsupported_profiles() {
     canonical["Config"]["Labels"][RUNTIME_LABEL] = json!("rust");
     assert!(profile(&canonical, OLD, NAME).is_ok());
     assert!(is_standard_running(&canonical, NAME));
+    canonical["Config"]["Image"] = json!(IMAGE.replacen("lane-edge@", "laneway/edge@", 1));
+    assert!(profile(&canonical, OLD, NAME).is_ok());
+    canonical["Config"]["Labels"][RUNTIME_LABEL] = Value::Null;
+    assert!(profile(&canonical, OLD, NAME).is_err());
     for (pointer, input) in [
         ("/Config/Image", json!("ghcr.io/doout/lane-edge:1.2.3")),
         ("/Mounts/0/Name", json!("another-connector-state")),

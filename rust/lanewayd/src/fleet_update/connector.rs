@@ -592,7 +592,10 @@ fn official_rust_image(value: &str, runtime: &Value) -> bool {
             .is_some_and(|suffix| suffix.starts_with(':') || suffix.starts_with("@sha256:"))
     };
     in_repository(super::release::LEGACY_CONNECTOR_IMAGE)
-        || (runtime == "rust" && in_repository(super::release::CONNECTOR_IMAGE))
+        || (runtime == "rust"
+            && [super::release::CONNECTOR_IMAGE, super::release::EDGE_IMAGE]
+                .into_iter()
+                .any(in_repository))
 }
 
 async fn pull(docker: &impl Docker, image: &str, volume: &str) -> Result<()> {

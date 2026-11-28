@@ -320,7 +320,13 @@ else
 fi
 [ "$confirmation" = deploy ] || die "cancelled before changing the deployment"
 if [ "$gateway_supported" = true ]; then
-  LANEWAY_COSIGN_BIN="$cosign_bin" sh "$source_dir/../twingate-gateway/install.sh"
+  edge_repository=$(sed -n 's/^LANEWAY_EDGE_REPOSITORY=//p' "$metadata_dir/settings.env")
+  if [ -n "$edge_repository" ]; then
+    edge_digest=$(sed -n 's/^LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=//p' "$metadata_dir/settings.env")
+    LANEWAY_COSIGN_BIN="$cosign_bin" sh "$source_dir/../twingate-gateway/install.sh" 65532 "$tag" "$edge_repository@$edge_digest"
+  else
+    LANEWAY_COSIGN_BIN="$cosign_bin" sh "$source_dir/../twingate-gateway/install.sh"
+  fi
 else
   echo "Managed Twingate gateways require a local Linux systemd/Docker host with /dev/net/tun." >&2
 fi

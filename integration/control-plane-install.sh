@@ -162,12 +162,9 @@ EOF
 chmod 0755 "$mock_bin"/*
 
 cat > "$test_root/image-digests.txt" <<'EOF'
-ghcr.io/doout/laneway-admin@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-ghcr.io/doout/laneway-controller@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-ghcr.io/doout/lane-edge@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-ghcr.io/doout/laneway-node@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-ghcr.io/doout/laneway-exit-node@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
-ghcr.io/doout/laneway-relay@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ghcr.io/doout/laneway/console@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ghcr.io/doout/laneway/relay@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+ghcr.io/doout/laneway/edge@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 EOF
 printf 'fixture-signature\n' > "$test_root/checksums.sigstore.json"
 printf 'fixture-artifacts\n' > "$test_root/bootstrap-artifacts.toml"
@@ -197,10 +194,11 @@ grep -Fx 'LANEWAY_VERSION=0.2.8' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_INSTALL_PROFILE=quick' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_CONTROL_RUNTIME=rust' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RUST_VERSION=0.2.8' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_EDGE_REPOSITORY=ghcr.io/doout/laneway/edge' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RUST_IMAGE_SUFFIX=' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$destination/.env" >/dev/null
-grep -Fx 'LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' "$destination/.env" >/dev/null
+grep -Fx 'LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$destination/.env" >/dev/null
 if grep -E '^LANEWAY_(CONTROLLER|RELAY|CONNECTOR|EXIT_NODE)_IMAGE_DIGEST=' "$destination/.env"; then
   echo "fresh installer pinned a Go runtime" >&2
   exit 1
@@ -208,7 +206,8 @@ fi
 grep -Fx 'LANEWAY_CONTROLLER_SERVER_NAME=lane.example.test' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_RELAY_PUBLIC_ENDPOINT=lane.example.test:4433' "$destination/.env" >/dev/null
 grep -Fx 'LANEWAY_NETWORK_ID=000102030405060708090a0b0c0d0e0f' "$destination/.env" >/dev/null
-test "$(grep -c '^cosign verify ' "$log_file")" -eq 5
+test "$(grep -c '^cosign verify ' "$log_file")" -eq 3
+grep -Fx 'LANEWAY_ADMIN_IMAGE_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "$destination/.env" >/dev/null
 test "$(grep -c '^cosign verify-blob ' "$log_file")" -eq 1
 grep -Fx "stage pki" "$log_file" >/dev/null
 grep -Fx "stage rust" "$log_file" >/dev/null

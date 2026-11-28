@@ -345,7 +345,7 @@ remove only the confirmed stale lock, and rerun
 `sudo laneway control administrator root-token rotate` so the recorded state
 machine can recover safely.
 
-Controller, relay, and `lane-edge` Connector containers run non-root with
+Console, Relay, and Edge Connector containers run non-root with
 read-only scratch roots. The full Exit Node alone needs `NET_ADMIN` and
 `/dev/net/tun`, inside its own container namespace. Do not give it host
 networking, the Docker socket, or privileged mode.

@@ -19,7 +19,8 @@ import time
 ROOT = Path("/var/lib/laneway-gateways")
 UID = int(os.getenv("LANEWAY_CONTROLLER_UID", "65532"))
 CLIENT = "twingate/client@sha256:6b868c3fd395f8b2bc7421359ceab65eda89a5d32884346322a6c533c931ec7b"
-CONNECTOR = "ghcr.io/doout/lane-edge-rust@sha256:f8b3ac366679d9f1067139b3d51c68a87108d5930a58cf8faa5edaa432f7ea7c"
+LEGACY_CONNECTOR = "ghcr.io/doout/lane-edge-rust@sha256:f8b3ac366679d9f1067139b3d51c68a87108d5930a58cf8faa5edaa432f7ea7c"
+CONNECTOR = os.getenv("LANEWAY_GATEWAY_EDGE_IMAGE", LEGACY_CONNECTOR)
 LABEL = "io.laneway.gateway"
 TENANT = re.compile(r"[0-9a-f]{64}")
 GENERATION = re.compile(r"[A-Za-z0-9_-]{1,96}")

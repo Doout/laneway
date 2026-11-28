@@ -96,16 +96,28 @@ unavailable on Rust.
 sudo laneway-control invite --name office --docker --connector
 ```
 
-New releases publish `lane-edge`, `laneway-controller`, `laneway-relay`,
-`laneway-node`, and `laneway-exit-node` under `ghcr.io/doout`. The current
-deployment tools still verify older releases that use the original `-rust`
-repositories. Before upgrading an older deployment to the first release with
-the new names, update the Compose deployment tooling or Connector updater from
-the verified package. Older verifiers expect the suffixed repositories.
+Releases publish three images under `ghcr.io/doout/laneway`:
+
+- `edge` runs the rootless Connector by default and provides the admin CLI,
+  native node, and Exit Node. Use the Compose Exit Node profile to grant
+  the TUN device and network capability explicitly. All roles use the same
+  image digest and version tag.
+- `console` includes the web UI and the network management API. Its
+  `platform` command runs the managed tenant operator service.
+- `relay` carries traffic when clients and edges cannot connect directly.
+
+The downloadable client and the optional Docker plugin ship separately. The
+deployment tools continue to verify older signed image names. Before upgrading
+an older control plane to the first release with these names, refresh
+`compose.yaml`, `compose.rust.yaml`, `laneway-control`, `prepare-rust.py`, and
+`verify-rust-release.sh` from the verified package, retaining any site-specific
+Compose overrides. Then run `sudo laneway-control update vVERSION`. Refresh the
+host's Connector updater from that verified package before updating a
+Connector across the same boundary.
 
 Run the generated command within ten minutes. Its rate-limited URL is consumed
 by the first download; later requests return `404`. A one-shot container enrolls
-the digest-pinned `lane-edge` image, then a clean runtime container starts
+the digest-pinned `edge` image, then a clean runtime container starts
 without the setup token, bootstrap key, or temporary mount. On the Connector
 host, update it with `sudo laneway-update-connector laneway-connector-office`.
 

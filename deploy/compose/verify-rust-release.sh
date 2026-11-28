@@ -89,31 +89,39 @@ verified_digest() {
   printf '%s\n' "$digest"
 }
 
-# The signed canonical inventory includes the standalone node image. Older
-# inventories use suffixed names, even when they also list legacy Go images.
+# Match release layouts by their signed image names, including older releases.
+namespace=ghcr.io/doout/laneway
+prefix=ghcr.io/doout
 suffix=-rust
-if [ "$mode" = publish ] || grep -q '^ghcr.io/doout/laneway-node@' "$work/image-digests.txt"; then
+admin=laneway-admin
+connector=lane-edge
+exit_node=laneway-exit-node
+if [ "$mode" = publish ] || grep -q '^ghcr[.]io/doout/laneway/' "$work/image-digests.txt"; then
+  prefix=$namespace
+  controller=console
+  relay=relay
+  exit_node=edge
+  admin=edge
+  connector=edge
   suffix=
-fi
-
-# Do not publish partial settings when any member fails.
-set -- laneway-controller$suffix laneway-relay$suffix laneway-exit-node$suffix
-case "$mode" in
-  install|publish) set -- "$@" laneway-admin lane-edge$suffix ;;
-esac
-if [ "$mode" = publish ]; then
-  set -- "$@" laneway-node$suffix
-  # Each entry above must exist exactly once. No other runtime or duplicate
-  # reference may be included in a newly published release.
+  set -- "$controller" "$relay" "$exit_node"
   [ "$(awk 'END { print NR }' "$work/image-digests.txt")" -eq "$#" ] ||
-    die "expected exactly five Rust runtimes and the operator image"
+    die "expected exactly the edge, console, and relay images"
+else
+  if grep -q '^ghcr.io/doout/laneway-node@' "$work/image-digests.txt"; then suffix=; fi
+  controller=laneway-controller$suffix
+  relay=laneway-relay$suffix
+  exit_node=$exit_node$suffix
+  connector=$connector$suffix
+  set -- "$controller" "$relay" "$exit_node"
+  case "$mode" in install) set -- "$@" "$admin" "$connector" ;; esac
 fi
 for name; do
   if [ "$mode" = publish ]; then
-    verified_digest "ghcr.io/doout/$name" > "$work/$name.digest" &
+    verified_digest "$prefix/$name" > "$work/$name.digest" &
     workers="$workers $!"
   else
-    verified_digest "ghcr.io/doout/$name" > "$work/$name.digest" || exit 1
+    verified_digest "$prefix/$name" > "$work/$name.digest" || exit 1
   fi
 done
 failed=0
@@ -126,12 +134,16 @@ done
 [ "$failed" -eq 0 ] || die "release image verification failed"
 
 printf 'LANEWAY_RUST_VERSION=%s\nLANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=%s\nLANEWAY_RUST_RELAY_IMAGE_DIGEST=%s\nLANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=%s\n' \
-  "${tag#v}" "$(cat "$work/laneway-controller$suffix.digest")" "$(cat "$work/laneway-relay$suffix.digest")" \
-  "$(cat "$work/laneway-exit-node$suffix.digest")"
+  "${tag#v}" "$(cat "$work/${controller}.digest")" "$(cat "$work/${relay}.digest")" \
+  "$(cat "$work/${exit_node}.digest")"
 case "$mode" in install|publish)
   printf 'LANEWAY_ADMIN_IMAGE_DIGEST=%s\nLANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=%s\n' \
-    "$(cat "$work/laneway-admin.digest")" "$(cat "$work/lane-edge$suffix.digest")"
+    "$(cat "$work/${admin}.digest")" "$(cat "$work/${connector}.digest")"
   ;;
 esac
 printf 'LANEWAY_RUST_IMAGE_SUFFIX=%s\n' "$suffix"
+if [ "$prefix" = "$namespace" ]; then
+  printf 'LANEWAY_CONSOLE_REPOSITORY=%s/console\nLANEWAY_RELAY_REPOSITORY=%s/relay\nLANEWAY_EDGE_REPOSITORY=%s/edge\n' \
+    "$namespace" "$namespace" "$namespace"
+fi
 if [ "$mode" = prepare ]; then cat "$work/bootstrap-artifacts.toml"; fi

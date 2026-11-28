@@ -255,42 +255,32 @@ jobs:
           cache-from: type=gha,scope=rust-release-deps-amd64,timeout=1m
       - name: Build pinned release image families
         run: |
-          docker buildx build --load --file deploy/containers/Dockerfile \
-            --target controller --build-arg VERSION=ci \
-            --tag laneway-controller:ci .
-          docker buildx build --load --file deploy/containers/Dockerfile \
-            --target relay --build-arg VERSION=ci \
-            --tag laneway-relay:ci .
-          docker buildx build --load --file deploy/containers/Dockerfile \
-            --target admin --build-arg VERSION="$PREVIEW_VERSION" \
-            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" \
-            --tag laneway-admin:ci .
+          for role in controller relay; do
+            docker buildx build --load --file deploy/containers/Dockerfile.rust-relay \
+              --target "$role" --build-arg VERSION="$PREVIEW_VERSION" \
+              --build-context "controller-binary=$RUNNER_TEMP/laneway-rust" \
+              --build-context "relay-binary=$RUNNER_TEMP/laneway-rust" \
+              --build-context "healthcheck-binary=$RUNNER_TEMP/laneway-rust" \
+              --tag "laneway-$role:ci" .
+            test "$(docker run --rm --network none "laneway-$role:ci" --version)" = "$PREVIEW_VERSION"
+          done
           docker buildx build --load --file deploy/containers/Dockerfile.exit-node \
-            --build-arg VERSION="$PREVIEW_VERSION" --build-context "node-binary=$RUNNER_TEMP/laneway-rust" \
-            --tag laneway-exit-node:ci .
-          test "$(docker run --rm --network none laneway-controller:ci -version)" = ci
-          test "$(docker run --rm --network none laneway-relay:ci -version)" = ci
-          test "$(docker run --rm --network none laneway-admin:ci version)" = "$PREVIEW_VERSION"
-          test "$(docker run --rm --network none --entrypoint /usr/local/bin/laneway laneway-exit-node:ci version)" = "$PREVIEW_VERSION"
-      - name: Verify fresh Rust Connector enrollment and restart
+            --target edge --build-arg VERSION="$PREVIEW_VERSION" \
+            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" --tag laneway-edge:ci .
+          test "$(docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges:true laneway-edge:ci version)" = "$PREVIEW_VERSION"
+          docker image inspect laneway-edge:ci | jq -e '.[0].Config |
+            .User == "65532:65532" and .Entrypoint == ["/usr/local/bin/laneway"] and
+            .Cmd == ["connector", "run"] and .Labels["io.laneway.connector-runtime"] == "rust"'
+          ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-edge:ci
+      - name: Verify fresh Edge enrollment and restart
         env:
           LANEWAY_CONNECTOR_FIXTURE_BINARIES: ${{ runner.temp }}/laneway-rust
         run: |
-          docker buildx build --load --file deploy/containers/Dockerfile.connector \
-            --target rust-connector --build-arg VERSION="$PREVIEW_VERSION" \
-            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" --tag lane-edge:ci .
-          test "$(docker run --rm --network none lane-edge:ci version)" = "$PREVIEW_VERSION"
-          test "$(docker image inspect --format '{{index .Config.Labels "io.laneway.connector-runtime"}}' lane-edge:ci)" = rust
-          if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then
-            echo "the Rust connector image unexpectedly contains a runnable shell" >&2
-            exit 1
-          fi
-          ./integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci
-          ./integration/connector-bootstrap.sh lane-edge:ci
-          ./integration/connector-upgrade.sh lane-edge:ci
+          ./integration/connector-bootstrap.sh laneway-edge:ci
+          ./integration/connector-upgrade.sh laneway-edge:ci
           docker build --tag laneway-rust-lab:local integration/rust-lab
-          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci
-          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci tcp-fallback
+          bash integration/rust-lab/connector-cutover.sh --fresh laneway-edge:ci
+          bash integration/rust-lab/connector-cutover.sh --fresh laneway-edge:ci tcp-fallback
 
   rust:
     name: Rust workspace and Go interoperability

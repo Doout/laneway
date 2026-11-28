@@ -268,30 +268,18 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         role: &release-images
-          - name: admin
-            image: ghcr.io/doout/laneway-admin
-            dockerfile: deploy/containers/Dockerfile
-            target: admin
-          - name: rust-connector
-            image: ghcr.io/doout/lane-edge
-            dockerfile: deploy/containers/Dockerfile.connector
-            target: rust-connector
-          - name: rust-controller
-            image: ghcr.io/doout/laneway-controller
+          - name: edge
+            image: ghcr.io/doout/laneway/edge
+            dockerfile: deploy/containers/Dockerfile.exit-node
+            target: edge
+          - name: console
+            image: ghcr.io/doout/laneway/console
             dockerfile: deploy/containers/Dockerfile.rust-relay
             target: controller
-          - name: rust-relay
-            image: ghcr.io/doout/laneway-relay
+          - name: relay
+            image: ghcr.io/doout/laneway/relay
             dockerfile: deploy/containers/Dockerfile.rust-relay
             target: relay
-          - name: rust-node
-            image: ghcr.io/doout/laneway-node
-            dockerfile: deploy/containers/Dockerfile.rust-relay
-            target: node
-          - name: rust-exit-node
-            image: ghcr.io/doout/laneway-exit-node
-            dockerfile: deploy/containers/Dockerfile.exit-node
-            target: rust-exit
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

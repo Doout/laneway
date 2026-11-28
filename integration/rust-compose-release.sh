@@ -26,6 +26,7 @@ case "$1" in
       [ "$4" = --certificate-oidc-issuer ] && [ "$5" = "$issuer" ] || exit 1
     case "$6" in
       "${REJECT_IMAGE:-}"@*) exit 1 ;;
+      ghcr.io/doout/laneway/console@sha256:*|ghcr.io/doout/laneway/edge@sha256:*|ghcr.io/doout/laneway/relay@sha256:*) ;;
       ghcr.io/doout/laneway-controller-rust@sha256:*|ghcr.io/doout/laneway-relay-rust@sha256:*|ghcr.io/doout/laneway-exit-node-rust@sha256:*|\
       ghcr.io/doout/laneway-admin@sha256:*|ghcr.io/doout/laneway-controller@sha256:*|ghcr.io/doout/laneway-relay@sha256:*|\
       ghcr.io/doout/laneway-exit-node@sha256:*|ghcr.io/doout/lane-edge@sha256:*|ghcr.io/doout/laneway-node@sha256:*) ;;
@@ -73,22 +74,33 @@ sh "$root/deploy/compose/verify-rust-release.sh" --prepare v0.0.9103 metadata > 
 tail -n +6 candidate | diff - metadata/bootstrap-artifacts.toml
 mkdir published
 cp metadata/checksums.sigstore.json metadata/bootstrap-artifacts.toml published/
-write_published_images() {
+write_prior_images() {
   write_images | sed 's/-rust@/@/'
   printf 'ghcr.io/doout/laneway-admin@sha256:%s\n' "$one"
   printf 'ghcr.io/doout/lane-edge@sha256:%s\n' "$two"
   printf 'ghcr.io/doout/laneway-node@sha256:%s\n' "$three"
 }
+write_published_images() {
+  printf 'ghcr.io/doout/laneway/console@sha256:%s\n' "$one"
+  printf 'ghcr.io/doout/laneway/relay@sha256:%s\n' "$two"
+  printf 'ghcr.io/doout/laneway/edge@sha256:%s\n' "$three"
+}
 verify_published() (
   cd published
   if command -v sha256sum >/dev/null 2>&1; then sha256sum image-digests.txt bootstrap-artifacts.toml;
   else shasum -a 256 image-digests.txt bootstrap-artifacts.toml; fi > checksums.txt
-  sh "$root/deploy/compose/verify-rust-release.sh" --publish v0.0.9103 .
+  sh "$root/deploy/compose/verify-rust-release.sh" "${1:---publish}" v0.0.9103 .
 )
+write_prior_images > published/image-digests.txt
+verify_published --install > settings
+grep -Fx "LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=sha256:$two" settings >/dev/null
 write_published_images > published/image-digests.txt
 verify_published > settings
-grep -Fx "LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST=sha256:$two" settings >/dev/null
-for image in laneway-controller laneway-relay laneway-exit-node laneway-admin lane-edge laneway-node; do
+for key in LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_RUST_CONNECTOR_IMAGE_DIGEST LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST; do
+  grep -Fx "$key=sha256:$three" settings >/dev/null
+done
+grep -Fx "LANEWAY_EDGE_REPOSITORY=ghcr.io/doout/laneway/edge" settings >/dev/null
+for image in laneway/console laneway/relay laneway/edge; do
   if REJECT_IMAGE="ghcr.io/doout/$image" verify_published > settings 2> diagnostic; then
     echo "publication accepted an invalid image signature: $image" >&2
     exit 1
@@ -103,7 +115,7 @@ if verify_published > settings 2> diagnostic; then
   exit 1
 fi
 test ! -s settings
-grep -F 'expected exactly five Rust runtimes and the operator image' diagnostic >/dev/null || { cat diagnostic >&2; exit 1; }
+grep -F 'expected exactly the edge, console, and relay images' diagnostic >/dev/null || { cat diagnostic >&2; exit 1; }
 printf 'tampered bootstrap\n' >> metadata/bootstrap-artifacts.toml
 if sh "$root/deploy/compose/verify-rust-release.sh" --prepare v0.0.9103 metadata > settings 2> diagnostic; then
   echo 'expected mismatched bootstrap metadata to fail verification' >&2
