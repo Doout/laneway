@@ -51,82 +51,40 @@ history, so the default 100-record inventory always contains every authority
 that can still authorize a request. Disabling a principal is irreversible in
 v1 and atomically revokes all of its tokens.
 
-## Current route inventory
+## Route inventory
 
-The contract contains exactly 66 operations:
+The [OpenAPI contract](../api/openapi/management-v1.yaml) is the route index
+for the generated client. It covers administrator and session lifecycle,
+service principals, network and node inventory, enrollment, routes, relays,
+policies, certificates, audit, and application registration and consent.
 
-| Method | Path | Access class |
+The controller also serves the following feature endpoints. They are outside
+the generated management client contract. Network-scoped endpoints apply the
+controller's normal network authorization. Twingate has the session-only
+authorization described below.
+
+| Path | Methods | Purpose |
 | --- | --- | --- |
-| `GET` | `/v1/admin/auth/state` | Authentication state |
-| `POST` | `/v1/admin/auth/login` | Public account lifecycle |
-| `GET` | `/v1/admin/auth/session` | Current session read |
-| `POST` | `/v1/admin/auth/session/rotate` | Session lifecycle mutation |
-| `POST` | `/v1/admin/auth/logout` | Session lifecycle mutation |
-| `GET` | `/v1/admin/auth/root` | Root-only automation |
-| `POST` | `/v1/admin/auth/bootstrap` | Public account lifecycle |
-| `POST` | `/v1/admin/auth/recover` | Public account lifecycle |
-| `POST` | `/v1/admin/auth/bootstrap-grants` | Root-only automation |
-| `POST` | `/v1/admin/auth/root-token-rotations/{rotation_id}/begin` | Root-only automation |
-| `POST` | `/v1/admin/auth/root-token-rotations/{rotation_id}/complete` | Root-only automation |
-| `GET` | `/v1/admin/administrators` | Safe protected read; `username` is root-only |
-| `POST` | `/v1/admin/administrators` | Protected mutation |
-| `GET` | `/v1/admin/administrators/{principal_id}` | Safe protected read |
-| `PATCH` | `/v1/admin/administrators/{principal_id}` | Protected mutation |
-| `POST` | `/v1/admin/administrators/{principal_id}/password` | Protected mutation |
-| `POST` | `/v1/admin/administrators/{principal_id}/recovery-grants` | Root-only automation |
-| `GET` | `/v1/admin/administrators/{principal_id}/sessions` | Safe protected read |
-| `POST` | `/v1/admin/sessions/{session_id}/revoke` | Protected mutation |
-| `GET` | `/v1/admin/service-principals` | Owner/root safe read |
-| `POST` | `/v1/admin/service-principals` | Owner/root protected mutation |
-| `POST` | `/v1/admin/service-principals/{principal_id}/disable` | Owner/root protected mutation |
-| `GET` | `/v1/admin/service-principals/{principal_id}/tokens` | Owner/root safe read |
-| `POST` | `/v1/admin/service-principals/{principal_id}/tokens` | Owner/root protected mutation |
-| `POST` | `/v1/admin/service-access-tokens/{token_id}/revoke` | Owner/root protected mutation |
-| `GET` | `/v1/admin/audit` | Safe protected read |
-| `GET` | `/v1/admin/audit/page` | Safe protected read |
-| `POST` | `/v1/admin/enrollment-tokens` | Protected mutation |
-| `POST` | `/v1/admin/bootstrap-bundles` | Protected mutation |
-| `GET` | `/v1/admin/networks` | Safe protected read |
-| `POST` | `/v1/admin/networks` | Protected mutation |
-| `GET` | `/v1/admin/networks/{network_id}` | Safe protected read |
-| `GET` | `/v1/admin/networks/{network_id}/nodes` | Safe protected read |
-| `GET` | `/v1/admin/networks/{network_id}/endpoint-statuses` | Safe protected read |
-| `GET` | `/v1/admin/networks/{network_id}/relays` | Safe protected read |
-| `POST` | `/v1/admin/networks/{network_id}/relays` | Protected mutation |
-| `GET` | `/v1/admin/networks/{network_id}/acl-rules` | Safe protected read |
-| `POST` | `/v1/admin/networks/{network_id}/acl-rules` | Protected mutation |
-| `GET` | `/v1/admin/networks/{network_id}/access-subjects` | Safe protected read |
-| `POST` | `/v1/admin/networks/{network_id}/users` | Protected mutation |
-| `PATCH` | `/v1/admin/users/{user_id}` | Protected mutation |
-| `POST` | `/v1/admin/networks/{network_id}/teams` | Protected mutation |
-| `PUT` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
-| `DELETE` | `/v1/admin/teams/{team_id}/members/{user_id}` | Protected mutation |
-| `POST` | `/v1/admin/networks/{network_id}/access-grants` | Protected mutation |
-| `DELETE` | `/v1/admin/access-grants/{grant_id}` | Protected mutation |
-| `POST` | `/v1/admin/networks/{network_id}/resources` | Protected mutation |
-| `PATCH` | `/v1/admin/resources/{resource_id}` | Protected mutation |
-| `POST` | `/v1/admin/networks/{network_id}/services` | Protected mutation |
-| `PATCH` | `/v1/admin/services/{service_id}` | Protected mutation |
-| `POST` | `/v1/admin/networks/{network_id}/resource-access-grants` | Protected mutation |
-| `DELETE` | `/v1/admin/resource-access-grants/{grant_id}` | Protected mutation |
-| `GET` | `/v1/admin/networks/{network_id}/certificates` | Safe protected read |
-| `GET` | `/v1/admin/networks/{network_id}/routes` | Safe protected read |
-| `GET` | `/v1/admin/networks/{network_id}/audit` | Safe protected read |
-| `GET` | `/v1/admin/networks/{network_id}/audit/page` | Safe protected read |
-| `POST` | `/v1/admin/networks/{network_id}/certificates/{serial}/revoke` | Protected mutation |
-| `POST` | `/v1/admin/routes/assign` | Protected mutation |
-| `POST` | `/v1/admin/routes/{route_id}/approve` | Protected mutation |
-| `POST` | `/v1/admin/routes/{route_id}/withdraw` | Protected mutation |
-| `PUT` | `/v1/admin/acl-rules/{rule_id}` | Protected mutation |
-| `DELETE` | `/v1/admin/acl-rules/{rule_id}` | Protected mutation |
-| `POST` | `/v1/admin/nodes/{node_id}/revoke` | Protected mutation |
-| `PUT` | `/v1/admin/nodes/{node_id}/capabilities` | Protected mutation |
-| `POST` | `/v1/admin/relays/{relay_id}/disable` | Protected mutation |
-| `PUT` | `/v1/admin/relays/{relay_id}` | Protected mutation |
+| `/v1/admin/integrations/twingate` | GET, PUT, DELETE | Read, save, or disconnect the provider connection. |
+| `/v1/admin/integrations/twingate/gateway` | GET, PUT, DELETE | Inspect, configure, or remove a gateway. |
+| `/v1/admin/integrations/twingate/resources` | GET | List provider resources. |
+| `/v1/admin/integrations/twingate/test` | POST | Check the saved provider connection. |
+| `/v1/admin/networks/{network_id}/alerts` | GET | List operational alerts. |
+| `/v1/admin/networks/{network_id}/alerts/{alert_id}/acknowledge` | POST | Acknowledge an alert. |
+| `/v1/admin/networks/{network_id}/diagnostics` | POST | Check a proposed network connection. |
+| `/v1/admin/networks/{network_id}/fleet-updates` | GET, POST | Inspect or create an update rollout. |
+| `/v1/admin/networks/{network_id}/fleet-updates/{update_id}/cancel` | POST | Cancel a rollout. |
+| `/v1/admin/networks/{network_id}/fleet-updates/{update_id}/promote` | POST | Advance a rollout. |
+| `/v1/admin/networks/{network_id}/policy-history` | GET | List policy revisions. |
+| `/v1/admin/networks/{network_id}/policy-history/{revision}/restore` | POST | Restore a policy revision. |
+| `/v1/admin/networks/{network_id}/policy-preview` | POST | Preview a change without applying it. |
+| `/v1/admin/networks/{network_id}/private-dns` | GET | Inspect network-scoped private DNS records. |
+| `/v1/admin/networks/{network_id}/topology` | GET | Read bounded node topology observations. |
+| `/v1/admin/nodes/{node_id}/credential-recovery-grants` | POST | Issue a one-use node credential recovery grant. |
 
 ## Twingate console endpoints
 
-The Rust controller serves these console endpoints under
+The controller serves these console endpoints under
 `/v1/admin/integrations/twingate`. Every operation requires a tenant owner
 session cookie. Writes also require the CSRF cookie, a matching
 `X-Laneway-CSRF` header, and the controller's HTTPS origin.

@@ -8,7 +8,7 @@ ci_workflow=$repo_dir/.github/workflows/ci.yml
 dockerignore=$repo_dir/.dockerignore
 gitignore=$repo_dir/.gitignore
 compose_gitignore=$repo_dir/deploy/compose/.gitignore
-dockerfile=$repo_dir/deploy/containers/Dockerfile
+dockerfile=$repo_dir/deploy/containers/Dockerfile.rust-relay
 connector_dockerfile=$repo_dir/deploy/containers/Dockerfile.connector
 exit_dockerfile=$repo_dir/deploy/containers/Dockerfile.exit-node
 connector_updater=$repo_dir/deploy/containers/update-connector.sh
@@ -265,59 +265,44 @@ if grep -E '(^|[[:space:]:@])latest([[:space:]]|$)' "$workflow" >/dev/null; then
   exit 1
 fi
 
+[ ! -e "$repo_dir/go/go.mod" ] || {
+  echo "the retired Go workspace still exists" >&2
+  exit 1
+}
 for path in "$dockerfile" "$connector_dockerfile" "$exit_dockerfile"; do
   require '# syntax=docker/dockerfile:1.9@sha256:' "$path"
-  require "FROM --platform=\$BUILDPLATFORM golang:1.26-alpine@sha256:" "$path"
   require 'ARG VERSION=dev' "$path"
-  require 'ARG TARGETOS' "$path"
-  require 'ARG TARGETARCH' "$path"
-  require "CGO_ENABLED=0 GOOS=\${TARGETOS} GOARCH=\${TARGETARCH}" "$path"
-  require "github.com/Doout/laneway/go/internal/buildinfo.Version=\${VERSION}" "$path"
+  if grep -Eq '^FROM .*golang:|^COPY go/' "$path"; then
+    echo "runtime image still depends on the retired Go workspace: $path" >&2
+    exit 1
+  fi
 done
 require 'RUN pnpm build:live' "$dockerfile"
-require 'FROM scratch AS runtime' "$dockerfile"
-require 'FROM runtime AS controller' "$dockerfile"
-require 'FROM runtime AS relay' "$dockerfile"
-require 'FROM scratch AS admin' "$dockerfile"
-require 'FROM build-base AS build-controller' "$dockerfile"
-require 'FROM build-base AS build-relay' "$dockerfile"
-require 'AS build-admin' "$dockerfile"
-require 'COPY --from=build-admin /src/rust/target/release/lanewayd-rs /lanewayd-rs' "$dockerfile"
-require 'COPY --from=node-binary /lanewayd-rs /usr/local/bin/laneway' "$dockerfile"
-require "test \"\${BINARY}\" = laneway-controller" "$dockerfile"
-require "test \"\${BINARY}\" = laneway-relay" "$dockerfile"
-require '-o /out/laneway ./cmd/laneway-controller' "$dockerfile"
-require '-o /out/laneway ./cmd/laneway-relay' "$dockerfile"
-console_copy_stage=$(awk '/^FROM / { stage = $NF } /^COPY --from=console / { print stage }' "$dockerfile")
+require 'FROM scratch AS controller' "$dockerfile"
+require 'FROM scratch AS relay' "$dockerfile"
+console_copy_stage=$(awk '/^FROM / { stage = $NF } /^COPY --from=console-build / { print stage }' "$dockerfile")
 if [ "$console_copy_stage" != controller ]; then
   echo "console assets must be copied exactly once and only by the controller target" >&2
   exit 1
 fi
-require_default_target() {
-  actual=$(awk '/^FROM / { stage = $NF } END { print stage }' "$1")
-  if [ "$actual" != "$2" ]; then
-    echo "$1 selects default Docker target ${actual:-none}, want $2" >&2
-    exit 1
-  fi
-}
-
-require_default_target "$dockerfile" admin
-require_default_target "$connector_dockerfile" rust-connector
-require_default_target "$exit_dockerfile" rust-exit
 require_compose_target controller controller
 require_compose_target relay relay
-require_compose_target admin admin
-require_compose_target exit-node go-exit
-if grep -F 'BINARY:' "$compose_dev_file" >/dev/null ||
-  grep -F -- '--build-arg BINARY=' "$docker_exit_integration" >/dev/null ||
-  grep -F -- '--build-arg BINARY=' "$ci_workflow" >/dev/null; then
-  echo "development and integration image builds must use fixed Docker targets" >&2
-  exit 1
-fi
+require_compose_target admin edge
+# The admin role builds Edge once and Exit uses the same image.
+for role in admin exit-node; do
+  if ! awk -v role="$role:" '
+    $1 == role { active = 1; next }
+    active && /^  [^ ]/ { active = 0 }
+    active && $1 == "image:" && $2 == "laneway-edge:dev" { found = 1 }
+    END { exit !found }
+  ' "$compose_dev_file"; then
+    echo "development Compose $role must use the shared Edge image" >&2
+    exit 1
+  fi
+done
 require '--target controller' "$docker_exit_integration"
 require '--target relay' "$docker_exit_integration"
-require '--target admin' "$docker_exit_integration"
-require '--target go-exit' "$docker_exit_integration"
+require '--target edge' "$docker_exit_integration"
 require '"dev": "vite --mode demo"' "$web_package"
 require '"build": "vite build"' "$web_package"
 require '"build:live": "tsc -b && vite build --mode live"' "$web_package"
@@ -339,7 +324,6 @@ done
 require 'FROM scratch AS node-binary' "$connector_dockerfile"
 require 'COPY --from=node-binary /lanewayd-rs /usr/local/bin/lanewayd-rs' "$connector_dockerfile"
 require 'HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6' "$connector_dockerfile"
-require 'CMD ["/usr/local/bin/laneway-healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
 require 'CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]' "$connector_dockerfile"
 require 'ENTRYPOINT ["/usr/local/bin/laneway"]' "$connector_dockerfile"
 require 'CMD ["connector", "run"]' "$connector_dockerfile"
@@ -357,8 +341,8 @@ for package in ca-certificates iproute2-minimal nftables procps-ng setpriv tini;
 done
 require 'libcap-setcap=2.78-r0' "$exit_dockerfile"
 require 'setcap cap_net_admin=ep /bin/setpriv' "$exit_dockerfile"
-require 'ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]' "$exit_dockerfile"
-require 'CMD ["-config", "/etc/laneway/exit-node.toml"]' "$exit_dockerfile"
+require 'CMD ["connector", "run"]' "$exit_dockerfile"
+require 'entrypoint: [/bin/setpriv, --inh-caps=+net_admin, --ambient-caps=+net_admin, --no-new-privs, /sbin/tini, --, /usr/local/bin/run-rust-exit]' "$repo_dir/deploy/compose/compose.rust.yaml"
 require 'LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/lane-edge:LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST' "$lane_workflow"
@@ -369,7 +353,6 @@ require 'corepack pnpm build:live' "$ci_workflow"
 require 'LANEWAY_EXPECTED_BUILD_MODE=demo corepack pnpm test:e2e' "$ci_workflow"
 require 'LANEWAY_EXPECTED_BUILD_MODE=live corepack pnpm exec playwright test e2e/build-mode.spec.ts' "$ci_workflow"
 require 'FROM base AS edge' "$exit_dockerfile"
-require 'FROM edge AS rust-exit' "$exit_dockerfile"
 require '--target edge --build-arg VERSION="$PREVIEW_VERSION"' "$ci_workflow"
 require '.Cmd == ["connector", "run"]' "$ci_workflow"
 require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-edge:ci' "$ci_workflow"

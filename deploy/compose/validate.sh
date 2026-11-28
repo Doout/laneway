@@ -2,9 +2,12 @@
 set -eu
 
 base_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-runtime=go
-[ "${1:-}" != --rust ] || { runtime=rust; shift; }
-[ "$#" -eq 0 ] || { echo "usage: validate.sh [--rust]" >&2; exit 1; }
+runtime=standard
+case "${1:-}" in
+  --rust) runtime=rust; shift ;;
+  --dev) runtime=dev; shift ;;
+esac
+[ "$#" -eq 0 ] || { echo "usage: validate.sh [--dev | --rust]" >&2; exit 1; }
 if [ -n "${LANEWAY_VERSION:-}" ]; then
   version=$LANEWAY_VERSION
 else
@@ -31,6 +34,7 @@ if [ "$runtime" = rust ]; then
 elif grep -F 'image: ghcr.io/doout/laneway-exit-node:' "$base_dir/compose.yaml" >/dev/null; then
   digest_keys="$digest_keys LANEWAY_CONNECTOR_IMAGE_DIGEST"
 fi
+if [ "$runtime" = dev ]; then digest_keys=; fi
 for key in $digest_keys
 do
   digest=$(printenv "$key" 2>/dev/null || true)
@@ -162,8 +166,8 @@ fi
 
 if grep -E 'REPLACE_|CHANGE_ME|latest([:@]|$)' \
   "$base_dir/generated/config/controller.toml" \
-  "$base_dir/generated/config/relay.toml" \
-  "$base_dir/.env" >/dev/null 2>&1; then
+  "$base_dir/generated/config/relay.toml" >/dev/null 2>&1 ||
+  { [ "$runtime" != dev ] && grep -E 'REPLACE_|CHANGE_ME|latest([:@]|$)' "$base_dir/.env" >/dev/null 2>&1; }; then
   echo "generated configuration still contains a placeholder or mutable tag" >&2
   exit 1
 fi
@@ -208,10 +212,23 @@ if [ -e "$recovery_dir" ] || [ -L "$recovery_dir" ]; then
   done
 fi
 
+# Compose interpolates the release overlay before selecting the local images.
+dev_version_env() {
+  placeholder=sha256:0000000000000000000000000000000000000000000000000000000000000000
+  export LANEWAY_VERSION=dev LANEWAY_RUST_VERSION=dev
+  export LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST="$placeholder"
+  export LANEWAY_RUST_RELAY_IMAGE_DIGEST="$placeholder"
+  export LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST="$placeholder"
+}
+
 compose() {
-  if [ "$runtime" = rust ]; then
-    set -- -f "$base_dir/compose.rust.yaml" "$@"
-  fi
+  case "$runtime" in
+    dev)
+      dev_version_env
+      set -- -f "$base_dir/compose.rust.yaml" -f "$base_dir/compose.dev.yaml" "$@"
+      ;;
+    rust) set -- -f "$base_dir/compose.rust.yaml" "$@" ;;
+  esac
   docker compose --project-directory "$base_dir" --env-file "$base_dir/.env" -f "$base_dir/compose.yaml" "$@"
 }
 compose config --quiet

@@ -268,7 +268,7 @@ StandardError=inherit
 EOF
   systemctl daemon-reload
   start_packaged_relay
-  start_process "$gateway_ns" "$work_dir/gateway.log" "$work_dir/lanewayd" -config "$work_dir/gateway.toml"
+  start_process "$gateway_ns" "$work_dir/gateway.log" "$work_dir/laneway" node run -config "$work_dir/gateway.toml"
   gateway_pid=$last_pid
   wait_log "$last_pid" "$work_dir/gateway.log" interface=lane0
   printf '%s %s\n' "$location_controller_ip" "$discovery_name" >"$work_dir/managed-node.hosts"
@@ -389,7 +389,7 @@ EOF
     start_process "$relay_ns" "$work_dir/relay.log" "$work_dir/laneway-relay" -config "$work_dir/relay.toml"
     wait_log "$last_pid" "$work_dir/relay.log" listening
   fi
-  start_process "$gateway_ns" "$work_dir/gateway.log" "$work_dir/lanewayd" -config "$work_dir/gateway.toml"
+  start_process "$gateway_ns" "$work_dir/gateway.log" "$work_dir/laneway" node run -config "$work_dir/gateway.toml"
   wait_log "$last_pid" "$work_dir/gateway.log" interface=lane0
   before=$("$work_dir/netprobe-inspect" certificate-info -cert "$cert")
   key_hash=$(sha256sum "$key")
@@ -416,5 +416,5 @@ EOF
   packaged_node_started=false
   [[ ! -e "$socket" ]] && ! ip -n "$rust_ns" link show lane0 >/dev/null 2>&1
   cleanup_packaged_node
-  echo 'PASS: packaged systemd node renewed as laneway, exchanged traffic with a Go peer, and removed its socket and tunnel.'
+  echo 'PASS: packaged systemd node renewed as laneway, exchanged traffic with its peer, and removed its socket and tunnel.'
 }

@@ -304,7 +304,7 @@ async fn live_named_volume_update_and_rollback() -> Result<()> {
         Path::new("/.dockerenv").exists()
             && name.starts_with("laneway-connector-update-lab-")
             && valid_name(&name)
-            && image.starts_with("ghcr.io/doout/lane-edge-rust:managed-lab-"),
+            && image.starts_with("ghcr.io/doout/laneway/edge:managed-lab-"),
         "requires the disposable Connector lab"
     );
     let docker = LabDocker;

@@ -1,6 +1,6 @@
-# Shared Rust control plane
+# Shared tenant control plane
 
-Run one Rust controller and one Rust edge relay. The edge serves the platform
+Run one controller and one relay. The relay serves the platform
 hostname (for example, `lane.example.com`) and one hostname per tenant (for
 example, `acme.lane.example.com`). Each hostname has its own administrator
 directory, sessions, database, root credential, workload CA, and network.
@@ -12,9 +12,9 @@ Standalone self-hosted installations use the existing installer and
 `laneway-controller serve`; they do not need a Platform directory, a tenant
 manifest, or a connection to the hosted control plane.
 
-## Preview the operator Platform
+## Run the operator Platform
 
-The Platform is a separate, loopback-only console. It lists configured
+The Platform backend listens on loopback. It lists configured
 tenant hostnames and tracks new requests without exposing instance APIs or
 credentials. Use SSH forwarding for remote access unless you explicitly set
 up the shared HTTPS relay integration below. Starting the backend alone does
@@ -51,8 +51,8 @@ the printed base SHA-256 with the current active manifest; never apply a
 stale candidate. Activate one tenant at a time through the normal shared
 deployment process, then verify HTTPS and bootstrap the tenant owner with
 the existing CLI. If staging fails after writing a database, inspect that
-unpublished file before reusing its path. Public Platform auth, automatic
-activation, and owner invite links are not part of this preview.
+unpublished file before reusing its path. The shipped Platform requires an
+operator to activate the staged manifest and bootstrap the tenant owner.
 
 ### Serve the Platform on the shared HTTPS root
 
@@ -170,8 +170,13 @@ or from shared capacity limits.
 
 ## Verify isolation
 
-`make rust-tenant-interop` runs the actual Rust controller and relay on
-loopback with a platform hostname and two tenants. It checks tenant
-sign-in, network inventory, discovery, enrollment, QUIC relay traffic and
-TCP fallback, including rejection of foreign sessions, network IDs, node
-credentials, enrollment tokens, and cross-tenant packets.
+Run the controller tests from the repository root:
+
+```sh
+cargo test --locked --manifest-path rust/Cargo.toml -p laneway-controller
+```
+
+Before accepting a live change, verify HTTPS and discovery for each hostname,
+then confirm a tenant administrator can see only that tenant’s inventory.
+Check that a client still enrolls and reaches its own approved routes over
+the shared relay.

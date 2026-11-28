@@ -64,22 +64,24 @@ jq -e '
   (.services.relay.healthcheck.test[0] == "CMD")
 ' >/dev/null
 
-LANEWAY_VERSION=1.2.3 \
-LANEWAY_CONTROLLER_IMAGE_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111 \
-LANEWAY_RELAY_IMAGE_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222 \
-LANEWAY_ADMIN_IMAGE_DIGEST=sha256:3333333333333333333333333333333333333333333333333333333333333333 \
-LANEWAY_CONNECTOR_IMAGE_DIGEST=sha256:5555555555555555555555555555555555555555555555555555555555555555 \
-LANEWAY_EXIT_NODE_IMAGE_DIGEST=sha256:4444444444444444444444444444444444444444444444444444444444444444 \
+LANEWAY_VERSION=dev \
+LANEWAY_RUST_VERSION=dev \
+LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+LANEWAY_RUST_RELAY_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
 LANEWAY_CONTROLLER_SERVER_NAME=controller.example.test \
 docker compose --project-directory "$repo_dir/deploy/compose" \
   --env-file /dev/null --profile tools --profile exit-node \
-  -f "$compose_file" -f "$compose_dev_file" config --format json |
+  -f "$compose_file" -f "$repo_dir/deploy/compose/compose.rust.yaml" -f "$compose_dev_file" config --format json |
 jq -e '
   (.services.controller.build.target == "controller") and
   (.services.relay.build.target == "relay") and
-  (.services.admin.build.target == "admin") and
-  (.services["exit-node"].build.target == "go-exit") and
-  (.services.controller.command == ["-config", "/etc/laneway/controller.toml", "-console-dir", "/usr/share/laneway-console"]) and
+  (.services.admin.build.target == "edge") and
+  (.services["exit-node"].image == .services.admin.image) and
+  (.services["exit-node"].build == null) and
+  (.services["exit-node"].entrypoint[-1] == "/usr/local/bin/run-rust-exit") and
+  (.services.controller.command[0] == "serve") and
+  (.services.relay.command == ["--config", "/etc/laneway/relay.toml"]) and
   ([.services.controller.volumes[] | .target != "/usr/share/laneway-console"] | all)
 ' >/dev/null
 

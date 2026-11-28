@@ -9,7 +9,7 @@ if [[ "$(id -u)" != "0" ]]; then
   echo "ERROR: Rust node interoperability requires root" >&2
   exit 1
 fi
-for command in cargo go ip nft grep ping; do
+for command in cargo ip nft grep ping; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "ERROR: required command is missing: ${command}" >&2
     exit 1
@@ -48,16 +48,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-(
-  cd "${repo_root}/go"
-  go build -o "${work_dir}/laneway" ./cmd/laneway
-  go build -o "${work_dir}/go-node" ./cmd/laneway
-  go build -o "${work_dir}/go-relay" ./cmd/laneway-relay
-)
 cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-relay
 cp "${repo_root}/rust/target/debug/laneway-inspect-probe" "${work_dir}/netprobe"
 cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
 cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/rust-relay"
+ln "${work_dir}/rust-node" "${work_dir}/laneway"
 
 network_id="00000000000000000000000000000001"
 node_a_id="00000000000000000000000000000002"
@@ -136,26 +131,6 @@ ip -n "${external_ns}" address add 2001:db8:253::2/64 dev eth0
 ip -n "${node_a_ns}" link set wan0 up
 ip -n "${external_ns}" link set eth0 up
 
-cat >"${work_dir}/go-relay.toml" <<EOF
-mode = "relay"
-state_dir = "${work_dir}/go-relay-state"
-socket_path = "${work_dir}/go-relay.sock"
-[tls]
-certificate = "${work_dir}/pki/relay.crt"
-private_key = "${work_dir}/pki/relay.key"
-ca = "${work_dir}/pki/ca.crt"
-[relay]
-listen = "${relay_ip}:4433"
-[[peers]]
-network_id = "${network_id}"
-node_id = "${node_a_id}"
-prefixes = ["100.113.0.1/32", "fd71:6e65:7761::1/128"]
-[[peers]]
-network_id = "${network_id}"
-node_id = "${node_b_id}"
-prefixes = ["100.113.0.2/32", "fd71:6e65:7761::2/128"]
-EOF
-
 cat >"${work_dir}/rust-relay.toml" <<EOF
 mode = "relay"
 state_dir = "${work_dir}/rust-relay-state"
@@ -166,6 +141,7 @@ private_key = "${work_dir}/pki/relay.key"
 ca = "${work_dir}/pki/ca.crt"
 [relay]
 listen = "${relay_ip}:4433"
+metrics_listen = "127.0.0.1:6060"
 queue_depth = 16
 max_sessions = 8
 max_routes = 4096
@@ -241,66 +217,6 @@ rust_node_config "${work_dir}/rust-a.toml" "${node_a_id}" "${work_dir}/pki/a.crt
 rust_node_config "${work_dir}/rust-b.toml" "${node_b_id}" "${work_dir}/pki/b.crt" "${work_dir}/pki/b.key" \
   "${node_b_v4}" "${node_b_v6}" "${node_a_id}" "${node_a_v4}" "${node_a_v6}"
 
-cat >"${work_dir}/go-b.toml" <<EOF
-mode = "node"
-state_dir = "${work_dir}/go-b-state"
-socket_path = "${work_dir}/go-b.sock"
-[tls]
-certificate = "${work_dir}/pki/b.crt"
-private_key = "${work_dir}/pki/b.key"
-ca = "${work_dir}/pki/ca.crt"
-[node]
-name = "interop-go-b"
-relay_address = "${relay_ip}:4433"
-relay_network_id = "${network_id}"
-relay_service_id = "${relay_id}"
-overlay_addresses = ["100.113.0.2/32", "fd71:6e65:7761::2/128"]
-reconnect_min = "50ms"
-reconnect_max = "500ms"
-[tcp_fallback]
-address = "${relay_ip}:4443"
-handshake_timeout = "5s"
-write_timeout = "5s"
-idle_timeout = "15s"
-keepalive_period = "5s"
-quic_probe_interval = "5m"
-queue_depth = 16
-[[peers]]
-network_id = "${network_id}"
-node_id = "${node_a_id}"
-prefixes = ["100.113.0.1/32", "fd71:6e65:7761::1/128"]
-EOF
-
-cat >"${work_dir}/go-a.toml" <<EOF
-mode = "node"
-state_dir = "${work_dir}/go-a-state"
-socket_path = "${work_dir}/go-a.sock"
-[tls]
-certificate = "${work_dir}/pki/a.crt"
-private_key = "${work_dir}/pki/a.key"
-ca = "${work_dir}/pki/ca.crt"
-[node]
-name = "interop-go-a"
-relay_address = "${relay_ip}:4433"
-relay_network_id = "${network_id}"
-relay_service_id = "${relay_id}"
-overlay_addresses = ["100.113.0.1/32", "fd71:6e65:7761::1/128"]
-reconnect_min = "50ms"
-reconnect_max = "500ms"
-[tcp_fallback]
-address = "${relay_ip}:4443"
-handshake_timeout = "5s"
-write_timeout = "5s"
-idle_timeout = "15s"
-keepalive_period = "5s"
-quic_probe_interval = "5m"
-queue_depth = 16
-[[peers]]
-network_id = "${network_id}"
-node_id = "${node_b_id}"
-prefixes = ["100.113.0.2/32", "fd71:6e65:7761::2/128"]
-EOF
-
 cp "${work_dir}/rust-a.toml" "${work_dir}/rust-a-direct.toml"
 cat >>"${work_dir}/rust-a-direct.toml" <<EOF
 [direct]
@@ -314,16 +230,17 @@ node_id = "${node_b_id}"
 address = "10.253.0.3:45002"
 EOF
 
-cp "${work_dir}/go-b.toml" "${work_dir}/go-b-direct.toml"
-cat >>"${work_dir}/go-b-direct.toml" <<EOF
+cp "${work_dir}/rust-b.toml" "${work_dir}/rust-b-direct.toml"
+cat >>"${work_dir}/rust-b-direct.toml" <<EOF
 [direct]
-enabled = true
 listen = "10.253.0.3:45002"
-candidate_ttl = "30s"
 probe_interval = "50ms"
 probe_timeout = "3s"
-rendezvous_interval = "6s"
-max_candidates = 4
+probe_attempts = 3
+candidate_refresh_interval = "6s"
+[[direct_peers]]
+node_id = "${node_a_id}"
+address = "10.253.0.2:45001"
 EOF
 
 cp "${work_dir}/rust-a.toml" "${work_dir}/rust-a-subnet.toml"
@@ -341,8 +258,21 @@ mode = "routed"
 output_interface = "lan0"
 EOF
 
-sed 's#prefixes = \["100.113.0.1/32", "fd71:6e65:7761::1/128"\]#prefixes = ["100.113.0.1/32", "fd71:6e65:7761::1/128", "192.168.77.0/24", "192.168.78.0/24"]#' \
-  "${work_dir}/go-b.toml" >"${work_dir}/go-b-subnet.toml"
+node_b_routes() {
+  local path="$1"
+  shift
+  cp "${work_dir}/rust-b.toml" "${path}"
+  for prefix; do
+    cat >>"${path}" <<EOF
+[[routes]]
+prefix = "${prefix}"
+via_node = "${node_a_id}"
+kind = "subnet"
+EOF
+  done
+}
+
+node_b_routes "${work_dir}/rust-b-subnet.toml" 192.168.77.0/24 192.168.78.0/24
 sed 's#prefixes = \["100.113.0.1/32", "fd71:6e65:7761::1/128"\]#prefixes = ["100.113.0.1/32", "fd71:6e65:7761::1/128", "192.168.77.0/24", "192.168.78.0/24"]#' \
   "${work_dir}/rust-relay.toml" >"${work_dir}/rust-relay-subnet.toml"
 
@@ -354,8 +284,7 @@ exit_gateway_sources = ["${node_b_v4}/32", "${node_b_v6}/128"]
 exit_output_interface = "wan0"
 EOF
 
-sed 's#prefixes = \["100.113.0.1/32", "fd71:6e65:7761::1/128"\]#prefixes = ["100.113.0.1/32", "fd71:6e65:7761::1/128", "203.0.113.2/32", "2001:db8:253::2/128"]#' \
-  "${work_dir}/go-b.toml" >"${work_dir}/go-b-exit-targets.toml"
+node_b_routes "${work_dir}/rust-b-exit-targets.toml" 203.0.113.2/32 2001:db8:253::2/128
 sed 's#prefixes = \["100.113.0.1/32", "fd71:6e65:7761::1/128"\]#prefixes = ["100.113.0.1/32", "fd71:6e65:7761::1/128", "203.0.113.2/32", "2001:db8:253::2/128"]#' \
   "${work_dir}/rust-relay.toml" >"${work_dir}/rust-relay-exit.toml"
 
@@ -481,28 +410,6 @@ wait_metric_value() {
 }
 
 if [[ "${LANEWAY_INTEROP_DIRECT_ONLY:-0}" != "1" ]]; then
-echo "==> Rust node -> Go relay -> Go node"
-start_process "${relay_ns}" "${work_dir}/go-relay.log" "${work_dir}/go-relay" -config "${work_dir}/go-relay.toml"
-go_relay_pid="${last_pid}"
-wait_log "${go_relay_pid}" "${work_dir}/go-relay.log" "listening"
-start_process "${node_a_ns}" "${work_dir}/rust-a-go-relay.log" "${work_dir}/rust-node" --config "${work_dir}/rust-a.toml"
-rust_a_pid="${last_pid}"
-start_process "${node_b_ns}" "${work_dir}/go-b.log" "${work_dir}/go-node" node run -config "${work_dir}/go-b.toml"
-go_b_pid="${last_pid}"
-wait_log "${rust_a_pid}" "${work_dir}/rust-a-go-relay.log" "relay connected"
-wait_log "${go_b_pid}" "${work_dir}/go-b.log" "interface=lane0"
-echo "==> bidirectional IPv4 and IPv6 over mixed Rust/Go nodes"
-exchange_bidirectional rust-go-go
-echo "==> ICMP and SSH-class TCP use ordinary overlay routes"
-ip netns exec "${node_a_ns}" ping -c 2 -W 2 "${node_b_v4}"
-ip netns exec "${node_a_ns}" ping -c 2 -W 2 "${node_b_v6}"
-ip netns exec "${node_b_ns}" ping -c 2 -W 2 "${node_a_v4}"
-ip netns exec "${node_b_ns}" ping -c 2 -W 2 "${node_a_v6}"
-exchange_tcp_bidirectional rust-go-overlay-tcp
-stop_process "${rust_a_pid}"
-stop_process "${go_b_pid}"
-stop_process "${go_relay_pid}"
-
 echo "==> Rust node -> Rust relay -> Rust node"
 start_process "${relay_ns}" "${work_dir}/rust-relay.log" "${work_dir}/rust-relay" --config "${work_dir}/rust-relay.toml"
 rust_relay_pid="${last_pid}"
@@ -514,28 +421,18 @@ rust_b_pid="${last_pid}"
 wait_log "${rust_a_pid}" "${work_dir}/rust-a-rust-relay.log" "relay connected"
 wait_log "${rust_b_pid}" "${work_dir}/rust-b.log" "relay connected"
 wait_log "${rust_relay_pid}" "${work_dir}/rust-relay.log" "registrations: 2"
-exchange rust-rust-rust
+exchange_bidirectional rust-overlay-udp
+echo "==> ICMP and SSH-class TCP use ordinary overlay routes"
+ip netns exec "${node_a_ns}" ping -c 2 -W 2 "${node_b_v4}"
+ip netns exec "${node_a_ns}" ping -c 2 -W 2 "${node_b_v6}"
+ip netns exec "${node_b_ns}" ping -c 2 -W 2 "${node_a_v4}"
+ip netns exec "${node_b_ns}" ping -c 2 -W 2 "${node_a_v6}"
+exchange_tcp_bidirectional rust-overlay-tcp
 stop_process "${rust_a_pid}"
 stop_process "${rust_b_pid}"
 stop_process "${rust_relay_pid}"
 
-echo "==> Rust node -> Rust relay -> Go node"
-start_process "${relay_ns}" "${work_dir}/rust-relay-mixed.log" "${work_dir}/rust-relay" --config "${work_dir}/rust-relay.toml"
-rust_relay_pid="${last_pid}"
-wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-mixed.log" "listening"
-start_process "${node_a_ns}" "${work_dir}/rust-a-rust-relay-go.log" "${work_dir}/rust-node" --config "${work_dir}/rust-a.toml"
-rust_a_pid="${last_pid}"
-start_process "${node_b_ns}" "${work_dir}/go-b-rust-relay.log" "${work_dir}/go-node" node run -config "${work_dir}/go-b.toml"
-go_b_pid="${last_pid}"
-wait_log "${rust_a_pid}" "${work_dir}/rust-a-rust-relay-go.log" "relay connected"
-wait_log "${go_b_pid}" "${work_dir}/go-b-rust-relay.log" "interface=lane0"
-wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-mixed.log" "registrations: 2"
-exchange rust-rust-go
-stop_process "${rust_a_pid}"
-stop_process "${go_b_pid}"
-stop_process "${rust_relay_pid}"
-
-echo "==> Rust node -> Rust relay TLS/TCP fallback -> Go QUIC node"
+echo "==> Rust node -> Rust relay TLS/TCP fallback -> QUIC node"
 ip netns exec "${node_a_ns}" nft add table inet laneway_quic_block
 ip netns exec "${node_a_ns}" nft add chain inet laneway_quic_block output \
   '{ type filter hook output priority -10; policy accept; }'
@@ -546,27 +443,27 @@ rust_relay_pid="${last_pid}"
 wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-tcp.log" "listening"
 start_process "${node_a_ns}" "${work_dir}/rust-a-rust-tcp.log" "${work_dir}/rust-node" --config "${work_dir}/rust-a.toml"
 rust_a_pid="${last_pid}"
-start_process "${node_b_ns}" "${work_dir}/go-b-rust-tcp.log" "${work_dir}/go-node" node run -config "${work_dir}/go-b.toml"
-go_b_pid="${last_pid}"
+start_process "${node_b_ns}" "${work_dir}/rust-b-rust-tcp.log" "${work_dir}/rust-node" --config "${work_dir}/rust-b.toml"
+rust_b_pid="${last_pid}"
 wait_log "${rust_a_pid}" "${work_dir}/rust-a-rust-tcp.log" "Rust agent relay TCP fallback connected"
-wait_log "${go_b_pid}" "${work_dir}/go-b-rust-tcp.log" "interface=lane0"
+wait_log "${rust_b_pid}" "${work_dir}/rust-b-rust-tcp.log" "relay connected"
 wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-tcp.log" "registrations: 2"
-exchange rust-rust-tcp-go
+exchange rust-relay-tcp
 stop_process "${rust_a_pid}"
-stop_process "${go_b_pid}"
+stop_process "${rust_b_pid}"
 stop_process "${rust_relay_pid}"
 ip netns exec "${node_a_ns}" nft delete table inet laneway_quic_block
 
-echo "==> Go node -> Rust subnet router -> NAT and routed LAN applications"
+echo "==> Rust node -> Rust subnet router -> NAT and routed LAN applications"
 start_process "${relay_ns}" "${work_dir}/rust-relay-subnet.log" "${work_dir}/rust-relay" --config "${work_dir}/rust-relay-subnet.toml"
 rust_relay_pid="${last_pid}"
 wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-subnet.log" "listening"
 start_process "${node_a_ns}" "${work_dir}/rust-a-subnet.log" "${work_dir}/rust-node" --config "${work_dir}/rust-a-subnet.toml"
 rust_a_pid="${last_pid}"
-start_process "${node_b_ns}" "${work_dir}/go-b-subnet.log" "${work_dir}/go-node" node run -config "${work_dir}/go-b-subnet.toml"
-go_b_pid="${last_pid}"
+start_process "${node_b_ns}" "${work_dir}/rust-b-subnet.log" "${work_dir}/rust-node" --config "${work_dir}/rust-b-subnet.toml"
+rust_b_pid="${last_pid}"
 wait_log "${rust_a_pid}" "${work_dir}/rust-a-subnet.log" "relay connected"
-wait_log "${go_b_pid}" "${work_dir}/go-b-subnet.log" "interface=lane0"
+wait_log "${rust_b_pid}" "${work_dir}/rust-b-subnet.log" "relay connected"
 wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-subnet.log" "registrations: 2"
 ip netns exec "${node_b_ns}" ping -c 2 -W 2 192.168.77.2
 ip netns exec "${node_b_ns}" ping -c 2 -W 2 192.168.78.2
@@ -579,19 +476,19 @@ exchange_one rust-subnet-routed-udp "${lan_ns}" 192.168.78.2:9501 \
 exchange_tcp_one rust-subnet-routed-tcp "${lan_ns}" 192.168.78.2:9502 \
   "${node_b_ns}" 192.168.78.2:9502 "${node_b_v4}:"
 stop_process "${rust_a_pid}"
-stop_process "${go_b_pid}"
+stop_process "${rust_b_pid}"
 stop_process "${rust_relay_pid}"
 
-echo "==> Go node -> Rust exit gateway -> NATed IPv4 and IPv6 applications"
+echo "==> Rust node -> Rust exit gateway -> NATed IPv4 and IPv6 applications"
 start_process "${relay_ns}" "${work_dir}/rust-relay-exit.log" "${work_dir}/rust-relay" --config "${work_dir}/rust-relay-exit.toml"
 rust_relay_pid="${last_pid}"
 wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-exit.log" "listening"
 start_process "${node_a_ns}" "${work_dir}/rust-a-exit.log" "${work_dir}/rust-node" --config "${work_dir}/rust-a-exit.toml"
 rust_a_pid="${last_pid}"
-start_process "${node_b_ns}" "${work_dir}/go-b-exit.log" "${work_dir}/go-node" node run -config "${work_dir}/go-b-exit-targets.toml"
-go_b_pid="${last_pid}"
+start_process "${node_b_ns}" "${work_dir}/rust-b-exit.log" "${work_dir}/rust-node" --config "${work_dir}/rust-b-exit-targets.toml"
+rust_b_pid="${last_pid}"
 wait_log "${rust_a_pid}" "${work_dir}/rust-a-exit.log" "relay connected"
-wait_log "${go_b_pid}" "${work_dir}/go-b-exit.log" "interface=lane0"
+wait_log "${rust_b_pid}" "${work_dir}/rust-b-exit.log" "relay connected"
 wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-exit.log" "registrations: 2"
 ip netns exec "${node_b_ns}" ping -c 2 -W 2 203.0.113.2
 ip netns exec "${node_b_ns}" ping -c 2 -W 2 2001:db8:253::2
@@ -604,29 +501,28 @@ exchange_one rust-exit-v6-udp "${external_ns}" '[2001:db8:253::2]:9601' \
 exchange_tcp_one rust-exit-v6-tcp "${external_ns}" '[2001:db8:253::2]:9602' \
   "${node_b_ns}" '[2001:db8:253::2]:9602' '[2001:db8:253::1]:'
 stop_process "${rust_a_pid}"
-stop_process "${go_b_pid}"
+stop_process "${rust_b_pid}"
 stop_process "${rust_relay_pid}"
 
 fi
 
-echo "==> Rust node -> authenticated direct QUIC -> Go node"
-start_process "${relay_ns}" "${work_dir}/go-relay-direct.log" "${work_dir}/go-relay" \
-  -config "${work_dir}/go-relay.toml" -diagnostics 127.0.0.1:6060
-go_relay_pid="${last_pid}"
-wait_log "${go_relay_pid}" "${work_dir}/go-relay-direct.log" "listening"
-wait_metric_value "${relay_ns}" laneway_forwarded_packets_total 0
-start_process "${node_b_ns}" "${work_dir}/go-b-direct.log" "${work_dir}/go-node" node run -config "${work_dir}/go-b-direct.toml"
-go_b_pid="${last_pid}"
+echo "==> two Rust nodes exchange authenticated direct QUIC packets"
+start_process "${relay_ns}" "${work_dir}/rust-relay-direct.log" "${work_dir}/rust-relay" \
+  --config "${work_dir}/rust-relay.toml"
+rust_relay_pid="${last_pid}"
+wait_log "${rust_relay_pid}" "${work_dir}/rust-relay-direct.log" "listening"
+wait_metric_value "${relay_ns}" laneway_relay_forwarded_packets_total 0
+start_process "${node_b_ns}" "${work_dir}/rust-b-direct.log" "${work_dir}/rust-node" --config "${work_dir}/rust-b-direct.toml"
+rust_b_pid="${last_pid}"
 start_process "${node_a_ns}" "${work_dir}/rust-a-direct.log" "${work_dir}/rust-node" --config "${work_dir}/rust-a-direct.toml"
 rust_a_pid="${last_pid}"
-wait_log "${go_b_pid}" "${work_dir}/go-b-direct.log" "interface=lane0"
+wait_log "${rust_b_pid}" "${work_dir}/rust-b-direct.log" "direct path attached"
 wait_log "${rust_a_pid}" "${work_dir}/rust-a-direct.log" "direct path attached"
-exchange_bidirectional rust-go-direct
-wait_metric_value "${relay_ns}" laneway_forwarded_packets_total 0
+exchange_bidirectional rust-direct
+wait_metric_value "${relay_ns}" laneway_relay_forwarded_packets_total 0
 stop_process "${rust_a_pid}"
-stop_process "${go_b_pid}"
-stop_process "${go_relay_pid}"
+stop_process "${rust_b_pid}"
+stop_process "${rust_relay_pid}"
 grep -Eq 'relay_packets: 0.*direct_packets: [1-9][0-9]*' "${work_dir}/rust-a-direct.log"
-grep -q 'stopped sessions=0 forwarded=0 dropped=0' "${work_dir}/go-relay-direct.log"
 
-echo "PASS: Rust node executable interoperability"
+echo "PASS: Rust node overlay traffic, fallback, subnet routing, Exit NAT, and direct QUIC"

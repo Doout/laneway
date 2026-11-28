@@ -11,51 +11,37 @@ permissions:
 
 jobs:
   architecture-smoke:
-    name: ${{ matrix.label }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: Linux ${{ matrix.arch }} native smoke
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goarch: amd64
-            label: linux/amd64 native smoke
-            runner: ""
-            classification: Native functional smoke on a shared CI runner; metrics are informational only.
-          - goarch: arm64
-            label: linux/arm64 emulated smoke
-            runner: qemu-aarch64
-            classification: QEMU user-mode functional smoke; metrics are not native and must not be compared.
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
-      - name: Install ARM64 user-mode emulator
-        if: matrix.goarch == 'arm64'
-        run: sudo apt-get update && sudo apt-get install -y qemu-user
-      - name: Run all benchmark scenarios (${{ matrix.classification }})
-        env:
-          BENCHMARK_SMOKE_GOARCH: ${{ matrix.goarch }}
-          BENCHMARK_SMOKE_RUNNER: ${{ matrix.runner }}
-          SMOKE_CLASSIFICATION: ${{ matrix.classification }}
-          SMOKE_OUTPUT: benchmark-smoke-${{ matrix.goarch }}.txt
+          workspaces: rust
+          shared-key: dataplane-benchmarks-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build and exercise each dataplane mode
         run: |
-          echo "classification: ${SMOKE_CLASSIFICATION}" | tee "${SMOKE_OUTPUT}"
-          make benchmark-arch-smoke | tee -a "${SMOKE_OUTPUT}"
-          {
-            echo "### ${{ matrix.label }}"
-            echo
-            echo "${SMOKE_CLASSIFICATION}"
-            echo
-            echo '```text'
-            grep '^summary ' "${SMOKE_OUTPUT}"
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
-      - name: Archive smoke output
-        uses: actions/upload-artifact@v4
+          set -euo pipefail
+          cargo build --locked --release --manifest-path rust/Cargo.toml -p laneway-bench
+          for mode in node relay relay-forward; do
+            rust/target/release/laneway-bench --mode "$mode" --flows 1 \
+              --packet-size 1200 --duration-secs 1 --json
+          done | tee benchmark-smoke.jsonl
+          jq -es 'map(.mode) == ["node", "relay", "relay-forward"] and all(.[]; .packets > 0)' \
+            benchmark-smoke.jsonl > /dev/null
+      - uses: actions/upload-artifact@v4
         with:
-          name: benchmark-smoke-${{ matrix.goarch }}
-          path: benchmark-smoke-${{ matrix.goarch }}.txt
+          name: benchmark-smoke-${{ matrix.arch }}
+          path: benchmark-smoke.jsonl
           if-no-files-found: error

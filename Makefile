@@ -1,78 +1,39 @@
-.PHONY: build package test race vet benchmark benchmark-matrix benchmark-relay-comparison benchmark-full-matrix benchmark-quic benchmark-unit benchmark-arch-smoke integration privileged-integration docker-exit-integration docker-plugin-integration docker-plugin-rootfs rust-test rust-interop rust-node-interop fmt-check proto proto-lint proto-check management-api-check
+.PHONY: build package test vet fmt-check benchmark benchmark-arch-smoke integration privileged-integration docker-exit-integration docker-plugin-integration docker-plugin-rootfs rust-test rust-node-interop proto-lint proto-check management-api-check
 
 VERSION ?= dev
-PACKAGE_GOOS ?= $(shell cd go && go env GOOS)
-PACKAGE_GOARCH ?= $(shell cd go && go env GOARCH)
-
-BENCHMARK_SMOKE_GOOS ?= linux
-BENCHMARK_SMOKE_GOARCH ?= $(shell cd go && go env GOARCH)
-BENCHMARK_SMOKE_RUNNER ?=
-BENCHMARK_SMOKE_DURATION ?= 1s
-BENCHMARK_SMOKE_SIZE ?= 512
-BENCHMARK_SMOKE_PPS ?= 1000
-BENCHMARK_SMOKE_QUEUE ?= 256
+CARGO_WORKSPACE = --manifest-path rust/Cargo.toml --locked
 
 build:
-	cd go && go build ./...
+	cargo build $(CARGO_WORKSPACE)
 
-# Create a self-contained Linux or macOS release archive in dist/. Linux
-# packages include services; macOS installation selects the foreground client.
+# Package the verified native binaries as the release archive.
 package:
-	VERSION="$(VERSION)" PACKAGE_GOOS="$(PACKAGE_GOOS)" PACKAGE_GOARCH="$(PACKAGE_GOARCH)" ./scripts/package.sh
+	VERSION="$(VERSION)" PACKAGE_OS="$(PACKAGE_OS)" PACKAGE_ARCH="$(PACKAGE_ARCH)" ./scripts/package.sh
 
 test:
-	cd go && go test ./...
+	cargo test $(CARGO_WORKSPACE)
 
-race:
-	cd go && go test -race ./...
+vet:
+	cargo clippy $(CARGO_WORKSPACE) --all-targets -- -D warnings
 
-benchmark: benchmark-unit benchmark-matrix
+rust-test: test vet
 
-benchmark-unit:
-	cd go && go test -run '^$$' -bench . -benchmem ./internal/protocol ./internal/routing ./internal/dataplane ./internal/relay ./internal/tcpfallback
+fmt-check:
+	cargo fmt --manifest-path rust/Cargo.toml --all -- --check
 
-benchmark-quic:
-	cd go && go run ./cmd/laneway-bench quic-relay -duration 3s -size 1200
+benchmark: benchmark-arch-smoke
 
-# Bounded smoke across native UDP, QUIC stream, and every packet-pump scenario. Use
-# laneway-bench matrix directly for the full flow/size/profile cross-product.
-benchmark-matrix:
-	cd go && go run ./cmd/laneway-bench matrix -duration 250ms -pps 1000 -queue 256 -flows 1 -sizes small,mtu -profiles lan
-
-# Bounded, apples-to-apples authenticated relay comparison. The Go driver owns
-# the ephemeral PKI and node generators and supervises the release Rust relay.
-benchmark-relay-comparison:
-	cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-relay
-	cd go && go run ./cmd/laneway-bench matrix -scenarios relay-quic,relay-tcp,rust-relay-quic,rust-relay-tcp -rust-relay-binary ../rust/target/release/laneway-relay -duration 250ms -pps 1000 -queue 256 -flows 1 -sizes small,mtu -profiles lan
-
-# Release evidence: every scenario across 1/10/100 flows, small/MTU packets,
-# LAN/WAN profiles, then the same cross-product under deterministic random and
-# burst loss. The scheduled full-matrix workflow preserves both outputs.
-benchmark-full-matrix:
-	cargo build --manifest-path rust/Cargo.toml --locked --release -p laneway-relay
-	cd go && go run ./cmd/laneway-bench matrix -duration 1s -pps 0 -queue 4096 -flows 1,10,100 -sizes small,mtu -profiles lan,wan -loss 0 -seed 1
-	cd go && go run ./cmd/laneway-bench matrix -duration 1s -pps 10000 -queue 4096 -flows 1,10,100 -sizes small,mtu -profiles lan,wan -loss 1 -burst-loss 3 -seed 20260807
-	cd go && go run ./cmd/laneway-bench matrix -scenarios relay-quic,relay-tcp,rust-relay-quic,rust-relay-tcp -rust-relay-binary ../rust/target/release/laneway-relay -duration 1s -pps 10000 -queue 4096 -flows 1,10,100 -sizes small,mtu -profiles lan,wan -loss 0 -seed 1
-	cd go && go run ./cmd/laneway-bench matrix -scenarios relay-quic,relay-tcp,rust-relay-quic,rust-relay-tcp -rust-relay-binary ../rust/target/release/laneway-relay -duration 1s -pps 10000 -queue 4096 -flows 1,10,100 -sizes small,mtu -profiles lan,wan -loss 1 -burst-loss 3 -seed 20260807
-
-# Functional architecture coverage only. In particular, results collected via
-# BENCHMARK_SMOKE_RUNNER=qemu-aarch64 are not performance-comparable.
 benchmark-arch-smoke:
-	@set -eu; \
-	bench_tmp="$$(mktemp -d)"; \
-	trap 'rm -rf "$$bench_tmp"' EXIT INT TERM; \
-	cd go; \
-	CGO_ENABLED=0 GOOS="$(BENCHMARK_SMOKE_GOOS)" GOARCH="$(BENCHMARK_SMOKE_GOARCH)" \
-		go build -o "$$bench_tmp/laneway-bench" ./cmd/laneway-bench; \
-	$(BENCHMARK_SMOKE_RUNNER) "$$bench_tmp/laneway-bench" matrix \
-		-duration "$(BENCHMARK_SMOKE_DURATION)" -sizes "$(BENCHMARK_SMOKE_SIZE)" \
-		-flows 1 -profiles lan -pps "$(BENCHMARK_SMOKE_PPS)" -queue "$(BENCHMARK_SMOKE_QUEUE)"
+	cargo run $(CARGO_WORKSPACE) --release -p laneway-bench -- --mode node --flows 1 --packet-size 1200 --duration-secs 1 --json
 
 integration:
 	./integration/nonprivileged.sh
 
 privileged-integration:
-	LANEWAY_RUN_PRIVILEGED=1 ./integration/linux-netns.sh
+	LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-kernel-netns.sh
+
+rust-node-interop:
+	LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
 
 docker-exit-integration:
 	LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-exit-node.sh
@@ -83,47 +44,12 @@ docker-plugin-integration:
 docker-plugin-rootfs:
 	VERSION="$(VERSION)" ./deploy/docker-plugin/build-rootfs.sh
 
-rust-test:
-	cargo test --manifest-path rust/Cargo.toml --locked
-	cargo clippy --manifest-path rust/Cargo.toml --all-targets --locked -- -D warnings
-
-rust-interop:
-	cd go && go test -count=1 -race -tags=rustinterop ./integration/rustrelay -v
-
-rust_tenant_interop_test = cd go && LANEWAY_RUST_CONTROLLER="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/laneway-controller" LANEWAY_RUST_RELAY="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/laneway-relay" go test -count=1 -tags=rustinterop ./integration/rustrelay -run '^TestSharedTenantIsolation$$' -v
-
-.PHONY: rust-controller-interop rust-tenant-interop
-rust-controller-interop:
-	cargo build --locked --manifest-path rust/Cargo.toml -p laneway-controller -p laneway-healthcheck -p laneway-relay -p lanewayd-rs
-	cd go && LANEWAY_RUST_CONTROLLER="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/laneway-controller" LANEWAY_RUST_RELAY="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/laneway-relay" LANEWAY_RUST_NODE="$(abspath $(or $(CARGO_TARGET_DIR),rust/target))/debug/lanewayd-rs" go test -count=1 -tags=rustinterop ./internal/controller ./internal/controllerservice -run '^TestRust(Controller(Fresh|Inventory|Sessions|HTTPS|QUIC|Discovery|ServiceTLS|RelayTLS|Topology|FleetUpdates)|NodeCredentialRecovery)$$' -v
-	cargo test --locked --manifest-path rust/Cargo.toml -p laneway-controller --test node_issuer_go -- --ignored
-	$(rust_tenant_interop_test)
-
-rust-tenant-interop:
-	cargo build --locked --manifest-path rust/Cargo.toml -p laneway-controller -p laneway-relay
-	$(rust_tenant_interop_test)
-
-rust-node-interop:
-	LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
-
-vet:
-	cd go && go vet ./...
-
-fmt-check:
-	@files="$$(find go -name '*.go' -type f -print)"; \
-	if [ -n "$$files" ] && [ -n "$$(gofmt -l $$files)" ]; then \
-		gofmt -l $$files; \
-		exit 1; \
-	fi
-
-proto:
-	buf generate
-
 proto-lint:
 	buf lint
 
-proto-check: proto-lint proto
-	git diff --exit-code -- go/api
+# Cargo generates and compiles the Rust protocol bindings from the schemas.
+proto-check: proto-lint
+	cargo check $(CARGO_WORKSPACE) -p laneway-protocol
 
 management-api-check:
 	cd web && corepack pnpm api:check

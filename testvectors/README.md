@@ -9,7 +9,7 @@ SHA-256 digest.
 - Protobuf fixtures are examples; decoders must accept any valid encoding.
 - Frame lengths and packet-header integers use network byte order.
 
-Go and Rust tests consume the same packet, identity, control, routing, and
+The conformance tests consume this packet, identity, control, routing, and
 invalid-input corpus. Packet byte `0x10` starts a raw IP frame and `0x11` an
 opaque WireGuard frame; both are followed by a four-byte route handle.
 

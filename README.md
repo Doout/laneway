@@ -15,17 +15,20 @@ You need a Linux control-plane host with Docker Engine 26+, Docker Compose v2,
 
 ### 1. Deploy the control plane
 
-Replace the domain and run this on the control-plane host:
+Replace the domain and use a signed release tag. This example pins v0.3.12.
+Run it on the control-plane host:
 
 ```sh
-export LANEWAY_DOMAIN=lane.example.com; curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install.sh | sudo env LANEWAY_DOMAIN="$LANEWAY_DOMAIN" bash
+version=v0.3.12
+curl -fsSL "https://github.com/Doout/laneway/releases/download/$version/install.sh" |
+  sudo env LANEWAY_VERSION="$version" LANEWAY_DOMAIN=lane.example.com sh
 ```
 
 Copy the printed recovery-kit directory off the server, then verify the
 deployment:
 
 ```sh
-sudo laneway control production-check
+sudo laneway control readiness
 ```
 
 The installer does not change DNS, firewall rules, routes, interfaces, or
@@ -41,9 +44,9 @@ sudo laneway control invite --name office --docker --connector --bootstrap
 
 Run the generated `curl | sudo bash` command within ten minutes on a Linux
 Docker host that can reach the private network. Its encrypted payload is
-single-use; enrollment starts a clean scratch `lane-edge` container with no
-setup token or key. The Connector needs no inbound port, TUN device, or Linux
-capability.
+single-use. Enrollment starts the signed `ghcr.io/doout/laneway/edge` image
+with no setup token or key. The Connector needs no inbound port, TUN device,
+or Linux capability.
 
 ### 3. Enroll a client
 
@@ -53,7 +56,9 @@ A fresh client install defaults to this mode.
 To follow the system tunnel example below, install the system client on Linux or macOS:
 
 ```sh
-curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install.sh | bash -s -- --system
+version=v0.3.12
+curl -fsSL "https://github.com/Doout/laneway/releases/download/$version/install.sh" |
+  env LANEWAY_VERSION="$version" sh -s -- --system
 ```
 
 Create a login token on the control-plane host:
@@ -94,10 +99,11 @@ UDP, not ICMP; test with a reachable service such as
 
 ## Documentation
 
-- [Control-plane deployment and recovery](deploy/compose/README.md)
+- [Control-plane deployment and recovery](https://github.com/Doout/laneway/blob/main/deploy/compose/README.md)
 - [Rootless SOCKS5 client](docs/rootless.md)
 - [Operations and troubleshooting](docs/operations.md)
-- [Protocol specifications](spec/)
+- [Protocol specifications](https://github.com/Doout/laneway/tree/main/spec)
+- [Build and test from source](https://github.com/Doout/laneway/blob/main/rust/README.md)
 - [Security reporting](SECURITY.md)
 
 ## License

@@ -4,37 +4,37 @@ set -eu
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 project_dir=$(CDPATH='' cd -- "$script_dir/.." && pwd)
 version=${VERSION-dev}
-package_goos=${PACKAGE_GOOS:-$(uname -s | tr '[:upper:]' '[:lower:]')}
-package_goarch=${PACKAGE_GOARCH:-}
-if [ -z "$package_goarch" ]; then
+package_os=${PACKAGE_OS:-${PACKAGE_GOOS:-$(uname -s | tr '[:upper:]' '[:lower:]')}}
+package_arch=${PACKAGE_ARCH:-${PACKAGE_GOARCH:-}}
+if [ -z "$package_arch" ]; then
   case "$(uname -m)" in
-    x86_64) package_goarch=amd64 ;;
-    arm64|aarch64) package_goarch=arm64 ;;
-    *) package_goarch=$(uname -m) ;;
+    x86_64) package_arch=amd64 ;;
+    arm64|aarch64) package_arch=arm64 ;;
+    *) package_arch=$(uname -m) ;;
   esac
 fi
 package_rust_runtime_dir=${PACKAGE_RUST_RUNTIME_DIR:-}
 package_rust_macos=${PACKAGE_RUST_MACOS:-}
 
-case "$package_goos" in linux|darwin) ;; *) echo "unsupported package operating system: $package_goos" >&2; exit 1;; esac
-case "$package_goarch" in
+case "$package_os" in linux|darwin) ;; *) echo "unsupported package operating system: $package_os" >&2; exit 1;; esac
+case "$package_arch" in
   amd64|arm64) ;;
   *)
-    echo "unsupported package architecture: $package_goarch" >&2
+    echo "unsupported package architecture: $package_arch" >&2
     exit 1
     ;;
 esac
 [ -n "$version" ] || { echo "version is empty" >&2; exit 1; }
-case "$package_goos" in
+case "$package_os" in
   linux)
     [ -n "$package_rust_runtime_dir" ] && [ -z "$package_rust_macos" ] ||
       { echo "Linux packages require PACKAGE_RUST_RUNTIME_DIR (the five static Rust runtimes)" >&2; exit 1; }
-    sh "$script_dir/verify-rust-release-runtime.sh" "$package_rust_runtime_dir" "$package_goarch"
+    sh "$script_dir/verify-rust-release-runtime.sh" "$package_rust_runtime_dir" "$package_arch"
     ;;
   darwin)
     [ -n "$package_rust_macos" ] && [ -z "$package_rust_runtime_dir" ] ||
       { echo "macOS packages require PACKAGE_RUST_MACOS (native lanewayd-rs)" >&2; exit 1; }
-    sh "$script_dir/verify-rust-macos-runtime.sh" "$package_rust_macos" "$package_goarch"
+    sh "$script_dir/verify-rust-macos-runtime.sh" "$package_rust_macos" "$package_arch"
     ;;
 esac
 case "$version" in
@@ -47,10 +47,10 @@ esac
 staging_dir=$(mktemp -d)
 trap 'find "$staging_dir" -depth -delete' EXIT HUP INT TERM
 package_dir="$staging_dir/laneway"
-archive="laneway_${package_goos}_${package_goarch}.tar.gz"
-standalone="laneway_${package_goos}_${package_goarch}"
+archive="laneway_${package_os}_${package_arch}.tar.gz"
+standalone="laneway_${package_os}_${package_arch}"
 mkdir -p "$package_dir/bin" "$package_dir/docs" "$project_dir/dist"
-if [ "$package_goos" = linux ]; then
+if [ "$package_os" = linux ]; then
 	mkdir -p "$package_dir/sbin" "$package_dir/examples" "$package_dir/systemd" \
 		"$package_dir/nftables" "$package_dir/spec" "$package_dir/deploy" "$package_dir/integration"
 	for runtime in laneway-controller-rs laneway-healthcheck-rs laneway-relay-rs laneway-update-rs lanewayd-rs; do
@@ -71,7 +71,7 @@ else
 	cp "$project_dir/docs/rust-runtime-migration.md" "$package_dir/docs/"
 fi
 
-case "$package_goos" in
+case "$package_os" in
   linux) install -m 0755 "$package_rust_runtime_dir/lanewayd-rs" "$package_dir/bin/laneway" ;;
   darwin) install -m 0755 "$package_rust_macos" "$package_dir/bin/laneway" ;;
 esac
@@ -82,7 +82,7 @@ cp "$project_dir/LICENSE-MIT" "$project_dir/LICENSE-APACHE" "$package_dir/"
 cp "$project_dir/docs/operations.md" "$package_dir/docs/operations.md"
 cp "$project_dir/docs/rootless.md" "$package_dir/docs/rootless.md"
 cp "$project_dir/docs/ephemeral-shared-host-exit.md" "$package_dir/docs/ephemeral-shared-host-exit.md"
-if [ "$package_goos" = linux ]; then
+if [ "$package_os" = linux ]; then
 cp "$project_dir/deploy/examples/controller.toml" \
   "$project_dir/deploy/examples/node-controller.toml" \
   "$project_dir/deploy/examples/node.toml" \
@@ -127,7 +127,7 @@ printf '%s\n' "$version" > "$package_dir/VERSION"
 find "$package_dir" -type f -exec chmod 0644 {} +
 find "$package_dir" -type d -exec chmod 0755 {} +
 chmod 0755 "$package_dir/install.sh" "$package_dir/bin/laneway"
-if [ "$package_goos" = linux ]; then
+if [ "$package_os" = linux ]; then
 	chmod 0755 "$package_dir"/sbin/* "$package_dir"/deploy/compose/*.sh \
 		"$package_dir"/deploy/compose/laneway-control \
 		"$package_dir"/deploy/containers/update-connector.sh \
@@ -151,7 +151,7 @@ else
 fi
 gzip -n < "$staging_dir/payload.tar" > "$tmp_archive"
 mv "$tmp_archive" "$project_dir/dist/$archive"
-if [ "$package_goos" = darwin ]; then
+if [ "$package_os" = darwin ]; then
 	cp "$package_dir/bin/laneway" "$project_dir/dist/$standalone"
 	chmod 0755 "$project_dir/dist/$standalone"
 fi

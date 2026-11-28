@@ -1,8 +1,8 @@
 # Operations
 
 Use the [root README](../README.md) for first-time setup and the
-[Compose guide](../deploy/compose/README.md) for deployment and recovery.
-See [Shared Rust control plane](shared-tenant-control-plane.md) for the
+[Compose guide](https://github.com/Doout/laneway/blob/main/deploy/compose/README.md) for deployment and recovery.
+See [Shared tenant control plane](https://github.com/Doout/laneway/blob/main/docs/shared-tenant-control-plane.md) for the
 separate, opt-in tenant deployment.
 
 ## Boundaries
@@ -26,29 +26,30 @@ sudo laneway control backup
 sudo laneway control update
 ```
 
-`status` exits nonzero when a required service is unhealthy. On a fresh Rust
-Compose install, `update` selects the latest stable release; pass `vX.Y.Z` to
-select an exact release. It verifies release and image signatures, creates an
-encrypted backup, and brings the release up against a separate copy of the
-controller state. If startup or authenticated inventory fails, it restarts
-the previous release against the original state. Plan a maintenance window:
-the controller and relay stop briefly, and changes accepted by a failed
-candidate are discarded. The command reports the retained source volume
-and settings. It does not migrate Go deployments, perform downgrades, or
-replace host CLI and Compose templates.
+`status` exits nonzero when a required service is unhealthy. On a Compose
+install, `update` selects GitHub’s latest stable release. Pass an exact tag
+such as `vX.Y.Z` to select a signed prerelease.
+
+The updater verifies signatures, creates an encrypted backup, and starts the
+candidate against a separate copy of controller state. If startup or
+authenticated inventory fails, it restarts the previous release against the
+original state. Schedule a maintenance window because both services stop
+briefly. Changes accepted by a failed candidate are discarded. The command
+reports the retained source volume and settings. Update the host CLI and
+Compose templates separately.
 
 Connector identities persist in named Docker volumes. Do not remove the volume
 during an upgrade. From the Connector host, use the updater in the signed
-Linux package to update a standard durable Rust Connector:
+Linux package to update a standard durable Connector:
 
 ```sh
 sudo laneway-update-connector laneway-connector-office
 ```
 
-Add `--version vX.Y.Z` to select an exact signed release. The updater does
-not downgrade or convert a Go Connector. It checks the candidate against
-the existing identity without giving it network access or write access to
-the volume, then switches containers only after those checks pass.
+Add `--version vX.Y.Z` to select an exact signed release. The updater accepts
+newer releases for the current Connector runtime. It checks the candidate
+against the existing identity without network access or volume writes, then
+switches containers after those checks pass.
 
 ## Administrator lifecycle
 
@@ -232,12 +233,12 @@ journalctl -u laneway-relay --since '30 minutes ago' --no-pager
 Node status reports addresses, routes, carrier, certificate and configuration
 lease health, and Exit selection. Peer status reports `direct`, `relay-quic`,
 `tcp-fallback`, or `disconnected`. Endpoint clients use the protected
-[local daemon API v1](local-daemon-api-v1.md) behind these commands.
+[local daemon API v1](https://github.com/Doout/laneway/blob/main/docs/local-daemon-api-v1.md) behind these commands.
 
 Alert on credentials approaching expiry, sustained relay throttling, loss of
 all paths, cleanup failures, or an Exit Node whose forwarding/NAT readiness is
 zero. Diagnostic listeners must remain on loopback; see the
-[observability profile](../spec/observability-v1.md).
+[observability profile](https://github.com/Doout/laneway/blob/main/spec/observability-v1.md).
 
 ## Troubleshooting
 
@@ -271,7 +272,7 @@ sysctl net.ipv4.ip_forward net.ipv6.conf.all.forwarding
 
 Routed mode needs a LAN return route to the overlay pool. NAT mode changes the
 observed source but does not need that route. Never flush nftables; follow the
-[nftables guide](../deploy/nftables/README.md) when recovery fails.
+[nftables guide](https://github.com/Doout/laneway/blob/main/deploy/nftables/README.md) when recovery fails.
 
 ### Exit routing is wrong
 
@@ -346,7 +347,7 @@ remove only the confirmed stale lock, and rerun
 machine can recover safely.
 
 Console, Relay, and Edge Connector containers run non-root with
-read-only scratch roots. The full Exit Node alone needs `NET_ADMIN` and
+read-only root filesystems. The full Exit Node alone needs `NET_ADMIN` and
 `/dev/net/tun`, inside its own container namespace. Do not give it host
 networking, the Docker socket, or privileged mode.
 
@@ -369,7 +370,7 @@ for review.
 
 ### Connect to a resource through the Twingate bridge
 
-The controller host needs a [Twingate gateway worker](../deploy/twingate-gateway/README.md).
+The controller host needs a [Twingate gateway worker](https://github.com/Doout/laneway/blob/main/deploy/twingate-gateway/README.md).
 In the Twingate Admin Console, create a **Read, Write & Provision** API token
 and confirm that your Twingate plan includes Service Accounts. Save the token
 under **Connection settings**. A read-only token remains sufficient for

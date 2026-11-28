@@ -2,18 +2,30 @@ import { readFile } from 'node:fs/promises';
 import console from 'node:console';
 import { URL } from 'node:url';
 
-const servicePath = new URL('../../go/internal/controllerservice/service.go', import.meta.url);
-const routePoliciesPath = new URL('../../go/internal/adminauth/routes.go', import.meta.url);
-const operationPoliciesPath = new URL('../../go/internal/adminauth/model.go', import.meta.url);
+const controller = new URL('../../rust/laneway-controller/src/', import.meta.url);
 const contractPath = new URL('../../api/openapi/management-v1.yaml', import.meta.url);
 const componentsPath = new URL('../../api/openapi/components.yaml', import.meta.url);
+const guidePath = new URL('../../spec/management-api-v1.md', import.meta.url);
 
-const [serviceSource, routePoliciesSource, operationPoliciesSource, contractSource, componentsSource] = await Promise.all([
-  readFile(servicePath, 'utf8'),
-  readFile(routePoliciesPath, 'utf8'),
-  readFile(operationPoliciesPath, 'utf8'),
+// Only the request dispatcher and its route parsers register paths.
+const handlers = [
+  'http',
+  'http/access_admin',
+  'http/administrators',
+  'http/applications',
+  'http/applications/authorization',
+  'http/audit',
+  'http/automation',
+  'http/recovery',
+  'http/twingate',
+];
+const [contractSource, componentsSource, guideSource, accessSource, automationSource, ...routerSources] = await Promise.all([
   readFile(contractPath, 'utf8'),
   readFile(componentsPath, 'utf8'),
+  readFile(guidePath, 'utf8'),
+  readFile(new URL('access_admin.rs', controller), 'utf8'),
+  readFile(new URL('automation.rs', controller), 'utf8'),
+  ...handlers.map((handler) => readFile(new URL(`${handler}.rs`, controller), 'utf8')),
 ]);
 
 const duplicateYamlKeys = [];
@@ -53,34 +65,59 @@ const checkDuplicateYamlKeys = (name, source) => {
 checkDuplicateYamlKeys('management-v1.yaml', contractSource);
 checkDuplicateYamlKeys('components.yaml', componentsSource);
 
-const registered = new Set();
-const protectedRegistrations = new Set();
-const duplicateRegistrations = [];
-const addRegistration = (method, path) => {
-  const key = `${method} ${path}`;
-  if (registered.has(key)) duplicateRegistrations.push(key);
-  registered.add(key);
-};
+const canonical = (path) => path.replace(/\{[^}]+\}/gu, '{}');
+const documentedExtensions = new Map(
+  [...guideSource.matchAll(/^\| `(\/v1\/admin\/[^`]+)` \| ([A-Z, ]+) \|/gmu)]
+    .map(([, path, methods]) => [canonical(path), new Set(methods.split(', '))]),
+);
 
-for (const match of serviceSource.matchAll(
-  /mux\.HandleFunc\("(GET|POST|PUT|PATCH|DELETE) (\/v1\/admin(?:\/[^" ]*)?)"/g,
-)) {
-  addRegistration(match[1], match[2]);
+const registeredPaths = new Map();
+const registeredMethods = new Map();
+const missingAccessMethods = [];
+const duplicateRegistrations = [];
+
+// The handlers with an Allow table use it to describe supported methods.
+function allowedMethods(source) {
+  const methods = new Map();
+  for (const [, patterns, allowed] of source.matchAll(
+    /((?:(?:Self|Route)::\w+(?:\([^()]*\))?(?:\s*\|\s*)?\s*)+) => "([A-Z, ]+)",/gu,
+  )) {
+    for (const [, route] of patterns.matchAll(/(?:Self|Route)::(\w+)/gu)) {
+      methods.set(route, allowed.split(', ').filter((method) => method !== 'HEAD'));
+    }
+  }
+  return methods;
 }
 
-const goMethods = {
-  Delete: 'DELETE',
-  Get: 'GET',
-  Patch: 'PATCH',
-  Post: 'POST',
-  Put: 'PUT',
-};
-for (const match of serviceSource.matchAll(
-  /s\.registerManagementRoute\(mux, http\.Method(Get|Post|Put|Patch|Delete), "(\/v1\/admin(?:\/[^" ]*)?)"/g,
-)) {
-  const key = `${goMethods[match[1]]} ${match[2]}`;
-  addRegistration(goMethods[match[1]], match[2]);
-  protectedRegistrations.add(key);
+function register(path, handler, methods) {
+  // The main dispatcher checks the networks path both as a string and as
+  // path components to handle GET and POST. Count the same handler once.
+  const previous = registeredPaths.get(path);
+  const sharedNetworkDispatch = path === '/v1/admin/networks' && handler === 'http' && previous === handler;
+  if (previous !== undefined && !sharedNetworkDispatch) {
+    duplicateRegistrations.push(path);
+  }
+  registeredPaths.set(path, handler);
+  if (methods?.length) registeredMethods.set(path, methods);
+}
+
+for (const [index, source] of routerSources.entries()) {
+  const handler = handlers[index];
+  const methods = allowedMethods(source);
+  for (const [, pattern, arm] of source.matchAll(
+    /\[\s*""\s*,\s*"v1"\s*,\s*"admin"((?:\s*,\s*(?:"[^"\n]+"|\w+))+)\s*,?\s*\]\s*=>\s*(?:\{\s*)?(?:Some\()?((?:Self::)?\w+)?/gu,
+  )) {
+    const segments = pattern.split(',').slice(1).map((segment) => segment.trim());
+    const path = `/v1/admin/${segments.map((segment) => (
+      segment.startsWith('"') ? segment.slice(1, -1) : '{}'
+    )).join('/')}`;
+    const methodSet = methods.get(arm?.replace(/^Self::/u, ''));
+    register(path, handler, methodSet);
+    if (handler === 'http/access_admin' && !methodSet) missingAccessMethods.push(path);
+  }
+  for (const [, path] of source.matchAll(/path == "(\/v1\/admin(?:\/[^" ]*)?)"/gu)) {
+    register(path, handler);
+  }
 }
 
 const documented = new Set();
@@ -125,29 +162,63 @@ for (const line of contractSource.split(/\r?\n/u)) {
   }
 }
 
-const policyRoutes = new Map();
-for (const match of routePoliciesSource.matchAll(
-  /\{http\.Method(Get|Post|Put|Patch|Delete), "(\/v1\/admin(?:\/[^" ]*)?)", (Operation[A-Za-z0-9]+), Scope[A-Za-z0-9]+, (?:true|false)\}/g,
-)) {
-  policyRoutes.set(`${goMethods[match[1]]} ${match[2]}`, match[3]);
+// Service tokens can enter the access-action and audit handlers. The main
+// dispatcher delegates only these inventory and enrollment operations to
+// the service-token-aware store; its other endpoints are session/root only.
+const dispatcherAutomation = new Map([
+  ['GET /v1/admin/networks', 'network.list'],
+  ['GET /v1/admin/networks/{}', 'network.read'],
+  ['GET /v1/admin/networks/{}/nodes', 'node.read'],
+  ['POST /v1/admin/networks', 'network.create'],
+  ['POST /v1/admin/enrollment-tokens', 'enrollment.issue'],
+  ['POST /v1/admin/bootstrap-bundles', 'bootstrap_bundle.create'],
+  ['POST /v1/admin/networks/{}/node-installers', 'enrollment.issue'],
+]);
+const permissionNames = (body) => new Set(
+  [...(body ?? '').matchAll(/"([a-z_]+\.[a-z_]+)"/gu)].map(([, permission]) => permission),
+);
+const accessPermissions = permissionNames(
+  /fn permission\(&self\) -> &'static str \{([\s\S]*?)\n {4}\}/u.exec(accessSource)?.[1],
+);
+const delegablePermissions = permissionNames(
+  /fn authority\(op: &str\) -> Option<bool> \{([\s\S]*?)\n\}/u.exec(automationSource)?.[1],
+);
+const expectedPermissions = new Set([
+  ...accessPermissions,
+  ...dispatcherAutomation.values(),
+  'audit.read',
+  'audit.read_global',
+]);
+const difference = (left, right) => [...left].filter((key) => !right.has(key)).sort();
+const documentedPaths = new Set();
+const documentedMethods = new Map();
+const automationRoutes = new Set();
+for (const route of documented) {
+  const [method, rawPath] = route.split(' ');
+  const path = canonical(rawPath);
+  documentedPaths.add(path);
+  if (!documentedMethods.has(path)) documentedMethods.set(path, new Set());
+  documentedMethods.get(path).add(method);
+  const handler = registeredPaths.get(path);
+  if (handler === 'http/access_admin' || handler === 'http/audit'
+    || dispatcherAutomation.has(`${method} ${path}`)) {
+    automationRoutes.add(route);
+  }
 }
 
-const automationGrantableMatch = /func AutomationGrantable\(operation Operation\) bool \{[\s\S]*?switch operation \{\s*case ([\s\S]*?):\s*return false\s*default:/u.exec(operationPoliciesSource);
-const automationExcludedOperations = new Set(
-  [...(automationGrantableMatch?.[1] ?? '').matchAll(/\bOperation[A-Za-z0-9]+\b/gu)].map((match) => match[0]),
-);
-const automationRoutes = new Set(
-  [...policyRoutes]
-    .filter(([, operation]) => !automationExcludedOperations.has(operation))
-    .map(([route]) => route),
-);
+const missing = difference(registeredPaths.keys(), new Set([...documentedPaths, ...documentedExtensions.keys()]));
+const missingPermissions = difference(expectedPermissions, delegablePermissions);
+const extra = difference(documentedPaths, new Set(registeredPaths.keys()));
+const staleExtensions = difference(documentedExtensions.keys(), new Set(registeredPaths.keys()));
+const overlappingExtensions = [...documentedExtensions.keys()].filter((path) => documentedPaths.has(path));
+const methodDrift = [];
+for (const [path, expected] of registeredMethods) {
+  const actual = documentedMethods.get(path) ?? documentedExtensions.get(path);
+  if (actual && (expected.length !== actual.size || expected.some((method) => !actual.has(method)))) {
+    methodDrift.push(`${path} (controller: ${expected.join(', ')}, documented: ${[...actual].join(', ')})`);
+  }
+}
 const documentedAutomationRoutes = new Set(serviceAccessTokenAlternatives.keys());
-
-const difference = (left, right) => [...left].filter((key) => !right.has(key)).sort();
-const missing = difference(registered, documented);
-const extra = difference(documented, registered);
-const missingPolicies = difference(protectedRegistrations, new Set(policyRoutes.keys()));
-const extraPolicies = difference(new Set(policyRoutes.keys()), protectedRegistrations);
 const missingAutomationSecurity = difference(automationRoutes, documentedAutomationRoutes);
 const extraAutomationSecurity = difference(documentedAutomationRoutes, automationRoutes);
 const duplicateAutomationSecurity = [...serviceAccessTokenAlternatives]
@@ -156,17 +227,19 @@ const duplicateAutomationSecurity = [...serviceAccessTokenAlternatives]
   .sort();
 const problems = [];
 if (duplicateYamlKeys.length) problems.push(`duplicate YAML mapping keys: ${duplicateYamlKeys.join(', ')}`);
-if (registered.size !== 82) problems.push(`controller registration count is ${registered.size}, expected 82`);
-if (documented.size !== 82) problems.push(`OpenAPI operation count is ${documented.size}, expected 82`);
 if (duplicateRegistrations.length) problems.push(`duplicate controller registrations: ${duplicateRegistrations.join(', ')}`);
 if (duplicateOperations.length) problems.push(`duplicate OpenAPI operations: ${duplicateOperations.join(', ')}`);
-if (missing.length) problems.push(`missing from OpenAPI: ${missing.join(', ')}`);
+if (missing.length) problems.push(`missing from OpenAPI or extension inventory: ${missing.join(', ')}`);
 if (extra.length) problems.push(`not registered by controller: ${extra.join(', ')}`);
-if (!automationGrantableMatch || automationExcludedOperations.size === 0) {
-  problems.push('could not resolve the controller automation grant boundary');
+if (staleExtensions.length) problems.push(`extensions no longer served: ${staleExtensions.join(', ')}`);
+if (overlappingExtensions.length) problems.push(`extensions already in OpenAPI: ${overlappingExtensions.join(', ')}`);
+if (methodDrift.length) problems.push(`controller method drift: ${methodDrift.join(', ')}`);
+if (missingAccessMethods.length) {
+  problems.push(`missing controller access methods: ${missingAccessMethods.join(', ')}`);
 }
-if (missingPolicies.length) problems.push(`registered protected routes without policies: ${missingPolicies.join(', ')}`);
-if (extraPolicies.length) problems.push(`policies without registered protected routes: ${extraPolicies.join(', ')}`);
+if (!accessPermissions.size || missingPermissions.length) {
+  problems.push(`service-token permissions no longer match the controller: ${missingPermissions.join(', ')}`);
+}
 if (missingAutomationSecurity.length) {
   problems.push(`grantable service-token routes missing the OpenAPI security alternative: ${missingAutomationSecurity.join(', ')}`);
 }
@@ -181,4 +254,4 @@ if (problems.length) {
   throw new Error(`management contract route drift:\n- ${problems.join('\n- ')}`);
 }
 
-console.log(`Management contract has unique YAML keys, matches all ${registered.size} registered administrator routes, and documents all ${automationRoutes.size} grantable service-token routes.`);
+console.log(`Management contract has unique YAML keys and documents ${documented.size} administrator operations on ${documentedPaths.size} controller paths. ${documentedExtensions.size} extension paths are tracked separately.`);

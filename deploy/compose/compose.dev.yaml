@@ -1,27 +1,26 @@
-# Historical development fixture for the Go controller and packet tests.
-# Fresh deployments use the Rust Compose overlay and installer.
+# Local builds use the same images and commands as the release deployment.
 services:
   controller:
-    image: laneway-controller:dev
+    image: laneway-console:dev
+    pull_policy: never
     build:
       context: ../..
-      dockerfile: deploy/containers/Dockerfile
+      dockerfile: deploy/containers/Dockerfile.rust-relay
       target: controller
   relay:
     image: laneway-relay:dev
+    pull_policy: never
     build:
       context: ../..
-      dockerfile: deploy/containers/Dockerfile
+      dockerfile: deploy/containers/Dockerfile.rust-relay
       target: relay
   admin:
-    image: laneway-admin:dev
-    build:
-      context: ../..
-      dockerfile: deploy/containers/Dockerfile
-      target: admin
-  exit-node:
-    image: laneway-exit-node:dev
+    image: laneway-edge:dev
+    pull_policy: never
     build:
       context: ../..
       dockerfile: deploy/containers/Dockerfile.exit-node
-      target: go-exit
+      target: edge
+  exit-node:
+    image: laneway-edge:dev
+    pull_policy: never

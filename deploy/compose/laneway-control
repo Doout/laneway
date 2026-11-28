@@ -2289,6 +2289,7 @@ fi
 command=${1:-}; [ -n "$command" ] || { usage; exit 1; }; shift
 if [ "$runtime" = rust ]; then
   case "$command" in
+    init) [ "${1:-}" = --dev ] || die "use the signed control-plane installer for a fresh deployment" ;;
     status|backup|restore|readiness|production-check|administrator|invite|user-token|api-token|route|update|help|-h|--help) ;;
     *) die "refusing the Go lifecycle workflow on a Rust deployment" ;;
   esac

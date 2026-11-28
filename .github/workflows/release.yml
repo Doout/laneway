@@ -14,20 +14,17 @@ jobs:
   verify:
     name: Verify release source
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          go-version: "1.26.11"
-          cache-dependency-path: go/go.sum
-      - name: Test and vet
-        working-directory: go
-        run: |
-          go test ./...
-          go vet ./...
+          workspaces: rust
+          save-if: 'false'
+      - name: Test Rust workspace
+        run: cargo test --locked --manifest-path rust/Cargo.toml
       - name: Check scripts
         run: |
           python3 -m unittest discover -s deploy/compose -p 'test_*.py'
@@ -65,10 +62,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.26.11"
-          cache-dependency-path: go/go.sum
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           version: v0.36.1
@@ -108,8 +101,8 @@ jobs:
           if-no-files-found: error
       - name: Build reproducible package
         env:
-          PACKAGE_GOOS: ${{ matrix.os }}
-          PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_OS: ${{ matrix.os }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
           PACKAGE_RUST_RUNTIME_DIR: ${{ runner.temp }}/runtime
         run: make package VERSION="${GITHUB_REF_NAME#v}"
       - name: Generate package SBOM
@@ -145,10 +138,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.26.11"
-          cache-dependency-path: go/go.sum
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: laneway-linux-${{ matrix.arch }}
@@ -160,8 +149,8 @@ jobs:
       - name: Test installed rootless CLI and helper from the release archive
         if: matrix.check == 'systemd'
         env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
-        run: sh integration/rust-release-rootless.sh --linux-archive "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: sh integration/rust-release-rootless.sh --linux-archive "dist/laneway_linux_$PACKAGE_ARCH.tar.gz"
       - name: Prepare the isolated systemd runner
         run: |
           packages=(binutils iproute2 iptables nftables wireguard-tools jq iputils-ping procps)
@@ -174,23 +163,19 @@ jobs:
           sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
       - name: Test the exact release archive under systemd
         env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
           CHECK: ${{ matrix.check }}
         run: |
-          archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
+          archive="dist/laneway_linux_$PACKAGE_ARCH.tar.gz"
           tar -xzf "$RUNNER_TEMP/activation-fixture.tar.gz" -C "$RUNNER_TEMP"
           case "$CHECK" in
             systemd)
-              fixtures="$RUNNER_TEMP/laneway-go-fixtures"
-              mkdir "$fixtures"
-              CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway ./cmd/laneway-relay ./integration/rustnodecontroller
-              rustc --edition 2024 -O integration/netprobe-stream.rs -o "$fixtures/netprobe-stream"
-              sudo env PATH="$PATH" LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$fixtures" \
-                LANEWAY_NODE_TEST_STREAM_PROBE="$fixtures/netprobe-stream" \
+              rustc --edition 2024 -O integration/netprobe-stream.rs -o "$RUNNER_TEMP/netprobe-stream"
+              sudo env PATH="$PATH" LANEWAY_NODE_TEST_STREAM_PROBE="$RUNNER_TEMP/netprobe-stream" \
                 LANEWAY_NODE_TEST_INSPECT_PROBE="$RUNNER_TEMP/activation-fixture/laneway-inspect-probe" \
                 LANEWAY_NODE_TEST_ENROLL_PROBE="$RUNNER_TEMP/activation-fixture/prior-node" \
                 bash integration/rust-release-systemd.sh "$archive" \
-                "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}" ;;
+                "$PACKAGE_ARCH" "${GITHUB_REF_NAME#v}" ;;
             fleet-update)
               sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "$archive" \
                 "$RUNNER_TEMP/activation-fixture" ;;
@@ -211,10 +196,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.26.11"
-          cache-dependency-path: go/go.sum
       - name: Restore native release probes from main
         id: macos-probes
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -238,17 +219,17 @@ jobs:
           printf 'PACKAGE_RUST_MACOS=%s\n' "$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" >> "$GITHUB_ENV"
       - name: Build reproducible package
         env:
-          PACKAGE_GOOS: ${{ matrix.os }}
-          PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_OS: ${{ matrix.os }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
         run: make package VERSION="${GITHUB_REF_NAME#v}"
       - name: Test the macOS release archive on its native architecture
         env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
           LANEWAY_MACOS_PROBES_DIR: ${{ steps.macos-probes.outputs.cache-hit == 'true' && format('{0}/laneway-macos-probes', runner.temp) || '' }}
         run: |
           RUSTUP_TOOLCHAIN=1.91.1 LANEWAY_MACOS_ARCHIVE_INSTALL=1 LANEWAY_MACOS_UTUN_TEST=1 LANEWAY_MACOS_DESKTOP_TEST=1 \
             sh integration/rust-release-macos.sh \
-            "dist/laneway_darwin_$PACKAGE_GOARCH.tar.gz" "$PACKAGE_GOARCH" "${GITHUB_REF_NAME#v}"
+            "dist/laneway_darwin_$PACKAGE_ARCH.tar.gz" "$PACKAGE_ARCH" "${GITHUB_REF_NAME#v}"
       - name: Generate package SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with: *package-sbom

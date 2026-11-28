@@ -32,9 +32,21 @@ ipv4_pool=$(read_setting LANEWAY_IPV4_POOL)
 relay_endpoint=$(read_setting LANEWAY_RELAY_PUBLIC_ENDPOINT)
 server_name=$(read_setting LANEWAY_CONTROLLER_SERVER_NAME)
 
+# Compose interpolates the release overlay before selecting the local images.
+dev_version_env() {
+  placeholder=sha256:0000000000000000000000000000000000000000000000000000000000000000
+  export LANEWAY_VERSION=dev LANEWAY_RUST_VERSION=dev
+  export LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST="$placeholder"
+  export LANEWAY_RUST_RELAY_IMAGE_DIGEST="$placeholder"
+  export LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST="$placeholder"
+}
+
 compose() {
   case "$mode" in
-    dev) set -- -f "$base_dir/compose.dev.yaml" "$@" ;;
+    dev)
+      dev_version_env
+      set -- -f "$base_dir/compose.rust.yaml" -f "$base_dir/compose.dev.yaml" "$@"
+      ;;
     rust) set -- -f "$base_dir/compose.rust.yaml" "$@" ;;
   esac
   docker compose --project-directory "$base_dir" --env-file "$base_dir/.env" \
@@ -45,10 +57,8 @@ admin() {
   compose --profile tools run --rm admin "$@"
 }
 
-if [ "$mode" = rust ]; then
+if [ "$mode" != standard ]; then
   [ "$(id -u)" -eq 0 ] || { echo "Rust bootstrap must run as root" >&2; exit 1; }
-  [ "$(read_setting LANEWAY_RUST_VERSION)" = "$(read_setting LANEWAY_VERSION)" ] ||
-    { echo "Rust bootstrap and the admin image must use the same release version" >&2; exit 1; }
   # The signed pins and deployment settings are staged in .env. Environment
   # values take precedence in Compose unless removed before rendering.
   unset LANEWAY_CONSOLE_REPOSITORY LANEWAY_RELAY_REPOSITORY LANEWAY_EDGE_REPOSITORY
@@ -56,7 +66,26 @@ if [ "$mode" = rust ]; then
     LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST LANEWAY_RUST_RELAY_IMAGE_DIGEST \
     LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST LANEWAY_BIND_ADDRESS LANEWAY_CONTROLLER_PORT \
     LANEWAY_RELAY_QUIC_PORT LANEWAY_RELAY_TCP_PORT LANEWAY_EXIT_DIRECT_PORT LANEWAY_CONTROLLER_SERVER_NAME
-  "$base_dir/validate.sh" --rust
+  if [ "$mode" = rust ]; then
+    [ "$(read_setting LANEWAY_RUST_VERSION)" = "$(read_setting LANEWAY_VERSION)" ] ||
+      { echo "Rust bootstrap and the admin image must use the same release version" >&2; exit 1; }
+    "$base_dir/validate.sh" --rust
+  else
+    "$base_dir/validate.sh" --dev
+    if [ ! -e "$base_dir/generated/config/bootstrap.rust.json" ] &&
+       [ ! -e "$base_dir/generated/config/relay.rust.toml" ]; then
+      python3 "$base_dir/prepare-rust.py" --lab
+    fi
+    spool_dir="$base_dir/generated/gateway-spool"
+    if [ -L "$spool_dir" ] || { [ -e "$spool_dir" ] && [ ! -d "$spool_dir" ]; }; then
+      echo "Development gateway spool must be a real directory" >&2
+      exit 1
+    fi
+    if [ ! -e "$spool_dir" ]; then
+      install -d -m 0700 -o 65532 -g 65532 "$spool_dir"
+    fi
+    compose --profile tools build controller relay admin
+  fi
   existing=$(compose --profile exit-node ps --all --quiet controller relay exit-node)
   if [ -n "$existing" ]; then
     echo "Rust bootstrap requires a new deployment without existing service containers" >&2
@@ -78,7 +107,7 @@ networks=$(admin controller network list $common --limit 1000)
 network_count=$(printf '%s\n' "$networks" | jq --arg id "$network_id" '[.networks[] | select(.network_id == $id)] | length')
 case "$network_count" in
   0)
-    if [ "$mode" = rust ]; then
+    if [ "$mode" != standard ]; then
       echo "The Rust controller's initial network does not match .env; refusing to create another" >&2
       exit 1
     fi

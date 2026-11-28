@@ -8,7 +8,8 @@ selection. Reserve color for focus, the Laneway mark, and meaningful status.
 Build console controls from the [shared React components](web/src/components/ui.tsx).
 These use UI SDK for buttons, form fields, and search inputs. Keep navigation
 links and tables semantic. The [desktop client](docs/desktop-client.md)
-manages the local node and has its own navigation.
+shows status, peers, and routes from a same-user daemon in a separate
+read-only view.
 
 ## Navigation and records
 

@@ -1,8 +1,9 @@
 # Control-plane deployment
 
-The Compose deployment runs the Rust controller and relay as separate non-root
-containers. The Go operator CLI is a host tool, not a service. State and public relay certificates survive container replacement;
-the offline root CA key does not remain on the server.
+Compose runs Console and Relay as separate non-root containers. Operator
+commands use the host CLI or the Edge image. State and public relay
+certificates survive container replacement. Keep the offline root CA key off
+the server.
 
 ## Requirements
 
@@ -17,7 +18,9 @@ the offline root CA key does not remain on the server.
 Prepare DNS and firewall rules, replace the domain, then run:
 
 ```sh
-export LANEWAY_DOMAIN=lane.example.com; curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install.sh | sudo env LANEWAY_DOMAIN="$LANEWAY_DOMAIN" bash
+export LANEWAY_DOMAIN=lane.example.com
+curl -fsSL https://github.com/Doout/laneway/releases/download/v0.3.12/install.sh |
+  sudo env LANEWAY_DOMAIN="$LANEWAY_DOMAIN" LANEWAY_VERSION=v0.3.12 sh
 ```
 
 The installer requires a signed release and verifies immutable image digests.
@@ -164,8 +167,8 @@ To keep the root key and recovery identity entirely off production, run on a
 trusted Linux host:
 
 ```sh
-curl -fsSL https://github.com/Doout/laneway/releases/latest/download/install.sh | \
-  sudo env LANEWAY_NONINTERACTIVE=true sh -s -- --prepare-control-plane
+curl -fsSL https://github.com/Doout/laneway/releases/download/v0.3.12/install.sh | \
+  sudo env LANEWAY_NONINTERACTIVE=true LANEWAY_VERSION=v0.3.12 sh -s -- --prepare-control-plane
 ```
 
 Back up `laneway-recovery.identity` and `offline-root.tar.age`. Copy only the

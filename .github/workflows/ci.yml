@@ -147,60 +147,17 @@ jobs:
           cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked
           cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
 
-  go:
-    name: Go ${{ matrix.go }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        go: ["1.26.x", "stable"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: ${{ matrix.go }}
-          cache-dependency-path: go/go.sum
-      - name: Test
-        working-directory: go
-        run: go test -race ./...
-      - name: Vet
-        working-directory: go
-        run: go vet ./...
-      - name: Check formatting
-        if: matrix.go == '1.26.x'
-        run: test -z "$(gofmt -l go)"
-
-  macos-client:
-    name: macOS client and privileged-helper protocol
-    runs-on: macos-15
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
-      - name: Run native Darwin tests
-        working-directory: go
-        run: |
-          go test ./cmd/laneway -run '^TestMacOS'
-          go test ./internal/nethelper ./internal/platform ./internal/releaseupdate
-
   protobuf:
-    name: Protobuf lint and generated code
+    name: Protobuf schema lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
       - uses: bufbuild/buf-setup-action@v1
-      - run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+        with:
+          version: '1.50.0'
+          github_token: ${{ github.token }}
       - run: buf lint
-      - run: buf generate
-      - run: git diff --exit-code -- go/api
 
   compose:
     name: Hardened Compose contract
@@ -283,7 +240,7 @@ jobs:
           bash integration/rust-lab/connector-cutover.sh --fresh laneway-edge:ci tcp-fallback
 
   rust:
-    name: Rust workspace and Go interoperability
+    name: Rust workspace and network integration
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -295,18 +252,9 @@ jobs:
         with:
           workspaces: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
       - run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
       - run: cargo test --manifest-path rust/Cargo.toml --locked
       - run: cargo clippy --manifest-path rust/Cargo.toml --all-targets --locked -- -D warnings
-      - name: Go nodes through Rust relay
-        working-directory: go
-        run: go test -count=1 -race -tags=rustinterop ./integration/rustrelay -v
-      - name: Compare Rust inventory with Go controller HTTP responses
-        run: make rust-controller-interop
       - name: Install Rust node interoperability network tools
         run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping
       - name: Rust node executable interoperability
@@ -326,10 +274,6 @@ jobs:
         runner: [macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.11"
-          cache-dependency-path: go/go.sum
       - name: Cache native release probes on main
         id: macos-probes
         if: github.ref == 'refs/heads/main'
@@ -354,14 +298,14 @@ jobs:
       - run: cargo build --locked --release --manifest-path rust/Cargo.toml -p lanewayd-rs --bin lanewayd-rs
         env:
           LANEWAY_PRODUCT_VERSION: 0.0.0-ci
-      - name: Check the macOS CLI handoff to the Rust binary
-        run: |
-          cd go
-          LANEWAY_RUST_TEST_BINARY="$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" go test ./cmd/laneway -run '^Test(RustForeground|MacRustRuntime)' -count=1
       - name: Install the default archive and verify real utun traffic and cleanup
         run: |
           set -euo pipefail
-          arch=$(go env GOARCH)
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            arm64) arch=arm64 ;;
+            *) exit 1 ;;
+          esac
           PACKAGE_RUST_MACOS="$GITHUB_WORKSPACE/rust/target/release/lanewayd-rs" make package VERSION=0.0.0-ci
           if [ "$GITHUB_REF" = refs/heads/main ]; then
             export LANEWAY_MACOS_PROBES_DIR="$RUNNER_TEMP/laneway-macos-probes"
@@ -385,10 +329,6 @@ jobs:
           - {arch: arm64, runner: ubuntu-24.04-arm}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.11"
-          cache-dependency-path: go/go.sum
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with: *preview-builder
       - name: Reuse unchanged preview binaries
@@ -415,24 +355,24 @@ jobs:
             format('type=gha,scope=rust-release-deps-{0},mode=max,timeout=2m,ignore-error=true', matrix.arch) || '' }}
       - name: Verify the image uses the shared native daemon
         env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
         run: |
-          docker buildx build --platform "linux/$PACKAGE_GOARCH" --load \
-            --file deploy/containers/Dockerfile.rust-relay --target node \
-            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" --tag laneway-node:ci .
-          version=$(docker run --rm --network none --entrypoint /usr/local/bin/lanewayd-rs laneway-node:ci --version)
+          docker buildx build --platform "linux/$PACKAGE_ARCH" --load \
+            --file deploy/containers/Dockerfile.exit-node --target edge \
+            --build-context "node-binary=$RUNNER_TEMP/laneway-rust" --tag laneway-edge:ci .
+          version=$(docker run --rm --network none laneway-edge:ci version)
           test "$version" = "$PREVIEW_VERSION"
       - name: Build the native preview archive
         env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
-        run: PACKAGE_GOOS=linux PACKAGE_RUST_RUNTIME_DIR="$RUNNER_TEMP/laneway-rust" make package VERSION="$PREVIEW_VERSION"
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: PACKAGE_OS=linux PACKAGE_RUST_RUNTIME_DIR="$RUNNER_TEMP/laneway-rust" make package VERSION="$PREVIEW_VERSION"
       - name: Test installed rootless CLI and helper from the preview archive
         env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
-        run: sh integration/rust-release-rootless.sh --linux-archive "dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: sh integration/rust-release-rootless.sh --linux-archive "dist/laneway_linux_$PACKAGE_ARCH.tar.gz"
       - name: Test the native preview archive under systemd
         env:
-          PACKAGE_GOARCH: ${{ matrix.arch }}
+          PACKAGE_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -440,48 +380,14 @@ jobs:
           sudo modprobe tun
           sudo modprobe wireguard
           sudo install -m 0600 /dev/null /run/.laneway-isolated-systemd-lab
-          archive="dist/laneway_linux_$PACKAGE_GOARCH.tar.gz"
-          fixtures="$RUNNER_TEMP/laneway-go-fixtures"
-          mkdir "$fixtures"
-          CGO_ENABLED=0 go -C go build -o "$fixtures/" ./cmd/laneway ./cmd/laneway-relay ./integration/rustnodecontroller
-          rustc --edition 2024 -O integration/netprobe-stream.rs -o "$fixtures/netprobe-stream"
-          sudo env PATH="$PATH" LANEWAY_NODE_TEST_GO_FIXTURE_DIR="$fixtures" \
-            LANEWAY_NODE_TEST_STREAM_PROBE="$fixtures/netprobe-stream" \
+          archive="dist/laneway_linux_$PACKAGE_ARCH.tar.gz"
+          rustc --edition 2024 -O integration/netprobe-stream.rs -o "$RUNNER_TEMP/netprobe-stream"
+          sudo env PATH="$PATH" LANEWAY_NODE_TEST_STREAM_PROBE="$RUNNER_TEMP/netprobe-stream" \
             LANEWAY_NODE_TEST_INSPECT_PROBE="$RUNNER_TEMP/laneway-rust/activation-fixture/laneway-inspect-probe" \
             LANEWAY_NODE_TEST_ENROLL_PROBE="$RUNNER_TEMP/laneway-rust/activation-fixture/prior-node" \
-            bash integration/rust-release-systemd.sh "$archive" "$PACKAGE_GOARCH" "$PREVIEW_VERSION"
+            bash integration/rust-release-systemd.sh "$archive" "$PACKAGE_ARCH" "$PREVIEW_VERSION"
           sudo env PATH="$PATH" bash integration/rust-release-fleet-update.sh "$archive" \
             "$RUNNER_TEMP/laneway-rust/activation-fixture"
-
-  cross-build:
-    name: Go build ${{ matrix.goos }}/${{ matrix.goarch }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
-      - name: Compile all packages
-        working-directory: go
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-        run: go build ./...
 
   rust-cross-build:
     name: Rust check ${{ matrix.target }}
@@ -522,15 +428,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
       - uses: dtolnay/rust-toolchain@stable
       - name: Install network tools
-        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables
+        run: sudo apt-get update && sudo apt-get install -y iproute2 nftables iputils-ping
       - name: Run isolated privileged suite
         run: >-
           sudo env PATH="$PATH" HOME="$HOME"
           CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-          LANEWAY_RUN_PRIVILEGED=1 ./integration/linux-netns.sh
+          LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-kernel-netns.sh

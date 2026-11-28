@@ -21,27 +21,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - suite: go-linux-netns
-            label: Go kernel and full-stack network namespaces
-            script: integration/linux-netns.sh
-            runner: ubuntu-24.04
           - suite: rust-kernel-netns
             label: Rust kernel ownership and crash recovery
             script: integration/rust-kernel-netns.sh
             runner: ubuntu-24.04
           - suite: rust-node-interop
-            label: Rust node and Go/Rust relay interoperability
+            label: Node and relay networking
             script: integration/rust-node-interop.sh
             runner: ubuntu-24.04
           - suite: rust-controller-node-netns
-            label: Go controller authority over a Rust node
+            label: Controller authority and credential renewal
             script: integration/rust-controller-node-netns.sh
             runner: ubuntu-24.04
           - suite: rust-private-dns
             label: Rust controller and node Private DNS
             script: integration/rust-controller-node-netns.sh
             runner: ubuntu-24.04
-            controller: rust
             private_dns: '1'
           - suite: docker-exit-amd64
             label: Isolated Docker Exit lifecycle (amd64)
@@ -53,10 +48,6 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26.x"
-          cache-dependency-path: go/go.sum
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@v4
         with:
@@ -87,7 +78,6 @@ jobs:
         env:
           INTEGRATION_SCRIPT: ${{ matrix.script }}
           INTEGRATION_SUITE: ${{ matrix.suite }}
-          NODE_CONTROLLER: ${{ matrix.controller || 'go' }}
           PRIVATE_DNS: ${{ matrix.private_dns || '0' }}
         run: |
           set -euo pipefail
@@ -97,7 +87,6 @@ jobs:
             CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
             RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
             LANEWAY_RUN_PRIVILEGED=1 \
-            LANEWAY_NODE_TEST_CONTROLLER="${NODE_CONTROLLER}" \
             LANEWAY_NODE_TEST_PRIVATE_DNS="${PRIVATE_DNS}" \
             LANEWAY_KERNEL_BENCHMARK_OUTPUT="${PWD}/privileged-integration-logs/${INTEGRATION_SUITE}-kernel-benchmark.jsonl" \
             "./${INTEGRATION_SCRIPT}" 2>&1 | tee "privileged-integration-logs/${INTEGRATION_SUITE}.log"
@@ -107,7 +96,6 @@ jobs:
           mkdir -p privileged-integration-logs
           {
             uname -a
-            go version
             rustc --version --verbose
             cargo --version
             ip -Version

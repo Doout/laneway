@@ -304,9 +304,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn city_lookup_uses_the_same_offline_fixture_as_go() {
+    fn city_lookup_uses_the_offline_fixture() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../go/internal/nodelocation/testdata/GeoIP2-City-Test.mmdb");
+            .join("tests/fixtures/geoip/GeoIP2-City-Test.mmdb");
         let db = Database::open(&path).unwrap();
         assert_eq!(db.provider(), "maxmind");
         let data = db
