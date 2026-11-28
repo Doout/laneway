@@ -339,7 +339,7 @@ if __name__ == "__main__":
         selection.add_argument("--release-metadata", type=Path, metavar="DIRECTORY",
                                help="read signed artifact metadata for the verified release in .env")
         selection.add_argument("--lab", action="store_true",
-                               help="reuse the Go bootstrap artifacts on an isolated, unsigned lab only")
+                               help="reuse local bootstrap settings in an isolated lab")
         selection.add_argument("--readiness", type=Path, metavar="DIRECTORY",
                                help="verify the active Rust release without starting or changing services")
         selection.add_argument("--stage-update", nargs=3, metavar=("DIRECTORY", "TAG", "VOLUME"))
@@ -353,7 +353,7 @@ if __name__ == "__main__":
             stage_update(base, Path(stage), tag, volume)
         else:
             prepare(base, args.release_metadata)
-            print("Staged Rust Compose inputs; the running stack and Go configuration are unchanged.")
+            print("Staged Rust Compose inputs without starting the stack.")
     except subprocess.CalledProcessError:
         sys.exit("Rust Compose: an external verification command failed")
     except (OSError, ValueError, KeyError, TypeError) as error:

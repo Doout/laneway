@@ -42,7 +42,7 @@ candidates.
 
 Headers are limited to 8 KiB, bodies to 1 MiB, request bodies to 4 KiB, and a
 complete request to five seconds. JSON responses require one content length; an
-empty `204 No Content` may omit it, matching Go's HTTP server behavior. Chunked
+empty `204 No Content` may omit it. Chunked
 responses, duplicate content lengths, trailing bytes, malformed JSON,
 unexpected status codes, and incomplete bodies fail closed. The webview cannot
 supply a socket path, URL, shell command, file path, or raw request.
@@ -90,8 +90,8 @@ Mixed or malformed identity fields fail closed. A failed refresh discards the
 previous snapshot so stale routes can never remain visibly authoritative.
 
 The shared fixture at
-`testvectors/local-api/desktop-snapshot-v1.json` is consumed by the Go local API,
-the Rust daemon, and the Tauri adapter. Required-field drift therefore fails CI.
+`testvectors/local-api/desktop-snapshot-v1.json` is consumed by the daemon
+and the Tauri adapter. Required-field drift therefore fails CI.
 Additive daemon response fields remain compatible because the adapter ignores
 fields it does not present to the webview.
 
@@ -120,8 +120,8 @@ native test target until the daemon publishes capability and candidate data.
 
 ## Privileged operations
 
-`go/internal/nethelper` remains the only foreground privileged mutation
-boundary. It uses a private inherited socket, peer-process authentication,
+[`laneway-network-helper`](https://github.com/Doout/laneway/tree/main/rust/laneway-network-helper) is the privileged
+network mutation boundary for foreground system tunnels. It uses a private inherited socket, peer-process authentication,
 strict typed plans, bounded messages, and authoritative cleanup. The desktop
 adapter neither imports that protocol nor gains a command capable of reaching
 it.

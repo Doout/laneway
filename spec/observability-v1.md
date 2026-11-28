@@ -50,7 +50,7 @@ bounded readiness summary:
 | Exit server | forwarding and NAT readiness, forwarded packets, and namespace-cleanup failures |
 | Foreground User | `actor=user`, owned routes, local-LAN bypasses, DNS ownership (`native` or `temporary-session`), identity deadline, and `cleanup_journal=helper-active` while connected |
 
-Go and Rust local APIs share JSON field names. Unknown deadlines are zero and
+The local API represents unknown deadlines as zero, and
 empty bounded lists are encoded as empty arrays. Status MUST NOT include tokens,
 keys, rendezvous material, or packet data. A foreground User reports successful
 network-state restoration when it exits cleanly.
@@ -116,14 +116,12 @@ change authorization or interrupt otherwise healthy forwarding.
 
 | Implementation | Opt-in setting | Routes | Binding requirements |
 | --- | --- | --- | --- |
-| Go daemons | `-diagnostics` | `/metrics`, `/debug/pprof/`, `/debug/pprof/heap`, `/debug/pprof/profile`, `/debug/pprof/trace` | explicit loopback address or `localhost`; reject wildcard and non-loopback addresses |
-| Rust node | `diagnostics.listen` | `/metrics` | explicit nonzero loopback socket; bounded connections, request bytes, and I/O deadlines |
-| Rust relay | `relay.metrics_listen` | `/metrics` | explicit loopback IP socket; reject hostnames and wildcard/non-loopback addresses; bound connections, request bytes, and I/O deadlines |
+| Node | `diagnostics.listen` | `/metrics` | explicit nonzero loopback socket; bounded connections, request bytes, and I/O deadlines |
+| Relay | `relay.metrics_listen` | `/metrics` | explicit loopback IP socket; reject hostnames and wildcard/non-loopback addresses; bound connections, request bytes, and I/O deadlines |
 
 These listeners have no application authentication. Operators MUST use an
 authenticated administrative tunnel for remote access and MUST NOT expose them
-through an unauthenticated proxy. Rust listeners do not provide profiling
-routes.
+through an unauthenticated proxy. The listeners expose metrics only.
 
 ## 7. Component metrics
 
@@ -134,10 +132,7 @@ routes.
 | Node | connections, packets and bytes, classified drops, QUIC/TCP/direct results, path switches, carrier and direct-path gauges, and current/peak queue depth |
 | Exit Node | forwarded traffic, forwarding readiness, NAT readiness, and namespace-cleanup failures |
 
-Metrics are process-global and label-free. The Go Exit Node names are
-`laneway_exit_forwarded_packets_total`, `laneway_exit_forwarding_ready`,
-`laneway_exit_nat_ready`, and
-`laneway_exit_namespace_cleanup_failures_total`. Rust exposes
+Metrics are process-global and label-free. The Exit Node exposes
 `laneway_rust_node_exit_forwarded_packets_total`,
 `laneway_rust_node_exit_forwarded_bytes_total`, readiness gauges, and
 `laneway_rust_node_exit_namespace_cleanup_failures_total`. A forwarded packet
@@ -152,6 +147,6 @@ outside the normal baseline; any cleanup failure; and an enabled Exit Node with
 forwarding or NAT readiness at zero. Relay fallback is healthy behavior, but a
 sustained loss of direct paths is an operational signal.
 
-All dataplane queues MUST be bounded and expose queue-full drops. Metrics and
-profiling run outside packet loops; a slow consumer MUST NOT delay forwarding or
+All dataplane queues MUST be bounded and expose queue-full drops. Metrics
+collection runs outside packet loops; a slow consumer MUST NOT delay forwarding or
 configuration polling.

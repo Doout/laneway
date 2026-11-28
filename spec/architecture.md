@@ -7,10 +7,10 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, 
 ## 1. Purpose and scope
 
 Laneway is a private IP overlay. It gives authenticated nodes stable addresses
-and carries ordinary IP packets without application-specific proxies. A node
-can also act as a controller-authorized subnet router or explicitly selected
-exit node. Protocol behavior is independent of implementation language and
-runtime.
+and carries ordinary IP packets. Rootless mode also exposes a local SOCKS5
+proxy for applications that opt in. A node can act as a controller-authorized
+subnet router or explicitly selected exit node. Protocol behavior is
+independent of implementation language and runtime.
 
 ## 2. Components and product actors
 
@@ -20,7 +20,7 @@ Laneway has four logical components:
 | --- | --- |
 | Controller | networks, identities, certificates, addresses, policy, and approved routes; it MUST NOT carry user packets |
 | Relay | rendezvous, session-local route handles, and fallback packet forwarding |
-| Endpoint | authentication, path management, routes, and packet exchange through `lane0` |
+| Endpoint | authentication, path management, routes, and packet exchange through a tunnel or a userspace stack |
 | CLI | local management; it is not a wire-protocol peer |
 
 Every participating endpoint uses the same reusable node dataplane. Roles are
@@ -28,10 +28,10 @@ controller-authorized policy attributes rather than trust granted by different
 agent binaries. A protocol node MAY hold any compatible combination of ordinary
 peer, subnet-router, exit-node, and relay-client roles.
 
-The product distinguishes a foreground temporary **User**, a persistent host
-**Node**, and an isolated container **Exit Node**. Their supported paths,
-privilege boundaries, namespace ownership, and cleanup requirements are
-normatively defined in [deployment-contract.md](deployment-contract.md).
+Deployment roles include a foreground **User**, a persistent host **Node**,
+a userspace **Connector**, and an isolated container **Exit Node**. Their
+supported paths, privilege boundaries, namespace ownership, and cleanup
+requirements are defined in [deployment-contract.md](deployment-contract.md).
 
 ## 3. Plane separation
 
@@ -39,7 +39,7 @@ Laneway separates three concerns:
 
 1. The control plane distributes authenticated configuration, discovery, routes, policy, capabilities, and health information over reliable QUIC streams.
 2. The packet dataplane carries framed raw IP packets, initially in QUIC DATAGRAM frames.
-3. The local routing plane maps OS routes through `lane0` to immutable route snapshots.
+3. The local routing plane applies immutable route snapshots to a system tunnel or the userspace stack.
 
 The controller MUST NOT be in the datapath. A relay MUST make forwarding decisions from authenticated session state and bounded in-memory tables; it MUST NOT query the controller or a database per packet.
 
@@ -63,7 +63,8 @@ A path is an authenticated carrier associated with a peer. The preference order 
 
 ## 5. Packet flow
 
-The virtual interface name is `lane0`. An outbound packet follows:
+On Linux, the default system tunnel interface is `lane0`. An outbound tunnel
+packet follows:
 
 ```text
 application -> kernel route -> lane0 -> route snapshot -> path -> frame -> transport
@@ -75,7 +76,15 @@ An inbound packet follows:
 transport -> authenticated path -> handle and source validation -> deframe -> lane0 -> kernel
 ```
 
-Inbound source validation MUST happen before injection into `lane0`. Route and path lookup MUST NOT perform a persistent-store read. Installing or removing OS routes MUST be transactional where supported and MUST restore previous system state after a clean shutdown or failed startup.
+Rootless clients send application traffic through an authenticated loopback
+SOCKS5 proxy and the userspace stack. Userspace Connectors forward approved
+TCP and UDP flows through ordinary sockets. Both paths enforce the same
+controller policy as the system tunnel.
+
+Inbound source validation MUST happen before delivery to the tunnel or
+userspace stack. Route and path lookup MUST NOT perform a persistent-store
+read. Installing or removing OS routes MUST be transactional where supported
+and MUST restore previous system state after a clean shutdown or failed startup.
 
 Implementations MUST authenticate certificate identities, negotiate compatible
 versions and capabilities, install relay handles from authenticated control

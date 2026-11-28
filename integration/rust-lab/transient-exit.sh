@@ -104,9 +104,7 @@ start_staged_systemd_exit() {
     ip netns attach "${rust_ns}" "${pid}"
     ip -n "${rust_ns}" link set lo up
     ip -n "${rust_ns}" address add 10.254.0.3/24 dev eth0
-    if [[ "${node_controller}" == rust ]]; then
-      ip -n "${rust_ns}" address add "${location_node_ip}/28" dev eth0
-    fi
+    ip -n "${rust_ns}" address add "${location_node_ip}/28" dev eth0
     ip -n "${rust_ns}" address add 203.0.113.1/24 dev uplink0
     ip -n "${rust_ns}" link set eth0 up
     ip -n "${rust_ns}" link set uplink0 up

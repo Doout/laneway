@@ -1,8 +1,6 @@
-# Go build and coverage output
+# Build and test output
 bin/
 dist/
-coverage.out
-*.test
 rust/target/
 node_modules/
 *.tsbuildinfo
@@ -13,10 +11,6 @@ test-results/
 .impeccable/
 web/.env*
 !web/.env.example
-
-# Ad-hoc executable output from local cross-builds
-go/netprobe
-go/netprobe.exe
 
 # Local Laneway state and credentials
 .laneway/

@@ -1,21 +1,4 @@
 # syntax=docker/dockerfile:1.9@sha256:fe40cf4e92cd0c467be2cfc30657a680ae2398318afd50b0c80585784c604f28
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine@sha256:ecb67f987aa1a57794c91d19ade7ae0209f2f0f5496aaef9e6ae85ddf92d02ab AS build
-ARG VERSION=dev
-ARG TARGETOS
-ARG TARGETARCH
-WORKDIR /src
-COPY go/go.mod go/go.sum ./
-RUN go mod download
-COPY go/ ./
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway ./cmd/laneway
-
-FROM build AS go-healthcheck
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
-    -ldflags="-s -w -X github.com/Doout/laneway/go/internal/buildinfo.Version=${VERSION}" \
-    -o /out/laneway-healthcheck ./cmd/laneway-healthcheck
-
 FROM rust:1.91-alpine@sha256:45c1c35cd364b8055e9e86f8ecd3e8c874b2dcb658d8a4f94b5d111aa0d651a2 AS rust-runtime
 ARG VERSION=dev
 RUN apk add --no-cache musl-dev
@@ -55,12 +38,6 @@ RUN apk add --no-cache --virtual .cap-tools libcap-setcap=2.78-r0 \
     && apk del .cap-tools
 USER 65532:65532
 
-FROM base AS go-exit
-COPY --from=build /out/laneway /usr/local/bin/laneway
-COPY --from=go-healthcheck /out/laneway-healthcheck /usr/local/bin/laneway-healthcheck
-ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
-CMD ["-config", "/etc/laneway/exit-node.toml"]
-
 FROM base AS edge
 LABEL io.laneway.connector-runtime="rust"
 COPY --from=node-binary /lanewayd-rs /usr/local/bin/lanewayd-rs
@@ -72,7 +49,3 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
     CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
 ENTRYPOINT ["/usr/local/bin/laneway"]
 CMD ["connector", "run"]
-
-FROM edge AS rust-exit
-ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/run-rust-exit"]
-CMD ["-config", "/etc/laneway/exit-node.toml"]

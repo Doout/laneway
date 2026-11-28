@@ -5,12 +5,12 @@ Release packages install these files under `/usr/local/share/laneway/deploy`:
 | Directory | Contents |
 | --- | --- |
 | `compose/` | Control plane, Connector, and isolated Exit Node |
-| `systemd/` | Controller, relay, and Node units |
-| `examples/` | Go and Rust configuration examples |
+| `systemd/` | Node, relay, and managed update units |
+| `examples/` | Runtime configuration examples |
 | `nftables/` | Host firewall example and recovery notes |
 | `containers/` | Container definitions and Connector updater |
 
-Use the [Compose guide](compose/README.md) for a new control plane. Install a
+Use the [Compose guide](https://github.com/Doout/laneway/blob/main/deploy/compose/README.md) for a new control plane. Install a
 managed Linux Node with `sudo laneway node install DOMAIN` instead of assembling
 its controller configuration by hand.
 

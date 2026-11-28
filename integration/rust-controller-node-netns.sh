@@ -9,11 +9,10 @@ if [[ "$(id -u)" != "0" ]]; then
   echo "ERROR: the controller/Rust-node gate requires root" >&2
   exit 1
 fi
-required_commands=(ip nft grep sed)
+required_commands=(ip nft grep sed jq)
 [[ -n "${LANEWAY_NODE_TEST_STREAM_PROBE:-}" ]] || required_commands+=(rustc)
 [[ -n "${LANEWAY_NODE_TEST_INSPECT_PROBE:-}" ]] || required_commands+=(cargo)
 [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" && "${LANEWAY_NODE_WIREGUARD_NATIVE:-1}" == "1" ]] || required_commands+=(cargo)
-[[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]] || required_commands+=(go)
 for command in "${required_commands[@]}"; do
   if ! command -v "${command}" >/dev/null 2>&1; then
     echo "ERROR: required command is missing: ${command}" >&2
@@ -37,7 +36,6 @@ declare -a namespaces=()
 declare -A active_processes=()
 last_pid=""
 link_index=0
-node_controller="${LANEWAY_NODE_TEST_CONTROLLER:-go}"
 test_dns="${LANEWAY_NODE_TEST_PRIVATE_DNS:-0}"
 test_topology="${LANEWAY_NODE_TEST_TOPOLOGY:-0}"
 topology_config=""
@@ -55,7 +53,7 @@ managed_invitation="${LANEWAY_NODE_TEST_MANAGED_INVITATION:-0}"
 snapshot_seconds=2
 if [[ -n "${packaged_node}" ]]; then
   [[ "${packaged_node}" == /* && "${test_wireguard}:${test_durable_exit}" == 0:0 &&
-     ( "${node_controller}:${packaged_relay}" == go:0 || "${node_controller}:${packaged_relay}" == rust:1 ) &&
+     "${packaged_relay}" == 1 &&
      "$(cat /proc/1/comm)" == systemd &&
      -f /run/.laneway-isolated-systemd-lab && ! -L /run/.laneway-isolated-systemd-lab &&
      "$(stat -c '%u:%a' /run/.laneway-isolated-systemd-lab)" == 0:600 ]] ||
@@ -72,14 +70,14 @@ if [[ "${managed_invitation}" != 0 ]]; then
   snapshot_seconds=10
 fi
 if [[ "${test_dns}" == "1" ]]; then
-  [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
+  [[ "${test_wireguard}:${test_durable_exit}" == "0:0" ]] ||
     { echo "Private DNS gate requires the default node profile and Rust controller" >&2; exit 1; }
   private_dns_listen="127.0.0.1:5354"
 fi
 if [[ "${test_topology}" == "1" ]]; then
-  [[ "${node_controller}:${test_wireguard}:${test_durable_exit}" == "rust:0:0" ]] ||
+  [[ "${test_wireguard}:${test_durable_exit}" == "0:0" ]] ||
     { echo "Topology gate requires the default node profile and Rust controller" >&2; exit 1; }
-  command -v curl >/dev/null && command -v jq >/dev/null ||
+  command -v curl >/dev/null ||
     { echo "Topology gate requires curl and jq" >&2; exit 1; }
   topology_config='topology_reporting = true'
 fi
@@ -106,7 +104,7 @@ if [[ "${test_systemd}" == "1" ]]; then
   source "${repo_root}/integration/rust-lab/transient-exit.sh"
 fi
 if [[ "${test_invitation}" == "1" ]]; then
-  [[ "${test_systemd}:${node_controller}" == 1:rust ]] ||
+  [[ "${test_systemd}" == 1 ]] ||
     { echo "Invitation gate requires the isolated systemd gate and Rust controller" >&2; exit 1; }
   # Keep the lease longer than the enrollment CLI's 10-second poll interval.
   snapshot_seconds=30
@@ -115,7 +113,6 @@ if [[ "${test_invitation}" == "1" ]]; then
   # shellcheck source=integration/rust-lab/exit-carrier.sh
   source "${repo_root}/integration/rust-lab/exit-carrier.sh"
 fi
-case "${node_controller}" in go|rust) ;; *) echo "Expected go or rust controller" >&2; exit 1 ;; esac
 work_dir="$(mktemp -d -t laneway-rust-controller.XXXXXX)"
 
 cleanup() {
@@ -332,51 +329,32 @@ elif [[ "${test_wireguard}" == 1 ]]; then
     --target-dir "${repo_root}/rust/target" -p lanewayd-rs --bin lanewayd-rs --features network-fixtures
   install -m 0755 "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/enroll-probe"
 fi
-if [[ -n "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR:-}" ]]; then
-  for fixture in laneway lanewayd laneway-relay rustnodecontroller; do
-    install -m 0755 "${LANEWAY_NODE_TEST_GO_FIXTURE_DIR}/${fixture}" "${work_dir}/${fixture}"
-  done
-else
-  (
-    cd "${repo_root}/go"
-    go build -o "${work_dir}/laneway" ./cmd/laneway
-    go build -o "${work_dir}/lanewayd" ./cmd/laneway
-    go build -o "${work_dir}/laneway-relay" ./cmd/laneway-relay
-    go build -o "${work_dir}/rustnodecontroller" ./integration/rustnodecontroller
-  )
-fi
 if [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" ]]; then
   runtime_dir="${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR}"
   install -m 0755 "${runtime_dir}/lanewayd-rs" "${work_dir}/rust-node"
-  if [[ -f "${runtime_dir}/laneway" ]]; then
-    mkdir "${work_dir}/native-cli"
-    install -m 0755 "${runtime_dir}/laneway" "${work_dir}/native-cli/laneway"
-  fi
-  if [[ "${node_controller}" == "rust" ]]; then
-    install -m 0755 "${runtime_dir}/laneway-controller-rs" "${work_dir}/rust-controller"
-    install -m 0755 "${runtime_dir}/laneway-relay-rs" "${work_dir}/rust-relay"
-    controller_version="$("${work_dir}/rust-controller" --version)"
-    relay_version="$("${work_dir}/rust-relay" --version)"
-    printf '==> prebuilt Rust controller %s and relay %s\n' \
-      "${controller_version}" "${relay_version}"
-  fi
-  node_version="$("${work_dir}/rust-node" --version)"
-  printf '==> prebuilt Rust node %s\n' "${node_version}"
+  install -m 0755 "${runtime_dir}/laneway-controller-rs" "${work_dir}/rust-controller"
+  install -m 0755 "${runtime_dir}/laneway-relay-rs" "${work_dir}/rust-relay"
+  install -m 0755 "${runtime_dir}/laneway-healthcheck-rs" "${work_dir}/laneway-healthcheck"
 else
-  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p lanewayd-rs -p laneway-healthcheck
+  cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" \
+    -p lanewayd-rs -p laneway-healthcheck -p laneway-controller -p laneway-relay
   cp "${repo_root}/rust/target/debug/lanewayd-rs" "${work_dir}/rust-node"
-  if [[ "${node_controller}" == "rust" ]]; then
-    cargo build --quiet --locked --manifest-path "${repo_root}/rust/Cargo.toml" -p laneway-controller -p laneway-relay
-    cp "${repo_root}/rust/target/debug/laneway-controller" "${work_dir}/rust-controller"
-    cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/rust-relay"
-  fi
+  cp "${repo_root}/rust/target/debug/laneway-controller" "${work_dir}/rust-controller"
+  cp "${repo_root}/rust/target/debug/laneway-relay" "${work_dir}/rust-relay"
+  cp "${repo_root}/rust/target/debug/laneway-healthcheck" "${work_dir}/laneway-healthcheck"
+fi
+ln "${work_dir}/rust-node" "${work_dir}/laneway"
+mkdir "${work_dir}/native-cli"
+if [[ -n "${LANEWAY_NODE_TEST_RUST_RUNTIME_DIR:-}" && -f "${runtime_dir}/laneway" ]]; then
+  install -m 0755 "${runtime_dir}/laneway" "${work_dir}/native-cli/laneway"
+else
+  ln "${work_dir}/rust-node" "${work_dir}/native-cli/laneway"
 fi
 
 network_id="21000000000000000000000000000001"
 controller_service="21000000000000000000000000000002"
 relay_service="21000000000000000000000000000003"
 controller_endpoint="https://10.254.0.1:8443"
-controller_quic_endpoint="10.254.0.1:8443"
 admin_token="laneway-rust-controller-integration-admin-token-00000001"
 printf '%s\n' "${admin_token}" >"${work_dir}/admin.token"
 chmod 600 "${work_dir}/admin.token"
@@ -386,7 +364,7 @@ chmod 600 "${work_dir}/admin.token"
 location_controller_ip="81.2.69.141"
 location_node_ip="81.2.69.142"
 discovery_name="exit-lab.invalid"
-location_fixture="${repo_root}/go/internal/nodelocation/testdata/GeoIP2-City-Test.mmdb"
+location_fixture="${repo_root}/rust/laneway-controller/tests/fixtures/geoip/GeoIP2-City-Test.mmdb"
 "${work_dir}/laneway" pki controller \
   -ca-cert "${work_dir}/pki/ca.crt" -ca-key "${work_dir}/pki/ca.key" \
   -network-id "${network_id}" -service-id "${controller_service}" -ip "10.254.0.1,127.0.0.1,${location_controller_ip}" \
@@ -419,25 +397,21 @@ ip -n "${gateway_ns}" link set lan1 up
 ip -n "${lan_ns}" link set eth0 up
 ip netns exec "${gateway_ns}" sysctl -qw net.ipv4.ip_forward=0
 
-controller_command=(
-  "${work_dir}/rustnodecontroller"
-  -listen 10.254.0.1:8443
-  -quic-listen 10.254.0.1:8443
-  -database "${work_dir}/controller.db"
-  -ca-cert "${work_dir}/pki/ca.crt"
-  -ca-key "${work_dir}/pki/ca.key"
-  -controller-cert "${work_dir}/pki/controller.crt"
-  -controller-key "${work_dir}/pki/controller.key"
-  -admin-token-file "${work_dir}/admin.token"
-  -snapshot-validity "${snapshot_seconds}s"
-  -initial-node-delay 1500ms
-)
-if [[ "${test_wireguard}" != "1" ]]; then
-  controller_command+=(-first-enrollment-validity 30s)
-fi
-start_process "${controller_ns}" "${work_dir}/controller.log" "${controller_command[@]}"
+"${work_dir}/rust-controller" init "${work_dir}/controller.db" \
+  "${work_dir}/pki/controller.crt" rust-node-live 100.115.0.0/24
+# Give the initial ordinary node a short-lived certificate. The full controller
+# below has a longer issuer lifetime so renewal is observable without repeated
+# renewals during traffic checks.
+initial_lifetime=30
+if [[ "${test_wireguard}" == 1 ]]; then initial_lifetime=3600; fi
+start_process "${controller_ns}" "${work_dir}/controller.log" \
+  "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 10.254.0.1:8443 \
+  "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
+  --listen-on-network --root-token-file "${work_dir}/admin.token" \
+  --node-client-ca "${work_dir}/pki/ca.crt" \
+  --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" "${initial_lifetime}"
 controller_pid="${last_pid}"
-wait_log "${controller_pid}" "${work_dir}/controller.log" "test controller listening"
+wait_log "${controller_pid}" "${work_dir}/controller.log" "listening https://10.254.0.1:8443"
 
 admin_connection=(
   --controller "${controller_endpoint}"
@@ -446,19 +420,10 @@ admin_connection=(
   --controller-service-id "${controller_service}"
   --admin-token-file "${work_dir}/admin.token"
 )
-ip netns exec "${controller_ns}" "${work_dir}/laneway" controller network create \
-  --network-id "${network_id}" --name rust-node-live --ipv4-pool 100.115.0.0/24 \
-  "${admin_connection[@]}" >"${work_dir}/network.json"
 rust_role=()
 if [[ "${test_wireguard}" == "1" ]]; then
   rust_role=(--class ephemeral --session-lifetime 10m --exit-node --requested-name rust-controller-node)
 fi
-gateway_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
-  --network-id "${network_id}" --label gateway --expires-in 10m "${admin_connection[@]}")"
-gateway_token="$(printf '%s\n' "${gateway_token_json}" | json_string_field enrollment_token)"
-[[ -n "${gateway_token}" ]] || { echo "ERROR: gateway enrollment token was not returned" >&2; exit 1; }
-(umask 077; printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token")
-
 rust_join=""
 if [[ "${test_invitation}:${managed_invitation}" == "0:0" ]]; then
   rust_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
@@ -480,10 +445,69 @@ if [[ "${test_invitation}:${managed_invitation}" == "0:0" ]]; then
       --out-wireguard-key "${work_dir}/pki/rust.wireguard.key")"
   fi
 fi
+stop_process "${controller_pid}"
+ip -n "${controller_ns}" address add "${location_controller_ip}/28" dev eth0
+ip -n "${rust_ns}" address add "${location_node_ip}/28" dev eth0
+ip -n "${relay_ns}" address add 81.2.69.140/28 dev eth0
+gateway_location_ip="81.2.69.139"
+ip -n "${gateway_ns}" address add "${gateway_location_ip}/28" dev eth0
+node_endpoint="https://${location_controller_ip}:9443"
+node_quic_endpoint="${location_controller_ip}:9443"
+node_server_name="${location_controller_ip}"
+health_location=(-public-ip "${location_node_ip}" -location "London, GB")
+# Keep the authority HTTPS listener on loopback. These connections are
+# restricted to peers on the disconnected laboratory bridge.
+ip netns exec "${controller_ns}" sysctl -qw net.ipv4.conf.eth0.route_localnet=1
+ip netns exec "${controller_ns}" nft add table ip lab_health
+ip netns exec "${controller_ns}" nft add chain ip lab_health prerouting \
+  '{ type nat hook prerouting priority dstnat; policy accept; }'
+for host in "${location_node_ip}" "${gateway_location_ip}" 81.2.69.140; do
+  ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
+    iifname eth0 ip saddr "${host}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
+done
+discovery_args=()
+if [[ "${test_invitation}" == 1 || "${managed_invitation}" == 1 ]]; then
+  case "$(uname -m)" in x86_64) lab_arch=amd64 ;; aarch64) lab_arch=arm64 ;; *) exit 2 ;; esac
+  jq -n --arg https "${node_endpoint}" --arg quic "${node_quic_endpoint}" --arg name "${discovery_name}" \
+    --arg arch "${lab_arch}" --arg sha "$(printf '%064d' 1)" \
+    '{enrollment_endpoint:$https, quic_endpoint:$quic, server_name:$name,
+      artifacts:[{os:"linux",arch:$arch,url:"https://release.invalid/node.tar.gz",sha256:$sha,size_bytes:123}]}' \
+    >"${work_dir}/bootstrap-profile.json"
+  discovery_args=(--bootstrap-profile "${work_dir}/bootstrap-profile.json")
+fi
+if [[ "${test_topology}" == 1 ]]; then
+  "${work_dir}/rust-controller" migrate-fleet "${work_dir}/controller.db"
+fi
+start_process "${controller_ns}" "${work_dir}/native-controller.log" \
+  "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
+  "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
+  --listen-on-network \
+  --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
+  --root-token-file "${work_dir}/admin.token" \
+  --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity "${snapshot_seconds}" \
+  --location-database "${location_fixture}" "${discovery_args[@]}"
+native_controller_pid="${last_pid}"
+wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
+advertiser_namespace="${controller_ns}"
+advertiser_endpoint="https://127.0.0.1:9443"
+management_connection=(
+  --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt"
+  --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
+  --admin-token-file "${work_dir}/admin.token"
+)
+gateway_endpoint="${node_endpoint}"
+gateway_server_name="${node_server_name}"
+
+gateway_token_json="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller enrollment-token issue \
+  --network-id "${network_id}" --label gateway --expires-in 10m "${management_connection[@]}")"
+gateway_token="$(printf '%s\n' "${gateway_token_json}" | json_string_field enrollment_token)"
+[[ -n "${gateway_token}" ]] || { echo "ERROR: gateway enrollment token was not returned" >&2; exit 1; }
+(umask 077; printf '%s\n' "${gateway_token}" >"${work_dir}/gateway.token")
+
 gateway_join="$(ip netns exec "${gateway_ns}" "${work_dir}/laneway" join --token-file "${work_dir}/gateway.token" \
-  --controller "${controller_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+  --controller "${gateway_endpoint}" --ca "${work_dir}/pki/ca.crt" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-  --name go-gateway --out-cert "${work_dir}/pki/gateway.crt" --out-key "${work_dir}/pki/gateway.key" \
+  --name gateway --out-cert "${work_dir}/pki/gateway.crt" --out-key "${work_dir}/pki/gateway.key" \
   --out-wireguard-key "${work_dir}/pki/gateway.wireguard.key")"
 rust_id="$(printf '%s\n' "${rust_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
 gateway_id="$(printf '%s\n' "${gateway_join}" | sed -n 's/.* node=\([0-9a-f]\{32\}\) .*/\1/p')"
@@ -497,94 +521,6 @@ if [[ ! "${gateway_id}" =~ ^[0-9a-f]{32}$ || -z "${gateway_address}" ]] ||
   printf '%s\n%s\n' "${rust_join}" "${gateway_join}" >&2
   exit 1
 fi
-node_endpoint="${controller_endpoint}"
-node_quic_endpoint="${controller_quic_endpoint}"
-node_server_name="10.254.0.1"
-gateway_endpoint="${node_endpoint}"
-gateway_server_name="${node_server_name}"
-gateway_config_endpoint="${controller_endpoint}"
-gateway_quic_endpoint="${controller_quic_endpoint}"
-native_controller_pid=""
-relay_metrics=""
-management_connection=("${admin_connection[@]}")
-advertiser_namespace="${gateway_ns}"
-advertiser_endpoint="${controller_endpoint}"
-health_location=()
-if [[ "${node_controller}" == "rust" ]]; then
-  ip -n "${controller_ns}" address add "${location_controller_ip}/28" dev eth0
-  ip -n "${rust_ns}" address add "${location_node_ip}/28" dev eth0
-  ip -n "${relay_ns}" address add 81.2.69.140/28 dev eth0
-  node_endpoint="https://${location_controller_ip}:9443"
-  node_quic_endpoint="${location_controller_ip}:9443"
-  node_server_name="${location_controller_ip}"
-  health_location=(-public-ip "${location_node_ip}" -location "London, GB")
-  relay_metrics='metrics_listen = "127.0.0.1:6060"'
-  # Keep HTTPS loopback-only. Allow just the lab node's HTTPS connection to
-  # reach that listener through TCP DNAT, without terminating its mTLS.
-  # Node and relay still fetch control snapshots over QUIC.
-  ip netns exec "${controller_ns}" sysctl -qw net.ipv4.conf.eth0.route_localnet=1
-  ip netns exec "${controller_ns}" nft add table ip lab_health
-  ip netns exec "${controller_ns}" nft add chain ip lab_health prerouting \
-    '{ type nat hook prerouting priority dstnat; policy accept; }'
-  ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
-    iifname eth0 ip saddr "${location_node_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
-  if [[ "${test_durable_exit}" == "1" || "${test_invitation}" == "1" || "${test_topology}" == "1" ||
-        "${packaged_relay}" == "1" ]]; then
-    gateway_location_ip="81.2.69.139"
-    ip -n "${gateway_ns}" address add "${gateway_location_ip}/28" dev eth0
-    ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
-      iifname eth0 ip saddr "${gateway_location_ip}" ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
-    gateway_endpoint="${node_endpoint}"
-    gateway_server_name="${node_server_name}"
-  fi
-  if [[ "${packaged_relay}" == "1" ]]; then
-    stop_process "${controller_pid}"
-    gateway_config_endpoint="${node_endpoint}"
-    gateway_quic_endpoint="${node_quic_endpoint}"
-    ip netns exec "${controller_ns}" nft add rule ip lab_health prerouting \
-      iifname eth0 ip saddr 81.2.69.140 ip daddr "${location_controller_ip}" tcp dport 9443 dnat to 127.0.0.1:9443
-  fi
-  discovery_args=()
-  if [[ "${test_invitation}" == "1" || "${managed_invitation}" == "1" ]]; then
-    # Rust is the only controller once the fixture database is provisioned.
-    stop_process "${controller_pid}"
-    gateway_config_endpoint="${node_endpoint}"
-    gateway_quic_endpoint="${node_quic_endpoint}"
-    case "$(uname -m)" in x86_64) lab_arch=amd64 ;; aarch64) lab_arch=arm64 ;; *) exit 2 ;; esac
-    jq -n --arg https "${node_endpoint}" --arg quic "${node_quic_endpoint}" --arg name "${discovery_name}" \
-      --arg arch "${lab_arch}" --arg sha "$(printf '%064d' 1)" \
-      '{enrollment_endpoint:$https, quic_endpoint:$quic, server_name:$name,
-        artifacts:[{os:"linux",arch:$arch,url:"https://release.invalid/node.tar.gz",sha256:$sha,size_bytes:123}]}' \
-      >"${work_dir}/bootstrap-profile.json"
-    discovery_args=(--bootstrap-profile "${work_dir}/bootstrap-profile.json")
-  fi
-  if [[ "${test_topology}" == "1" ]]; then
-    # The topology tables must be installed before the Rust process takes the
-    # writer lock. Legacy nodes talk to that same authoritative controller.
-    stop_process "${controller_pid}"
-    "${work_dir}/rust-controller" migrate-fleet "${work_dir}/controller.db"
-    gateway_config_endpoint="${node_endpoint}"
-    gateway_quic_endpoint="${node_quic_endpoint}"
-  fi
-  start_process "${controller_ns}" "${work_dir}/native-controller.log" \
-    "${work_dir}/rust-controller" serve "${work_dir}/controller.db" 127.0.0.1:9443 \
-    "${work_dir}/pki/controller.crt" "${work_dir}/pki/controller.key" \
-    --listen-on-network \
-    --node-client-ca "${work_dir}/pki/ca.crt" --node-issuer "${work_dir}/pki/ca.crt" "${work_dir}/pki/ca.key" 3600 \
-    --root-token-file "${work_dir}/admin.token" \
-    --node-quic --quic-listen "${node_quic_endpoint}" --snapshot-validity "${snapshot_seconds}" \
-    --location-database "${location_fixture}" "${discovery_args[@]}"
-  native_controller_pid="${last_pid}"
-  wait_log "${native_controller_pid}" "${work_dir}/native-controller.log" "listening quic://${node_quic_endpoint}"
-  advertiser_namespace="${controller_ns}"
-  advertiser_endpoint="https://127.0.0.1:9443"
-  management_connection=(
-    --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt"
-    --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
-    --admin-token-file "${work_dir}/admin.token"
-  )
-fi
-
 relay_registration="$(ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay register \
   --network-id "${network_id}" --service-id "${relay_service}" \
   --name rust-live-relay --endpoint 10.254.0.2:4433 "${management_connection[@]}")"
@@ -617,7 +553,7 @@ private_key = "${work_dir}/pki/relay.key"
 ca = "${work_dir}/pki/ca.crt"
 [relay]
 listen = "10.254.0.2:4433"
-${relay_metrics}
+metrics_listen = "127.0.0.1:6060"
 [controller]
 endpoint = "${node_endpoint}"
 quic_endpoint = "${node_quic_endpoint}"
@@ -634,16 +570,18 @@ socket_path = "${work_dir}/gateway.sock"
 certificate = "${work_dir}/pki/gateway.crt"
 private_key = "${work_dir}/pki/gateway.key"
 ca = "${work_dir}/pki/ca.crt"
+server_name = "10.254.0.2"
 [node]
-name = "go-gateway"
+name = "gateway"
 relay_address = "10.254.0.2:4433"
 relay_network_id = "${network_id}"
 relay_service_id = "${relay_service}"
 reconnect_min = "50ms"
 reconnect_max = "500ms"
 [controller]
-endpoint = "${gateway_config_endpoint}"
-quic_endpoint = "${gateway_quic_endpoint}"
+endpoint = "${gateway_endpoint}"
+quic_endpoint = "${node_quic_endpoint}"
+server_name = "${gateway_server_name}"
 network_id = "${network_id}"
 service_id = "${controller_service}"
 poll_interval = "100ms"
@@ -651,7 +589,7 @@ poll_interval = "100ms"
 advertise = ["192.168.77.0/24"]
 nat = true
 output_interface = "lan1"
-# This gate asserts relay forwarding. The mixed-node gate covers direct paths.
+# This gate asserts relay forwarding. The node-to-node gate covers direct paths.
 [direct]
 enabled = false
 EOF
@@ -714,26 +652,23 @@ if [[ "${test_wireguard}" == "1" ]]; then
 [tcp_fallback]
 listen = "10.254.0.2:4435"
 EOF
-  if [[ "${node_controller}" == "rust" ]]; then
-    start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/rust-relay" --config "${work_dir}/relay.toml"
-    relay_ready="listening"
-  else
-    start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/laneway-relay" \
-      -config "${work_dir}/relay.toml" -diagnostics 127.0.0.1:6060
-    relay_ready="TCP-fallback="
-  fi
-  wait_log "${last_pid}" "${work_dir}/relay.log" "${relay_ready}"
-  sed '/^advertise = /d' "${work_dir}/gateway.toml" >"${work_dir}/wg-go.toml"
-  cat >>"${work_dir}/wg-go.toml" <<EOF
+  start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/rust-relay" --config "${work_dir}/relay.toml"
+  wait_log "${last_pid}" "${work_dir}/relay.log" "listening"
+  sed '/^advertise = /d' "${work_dir}/gateway.toml" >"${work_dir}/wg-gateway.toml"
+  cat >>"${work_dir}/wg-gateway.toml" <<EOF
 [wireguard]
 enabled = true
 private_key = "${work_dir}/pki/gateway.wireguard.key"
 interface = "lane0"
 mtu = 1280
 EOF
-  start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/lanewayd" \
-    -config "${work_dir}/wg-go.toml"
-  wait_log "${last_pid}" "${work_dir}/gateway.log" "interface=lane0"
+  start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/laneway" node run \
+    -config "${work_dir}/wg-gateway.toml"
+  for _ in $(seq 1 200); do
+    if ip -n "${gateway_ns}" -4 addr show dev lane0 2>/dev/null | grep -Fq "${gateway_overlay}"; then break; fi
+    sleep 0.05
+  done
+  ip -n "${gateway_ns}" -4 addr show dev lane0 | grep -F "${gateway_overlay}" >/dev/null
 
   if [[ "${test_invitation}" == "1" ]]; then
     check_invited_systemd_exit
@@ -842,7 +777,7 @@ EOF
   fi
 
   for transport in quic tcp; do
-    echo "==> kernel WireGuard packets cross the ${node_controller} relay over ${transport}"
+    echo "==> kernel WireGuard packets cross the Rust relay over ${transport}"
     if [[ "${test_systemd}" == "1" ]]; then
       run_systemd_exit "${transport}"
     else
@@ -907,8 +842,8 @@ EOF
       policy_restored=0
       for _ in $(seq 1 150); do
         if rust_acl="$(ip netns exec "${rust_ns}" nft list table inet "${wg_table}" 2>/dev/null)" &&
-          go_acl="$(ip netns exec "${gateway_ns}" nft list table inet laneway_wg 2>/dev/null)" &&
-          [[ "${rust_acl}" != *"${denied_id}"* && "${go_acl}" != *"${denied_id}"* ]]; then
+          gateway_acl="$(ip netns exec "${gateway_ns}" nft list table inet "${wg_table}" 2>/dev/null)" &&
+          [[ "${rust_acl}" != *"${denied_id}"* && "${gateway_acl}" != *"${denied_id}"* ]]; then
           policy_restored=1
           break
         fi
@@ -919,8 +854,7 @@ EOF
         "${work_dir}/netprobe-stream" udp-echo-server -listen "${rust_address}:9794"
       reverse_pid="${last_pid}"
       wait_log "${reverse_pid}" "${work_dir}/wg-reverse-probe.log" "ready=udp-echo-server"
-      # A legacy peer resets its WireGuard session on any configuration
-      # update. Initiating from that peer rekeys without waiting for its timer.
+      # Retry from the peer while both nodes refresh their policy snapshots.
       for _ in $(seq 1 12); do
         if ip netns exec "${gateway_ns}" "${work_dir}/netprobe-stream" udp-client \
           -target "${rust_address}:9794" -message policy-rekeyed -timeout 1s; then break; fi
@@ -941,7 +875,7 @@ EOF
         "${work_dir}/netprobe-stream" udp-server -listen 203.0.113.2:9793 -max-packets 16 -timeout 90s
       nat_pid="${last_pid}"
       wait_log "${nat_pid}" "${work_dir}/wg-nat-probe.log" "ready=udp-server"
-      # Point only this disposable destination at the Go peer's existing
+      # Point only this disposable destination at the gateway's existing
       # encrypted relay socket. This needs no host resolver or default route.
       ip netns exec "${gateway_ns}" wg set lane0 peer "${rust_key}" \
         allowed-ips "${rust_overlay},203.0.113.2/32"
@@ -954,7 +888,7 @@ EOF
       [[ "$(ip netns exec "${rust_ns}" sysctl -n net.ipv4.ip_forward)" == "1" ]]
       if [[ "${test_drain}" == "1" ]]; then
         echo "==> a controller partition drains only established forwarded traffic"
-        # Leave the relay and Go peer connected to the controller. Only the
+        # Leave the relay and gateway connected to the controller. Only the
         # Rust exit loses its independent control channel in this namespace.
         ip netns exec "${rust_ns}" nft add table inet lab_drain
         ip netns exec "${rust_ns}" nft add chain inet lab_drain output '{ type filter hook output priority 0; policy accept; }'
@@ -1038,7 +972,7 @@ EOF
       grep -Fq 'test kernel_relay_bridge ... ok' "${work_dir}/wg-rust-${transport}.log"
     fi
   done
-  echo "PASS: the ephemeral Rust peer and durable Go peer exchange encrypted kernel traffic across the ${node_controller} relay"
+  echo "PASS: the ephemeral Rust peer and durable gateway exchange encrypted kernel traffic across the Rust relay"
   exit 0
 fi
 
@@ -1047,7 +981,21 @@ if [[ -n "${packaged_node}" ]]; then
   exit 0
 fi
 
-echo "==> Rust node bootstraps and renews its certificate at the ${node_controller} controller"
+# This authority gate measures traffic through the relay. Control-plane
+# snapshots can automatically enable direct paths for the two Rust nodes.
+# Block only their direct UDP traffic inside the disconnected fixture.
+ip netns exec "${rust_ns}" nft add table inet lab_relay_only
+ip netns exec "${rust_ns}" nft add chain inet lab_relay_only output \
+  '{ type filter hook output priority 0; policy accept; }'
+ip netns exec "${rust_ns}" nft add rule inet lab_relay_only output \
+  ip daddr "{10.254.0.4,${gateway_location_ip}}" udp drop
+ip netns exec "${gateway_ns}" nft add table inet lab_relay_only
+ip netns exec "${gateway_ns}" nft add chain inet lab_relay_only output \
+  '{ type filter hook output priority 0; policy accept; }'
+ip netns exec "${gateway_ns}" nft add rule inet lab_relay_only output \
+  ip daddr "{10.254.0.3,${location_node_ip}}" udp drop
+
+echo "==> Rust node bootstraps and renews its certificate at the Rust controller"
 if [[ ! -x "${work_dir}/native-cli/laneway" ]]; then
   mkdir "${work_dir}/native-cli"
   ln "${work_dir}/rust-node" "${work_dir}/native-cli/laneway"
@@ -1059,16 +1007,8 @@ initial_key_hash="$(sha256sum "${work_dir}/pki/rust.key")"
 start_process "${rust_ns}" "${work_dir}/rust.log" env RUST_LOG=info \
   "${work_dir}/native-cli/laneway" node run -config "${work_dir}/rust.toml"
 rust_pid="${last_pid}"
-if [[ "${node_controller}" == "go" ]]; then
-  wait_log "${controller_pid}" "${work_dir}/controller.log" "holding initial node configuration request"
-  if ip -n "${rust_ns}" link show lane0 >/dev/null 2>&1; then
-    echo "ERROR: Rust node created lane0 before its initial NodeConfiguration" >&2
-    exit 1
-  fi
-  wait_log "${controller_pid}" "${work_dir}/controller.log" "node configuration response status=200"
-fi
 wait_log "${rust_pid}" "${work_dir}/rust.log" "native Rust Laneway agent started"
-wait_log "${rust_pid}" "${work_dir}/rust.log" "renewed node certificate; restarting authenticated connections"
+wait_log "${rust_pid}" "${work_dir}/rust.log" "renewed node certificate; restarting authenticated connections" 700
 for _ in $(seq 1 160); do
   if [[ "$(grep -c 'native Rust Laneway agent started' "${work_dir}/rust.log")" -ge 2 ]]; then break; fi
   sleep 0.05
@@ -1132,12 +1072,7 @@ if [[ "${test_dns}" == "1" ]]; then
   echo "PASS: Private DNS fails closed and recovers after HTTPS transport loss"
 fi
 
-if [[ "${node_controller}" == "rust" ]]; then
-  start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/rust-relay" --config "${work_dir}/relay.toml"
-else
-  start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/laneway-relay" \
-    -config "${work_dir}/relay.toml" -diagnostics 127.0.0.1:6060
-fi
+start_process "${relay_ns}" "${work_dir}/relay.log" "${work_dir}/rust-relay" --config "${work_dir}/relay.toml"
 relay_pid="${last_pid}"
 wait_log "${relay_pid}" "${work_dir}/relay.log" "listening"
 if [[ "${test_durable_exit}" == "1" ]]; then
@@ -1250,16 +1185,16 @@ EOF
     echo "ERROR: gateway left a TUN device after shutdown" >&2
     exit 1
   fi
-  echo "PASS: durable Rust exit forwards only while approved by the ${node_controller} controller"
+  echo "PASS: durable Rust exit forwards only while approved by the Rust controller"
   exit 0
 fi
-start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/lanewayd" \
-  -config "${work_dir}/gateway.toml" -diagnostics 127.0.0.1:6061
+start_process "${gateway_ns}" "${work_dir}/gateway.log" "${work_dir}/laneway" node run \
+  -config "${work_dir}/gateway.toml"
 gateway_pid="${last_pid}"
-wait_log "${gateway_pid}" "${work_dir}/gateway.log" "interface=lane0"
+wait_log "${gateway_pid}" "${work_dir}/gateway.log" "native Rust Laneway agent started"
 wait_relay_sessions 2
-"${repo_root}/rust/target/debug/laneway-healthcheck" -unix "${work_dir}/rust.sock"
-"${repo_root}/rust/target/debug/lanewayd-rs" healthcheck -unix "${work_dir}/rust.sock"
+"${work_dir}/laneway-healthcheck" -unix "${work_dir}/rust.sock"
+"${work_dir}/rust-node" healthcheck -unix "${work_dir}/rust.sock"
 
 echo "==> approved route mutation is installed transactionally and carries a real packet"
 if ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q .; then
@@ -1280,20 +1215,18 @@ ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route approve 
   --route-id "${route_id}" "${management_connection[@]}" >"${work_dir}/route-approval.json"
 wait_route "${rust_ns}" 192.168.77.0/24 1
 for _ in $(seq 1 200); do
-  if ip netns exec "${gateway_ns}" nft list table inet laneway 2>/dev/null | grep -q '192.168.77.0/24' && \
+  if ip netns exec "${gateway_ns}" nft list table inet laneway_rs_subnet 2>/dev/null | grep -q '192.168.77.0/24' && \
      [[ "$(ip netns exec "${gateway_ns}" sysctl -n net.ipv4.ip_forward)" == "1" ]]; then
     break
   fi
   sleep 0.05
 done
-ip netns exec "${gateway_ns}" nft list table inet laneway | grep -q '192.168.77.0/24'
+ip netns exec "${gateway_ns}" nft list table inet laneway_rs_subnet | grep -q '192.168.77.0/24'
 relay_forwarded_packets() {
   ip netns exec "${relay_ns}" "${work_dir}/netprobe-inspect" metric \
     -url http://127.0.0.1:6060/metrics -name laneway_relay_forwarded_packets_total
 }
-if [[ "${node_controller}" == "rust" ]]; then
-  forwarded_before="$(relay_forwarded_packets)"
-fi
+forwarded_before="$(relay_forwarded_packets)"
 if [[ "${test_topology}" == "1" ]]; then
   (umask 077; printf 'Authorization: Bearer %s\n' "${admin_token}" >"${work_dir}/topology-header")
   topology() {
@@ -1304,12 +1237,14 @@ if [[ "${test_topology}" == "1" ]]; then
   topology | jq -e '.retention_seconds == 120 and (.edges | length == 0)' >/dev/null
 fi
 udp_success 9701 rust-route-allowed
-if [[ "${node_controller}" == "rust" ]]; then
+for _ in $(seq 1 40); do
   forwarded_after="$(relay_forwarded_packets)"
-  if (( forwarded_after < forwarded_before + 2 )); then
-    echo "ERROR: the request and reply did not use the Rust relay" >&2
-    exit 1
-  fi
+  if (( forwarded_after >= forwarded_before + 2 )); then break; fi
+  sleep 0.05
+done
+if (( forwarded_after < forwarded_before + 2 )); then
+  echo "ERROR: relay forwarded ${forwarded_before} packets before the probe and ${forwarded_after} after it" >&2
+  exit 1
 fi
 if [[ "${test_topology}" == "1" ]]; then
   recorded=0
@@ -1345,21 +1280,19 @@ if [[ "${reported_carrier}" != "relay_quic" ]]; then
   exit 1
 fi
 
-if [[ "${node_controller}" == "rust" ]]; then
-  echo "==> disabling the relay closes live sessions and stops forwarding"
-  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay disable \
-    --relay-id "${relay_id}" "${management_connection[@]}" >"${work_dir}/relay-disable.json"
-  wait_relay_sessions 0
-  udp_denied 9709 rust-relay-disabled
+echo "==> disabling the relay closes live sessions and stops forwarding"
+ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay disable \
+  --relay-id "${relay_id}" "${management_connection[@]}" >"${work_dir}/relay-disable.json"
+wait_relay_sessions 0
+udp_denied 9709 rust-relay-disabled
 
-  echo "==> updating the relay to enabled restores sessions and traffic without a restart"
-  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay update \
-    --relay-id "${relay_id}" --name rust-live-relay-restored --endpoint 10.254.0.2:4433 \
-    --enabled "${management_connection[@]}" >"${work_dir}/relay-update.json"
-  wait_relay_sessions 2
-  wait_route "${rust_ns}" 192.168.77.0/24 1
-  udp_success 9710 rust-relay-restored
-fi
+echo "==> updating the relay to enabled restores sessions and traffic without a restart"
+ip netns exec "${controller_ns}" "${work_dir}/laneway" controller relay update \
+  --relay-id "${relay_id}" --name rust-live-relay-restored --endpoint 10.254.0.2:4433 \
+  --enabled "${management_connection[@]}" >"${work_dir}/relay-update.json"
+wait_relay_sessions 2
+wait_route "${rust_ns}" 192.168.77.0/24 1
+udp_success 9710 rust-relay-restored
 
 echo "==> deleting the only ACL rule leaves the route present but fails traffic closed"
 ip netns exec "${controller_ns}" "${work_dir}/laneway" controller acl delete \
@@ -1380,50 +1313,48 @@ if [[ ! "${replacement_acl_id}" =~ ^[0-9a-f]{32}$ ]]; then
 fi
 udp_success 9703 rust-acl-restored
 
-if [[ "${node_controller}" == "rust" ]]; then
-  rust_workload_connection=(
-    --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt"
-    --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
-    --cert "${work_dir}/pki/rust.crt" --key "${work_dir}/pki/rust.key"
-  )
-  if ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
-    --route-id "${route_id}" "${rust_workload_connection[@]}" >"${work_dir}/foreign-withdrawal.log" 2>&1; then
-    echo "ERROR: a different node withdrew the gateway's route" >&2
-    exit 1
-  fi
-  grep -q 'ERROR_CODE_PERMISSION_DENIED' "${work_dir}/foreign-withdrawal.log"
-  if ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" route advertise 192.0.2.0/24 \
-    --kind subnet --mode nat "${rust_workload_connection[@]}" >"${work_dir}/unprivileged-advertisement.log" 2>&1; then
-    echo "ERROR: a node without subnet-router capability advertised a route" >&2
-    exit 1
-  fi
-  grep -q 'node lacks route capability' "${work_dir}/unprivileged-advertisement.log"
-  echo "==> a route owner withdraws through Rust; the route disappears and packets stop"
-  ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
-    --route-id "${route_id}" --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt" \
-    --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
-    --cert "${work_dir}/pki/gateway.crt" --key "${work_dir}/pki/gateway.key" >"${work_dir}/route-withdrawal.json"
-  wait_route "${rust_ns}" 192.168.77.0/24 0
-  udp_denied 9705 rust-route-withdrawn
-
-  echo "==> assigning the same subnet through Rust reinstalls it and restores traffic"
-  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route assign \
-    --network-id "${network_id}" --connector "${gateway_id}" --to 192.168.77.0/24 \
-    "${management_connection[@]}" >"${work_dir}/route-assignment.json"
-  wait_route "${rust_ns}" 192.168.77.0/24 1
-  udp_success 9706 rust-route-reassigned
-
-  echo "==> removing the router capability withdraws its route and stops traffic"
-  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
-    --node-id "${gateway_id}" "${management_connection[@]}" >"${work_dir}/capability-removal.json"
-  wait_route "${rust_ns}" 192.168.77.0/24 0
-  udp_denied 9707 rust-capability-removed
-  ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route assign \
-    --network-id "${network_id}" --connector "${gateway_id}" --to 192.168.77.0/24 \
-    "${management_connection[@]}" >"${work_dir}/route-restoration.json"
-  wait_route "${rust_ns}" 192.168.77.0/24 1
-  udp_success 9708 rust-capability-restored
+rust_workload_connection=(
+  --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt"
+  --controller-network-id "${network_id}" --controller-service-id "${controller_service}"
+  --cert "${work_dir}/pki/rust.crt" --key "${work_dir}/pki/rust.key"
+)
+if ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
+  --route-id "${route_id}" "${rust_workload_connection[@]}" >"${work_dir}/foreign-withdrawal.log" 2>&1; then
+  echo "ERROR: a different node withdrew the gateway's route" >&2
+  exit 1
 fi
+grep -q 'ERROR_CODE_PERMISSION_DENIED' "${work_dir}/foreign-withdrawal.log"
+if ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" route advertise 192.0.2.0/24 \
+  --kind subnet --mode nat "${rust_workload_connection[@]}" >"${work_dir}/unprivileged-advertisement.log" 2>&1; then
+  echo "ERROR: a node without subnet-router capability advertised a route" >&2
+  exit 1
+fi
+grep -q 'node lacks route capability' "${work_dir}/unprivileged-advertisement.log"
+echo "==> a route owner withdraws through Rust; the route disappears and packets stop"
+ip netns exec "${advertiser_namespace}" "${work_dir}/laneway" controller route withdraw \
+  --route-id "${route_id}" --controller "${advertiser_endpoint}" --ca "${work_dir}/pki/ca.crt" \
+  --controller-network-id "${network_id}" --controller-service-id "${controller_service}" \
+  --cert "${work_dir}/pki/gateway.crt" --key "${work_dir}/pki/gateway.key" >"${work_dir}/route-withdrawal.json"
+wait_route "${rust_ns}" 192.168.77.0/24 0
+udp_denied 9705 rust-route-withdrawn
+
+echo "==> assigning the same subnet through Rust reinstalls it and restores traffic"
+ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route assign \
+  --network-id "${network_id}" --connector "${gateway_id}" --to 192.168.77.0/24 \
+  "${management_connection[@]}" >"${work_dir}/route-assignment.json"
+wait_route "${rust_ns}" 192.168.77.0/24 1
+udp_success 9706 rust-route-reassigned
+
+echo "==> removing the router capability withdraws its route and stops traffic"
+ip netns exec "${controller_ns}" "${work_dir}/laneway" controller node capabilities \
+  --node-id "${gateway_id}" "${management_connection[@]}" >"${work_dir}/capability-removal.json"
+wait_route "${rust_ns}" 192.168.77.0/24 0
+udp_denied 9707 rust-capability-removed
+ip netns exec "${controller_ns}" "${work_dir}/laneway" controller route assign \
+  --network-id "${network_id}" --connector "${gateway_id}" --to 192.168.77.0/24 \
+  "${management_connection[@]}" >"${work_dir}/route-restoration.json"
+wait_route "${rust_ns}" 192.168.77.0/24 1
+udp_success 9708 rust-capability-restored
 
 echo "==> certificate revocation closes the established gateway path"
 gateway_info="$("${work_dir}/netprobe-inspect" certificate-info -cert "${work_dir}/pki/gateway.crt")"
@@ -1440,20 +1371,7 @@ ip -n "${rust_ns}" route show exact 192.168.77.0/24 | grep -q 'dev lane0'
 udp_denied 9704 rust-revoked-path
 
 echo "==> controller outage expires the last bounded lease and removes native authority"
-if [[ -n "${native_controller_pid}" ]]; then
-  stop_process "${native_controller_pid}"
-else
-  # ip netns exec may retain a parent wrapper on some iproute2 versions.
-  # Signal only processes in this disposable controller namespace.
-  while read -r namespace_pid; do
-    if [[ -n "${namespace_pid}" ]]; then
-      kill -KILL "${namespace_pid}" >/dev/null 2>&1 || true
-    fi
-  done < <(ip netns pids "${controller_ns}")
-  kill -KILL "${controller_pid}" >/dev/null 2>&1 || true
-  wait "${controller_pid}" >/dev/null 2>&1 || true
-  unset "active_processes[${controller_pid}]"
-fi
+stop_process "${native_controller_pid}"
 for _ in $(seq 1 160); do
   address_present=0
   route_present=0
@@ -1482,12 +1400,10 @@ if ip -n "${rust_ns}" -4 address show dev lane0 2>/dev/null | grep -q "${rust_ad
   exit 1
 fi
 grep -q 'authority expired' "${work_dir}/rust.log"
-if [[ "${node_controller}" == "rust" ]]; then
-  wait_relay_sessions 0
-  kill -0 "${relay_pid}"
-fi
+wait_relay_sessions 0
+kill -0 "${relay_pid}"
 
 stop_process "${gateway_pid}"
 stop_process "${relay_pid}"
 stop_process "${rust_pid}"
-echo "PASS: ${node_controller} controller drove Rust-node bootstrap, route/ACL mutation, revocation, and outage expiry"
+echo "PASS: Rust controller drove Rust-node bootstrap, route/ACL mutation, revocation, and outage expiry"

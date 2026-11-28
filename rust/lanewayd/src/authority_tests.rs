@@ -1,16 +1,8 @@
 use super::*;
-use crate::{
-    config::TlsConfig,
-    controller::{
-        ClientOptions,
-        tests::{EXIT_TEST_GENERATION, ephemeral_configuration, id, local_certificate},
-    },
-    tls::local_certificate_health,
+use crate::controller::tests::{
+    EXIT_TEST_GENERATION, ephemeral_configuration, id, local_certificate,
 };
-use std::{
-    env,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::time::timeout;
 
 #[derive(Default)]
@@ -98,85 +90,48 @@ async fn terminal_exit_deadline_interrupts_poll_and_retires_the_snapshot() -> Re
     assert!(request_started.load(Ordering::SeqCst));
     assert_eq!(observed.suspended.load(Ordering::SeqCst), 2);
     assert_eq!(observed.applied.load(Ordering::SeqCst), 0);
+    assert_eq!(observed.renewed.load(Ordering::SeqCst), 0);
     assert!(authority.active().is_none());
     assert!(authority.seed(initial).is_err());
     Ok(())
 }
 
-// Invoked by the disposable Go and Rust controller interoperability fixture.
-// Only snapshots and auth are tested; this does not create a packet device.
 #[tokio::test]
-#[ignore = "requires local Go/Rust controller; run integration/rust-lab/exit-lease.sh"]
-async fn live_ephemeral_exit_lease() -> Result<()> {
-    let tls = TlsConfig {
-        ca: env::var("LANEWAY_EXIT_LEASE_CA")?.into(),
-        certificate: env::var("LANEWAY_EXIT_LEASE_CERT")?.into(),
-        private_key: env::var("LANEWAY_EXIT_LEASE_KEY")?.into(),
-    };
-    let cert = local_certificate_health(&tls)?;
-    let network = env::var("LANEWAY_EXIT_LEASE_NETWORK")?.parse()?;
-    let node = env::var("LANEWAY_EXIT_LEASE_NODE")?.parse()?;
-    let generation: NonZeroU64 = env::var("LANEWAY_EXIT_LEASE_GENERATION")?.parse()?;
-    let client = Arc::new(
-        Client::new(ClientOptions {
-            endpoint: "https://127.0.0.1:1".to_owned(), // Control is QUIC-only.
-            quic_endpoint: Some(env::var("LANEWAY_EXIT_LEASE_QUIC")?),
-            server_name: "127.0.0.1".to_owned(),
-            network,
-            service: env::var("LANEWAY_EXIT_LEASE_SERVICE")?.parse()?,
-            certificate: tls.certificate,
-            private_key: tls.private_key,
-            ca: tls.ca,
-            timeout: Duration::from_secs(2),
-            exit_generation: Some(generation),
-        })
-        .await?,
-    );
-    let PollResult::Modified(wire) = client.poll(0).await? else {
-        bail!("controller did not send an initial full snapshot");
-    };
-    let initial = Arc::new(
-        Snapshot::compile_for(*wire, network, node, &cert, Some(generation))?
-            .resolve_relays()
-            .await?,
-    );
+async fn same_epoch_exit_heartbeat_extends_authority_without_reapplying_policy() -> Result<()> {
+    let mut heartbeat = ephemeral_configuration();
+    let cert = local_certificate();
+    let initial = Arc::new(Snapshot::compile_for(
+        heartbeat.clone(),
+        id(1),
+        id(2),
+        &cert,
+        NonZeroU64::new(EXIT_TEST_GENERATION),
+    )?);
     let authority = Authority::new();
     authority.seed(Arc::clone(&initial))?;
     let observed = Arc::new(ObservedRuntime::default());
     let runner = Runner::new(
-        client,
+        StalledPoll(Arc::new(AtomicBool::new(false))),
         Arc::clone(&authority),
         Arc::clone(&observed),
-        network,
-        node,
+        id(1),
+        id(2),
         cert,
-        Duration::from_millis(150),
+        Duration::from_millis(20),
     )?;
-    let running = tokio::spawn(async move { runner.run().await });
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if authority
-                .active()
-                .is_some_and(|current| current.valid_until > initial.valid_until)
-            {
-                return;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .context("controller did not extend the same-epoch lease")?;
-    assert!(observed.renewed.load(Ordering::SeqCst) > 0);
-    assert_eq!(observed.applied.load(Ordering::SeqCst), 0);
-    println!("rust ephemeral exit heartbeat verified");
 
-    // The fixture revokes the identity after reading the marker above.
-    let error = timeout(Duration::from_secs(5), running)
-        .await??
-        .unwrap_err();
-    assert!(error.is::<AuthorityRejected>(), "{error:#}");
-    assert_eq!(observed.suspended.load(Ordering::SeqCst), 1);
-    assert!(authority.active().is_none());
-    assert!(authority.seed(initial).is_err());
+    heartbeat.valid_until_unix_seconds += 5;
+    heartbeat.ephemeral_exit_suspect_at_unix_seconds += 5;
+    heartbeat.ephemeral_exit_revoke_at_unix_seconds += 5;
+    let prepared = runner
+        .prepare_poll(PollResult::Modified(Box::new(heartbeat)))
+        .await?;
+    assert!(runner.apply_poll(prepared, false).await?);
+    let renewed = authority.active().context("heartbeat retired authority")?;
+    assert_eq!(renewed.epoch, initial.epoch);
+    assert_eq!(renewed.valid_until, initial.valid_until + 5);
+    assert_eq!(observed.renewed.load(Ordering::SeqCst), 1);
+    assert_eq!(observed.applied.load(Ordering::SeqCst), 0);
+    assert_eq!(observed.suspended.load(Ordering::SeqCst), 0);
     Ok(())
 }

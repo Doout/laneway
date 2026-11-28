@@ -9,16 +9,14 @@ esac
 docker build -t laneway-rust-lab:local "$root/integration/rust-lab"
 mounts=(-v "$root:/src:ro"
   -v laneway-rust-lab-target:/src/rust/target
-  -v laneway-rust-lab-cache:/usr/local/cargo/registry
-  -v laneway-rust-lab-gomod:/go/pkg/mod -v laneway-rust-lab-gobuild:/gobuild)
+  -v laneway-rust-lab-cache:/usr/local/cargo/registry)
 # Only dependency fetch has external networking; it has no extra capabilities.
 docker run --rm "${mounts[@]}" laneway-rust-lab:local sh -ec \
-  'cargo fetch --locked --manifest-path rust/Cargo.toml; cd go && go mod download'
+  cargo fetch --locked --manifest-path rust/Cargo.toml
 docker run --rm --network none --cap-drop ALL \
   -e CARGO_INCREMENTAL=0 -e CARGO_PROFILE_DEV_DEBUG=0 -e CARGO_PROFILE_TEST_DEBUG=0 \
   "${mounts[@]}" laneway-rust-lab:local sh -ec '
-    cargo test --locked --manifest-path rust/Cargo.toml -p lanewayd-rs connector
-    bash integration/rust-lab/exit-lease.sh'
+    cargo test --offline --locked --manifest-path rust/Cargo.toml -p lanewayd-rs connector'
 docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
   --security-opt systempaths=unconfined --device /dev/net/tun \
   --tmpfs /run/credentials:rw,nosuid,nodev,noexec,mode=0755 \
@@ -30,10 +28,8 @@ docker run --rm --network none --cap-add NET_ADMIN --cap-add SYS_ADMIN \
     ./integration/rust-kernel-netns.sh
     ./integration/rust-node-interop.sh
     ./integration/rust-controller-node-netns.sh
-    LANEWAY_NODE_TEST_CONTROLLER=rust LANEWAY_NODE_TEST_PRIVATE_DNS=1 ./integration/rust-controller-node-netns.sh
-    LANEWAY_NODE_TEST_CONTROLLER=rust LANEWAY_NODE_TEST_TOPOLOGY=1 ./integration/rust-controller-node-netns.sh
+    LANEWAY_NODE_TEST_PRIVATE_DNS=1 ./integration/rust-controller-node-netns.sh
+    LANEWAY_NODE_TEST_TOPOLOGY=1 ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_DURABLE_EXIT=1 ./integration/rust-controller-node-netns.sh
-    LANEWAY_NODE_TEST_DURABLE_EXIT=1 LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh
     LANEWAY_NODE_TEST_WIREGUARD=1 ./integration/rust-controller-node-netns.sh
-    LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_WIREGUARD_DRAIN=1 LANEWAY_NODE_WIREGUARD_CREDENTIALS=1 ./integration/rust-controller-node-netns.sh
-    LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_WIREGUARD_DRAIN=1 LANEWAY_NODE_WIREGUARD_CREDENTIALS=1 LANEWAY_NODE_TEST_CONTROLLER=rust ./integration/rust-controller-node-netns.sh'
+    LANEWAY_NODE_TEST_WIREGUARD=1 LANEWAY_NODE_WIREGUARD_DRAIN=1 LANEWAY_NODE_WIREGUARD_CREDENTIALS=1 ./integration/rust-controller-node-netns.sh'

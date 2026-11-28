@@ -20,8 +20,23 @@ read_setting() {
   case "$value" in *[!A-Za-z0-9._:/-]*) die "$key contains an unsafe character" ;; esac
   printf '%s' "$value"
 }
+# Compose interpolates the release overlay before selecting the local images.
+dev_version_env() {
+  placeholder=sha256:0000000000000000000000000000000000000000000000000000000000000000
+  export LANEWAY_VERSION=dev LANEWAY_RUST_VERSION=dev
+  export LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST="$placeholder"
+  export LANEWAY_RUST_RELAY_IMAGE_DIGEST="$placeholder"
+  export LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST="$placeholder"
+}
+
 compose() {
-  if [ "$mode" = rust ]; then set -- -f "$base_dir/compose.rust.yaml" "$@"; fi
+  case "$mode" in
+    dev)
+      dev_version_env
+      set -- -f "$base_dir/compose.rust.yaml" -f "$base_dir/compose.dev.yaml" "$@"
+      ;;
+    rust) set -- -f "$base_dir/compose.rust.yaml" "$@" ;;
+  esac
   docker compose --project-directory "$base_dir" --env-file "$env_file" -f "$base_dir/compose.yaml" "$@"
 }
 

@@ -1,7 +1,7 @@
 # Local daemon API v1
 
 This document defines the compatibility boundary between a Laneway endpoint
-client and `lanewayd`. The Go and Rust daemons implement the same bounded
+client and `lanewayd`. The daemon implements a bounded
 HTTP/1.1 API on a Unix-domain socket. The default socket path is
 `/run/laneway/lanewayd.sock`.
 
@@ -123,7 +123,7 @@ to a v1 route. Query strings are not part of this API and are invalid requests.
 envelope's `Content-Length` but does not transmit that body.
 
 The response members that predate revision 1 retain their existing names and
-semantics; the golden fixture records their common Go/Rust JSON shape.
+semantics; the golden fixture records the versioned JSON shape.
 
 Profile storage, login, logout, connect, disconnect, update installation, and
 diagnostic-bundle operations are intentionally not part of this foundation.

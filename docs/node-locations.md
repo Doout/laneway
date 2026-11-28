@@ -8,16 +8,8 @@ in the list; they are never assigned an invented coordinate.
 ## Enable automatic lookup
 
 Provision a DB-IP City Lite, GeoLite2 City or GeoIP2 City `.mmdb` database
-on the controller. For Go, set this in its TOML configuration:
-
-```toml
-[controller]
-location_database = "/etc/laneway/GeoLite2-City.mmdb"
-```
-
-For the Rust lab controller, append
+on the controller. Append
 `--location-database /etc/laneway/GeoLite2-City.mmdb` to the `serve` command.
-Both implementations use the same map API and SQLite records.
 
 For containers, mount the file read-only at that path. Obtain and update it through
 [MaxMind's database distribution](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
@@ -32,7 +24,7 @@ controller. Manual locations work without a database.
 [DB-IP City Lite](https://db-ip.com/db/download/ip-to-city-lite) provides a monthly
 MMDB download without a MaxMind account. Download the MMDB gzip file for the
 desired month from the official page, verify its published checksum, decompress
-it, and point `location_database` to the resulting file. Keep it outside the image
+it, and point `--location-database` to the resulting file. Keep it outside the image
 and mount it read-only. Replace it atomically and restart to apply a new month.
 This dataset is CC BY 4.0; the map displays the required DB-IP attribution link
 when that database is configured. It has reduced coverage and accuracy, and

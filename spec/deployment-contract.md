@@ -10,6 +10,8 @@ Normative terms have the meaning defined in BCP 14.
   bounded lifetimes.
 - A **Node** is a persistent host agent. It MAY advertise
   controller-approved private subnets.
+- A **Connector** is a persistent userspace endpoint that handles approved TCP
+  and UDP traffic through ordinary sockets.
 - An **Exit Node** forwards explicitly selected default-route traffic. The
   default deployment is an isolated container.
 - The **controller** owns identities, leases, addresses, routes, ACLs, and relay
@@ -35,7 +37,7 @@ controller policy or an explicit operator choice disables it. A healthy relay
 path remains available until the direct path is authenticated and usable.
 Direct-path failure MUST NOT broaden routing or policy.
 
-All packet paths follow the same shape:
+The system tunnel packet path has this shape:
 
 ```text
 application -> actor-owned route -> lane0 -> source endpoint
@@ -50,6 +52,10 @@ User, persistent host state for a Node, and container state for an Exit Node.
 Controller traffic, relay carriers, direct peer endpoints, required gateways,
 and selected local-LAN prefixes MUST bypass an active exit route to prevent
 recursion.
+
+A rootless client exposes an authenticated SOCKS5 listener on loopback. It and
+userspace Connectors use an in-process stack and MUST NOT create host TUN
+interfaces or change host routes, DNS, or firewall rules.
 
 ## 3. State ownership
 
@@ -74,6 +80,7 @@ error; Laneway MUST NOT delete or overwrite it.
 | --- | --- | --- |
 | Controller container | dedicated non-root UID; no capabilities; read-only root; database as its only writable durable volume | offline root key, endpoint keys, broad writable mounts |
 | Relay container | dedicated non-root UID; no capabilities; read-only root; bounded runtime tmpfs | durable packet state or control-plane authority |
+| Rootless client or Connector | ordinary user; userspace forwarding | network-admin capability, TUN device, host network changes |
 | User process | invoking user; no elevated privilege | direct network administration |
 | User helper | root setup narrowed to `CAP_NET_ADMIN`; `no_new_privs`; requester-bound private channel; allowlisted network operations | listening control socket, commands, enrollment tokens, endpoint keys |
 | Node service | locked service identity; `CAP_NET_ADMIN`; `/dev/net/tun` | unrelated host capabilities or state |
@@ -127,4 +134,6 @@ No recovery path may infer ownership from a name alone.
 - Diagnostics follow [observability-v1.md](observability-v1.md) and remain local
   by default.
 - Runtime images and binaries MUST be pinned to a version or immutable digest;
-  a mutable `latest` tag is not a deployment input.
+  a mutable `latest` tag is not a deployment input. The published image set is
+  `ghcr.io/doout/laneway/console`, `ghcr.io/doout/laneway/relay`, and
+  `ghcr.io/doout/laneway/edge`.

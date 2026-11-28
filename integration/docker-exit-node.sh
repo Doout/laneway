@@ -9,7 +9,7 @@ if [[ "$(id -u)" != "0" ]]; then
   echo "ERROR: Docker Exit integration must run as root on a disposable host" >&2
   exit 1
 fi
-for command in docker go jq ip nft sed openssl; do
+for command in docker jq ip nft sed openssl; do
   command -v "${command}" >/dev/null || { echo "ERROR: missing ${command}" >&2; exit 1; }
 done
 [[ -c /dev/net/tun ]] || { echo "ERROR: /dev/net/tun is unavailable" >&2; exit 1; }
@@ -30,7 +30,6 @@ external_name="${prefix}-external"
 nat_name="${prefix}-nat"
 controller_image="${prefix}-controller:dev"
 relay_image="${prefix}-relay:dev"
-admin_image="${prefix}-admin:dev"
 node_image="${prefix}-node:dev"
 probe_image="${prefix}-probe:dev"
 probe_container="${prefix}-probe-export"
@@ -126,7 +125,7 @@ cleanup() {
   for volume in "${client_volume}" "${gateway_volume}"; do
     owned_volume "${volume}" && docker volume rm "${volume}" >/dev/null 2>&1
   done
-  for image in "${probe_image}" "${node_image}" "${admin_image}" "${relay_image}" "${controller_image}"; do
+  for image in "${probe_image}" "${node_image}" "${relay_image}" "${controller_image}"; do
     owned_image "${image}" && docker image rm -f "${image}" >/dev/null 2>&1
   done
   rm -rf -- "${work_dir}"
@@ -155,7 +154,7 @@ node_net_admin_exec() {
 wait_status() {
   local container="$1" config="$2" pattern="$3"
   for _ in $(seq 1 240); do
-    if docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway status -config "${config}" 2>/dev/null | grep -Fq "${pattern}"; then
+    if docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway status --config "${config}" 2>/dev/null | grep -Fq "${pattern}"; then
       return 0
     fi
     sleep 0.25
@@ -167,7 +166,7 @@ wait_status() {
 wait_peer_path() {
   local container="$1" config="$2" peer="$3" expected="$4"
   for _ in $(seq 1 240); do
-    if docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway peers -config "${config}" -json 2>/dev/null |
+    if docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway peers --config "${config}" --json 2>/dev/null |
       jq -e --arg peer "${peer}" --arg path "${expected}" '
         .[] | select(
           .node_id == $peer and
@@ -179,16 +178,15 @@ wait_peer_path() {
     sleep 0.25
   done
   echo "ERROR: ${container} peer ${peer} did not reach ${expected}" >&2
-  docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway status -config "${config}" -json >&2 || true
-  docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway peers -config "${config}" -json >&2 || true
+  docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway status --config "${config}" --json >&2 || true
+  docker exec --user 65532:65532 "${container}" /usr/local/bin/laneway peers --config "${config}" --json >&2 || true
   return 1
 }
 
-echo "==> build pinned Go reference images and a scratch-only test probe"
-docker build --quiet --label "${owner}" --target controller -t "${controller_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
-docker build --quiet --label "${owner}" --target relay -t "${relay_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
-docker build --quiet --label "${owner}" --target admin -t "${admin_image}" -f "${repo_root}/deploy/containers/Dockerfile" "${repo_root}" >/dev/null
-docker build --quiet --label "${owner}" --target go-exit -t "${node_image}" -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
+echo "==> build the Console, Relay, and Edge images with a scratch-only test probe"
+docker build --quiet --label "${owner}" --target controller -t "${controller_image}" -f "${repo_root}/deploy/containers/Dockerfile.rust-relay" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target relay -t "${relay_image}" -f "${repo_root}/deploy/containers/Dockerfile.rust-relay" "${repo_root}" >/dev/null
+docker build --quiet --label "${owner}" --target edge -t "${node_image}" -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
 mkdir -p "${work_dir}/probe-context"
 docker build --quiet --label "${owner}" --target network-probe -t "${probe_image}" \
   -f "${repo_root}/deploy/containers/Dockerfile.exit-node" "${repo_root}" >/dev/null
@@ -212,53 +210,49 @@ admin_token="docker-exit-integration-admin-token-${run_id}"
 printf '%s\n' "${admin_token}" >"${work_dir}/admin/admin.token"
 chmod 0600 "${work_dir}/admin/admin.token"
 
-go_bin="${work_dir}/laneway"
-(cd "${repo_root}/go" && go build -trimpath -o "${go_bin}" ./cmd/laneway)
-"${go_bin}" pki init -out-dir "${work_dir}/controller" >/dev/null
-"${go_bin}" pki controller -ca-cert "${work_dir}/controller/ca.crt" -ca-key "${work_dir}/controller/ca.key" \
+docker_admin() {
+  docker run --rm --label "${owner}" --network "${control_network}" --read-only --cap-drop ALL \
+    --security-opt no-new-privileges "$@"
+}
+pki() {
+  docker_admin -v "${work_dir}/controller:/pki" -v "${work_dir}/relay:/relay" "${node_image}" pki "$@"
+}
+chown -R 65532:65532 "${work_dir}"/{controller,relay}
+pki init -out-dir /pki >/dev/null
+pki controller -ca-cert /pki/ca.crt -ca-key /pki/ca.key \
   -network-id "${network_id}" -service-id "${controller_service}" -dns "${controller_name}" \
-  -out-cert "${work_dir}/controller/controller.crt" -out-key "${work_dir}/controller/controller.key"
-"${go_bin}" pki relay -ca-cert "${work_dir}/controller/ca.crt" -ca-key "${work_dir}/controller/ca.key" \
+  -out-cert /pki/controller.crt -out-key /pki/controller.key
+pki relay -ca-cert /pki/ca.crt -ca-key /pki/ca.key \
   -network-id "${network_id}" -service-id "${relay_service}" -dns "${relay_name}" \
-  -out-cert "${work_dir}/relay/relay.crt" -out-key "${work_dir}/relay/relay.key"
+  -out-cert /relay/relay.crt -out-key /relay/relay.key
 for directory in relay admin client gateway; do
   cp "${work_dir}/controller/ca.crt" "${work_dir}/${directory}/ca.crt"
 done
 
-cat >"${work_dir}/controller/controller.toml" <<EOF
-mode = "controller"
-state_dir = "/state"
-socket_path = "/tmp/controller.sock"
-[tls]
-certificate = "/secrets/controller.crt"
-private_key = "/secrets/controller.key"
-ca = "/secrets/ca.crt"
-[controller]
-listen = ":8443"
-quic_listen = ":8443"
-database = "/state/controller.db"
-ca_private_key = "/secrets/ca.key"
-admin_token_file = "/admin/admin.token"
-leaf_validity = "24h"
-EOF
-
 chown -R 65532:65532 "${work_dir}"/{controller,relay,admin,client,gateway}
+controller_mounts=(
+  -v "${work_dir}/controller:/secrets:ro"
+  -v "${work_dir}/admin:/admin:ro"
+  -v "${work_dir}/controller-state:/state"
+)
+install -d -o 65532 -g 65532 -m 0700 "${work_dir}/controller-state"
+docker_admin "${controller_mounts[@]}" "${controller_image}" init /state/controller.db \
+  /secrets/controller.crt docker-exit 100.117.0.0/24
 docker run -d --name "${controller_name}" --hostname "${controller_name}" --label "${owner}" \
   --network "${control_network}" --read-only --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532 \
-  --tmpfs /state:rw,noexec,nosuid,nodev,size=32m,uid=65532,gid=65532 \
-  -v "${work_dir}/controller:/secrets:ro" -v "${work_dir}/admin:/admin:ro" \
-  "${controller_image}" -config /secrets/controller.toml >/dev/null
-wait_log "${controller_name}" "laneway-controller HTTPS="
+  "${controller_mounts[@]}" "${controller_image}" serve /state/controller.db 0.0.0.0:8443 \
+  /secrets/controller.crt /secrets/controller.key --listen-on-network --root-token-file /admin/admin.token \
+  --node-client-ca /secrets/ca.crt --node-issuer /secrets/ca.crt /secrets/ca.key 86400 --node-quic >/dev/null
+wait_log "${controller_name}" "listening https://0.0.0.0:8443"
 
 admin() {
   docker run --rm --label "${owner}" --network "${control_network}" --read-only --cap-drop ALL \
     --security-opt no-new-privileges -v "${work_dir}/admin:/admin:ro" \
-    -v "${work_dir}/controller/ca.crt:/ca.crt:ro" "${admin_image}" "$@"
+    -v "${work_dir}/controller/ca.crt:/ca.crt:ro" "${node_image}" "$@"
 }
 admin_connection=(--controller "https://${controller_name}:8443" --ca /ca.crt --server-name "${controller_name}" \
   --controller-network-id "${network_id}" --controller-service-id "${controller_service}" --admin-token-file /admin/admin.token)
-admin controller network create --network-id "${network_id}" --name docker-exit --ipv4-pool 100.117.0.0/24 "${admin_connection[@]}" >/dev/null
 admin controller relay register --network-id "${network_id}" --service-id "${relay_service}" \
   --name docker-relay --endpoint "${relay_name}:4433" "${admin_connection[@]}" >/dev/null
 
@@ -276,7 +270,7 @@ join_node() {
   local name="$1" directory="$2"
   docker run --rm --label "${owner}" --network "${control_network}" --read-only --cap-drop ALL \
     --security-opt no-new-privileges -v "${directory}:/node" \
-    -v "${work_dir}/controller/ca.crt:/ca.crt:ro" "${admin_image}" join \
+    -v "${work_dir}/controller/ca.crt:/ca.crt:ro" "${node_image}" join \
     --token-file /node/enrollment.token --controller "https://${controller_name}:8443" --ca /ca.crt \
     --server-name "${controller_name}" --controller-network-id "${network_id}" \
     --controller-service-id "${controller_service}" --name "${name}" \
@@ -304,6 +298,7 @@ private_key = "/secrets/relay.key"
 ca = "/secrets/ca.crt"
 [relay]
 listen = ":4433"
+metrics_listen = "127.0.0.1:6060"
 packet_rate_bits_per_second = 2000000
 packet_burst_bytes = 65536
 [tcp_fallback]
@@ -317,9 +312,7 @@ service_id = "${controller_service}"
 poll_interval = "250ms"
 EOF
 
-node_config() {
-  local directory="$1" name="$2" listen_port="$3" serve="$4" output="$5"
-  cat >"${directory}/node.toml" <<EOF
+cat >"${work_dir}/gateway/node.toml" <<EOF
 mode = "node"
 state_dir = "/var/lib/laneway"
 socket_path = "/run/laneway/lanewayd.sock"
@@ -329,7 +322,7 @@ private_key = "/secrets/node.key"
 ca = "/secrets/ca.crt"
 server_name = "${relay_name}"
 [node]
-name = "${name}"
+name = "docker-gateway"
 relay_address = "${relay_name}:4433"
 relay_network_id = "${network_id}"
 relay_service_id = "${relay_service}"
@@ -347,7 +340,7 @@ address = "${relay_name}:8443"
 quic_probe_interval = "1s"
 [direct]
 enabled = true
-listen = "0.0.0.0:${listen_port}"
+listen = "0.0.0.0:4434"
 probe_interval = "100ms"
 probe_timeout = "2s"
 rendezvous_interval = "10s"
@@ -355,16 +348,13 @@ rendezvous_interval = "10s"
 private_key = "/secrets/wireguard.key"
 mtu = 1200
 [routing]
-output_interface = "${output}"
+output_interface = "wan0"
 nat = true
 [exit]
-serve = ${serve}
+serve = true
 failure_mode = "closed"
 dns_servers = ["1.1.1.1"]
 EOF
-}
-node_config "${work_dir}/client" docker-client 4435 false eth0
-node_config "${work_dir}/gateway" docker-gateway 4434 true wan0
 cat >"${work_dir}/resolvectl" <<'EOF'
 #!/bin/sh
 set -eu
@@ -394,14 +384,69 @@ chown -R 65532:65532 "${work_dir}"/{relay,client,gateway}
 docker run -d --name "${relay_name}" --hostname "${relay_name}" --label "${owner}" --network "${control_network}" \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
-  -v "${work_dir}/relay:/secrets:ro" "${relay_image}" -config /secrets/relay.toml -diagnostics 127.0.0.1:6060 >/dev/null
-wait_log "${relay_name}" "laneway-relay QUIC="
+  -v "${work_dir}/relay:/secrets:ro" "${relay_image}" --config /secrets/relay.toml >/dev/null
+wait_log "${relay_name}" "listening"
+
+control_ip() {
+  docker inspect "$1" | jq -er --arg network "${control_network}" '
+    .[0].NetworkSettings.Networks[$network].IPAddress | select(type == "string" and length > 0)
+  '
+}
+controller_ip="$(control_ip "${controller_name}")"
+relay_ip="$(control_ip "${relay_name}")"
+# Allow selection while requiring a separate local activation after approval.
+cat >"${work_dir}/client/node.toml" <<EOF
+mode = "node"
+socket_path = "/run/laneway/lanewayd.sock"
+exit_intent_path = "/var/lib/laneway/exit-intent-v1.json"
+[identity]
+network_id = "${network_id}"
+node_id = "${client_id}"
+[tls]
+certificate = "/secrets/node.crt"
+private_key = "/secrets/node.key"
+ca = "/secrets/ca.crt"
+[controller]
+endpoint = "https://${controller_name}:8443"
+quic_endpoint = "${controller_name}:8443"
+server_name = "${controller_name}"
+service_id = "${controller_service}"
+poll_interval = "250ms"
+[tun]
+name = "lane0"
+mtu = 1200
+configure = true
+[relay]
+address = "${relay_ip}:4433"
+server_name = "${relay_name}"
+service_id = "${relay_service}"
+reconnect_min = "100ms"
+reconnect_max = "1s"
+quic_recovery_interval = "1s"
+[tcp_fallback]
+address = "${relay_ip}:8443"
+[direct]
+listen = "0.0.0.0:4435"
+probe_interval = "100ms"
+probe_timeout = "2s"
+candidate_refresh_interval = "10s"
+[forwarding.exit_client]
+enabled = false
+authorized = true
+failure_mode = "closed"
+controller_bypass = ["${controller_ip}"]
+dns_servers = ["1.1.1.1"]
+EOF
 
 node_create() {
   local name="$1" directory="$2" volume="$3"
+  local launcher=(/usr/local/bin/laneway node run)
+  if [[ "${name}" == "${gateway_name}" ]]; then
+    launcher=(/usr/local/bin/run-rust-exit)
+  fi
   docker create --name "${name}" --hostname "${name}" --label "${owner}" --network "${control_network}" \
     --user 65532:65532 --read-only --cap-drop ALL --cap-add NET_ADMIN \
-    --device /dev/net/tun:/dev/net/tun \
+    --device /dev/net/tun:/dev/net/tun --entrypoint /bin/setpriv \
     --sysctl net.ipv4.ip_forward=1 --sysctl net.ipv6.conf.all.forwarding=1 \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
     --tmpfs /run/laneway:rw,noexec,nosuid,nodev,size=4m,uid=65532,gid=65532 \
@@ -409,7 +454,8 @@ node_create() {
     -v "${volume}:/var/lib/laneway" -v "${directory}:/secrets:ro" \
     -v "${work_dir}/resolvectl:/usr/bin/resolvectl:ro" \
     -v "${work_dir}/probe-context/netprobe:/test/netprobe:ro" \
-    "${node_image}" -config /secrets/node.toml >/dev/null
+    "${node_image}" --inh-caps=+net_admin --ambient-caps=+net_admin --no-new-privs /sbin/tini -- \
+    "${launcher[@]}" -config /secrets/node.toml >/dev/null
 }
 node_create "${client_name}" "${work_dir}/client" "${client_volume}"
 node_create "${gateway_name}" "${work_dir}/gateway" "${gateway_volume}"
@@ -427,13 +473,17 @@ for node_name in "${client_name}" "${gateway_name}"; do
   ')"
   # setpriv draws NET_ADMIN from the file capability before setting
   # no_new_privs. Check the entrypoint here and the actual process below.
-  if ! jq -e '
+  if ! jq -e --arg name "${node_name}" --arg gateway "${gateway_name}" '
     .[0].Config.User == "65532:65532" and
     .[0].HostConfig.Privileged == false and
     .[0].HostConfig.NetworkMode != "host" and
     (.[0].HostConfig.CapAdd | map(sub("^CAP_"; ""))) == ["NET_ADMIN"] and
     (.[0].HostConfig.SecurityOpt // []) == [] and
-    .[0].Config.Entrypoint == ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"] and
+    .[0].Config.Entrypoint == ["/bin/setpriv"] and
+    .[0].Config.Cmd[0:5] == ["--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--"] and
+    (.[0].Config.Cmd[5:] == (if $name == $gateway then
+      ["/usr/local/bin/run-rust-exit", "-config", "/secrets/node.toml"]
+    else ["/usr/local/bin/laneway", "node", "run", "-config", "/secrets/node.toml"] end)) and
     (.[0].HostConfig.Devices | length == 1) and
     .[0].HostConfig.Devices[0].PathOnHost == "/dev/net/tun" and
     .[0].HostConfig.Devices[0].PathInContainer == "/dev/net/tun"
@@ -444,11 +494,11 @@ for node_name in "${client_name}" "${gateway_name}"; do
 done
 docker network connect "${egress_network}" "${gateway_name}"
 docker start "${client_name}" "${gateway_name}" >/dev/null
-wait_log "${client_name}" "interface=lane0"
-wait_log "${gateway_name}" "interface=lane0"
+wait_log "${client_name}" "native Rust Laneway agent started"
+wait_log "${gateway_name}" "native Rust Laneway agent started"
 for node_name in "${client_name}" "${gateway_name}"; do
   docker exec "${node_name}" sh -eu -c '
-    pid="$(pgrep -xo laneway)"
+    pid="$(pgrep -xo lanewayd-rs || pgrep -xo laneway)"
     status="$(cat "/proc/${pid}/status")"
     printf "%s\n" "${status}" | grep -Eq "^Uid:[[:space:]]+65532[[:space:]]+65532[[:space:]]+65532[[:space:]]+65532$"
     printf "%s\n" "${status}" | grep -Eq "^NoNewPrivs:[[:space:]]+1$"
@@ -490,14 +540,14 @@ exit_route_id="$(jq -r '.advertisements[0].route_id' <<<"${exit_json}")"
 [[ "${exit_route_id}" =~ ^[0-9a-f]{32}$ ]] || { echo "ERROR: Exit route advertisement failed" >&2; exit 1; }
 admin controller route approve --route-id "${exit_route_id}" "${admin_connection[@]}" >/dev/null
 for _ in $(seq 1 120); do
-  node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break
+  node_net_admin_exec "${gateway_name}" nft list table inet laneway_rs_exit >/dev/null 2>&1 && break
   sleep 0.25
 done
-node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null
+node_net_admin_exec "${gateway_name}" nft list table inet laneway_rs_exit >/dev/null
 exit_selected=0
 for _ in $(seq 1 240); do
   if docker exec --user 65532:65532 "${client_name}" /usr/local/bin/laneway exit use docker-gateway \
-    -config /secrets/node.toml >/dev/null 2>"${work_dir}/exit-use.err"; then
+    --config /secrets/node.toml >/dev/null 2>"${work_dir}/exit-use.err"; then
     exit_selected=1
     break
   fi
@@ -553,7 +603,7 @@ docker exec "${client_name}" /test/netprobe udp-bench-client -target "${saturati
   -scenario docker-exit-relay-saturation -scope controller-authorized-double-nat \
   -duration 750ms -size 1200 -pps 3000 -flows 1 >/dev/null
 throttled="$(docker run --rm --label "${owner}" --network "container:${relay_name}" "${probe_image}" \
-  metric -url http://127.0.0.1:6060/metrics -name laneway_throttled_packets_total)"
+  metric -url http://127.0.0.1:6060/metrics -name laneway_relay_throttled_packets_total)"
 [[ "${throttled}" =~ ^[0-9]+$ && "${throttled}" -gt 0 ]] || { echo "ERROR: relay did not expose saturation drops" >&2; exit 1; }
 admin controller audit --network-id "${network_id}" --limit 1 "${admin_connection[@]}" >/dev/null
 node_net_admin_exec "${client_name}" nft delete table inet laneway_test_direct_block
@@ -563,13 +613,13 @@ wait_peer_path "${client_name}" /secrets/node.toml "${gateway_id}" direct
 echo "==> graceful restart and SIGKILL restart recreate only container-owned state"
 docker stop --time 20 "${gateway_name}" >/dev/null
 docker start "${gateway_name}" >/dev/null
-wait_log "${gateway_name}" "interface=lane0"
-for _ in $(seq 1 120); do node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break; sleep 0.25; done
+wait_log "${gateway_name}" "native Rust Laneway agent started"
+for _ in $(seq 1 120); do node_net_admin_exec "${gateway_name}" nft list table inet laneway_rs_exit >/dev/null 2>&1 && break; sleep 0.25; done
 run_external_flow docker-exit-graceful-restart
 docker kill --signal KILL "${gateway_name}" >/dev/null
 docker start "${gateway_name}" >/dev/null
-wait_log "${gateway_name}" "interface=lane0"
-for _ in $(seq 1 120); do node_net_admin_exec "${gateway_name}" nft list table inet laneway_exit >/dev/null 2>&1 && break; sleep 0.25; done
+wait_log "${gateway_name}" "native Rust Laneway agent started"
+for _ in $(seq 1 120); do node_net_admin_exec "${gateway_name}" nft list table inet laneway_rs_exit >/dev/null 2>&1 && break; sleep 0.25; done
 run_external_flow docker-exit-crash-restart
 
 echo "==> remove owned Docker resources and prove foreign host/container state is unchanged"

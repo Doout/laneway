@@ -85,7 +85,7 @@ Release validation MUST cover certificate and identity failures, cross-network
 and stale handles, malformed or oversized frames, spoofed routes and sources,
 version and capability downgrade, bounded resource exhaustion, carrier
 fallback, lease expiry, host-state recovery, helper and container isolation,
-bootstrap tampering, enrollment replay, and shared Go/Rust golden vectors.
+bootstrap tampering, enrollment replay, and the shared protocol golden vectors.
 
 ## 7. Residual risks
 

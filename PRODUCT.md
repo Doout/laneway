@@ -10,7 +10,7 @@ web
 
 The administrator console is a React and TypeScript single-page application built with Vite and emitted as a static bundle suitable for serving beside the controller. Server state uses TanStack Query, form boundaries use React Hook Form and Zod, and accessible custom components carry the approved Laneway visual system.
 
-Laneway should also have a later desktop client, but it is a separate end-user surface rather than a wrapper around the administrator console. That client should use Tauri 2 with the shared React design system and communicate with the local Laneway daemon for profile, connection, exit-node, tray, update, and diagnostic workflows. The administrator console remains web-first.
+The Tauri 2 desktop foundation is a separate end-user surface. It uses the shared design tokens and reads status, peers, and private routes from a same-user daemon. Planned capabilities and limits are defined in the [desktop contract](spec/desktop-client-v1.md).
 
 ## Users
 
@@ -22,7 +22,7 @@ Laneway connects clients to Linux hosts and private networks through an encrypte
 
 ## Positioning
 
-Laneway carries ordinary IP traffic without an application proxy, prefers authenticated direct QUIC paths, and falls back through an authenticated relay while keeping the controller out of the packet path.
+Laneway supports system tunnels and a rootless loopback SOCKS5 proxy. It prefers authenticated direct QUIC paths and falls back through an authenticated relay. The controller stays out of the packet path.
 
 ## Operating Context
 
@@ -41,19 +41,15 @@ The product name is Laneway. The console should meet the usability and craft bar
 
 The visual target is now deliberately between NetBird and Twingate, with NetBird carrying more weight in the UX. Laneway should use a task-oriented grouped sidebar, contextual breadcrumbs, chip-based filters, topology-first access explanations, in-place enrollment steps, and detail drawers or split workspaces where they preserve context. It should retain Twingate's restraint, readable density, explicit primary actions, and serious operational tone. The result must feel like Laneway rather than a re-skinned copy of either product.
 
-The approved theme remains a dark operating-room environment. Surfaces may separate more clearly than the original graphite build, but light mode, generic card dashboards, and wide horizontal product navigation are not the default direction.
-
-The execution path is comp-led: the complete page set must be rendered and approved before application UI implementation begins.
-
-The render review set contains 24 screens: controller sign in; overview; node inventory, creation, token, detail, capability editing, and revocation; user enrollment inventory, issuance, token, and detail; route inventory, creation, approval, and detail; ACL inventory, editing, and evaluation detail; infrastructure overview, network detail, and relay registration/detail; tokens and certificates; and audit events with event detail.
+Use the shared light and dark tokens and preserve the console’s grouped sidebar and restrained density.
 
 ## Evidence on Hand
 
 - `README.md` documents the quick-start workflow and product promise.
 - `spec/architecture.md` defines the controller, relay, endpoint, CLI, direct-path preference, relay fallback, and fail-closed behavior.
-- `go/cmd/laneway/cli.go`, `controller.go`, and `controller_overview.go` expose the current administrator workflows and record shapes.
+- [Management API v1](spec/management-api-v1.md) defines the administrator workflows and record shapes.
 - The controller stores networks, nodes, routes, ACL rules, relays, enrollment tokens, certificates, and audit events.
-- No logo artwork, persistent user-directory model, customer claims, commercial metrics, or production dashboard data is present. Page renders use clearly synthetic example records and must not invent market claims.
+- Use the Laneway mark. The product has no persistent user-directory model, customer claims, commercial metrics, or production dashboard data. Page renders use clearly synthetic example records and must not invent market claims.
 
 ## Product Principles
 

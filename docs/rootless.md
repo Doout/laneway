@@ -4,7 +4,7 @@ Run Laneway in your regular user account on Linux or macOS to give selected appl
 
 ## Configure and start
 
-1. Install the official Laneway package with its companion runtime. Run the official installer as your regular user with `sh install.sh --rootless` to select a per-user installation.
+1. Install the signed Laneway client as your regular user with `sh install.sh --rootless`.
 2. Ask the network operator for a native setup invitation. The operator can issue one from an existing control-plane deployment.
 
    ```sh

@@ -1,32 +1,25 @@
-# Rust implementation
+# Rust workspace
 
-The workspace contains the shared `laneway-protocol` library, the
-`laneway-relay` QUIC/TCP relay, and the Linux `lanewayd-rs` Node. They use the
-same v1 protocol and [golden vectors](../testvectors/README.md) as Go.
-The `laneway-controller` crate currently supports read-only local network and
-node inventory. See the [migration runbook](../docs/rust-runtime-migration.md#controller-inventory)
-for supported commands and the Go/Rust comparison.
+The workspace contains the Laneway controller, relay, endpoint and CLI,
+privileged network helper, Docker network plugin, and shared protocol crates.
+The [v1 specifications](../spec/) and [golden vectors](../testvectors/README.md)
+define their wire formats.
 
-## Build
+## Build and test
 
-From the repository root:
+Run from the repository root with Rust 1.91 or newer:
 
 ```sh
-make rust-test
-cargo build --locked --release --manifest-path rust/Cargo.toml
+make build
+make test
+make vet
+make fmt-check
 ```
 
-## Run
+For an optimized build, run
+`cargo build --locked --release --manifest-path rust/Cargo.toml`.
 
-```sh
-rust/target/release/laneway-relay \
-  --config deploy/examples/relay-rust.toml
-
-sudo rust/target/release/lanewayd-rs \
-  --config deploy/examples/node-rust.toml
-```
-
-Validate an installed configuration without opening listeners or changing host
+Validate installed configurations without opening listeners or changing host
 networking:
 
 ```sh
@@ -34,14 +27,6 @@ laneway-relay --config /etc/laneway/relay-rust.toml --check-config
 lanewayd-rs --config /etc/laneway/node-rust.toml --check-config
 ```
 
-The relay accepts either static peers or controller snapshots, not both. The
-Node requires Linux, `/dev/net/tun`, and `NET_ADMIN` when it manages routes.
-Private keys must be mode `0600` or `0640`, and certificates must contain the
-configured Laneway SPIFFE identity.
-
-Node metrics use `diagnostics.listen`; relay metrics use
-`relay.metrics_listen`. Both must stay on loopback because they have no
-application authentication.
-
-See [integration tests](../integration/README.md) for cross-language and kernel
-gates, and [benchmarks](../docs/benchmarks.md) for performance commands.
+See [runtime and releases](../docs/rust-runtime-migration.md) for packaging and
+deployment, [integration tests](../integration/README.md) for network and
+release gates, and [benchmarks](../docs/benchmarks.md) for performance tests.

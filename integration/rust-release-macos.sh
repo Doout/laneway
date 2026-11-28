@@ -74,8 +74,6 @@ sh "$root/scripts/verify-rust-macos-runtime.sh" "$package/bin/lanewayd-rs" "$arc
 [ "$(cat "$package/VERSION")" = "$version" ]
 [ "$("$package/bin/laneway" version)" = "$version" ]
 [ "$("$package/bin/lanewayd-rs" --version)" = "$version" ]
-LANEWAY_MACOS_TEST_ARCHIVE="$archive" LANEWAY_MACOS_TEST_VERSION="$version" \
-  go -C "$root/go" test ./cmd/laneway -run '^TestMacRustRuntimeArchiveMatchesUpdater$' -count=1
 
 run_probe() {
   probe_executable=$1
@@ -125,17 +123,6 @@ if [ "$install_probe" = 1 ]; then
     cat "$probe_dir/utun.log"
     grep -Fxq "test $utun_case ... ok" "$probe_dir/utun.log" ||
       { echo 'the installed Rust utun probe did not run' >&2; exit 1; }
-    go -C "$root/go" test -c -o "$probe_dir/go-nethelper.test" ./internal/nethelper
-    # Keep the test log owned by the ordinary user for cleanup.
-    # shellcheck disable=SC2024
-    if ! sudo -n env LANEWAY_PRIVILEGED_TEST=1 LANEWAY_TEST_HELPER="$runtime_dir/lanewayd-rs" \
-      "$probe_dir/go-nethelper.test" -test.v -test.run '^TestDarwinNativeHelper$' >"$probe_dir/go-helper.log" 2>&1; then
-      cat "$probe_dir/go-helper.log" >&2
-      exit 1
-    fi
-    cat "$probe_dir/go-helper.log"
-    grep -Eq '^--- PASS: TestDarwinNativeHelper ' "$probe_dir/go-helper.log" || \
-      { echo 'the installed Go to Rust helper probe did not run' >&2; exit 1; }
   fi
 fi
-printf 'Verified the macOS %s archive and standalone Go client at version %s.\n' "$arch" "$version"
+printf 'Verified the macOS %s archive and standalone client at version %s.\n' "$arch" "$version"

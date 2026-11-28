@@ -1,69 +1,58 @@
 # Integration tests
 
-Run all commands from the repository root.
+Run these commands from the repository root.
 
 ## Unprivileged
 
-The default suite does not change host networking:
+Run the Rust workspace and frontend contract checks:
 
 ```sh
-./integration/nonprivileged.sh
+make test
+make proto-check
+make management-api-check
 ```
 
-The Go-to-Rust relay gate also requires a Rust toolchain:
-
-```sh
-make rust-interop
-```
+The [rootless client guide](../docs/rootless.md#run-the-linux-integration-test)
+explains how to test the packaged binary as an ordinary Linux user.
 
 ## Privileged Linux
 
-These gates require root, `/dev/net/tun`, Go, `iproute2`, `iputils`, nftables,
-and `sysctl`. The Rust gates also require Cargo.
+Run on an isolated Linux host with Cargo, `/dev/net/tun`, iproute2, nftables,
+iputils, and jq. The tests create disposable network namespaces:
 
 ```sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/linux-netns.sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-kernel-netns.sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-controller-node-netns.sh
+sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-kernel-netns.sh
+sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-node-interop.sh
+sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 ./integration/rust-controller-node-netns.sh
 ```
 
-The scripts skip unless `LANEWAY_RUN_PRIVILEGED=1` is set and remove their
-temporary namespaces on exit. Add `LANEWAY_KEEP_INTEGRATION_WORK=1` to the
-controller/Rust Node gate to retain failure logs.
+Add `LANEWAY_NODE_TEST_PRIVATE_DNS=1` to the controller and node test to
+exercise private DNS. Use `LANEWAY_KEEP_INTEGRATION_WORK=1` to keep its
+working directory and logs after a failure.
 
-Collect kernel benchmark JSONL from the main Linux gate with an absolute path:
+Docker Exit Node and network plugin tests also require Docker and modify
+networking inside the test lab. Run them on a disposable Docker host:
 
 ```sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 \
-  LANEWAY_KERNEL_BENCHMARK_OUTPUT=/absolute/path/results.jsonl \
-  ./integration/linux-netns.sh
+sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-exit-node.sh
+sudo env PATH="$PATH" LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-plugin.sh
 ```
 
 ## Docker Connector
 
+Build the same Edge target that the release workflow publishes:
+
 ```sh
-docker build --file deploy/containers/Dockerfile.connector \
-  --build-arg VERSION=0.0.0 --tag lane-edge-rust:lab .
-./integration/connector-bootstrap.sh lane-edge-rust:lab
+docker build --file deploy/containers/Dockerfile.exit-node --target edge \
+  --build-arg VERSION=0.0.0 --tag laneway-edge:dev .
+./integration/connector-bootstrap.sh laneway-edge:dev
+
 docker build --tag laneway-rust-lab:local integration/rust-lab
 bash integration/rust-lab/connector-cutover.sh --prime-cache
-bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:lab
-bash integration/rust-lab/connector-cutover.sh --fresh lane-edge-rust:lab tcp-fallback
+bash integration/rust-lab/connector-cutover.sh --fresh laneway-edge:dev
+bash integration/rust-lab/connector-cutover.sh --fresh laneway-edge:dev tcp-fallback
 ```
 
-These gates cover the scratch image, encrypted bootstrap, and restart with the
-saved Rust Connector identity.
-
-## Docker Exit Node
-
-This historical Go reference gate requires Docker, `jq`, and OpenSSL. It creates and removes
-containers, networks, volumes, routes, and firewall state, so run it only on a
-disposable Docker host:
-
-```sh
-sudo env LANEWAY_RUN_PRIVILEGED=1 ./integration/docker-exit-node.sh
-```
-
-Cleanup is limited to resources carrying the gate's ownership label. Do not run
-it on a shared Docker host.
+These checks cover encrypted one-time bootstrap and restart with the enrolled
+identity over QUIC and TCP fallback. The release workflow separately tests
+the signed installation, Exit Node forwarding, and encrypted recovery.
