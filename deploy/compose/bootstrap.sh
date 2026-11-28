@@ -51,6 +51,7 @@ if [ "$mode" = rust ]; then
     { echo "Rust bootstrap and the admin image must use the same release version" >&2; exit 1; }
   # The signed pins and deployment settings are staged in .env. Environment
   # values take precedence in Compose unless removed before rendering.
+  unset LANEWAY_CONSOLE_REPOSITORY LANEWAY_RELAY_REPOSITORY LANEWAY_EDGE_REPOSITORY
   unset LANEWAY_VERSION LANEWAY_ADMIN_IMAGE_DIGEST LANEWAY_RUST_VERSION LANEWAY_RUST_IMAGE_SUFFIX \
     LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST LANEWAY_RUST_RELAY_IMAGE_DIGEST \
     LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST LANEWAY_BIND_ADDRESS LANEWAY_CONTROLLER_PORT \

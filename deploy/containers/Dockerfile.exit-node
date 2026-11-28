@@ -61,11 +61,18 @@ COPY --from=go-healthcheck /out/laneway-healthcheck /usr/local/bin/laneway-healt
 ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/laneway", "node", "run"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]
 
-FROM base AS rust-exit
+FROM base AS edge
+LABEL io.laneway.connector-runtime="rust"
 COPY --from=node-binary /lanewayd-rs /usr/local/bin/lanewayd-rs
 USER 0:0
 RUN ln -s lanewayd-rs /usr/local/bin/laneway
 USER 65532:65532
 COPY --chmod=0755 deploy/containers/run-rust-exit /usr/local/bin/run-rust-exit
+HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=6 \
+    CMD ["/usr/local/bin/lanewayd-rs", "healthcheck", "-unix", "/run/laneway/lanewayd.sock"]
+ENTRYPOINT ["/usr/local/bin/laneway"]
+CMD ["connector", "run"]
+
+FROM edge AS rust-exit
 ENTRYPOINT ["/bin/setpriv", "--inh-caps=+net_admin", "--ambient-caps=+net_admin", "--no-new-privs", "/sbin/tini", "--", "/usr/local/bin/run-rust-exit"]
 CMD ["-config", "/etc/laneway/exit-node.toml"]

@@ -1,7 +1,7 @@
 # Opt-in cutover. The base file, services, ports and controller volume stay in place.
 services:
   controller:
-    image: ghcr.io/doout/laneway-controller${LANEWAY_RUST_IMAGE_SUFFIX--rust}:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST:?set the verified Rust controller digest}
+    image: ${LANEWAY_CONSOLE_REPOSITORY:-ghcr.io/doout/laneway-controller${LANEWAY_RUST_IMAGE_SUFFIX--rust}}:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST:?set the verified Rust controller digest}
     labels:
       io.laneway.control-runtime: rust
     command:
@@ -39,7 +39,7 @@ services:
         aliases:
           - ${LANEWAY_CONTROLLER_SERVER_NAME:?set the certificate DNS name}
   relay:
-    image: ghcr.io/doout/laneway-relay${LANEWAY_RUST_IMAGE_SUFFIX--rust}:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_RELAY_IMAGE_DIGEST:?set the verified Rust relay digest}
+    image: ${LANEWAY_RELAY_REPOSITORY:-ghcr.io/doout/laneway-relay${LANEWAY_RUST_IMAGE_SUFFIX--rust}}:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_RELAY_IMAGE_DIGEST:?set the verified Rust relay digest}
     labels:
       io.laneway.control-runtime: rust
     command: ["--config", "/etc/laneway/relay.toml"]
@@ -56,9 +56,10 @@ services:
         bind:
           create_host_path: false
   exit-node:
-    image: ghcr.io/doout/laneway-exit-node${LANEWAY_RUST_IMAGE_SUFFIX--rust}:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST:?set the verified Rust exit digest}
+    image: ${LANEWAY_EDGE_REPOSITORY:-ghcr.io/doout/laneway-exit-node${LANEWAY_RUST_IMAGE_SUFFIX--rust}}:${LANEWAY_RUST_VERSION:?set the verified Rust version}@${LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST:?set the verified Rust exit digest}
     labels:
       io.laneway.control-runtime: rust
+    entrypoint: [/bin/setpriv, --inh-caps=+net_admin, --ambient-caps=+net_admin, --no-new-privs, /sbin/tini, --, /usr/local/bin/run-rust-exit]
     healthcheck:
       test: [CMD, /usr/local/bin/lanewayd-rs, healthcheck, -unix, /run/laneway/lanewayd.sock]
 volumes:

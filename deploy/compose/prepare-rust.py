@@ -35,6 +35,16 @@ RELEASE_SETTINGS = {
     "LANEWAY_RUST_EXIT_NODE_IMAGE_DIGEST",
 }
 IMAGE_SUFFIX = "LANEWAY_RUST_IMAGE_SUFFIX"
+IMAGE_REPOSITORIES = {
+    "LANEWAY_CONSOLE_REPOSITORY": "ghcr.io/doout/laneway/console",
+    "LANEWAY_RELAY_REPOSITORY": "ghcr.io/doout/laneway/relay",
+    "LANEWAY_EDGE_REPOSITORY": "ghcr.io/doout/laneway/edge",
+}
+SERVICE_REPOSITORIES = {
+    "controller": "LANEWAY_CONSOLE_REPOSITORY",
+    "relay": "LANEWAY_RELAY_REPOSITORY",
+    "exit-node": "LANEWAY_EDGE_REPOSITORY",
+}
 RUST_SERVICES = {
     "controller": "LANEWAY_RUST_CONTROLLER_IMAGE_DIGEST",
     "relay": "LANEWAY_RUST_RELAY_IMAGE_DIGEST",
@@ -122,12 +132,15 @@ def read_release_settings(text, required=RELEASE_SETTINGS):
     for line in text.splitlines():
         raw_key, _, value = line.partition("=")
         key = re.sub(r"^export[ \t]+", "", raw_key.strip()).strip()
-        if key in required or key == IMAGE_SUFFIX:
+        if key in required or key == IMAGE_SUFFIX or key in IMAGE_REPOSITORIES:
             require(raw_key == key, f"expected canonical {key}=VALUE in .env")
             require(key not in result, f"duplicate {key}")
             result[key] = value
     require(required <= result.keys(), "missing verified Rust release settings")
     require(result.setdefault(IMAGE_SUFFIX, "-rust") in ("", "-rust"), "invalid Rust image suffix")
+    repositories = {key: result[key] for key in IMAGE_REPOSITORIES if key in result}
+    require(not repositories or (repositories == IMAGE_REPOSITORIES and result[IMAGE_SUFFIX] == ""),
+            "invalid signed image repositories")
     return result
 
 
@@ -139,11 +152,11 @@ def candidate_release(base, metadata):
         input=read_config(base / "verify-rust-release.sh"),
         check=True, stdout=subprocess.PIPE, text=True,
     ).stdout
-    fields = envelope.split("\n", 5)
-    require(len(fields) == 6, "verified release did not supply bootstrap artifacts")
-    require(read_release_settings("\n".join(fields[:5])) == pinned,
+    settings, marker, artifacts = envelope.partition("\n[")
+    require(marker, "verified release did not supply bootstrap artifacts")
+    require(read_release_settings(settings) == pinned,
             "Rust image settings do not match the signed release; update the staged .env")
-    return pinned, bootstrap_artifacts(fields[5], tag)
+    return pinned, bootstrap_artifacts("[" + artifacts, tag)
 
 
 def bootstrap_artifacts(text, tag):
@@ -189,9 +202,9 @@ def stage_update(base, stage, tag, volume):
             require(line.startswith(f"{key}="), f"expected canonical {key}=VALUE in .env")
             updated.append(f"{key}={updates.pop(key)}")
             seen.add(key)
-        else:
+        elif key not in IMAGE_REPOSITORIES:
             updated.append(line)
-    require(not (updates.keys() - {"LANEWAY_RUST_CONTROLLER_STATE_VOLUME", IMAGE_SUFFIX}),
+    require(not (updates.keys() - {"LANEWAY_RUST_CONTROLLER_STATE_VOLUME", IMAGE_SUFFIX} - IMAGE_REPOSITORIES.keys()),
             "update requires a standard fresh Rust install with pinned image settings")
     updated.extend(f"{key}={value}" for key, value in updates.items())
     profile = json.loads(read_config(base / "generated/config/bootstrap.rust.json"))
@@ -213,7 +226,8 @@ def active_images(base, pinned):
     version = pinned["LANEWAY_RUST_VERSION"]
     for role, key in RUST_SERVICES.items():
         suffix = pinned.get(IMAGE_SUFFIX, "-rust")
-        expected = f"ghcr.io/doout/laneway-{role}{suffix}:{version}@{pinned[key]}"
+        repository = pinned.get(SERVICE_REPOSITORIES[role], f"ghcr.io/doout/laneway-{role}{suffix}")
+        expected = f"{repository}:{version}@{pinned[key]}"
         require(plan[role]["image"] == expected, f"{role}: Compose does not select the signed release image")
         active = command_output(compose + ["ps", "--status", "running", "-q", role]).strip()
         if not active and role == "exit-node":

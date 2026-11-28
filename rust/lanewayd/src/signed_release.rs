@@ -102,6 +102,8 @@ const MEMBER: &[u8] = b"laneway/sbin/lanewayd-rs";
 #[cfg(target_os = "macos")]
 const MEMBER: &[u8] = b"laneway/bin/lanewayd-rs";
 #[cfg(target_os = "linux")]
+pub(crate) const EDGE_IMAGE: &str = "ghcr.io/doout/laneway/edge";
+#[cfg(target_os = "linux")]
 pub(crate) const CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge";
 #[cfg(target_os = "linux")]
 pub(crate) const LEGACY_CONNECTOR_IMAGE: &str = "ghcr.io/doout/lane-edge-rust";
@@ -285,7 +287,16 @@ fn image_subject<'a>(manifest: &'a str, repository: &str) -> Result<Option<&'a s
 
 #[cfg(target_os = "linux")]
 fn connector_subject(manifest: &str) -> Result<String> {
-    // The canonical inventory includes a standalone node image. Releases
+    if manifest
+        .lines()
+        .any(|line| line.starts_with("ghcr.io/doout/laneway/"))
+    {
+        return Ok(image_subject(manifest, EDGE_IMAGE)?
+            .context("release has no Edge image")?
+            .to_owned());
+    }
+
+    // The older unsuffixed inventory included a standalone node image. Releases
     // that published a Go connector under the same name lacked that entry.
     let repository = if image_subject(manifest, NODE_IMAGE)?.is_some() {
         CONNECTOR_IMAGE
@@ -644,6 +655,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn connector_manifest_selects_the_image_for_its_release_layout() {
+        let edge = format!("{EDGE_IMAGE}@sha256:{}", "d".repeat(64));
         let canonical = format!("{CONNECTOR_IMAGE}@sha256:{}", "a".repeat(64));
         let legacy = format!("{LEGACY_CONNECTOR_IMAGE}@sha256:{}", "b".repeat(64));
         let node = format!("{NODE_IMAGE}@sha256:{}", "c".repeat(64));
@@ -653,6 +665,11 @@ mod tests {
             legacy
         );
         assert!(connector_subject(&canonical).is_err());
+        assert_eq!(connector_subject(&edge).unwrap(), edge);
+        assert!(connector_subject(&format!("{edge}\n{EDGE_IMAGE}@invalid")).is_err());
+        assert!(
+            connector_subject(&format!("ghcr.io/doout/laneway/console@unused\n{legacy}")).is_err()
+        );
         assert_eq!(
             connector_subject(&format!("{node}\n{canonical}")).unwrap(),
             canonical

@@ -87,23 +87,17 @@ if sed -n 's/^[[:space:]]*\(- \)\{0,1\}uses: \([^ #]*\).*/\2/p' "$workflow" |
   exit 1
 fi
 
-expected_images='ghcr.io/doout/lane-edge
-ghcr.io/doout/laneway-admin
-ghcr.io/doout/laneway-controller
-ghcr.io/doout/laneway-exit-node
-ghcr.io/doout/laneway-node
-ghcr.io/doout/laneway-relay'
-actual_images=$(awk '$1 == "image:" && $2 ~ /^ghcr\.io\/doout\// { print $2 }' "$workflow" | LC_ALL=C sort)
+expected_images='ghcr.io/doout/laneway/console
+ghcr.io/doout/laneway/edge
+ghcr.io/doout/laneway/relay'
+actual_images=$(awk '$1 == "image:" && $2 ~ /^ghcr[.]io\/doout\// { print $2 }' "$workflow" | LC_ALL=C sort)
 if [ "$actual_images" != "$expected_images" ]; then
-  echo "tagged releases must publish exactly the Rust runtime images and the operator image" >&2
+  echo "tagged releases must publish exactly the edge, console, and relay images" >&2
   exit 1
 fi
-require_release_target ghcr.io/doout/laneway-admin admin
-require_release_target ghcr.io/doout/laneway-controller controller
-require_release_target ghcr.io/doout/laneway-relay relay
-require_release_target ghcr.io/doout/laneway-node node
-require_release_target ghcr.io/doout/laneway-exit-node rust-exit
-require_release_target ghcr.io/doout/lane-edge rust-connector
+require_release_target ghcr.io/doout/laneway/console controller
+require_release_target ghcr.io/doout/laneway/edge edge
+require_release_target ghcr.io/doout/laneway/relay relay
 if grep -F 'BINARY=' "$workflow" >/dev/null || grep -F 'matrix.binary' "$workflow" >/dev/null; then
   echo "release images must use fixed Docker targets instead of a free-form binary argument" >&2
   exit 1
@@ -142,7 +136,7 @@ done
 for value in 'generated/lifecycle' 'image-digests.txt' 'LANEWAY_BOOTSTRAP_ARTIFACTS_FILE' 'laneway-control upgrade' 'host networking remain unchanged'; do
   require "$value" "$upgrader"
 done
-require "grep -q '^ghcr.io/doout/laneway-node@'" "$repo_dir/deploy/compose/upgrade-control-plane.sh"
+require "grep -Eq '^ghcr[.]io/doout/laneway(-node@|/)'" "$repo_dir/deploy/compose/upgrade-control-plane.sh"
 for value in '.env.example' 'install-control-plane.sh' 'prepare-control-plane.sh' 'upgrade-control-plane.sh' 'generated/config/*.example' 'must not read or archive'; do
   require "$value" "$package_workflow"
 done
@@ -256,9 +250,6 @@ if grep -Ei 'setup-qemu|tonistiigi/binfmt|fetch-tags:' "$workflow" >/dev/null; t
   exit 1
 fi
 require 'bootstrap-artifacts.toml ephemeral-exit-bootstrap.sh image-digests.txt install.sh' "$workflow"
-for image in laneway-controller laneway-relay laneway-node laneway-exit-node; do
-  require "image: ghcr.io/doout/$image" "$workflow"
-done
 
 for value in \
   'LANEWAY_CONTROLLER_IMAGE_DIGEST' \
@@ -372,23 +363,20 @@ require 'LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/lane-edge:LANEWAY_CONNECTOR_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/laneway-connector:LANEWAY_EXIT_NODE_IMAGE_DIGEST' "$lane_workflow"
 require 'ghcr.io/doout/laneway-exit-node:LANEWAY_EXIT_NODE_IMAGE_DIGEST' "$lane_workflow"
-require 'deploy/containers/Dockerfile.connector' "$ci_workflow"
 require 'if corepack pnpm build; then' "$ci_workflow"
 require 'corepack pnpm build:demo' "$ci_workflow"
 require 'corepack pnpm build:live' "$ci_workflow"
 require 'LANEWAY_EXPECTED_BUILD_MODE=demo corepack pnpm test:e2e' "$ci_workflow"
 require 'LANEWAY_EXPECTED_BUILD_MODE=live corepack pnpm exec playwright test e2e/build-mode.spec.ts' "$ci_workflow"
-require '--target controller --build-arg VERSION=ci' "$ci_workflow"
-require '--target relay --build-arg VERSION=ci' "$ci_workflow"
-require '--target admin --build-arg VERSION="$PREVIEW_VERSION"' "$ci_workflow"
-require 'docker run --rm --network none laneway-controller:ci -version' "$ci_workflow"
-require 'docker run --rm --network none laneway-relay:ci -version' "$ci_workflow"
-require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-admin:ci lane-edge:ci laneway-exit-node:ci' "$ci_workflow"
-require 'if docker run --rm --network none --entrypoint /bin/sh lane-edge:ci -c true; then' "$ci_workflow"
-require './integration/connector-bootstrap.sh lane-edge:ci' "$ci_workflow"
-require './integration/connector-upgrade.sh lane-edge:ci' "$ci_workflow"
-require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci' "$ci_workflow"
-require_line '          bash integration/rust-lab/connector-cutover.sh --fresh lane-edge:ci tcp-fallback' "$ci_workflow"
+require 'FROM base AS edge' "$exit_dockerfile"
+require 'FROM edge AS rust-exit' "$exit_dockerfile"
+require '--target edge --build-arg VERSION="$PREVIEW_VERSION"' "$ci_workflow"
+require '.Cmd == ["connector", "run"]' "$ci_workflow"
+require './integration/console-image-boundary.sh laneway-controller:ci laneway-relay:ci laneway-edge:ci' "$ci_workflow"
+require './integration/connector-bootstrap.sh laneway-edge:ci' "$ci_workflow"
+require './integration/connector-upgrade.sh laneway-edge:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh laneway-edge:ci' "$ci_workflow"
+require_line '          bash integration/rust-lab/connector-cutover.sh --fresh laneway-edge:ci tcp-fallback' "$ci_workflow"
 require './integration/connector-updater.sh' "$ci_workflow"
 require './integration/administrator-lifecycle.sh' "$ci_workflow"
 if ! grep -Eq '^[[:space:]]+\./integration/administrator-lifecycle\.sh[[:space:]]*$' "$ci_workflow" ||

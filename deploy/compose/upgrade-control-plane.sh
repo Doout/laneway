@@ -71,7 +71,7 @@ if [ "$(grep -c '^\[\[bootstrap\.artifacts\]\]$' "$artifacts_file")" -ne 4 ]; th
   die "signed bootstrap artifact manifest must contain four platform artifacts"
 fi
 curl --fail --location --silent --show-error "$base_url/image-digests.txt" -o "$work_dir/image-digests.txt"
-if grep -q '^ghcr.io/doout/laneway-node@' "$work_dir/image-digests.txt"; then
+if grep -Eq '^ghcr[.]io/doout/laneway(-node@|/)' "$work_dir/image-digests.txt"; then
   die "this release publishes Rust runtimes under the standard image names; migrate the control plane before upgrading"
 fi
 

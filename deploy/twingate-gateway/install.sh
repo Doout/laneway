@@ -8,10 +8,23 @@ for tool in docker ip nft nsenter systemctl python3; do command -v "$tool" >/dev
 [ -c /dev/net/tun ]
 base=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 root=/var/lib/laneway-gateways
-images=$(python3 -B -c 'import runpy,sys; w=runpy.run_path(sys.argv[1]); print(w["CLIENT"], w["CONNECTOR"])' "$base/worker.py")
-read -r provider connector <<EOF
+case $# in
+  0|1)
+    tag=v0.3.10
+    images=$(python3 -B -c 'import runpy,sys; w=runpy.run_path(sys.argv[1]); print(w["CLIENT"], w["LEGACY_CONNECTOR"])' "$base/worker.py")
+    read -r provider connector <<EOF
 $images
 EOF
+    ;;
+  3)
+    tag=$2
+    connector=$3
+    provider=$(python3 -B -c 'import runpy,sys; print(runpy.run_path(sys.argv[1])["CLIENT"])' "$base/worker.py")
+    printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+    printf '%s\n' "$connector" | grep -Eq '^ghcr[.]io/doout/laneway/edge@sha256:[0-9a-f]{64}$'
+    ;;
+  *) echo "Usage: install.sh [CONTROLLER_UID [RELEASE_TAG EDGE_IMAGE_DIGEST]]" >&2; exit 2 ;;
+esac
 export DOCKER_HOST=unix:///var/run/docker.sock
 unset DOCKER_CONTEXT
 docker info >/dev/null
@@ -32,7 +45,7 @@ if [ -z "$verify" ]; then
   printf '%s  %s\n' "$sum" "$verify" | sha256sum -c -
   chmod 0700 "$verify"
 fi
-"$verify" verify --certificate-identity 'https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/v0.3.10' \
+"$verify" verify --certificate-identity "https://github.com/Doout/laneway/.github/workflows/release.yml@refs/tags/$tag" \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' "$connector" >/dev/null
 for image in "$provider" "$connector"; do docker pull "$image"; done
 install -d -m 0750 -o root -g "$uid" "$root" "$root/spool" "$root/spool/status"
@@ -41,7 +54,7 @@ install -d -m 0700 -o root -g root "$root/work"
 install -d -m 0755 /usr/local/lib/laneway
 install -m 0755 "$base/worker.py" /usr/local/lib/laneway/twingate-gateway.py
 install -m 0644 "$base/laneway-twingate-gateway.service" /etc/systemd/system/
-printf 'LANEWAY_CONTROLLER_UID=%s\n' "$uid" > /etc/laneway-twingate-gateway
+printf 'LANEWAY_CONTROLLER_UID=%s\nLANEWAY_GATEWAY_EDGE_IMAGE=%s\n' "$uid" "$connector" > /etc/laneway-twingate-gateway
 systemctl daemon-reload
 systemctl enable laneway-twingate-gateway
 systemctl restart laneway-twingate-gateway

@@ -76,7 +76,7 @@ services:
     security_opt:
       - no-new-privileges:true
     init: true
-    image: ghcr.io/doout/laneway-admin:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_ADMIN_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    image: ${LANEWAY_EDGE_REPOSITORY:-ghcr.io/doout/laneway-admin}:${LANEWAY_VERSION:?set LANEWAY_VERSION to a released semantic version}@${LANEWAY_ADMIN_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}
     profiles: [tools]
     entrypoint: [/usr/local/bin/laneway]
     volumes:

@@ -1301,7 +1301,7 @@ CA. Only the standard non-root, read-only Rust Connector with
 or copy setup-token settings. It uses the current node certificate from the
 selected container, not shared administrator or registry credentials.
 
-The release workflow publishes `ghcr.io/doout/lane-edge`.
+The release workflow publishes the shared Connector and node image as `ghcr.io/doout/laneway/edge`.
 A Connector update verifies both the signed
 release manifest and the native image's digest signature. It runs an offline,
 read-only state preflight before stopping the old container. After a swap,
