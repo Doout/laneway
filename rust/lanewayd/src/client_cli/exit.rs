@@ -152,7 +152,7 @@ struct Peer {
 #[derive(Deserialize)]
 struct Settings {
     mode: String,
-    tls: lanewayd_rs::TlsConfig,
+    tls: ExitTls,
     controller: Controller,
     #[serde(default)]
     identity: Option<lanewayd_rs::IdentityConfig>,
@@ -160,6 +160,18 @@ struct Settings {
     exit: Option<LegacyExit>,
     #[serde(default)]
     forwarding: Option<lanewayd_rs::ForwardingConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExitTls {
+    certificate: PathBuf,
+    private_key: PathBuf,
+    ca: PathBuf,
+    // The legacy Docker profile pins the relay here. Route requests use the
+    // controller's separate TLS name.
+    #[serde(default, rename = "server_name")]
+    _relay_server_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -178,7 +190,8 @@ struct LegacyExit {
 
 async fn enable(options: Enable) -> Result<()> {
     let input = admin::read_file(&options.config, 128 << 10)?;
-    let settings: Settings = toml::from_str(std::str::from_utf8(&input)?)?;
+    let settings: Settings = toml::from_str(std::str::from_utf8(&input)?)
+        .with_context(|| format!("read Exit Node settings from {}", options.config.display()))?;
     ensure!(
         settings.mode == "node"
             && (settings.exit.is_some_and(|exit| exit.serve)
@@ -238,4 +251,23 @@ async fn enable(options: Enable) -> Result<()> {
         advertisements.push(advertisement);
     }
     admin::print_json(&json!({"advertisements": advertisements, "approval_needed": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_enable_reads_the_packaged_durable_exit_profile() -> Result<()> {
+        let profile =
+            include_str!("../../../../deploy/compose/generated/config/exit-node.toml.example");
+        let settings: Settings = toml::from_str(profile)?;
+        assert!(settings.exit.is_some_and(|exit| exit.serve));
+        assert_eq!(settings.controller.server_name, "controller.example.com");
+        assert_eq!(
+            settings.tls.ca,
+            PathBuf::from("/run/laneway-secrets/ca.crt")
+        );
+        Ok(())
+    }
 }
