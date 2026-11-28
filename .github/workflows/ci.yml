@@ -333,7 +333,7 @@ jobs:
         with: *preview-builder
       - name: Reuse unchanged preview binaries
         id: preview-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with: *preview-cache-inputs
       - name: Build the native preview without publishing
         if: steps.preview-cache.outputs.cache-hit != 'true'
@@ -366,6 +366,10 @@ jobs:
         env:
           PACKAGE_ARCH: ${{ matrix.arch }}
         run: PACKAGE_OS=linux PACKAGE_RUST_RUNTIME_DIR="$RUNNER_TEMP/laneway-rust" make package VERSION="$PREVIEW_VERSION"
+      - name: Save verified preview binaries before running the network lab
+        if: steps.preview-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with: *preview-cache-inputs
       - name: Test installed rootless CLI and helper from the preview archive
         env:
           PACKAGE_ARCH: ${{ matrix.arch }}

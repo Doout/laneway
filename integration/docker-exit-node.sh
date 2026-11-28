@@ -312,9 +312,7 @@ service_id = "${controller_service}"
 poll_interval = "250ms"
 EOF
 
-node_config() {
-  local directory="$1" name="$2" listen_port="$3" serve="$4" output="$5"
-  cat >"${directory}/node.toml" <<EOF
+cat >"${work_dir}/gateway/node.toml" <<EOF
 mode = "node"
 state_dir = "/var/lib/laneway"
 socket_path = "/run/laneway/lanewayd.sock"
@@ -324,7 +322,7 @@ private_key = "/secrets/node.key"
 ca = "/secrets/ca.crt"
 server_name = "${relay_name}"
 [node]
-name = "${name}"
+name = "docker-gateway"
 relay_address = "${relay_name}:4433"
 relay_network_id = "${network_id}"
 relay_service_id = "${relay_service}"
@@ -342,7 +340,7 @@ address = "${relay_name}:8443"
 quic_probe_interval = "1s"
 [direct]
 enabled = true
-listen = "0.0.0.0:${listen_port}"
+listen = "0.0.0.0:4434"
 probe_interval = "100ms"
 probe_timeout = "2s"
 rendezvous_interval = "10s"
@@ -350,16 +348,13 @@ rendezvous_interval = "10s"
 private_key = "/secrets/wireguard.key"
 mtu = 1200
 [routing]
-output_interface = "${output}"
+output_interface = "wan0"
 nat = true
 [exit]
-serve = ${serve}
+serve = true
 failure_mode = "closed"
 dns_servers = ["1.1.1.1"]
 EOF
-}
-node_config "${work_dir}/client" docker-client 4435 false eth0
-node_config "${work_dir}/gateway" docker-gateway 4434 true wan0
 cat >"${work_dir}/resolvectl" <<'EOF'
 #!/bin/sh
 set -eu
@@ -391,6 +386,57 @@ docker run -d --name "${relay_name}" --hostname "${relay_name}" --label "${owner
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532 \
   -v "${work_dir}/relay:/secrets:ro" "${relay_image}" --config /secrets/relay.toml >/dev/null
 wait_log "${relay_name}" "listening"
+
+control_ip() {
+  docker inspect "$1" | jq -er --arg network "${control_network}" '
+    .[0].NetworkSettings.Networks[$network].IPAddress | select(type == "string" and length > 0)
+  '
+}
+controller_ip="$(control_ip "${controller_name}")"
+relay_ip="$(control_ip "${relay_name}")"
+# Allow selection while requiring a separate local activation after approval.
+cat >"${work_dir}/client/node.toml" <<EOF
+mode = "node"
+socket_path = "/run/laneway/lanewayd.sock"
+exit_intent_path = "/var/lib/laneway/exit-intent-v1.json"
+[identity]
+network_id = "${network_id}"
+node_id = "${client_id}"
+[tls]
+certificate = "/secrets/node.crt"
+private_key = "/secrets/node.key"
+ca = "/secrets/ca.crt"
+[controller]
+endpoint = "https://${controller_name}:8443"
+quic_endpoint = "${controller_name}:8443"
+server_name = "${controller_name}"
+service_id = "${controller_service}"
+poll_interval = "250ms"
+[tun]
+name = "lane0"
+mtu = 1200
+configure = true
+[relay]
+address = "${relay_ip}:4433"
+server_name = "${relay_name}"
+service_id = "${relay_service}"
+reconnect_min = "100ms"
+reconnect_max = "1s"
+quic_recovery_interval = "1s"
+[tcp_fallback]
+address = "${relay_ip}:8443"
+[direct]
+listen = "0.0.0.0:4435"
+probe_interval = "100ms"
+probe_timeout = "2s"
+candidate_refresh_interval = "10s"
+[forwarding.exit_client]
+enabled = false
+authorized = true
+failure_mode = "closed"
+controller_bypass = ["${controller_ip}"]
+dns_servers = ["1.1.1.1"]
+EOF
 
 node_create() {
   local name="$1" directory="$2" volume="$3"
