@@ -264,7 +264,10 @@ mod tests {
         let settings: Settings = toml::from_str(profile)?;
         assert!(settings.exit.is_some_and(|exit| exit.serve));
         assert_eq!(settings.controller.server_name, "controller.example.com");
-        assert_eq!(settings.tls.ca, PathBuf::from("/run/laneway-secrets/ca.crt"));
+        assert_eq!(
+            settings.tls.ca,
+            PathBuf::from("/run/laneway-secrets/ca.crt")
+        );
         Ok(())
     }
 }
